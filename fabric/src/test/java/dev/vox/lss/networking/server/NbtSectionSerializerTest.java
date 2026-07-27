@@ -288,12 +288,63 @@ class NbtSectionSerializerTest {
     }
 
     @Test
-    void airOnly_skyLightOnly_dropped() {
-        // parseSection only consults BlockLight when deciding to keep an air-only section;
-        // a non-zero SkyLight alone does not rescue it.
+    void airOnly_skyLightOnly_servedWithinTheContentBand() {
+        // INVERTED 2026-07-27 (black-boundary-faces fix — this pin used to assert the
+        // drop): the lit air section just above terrain is what lights the top/side faces
+        // of adjacent content at chunk borders; it must ship WITH its sky layer.
+        byte[] sky = light(100, (byte) 0x0F);
+        byte[] wire = NbtSectionSerializer.serializeChunkNbt(
+                chunkNbt("minecraft:full",
+                        sectionNbt(2, true, true, null, null),
+                        sectionNbt(3, false, true, null, sky)), REGISTRY_ACCESS);
+        var sections = decode(wire);
+        assertEquals(2, sections.size(), "content + its lit air cap both serve");
+        assertTrue(sections.get(1).section().hasOnlyAir());
+        assertTrue(sections.get(1).hasSkyLight());
+        assertArrayEquals(sky, sections.get(1).skyLight());
+    }
+
+    @Test
+    void airOnly_skyLightOnly_aloneStaysAClear() {
+        // A column with NO content sections must remain a zero-section CLEAR no matter
+        // what lit-air entries exist — air must never turn a clear into a data column.
         byte[] wire = NbtSectionSerializer.serializeChunkNbt(
                 chunkNbt("minecraft:full", sectionNbt(3, false, true, null, light(100, (byte) 0x0F))), REGISTRY_ACCESS);
-        assertEquals(0, wire.length, "air-only with only SkyLight (no BlockLight) is dropped");
+        assertEquals(0, wire.length, "lit air with no content anywhere stays a clear");
+    }
+
+    @Test
+    void airOnly_skyLit_outsideTheContentBand_dropped() {
+        // Lit air serves only within ONE section of the content band (vanilla's own
+        // stored-light coverage); a stray lit-air entry far above is dropped.
+        byte[] wire = NbtSectionSerializer.serializeChunkNbt(
+                chunkNbt("minecraft:full",
+                        sectionNbt(0, true, true, null, null),
+                        sectionNbt(4, false, true, null, light(100, (byte) 0x0F))), REGISTRY_ACCESS);
+        var sections = decode(wire);
+        assertEquals(1, sections.size(), "only the content section serves");
+        assertFalse(sections.get(0).section().hasOnlyAir());
+    }
+
+    @Test
+    void lightOnlyNbtEntry_noBlockStates_servesAsAirWithSky() {
+        // Vanilla's cap entries (heightmap+1) carry SkyLight but NO block_states — they
+        // are precisely the boundary layers the fix serves. They must decode as all-air
+        // sections carrying the sky layer.
+        byte[] sky = light(64, (byte) 0xF0);
+        var lightOnly = new CompoundTag();
+        lightOnly.putInt("Y", 1);
+        lightOnly.putByteArray("SkyLight", sky);
+        byte[] wire = NbtSectionSerializer.serializeChunkNbt(
+                chunkNbt("minecraft:full",
+                        sectionNbt(0, true, true, null, null),
+                        lightOnly), REGISTRY_ACCESS);
+        var sections = decode(wire);
+        assertEquals(2, sections.size(), "content + the light-only cap entry both serve");
+        assertEquals(1, sections.get(1).y());
+        assertTrue(sections.get(1).section().hasOnlyAir());
+        assertTrue(sections.get(1).hasSkyLight());
+        assertArrayEquals(sky, sections.get(1).skyLight());
     }
 
     @Test

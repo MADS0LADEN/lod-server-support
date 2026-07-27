@@ -184,6 +184,7 @@ class ClientColumnProcessor {
 
     private void drainColumnQueue(ClientLevel level, int epoch) {
         drainColumnQueue(level.dimension(), level.getSectionsCount(), level.getMinSectionY(),
+                level.dimensionType().hasSkyLight(),
                 PalettedContainerFactory.create(level.registryAccess()),
                 (dimension, chunkX, chunkZ, columnData) ->
                         LSSApi.dispatchColumn(level, dimension, chunkX, chunkZ, columnData),
@@ -199,6 +200,7 @@ class ClientColumnProcessor {
      * poll, so a teardown mid-drain lets at most the already-polled column dispatch.
      */
     void drainColumnQueue(ResourceKey<Level> levelDimension, int levelSectionCount, int minSectionY,
+                          boolean hasSkyLight,
                           PalettedContainerFactory factory, ColumnDispatcher dispatcher, int epoch) {
         QueuedColumn queued;
         while (epoch == this.sessionEpoch && (queued = this.columnQueue.poll()) != null) {
@@ -219,6 +221,24 @@ class ClientColumnProcessor {
 
             try {
                 var sections = decodeSections(decompressed, levelSectionCount, factory);
+                if (ClientTraceLog.enabled()) {
+                    // Per-section light presence — the boundary-lighting instrument (black
+                    // leaf-face investigation 2026-07-27): [sectionY, hasBlockLight,
+                    // hasSkyLight, hasOnlyAir] per decoded section. Absent Ys are absent.
+                    var sb = new StringBuilder(64 + sections.length * 14);
+                    sb.append("\"pos\":[").append(payload.chunkX()).append(',')
+                            .append(payload.chunkZ()).append("],\"sections\":[");
+                    for (int i = 0; i < sections.length; i++) {
+                        var s = sections[i];
+                        if (i > 0) sb.append(',');
+                        sb.append('[').append(s.sectionY())
+                                .append(',').append(s.blockLight() != null ? 1 : 0)
+                                .append(',').append(s.skyLight() != null ? 1 : 0)
+                                .append(',').append(s.section().hasOnlyAir() ? 1 : 0).append(']');
+                    }
+                    sb.append(']');
+                    ClientTraceLog.event("col_light", sb.toString());
+                }
                 if (queued.resync()) {
                     // The client already held data here; the server sends the current column
                     // (which OMITS air sections) authoritatively. Fill every absent section-Y
@@ -226,6 +246,18 @@ class ClientColumnProcessor {
                     // cleared (WorldEdit clears, fully-emptied 0-section columns). Only on
                     // resync — a first serve had nothing, so absent == air == no-op.
                     sections = withAirFilledAbsentSections(sections, levelSectionCount, minSectionY, factory);
+                }
+                if (hasSkyLight) {
+                    // Implicit-sky fill (2026-07-27, black-boundary-faces fix): vanilla
+                    // stores sky layers only up to heightmap+1 — everything above is
+                    // IMPLICITLY full-bright, a rule the vanilla client resolves in its
+                    // light engine but a per-section wire cannot carry. Without this, a
+                    // consumer sampling the never-served air above/beside terrain (leaf
+                    // tops, cliff sides across a chunk border against a lower column)
+                    // reads light 0 and shades those faces black. Mirror vanilla's rule
+                    // client-side: every absent section ABOVE the column's top served
+                    // section becomes explicit all-air with full-bright sky.
+                    sections = withImplicitSkyAbove(sections, levelSectionCount, minSectionY, factory);
                 }
                 var columnData = new VoxelColumnData(sections, payload.columnTimestamp());
                 dispatcher.dispatch(payload.dimension(),
@@ -255,6 +287,47 @@ class ClientColumnProcessor {
      * until written — with null light layers (dark), consistent with the absent-means-all-zero
      * light default.
      */
+    /** One shared full-bright nibble array — consumers receive light layers READ-ONLY
+     *  (they already share the decoded per-column objects across all consumers). */
+    private static final byte[] FULL_BRIGHT_SKY = fullBrightNibbles();
+
+    private static byte[] fullBrightNibbles() {
+        byte[] b = new byte[2048];
+        java.util.Arrays.fill(b, (byte) 0xFF);
+        return b;
+    }
+
+    /**
+     * Append an all-air section with FULL-BRIGHT sky light for every absent section-Y
+     * ABOVE the column's top served section (up to the level top). Sky-lit dimensions
+     * only — the caller gates on {@code hasSkyLight}; below/among the served band nothing
+     * changes (unserved air there is dark air, which is correct). Resync's air-fill runs
+     * FIRST, so on resyncs the above-band sections it created with dark light are
+     * re-created here bright; order matters.
+     */
+    static VoxelColumnData.SectionData[] withImplicitSkyAbove(
+            VoxelColumnData.SectionData[] present, int levelSectionCount, int minSectionY,
+            PalettedContainerFactory factory) {
+        if (present.length == 0) return present;   // a CLEAR stays a clear
+        int top = Integer.MIN_VALUE;
+        for (var s : present) top = Math.max(top, s.sectionY());
+        int levelTop = minSectionY + levelSectionCount - 1;
+        if (top >= levelTop) return present;
+        var out = new java.util.ArrayList<VoxelColumnData.SectionData>(
+                present.length + (levelTop - top));
+        var byY = new java.util.HashMap<Integer, VoxelColumnData.SectionData>();
+        for (var s : present) byY.put(s.sectionY(), s);
+        out.addAll(java.util.Arrays.asList(present));
+        for (int y = top + 1; y <= levelTop; y++) {
+            var existing = byY.get(y);
+            if (existing != null) continue;
+            out.add(new VoxelColumnData.SectionData(y, new LevelChunkSection(factory),
+                    null, new DataLayer(FULL_BRIGHT_SKY)));
+        }
+        // replace any resync-filled DARK air sections above the served band with bright ones
+        return out.toArray(new VoxelColumnData.SectionData[0]);
+    }
+
     static VoxelColumnData.SectionData[] withAirFilledAbsentSections(
             VoxelColumnData.SectionData[] present, int levelSectionCount, int minSectionY,
             PalettedContainerFactory factory) {
