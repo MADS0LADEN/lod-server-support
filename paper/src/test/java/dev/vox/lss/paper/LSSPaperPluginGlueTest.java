@@ -99,15 +99,25 @@ class LSSPaperPluginGlueTest {
         }
     }
 
-    /** Registrar recorder: capabilities + the dialect the glue handed over. */
+    /** Registrar recorder: capabilities + dialect + the DEFERRED reply the glue handed over.
+     *  It deliberately does NOT run the reply — tests that want the SessionConfig must call
+     *  {@link #runDeferredReplies()}, mirroring the production lifecycle drain. That makes
+     *  every registering-path test also pin the Folia pre-registration fix: no reply may be
+     *  sent inline before the registration applies. */
     private static final class RecordingRegistrar implements LSSPaperPlugin.HandshakeRegistrar {
         final List<Integer> caps = new ArrayList<>();
         final List<HandshakeGate.WireDialect> dialects = new ArrayList<>();
+        final List<Runnable> deferredReplies = new ArrayList<>();
 
         @Override
-        public void register(int capabilities, HandshakeGate.WireDialect dialect) {
+        public void register(int capabilities, HandshakeGate.WireDialect dialect, Runnable replyAfterRegister) {
             caps.add(capabilities);
             dialects.add(dialect);
+            deferredReplies.add(replyAfterRegister);
+        }
+
+        void runDeferredReplies() {
+            deferredReplies.forEach(Runnable::run);
         }
     }
 
@@ -149,7 +159,12 @@ class LSSPaperPluginGlueTest {
         int caps = VOXEL_CAPS | 0x40; // future bit must pass through untouched
         LSSPaperPlugin.handleHandshake(handshakeFrame(V, caps),
                 "Steve", config(true), true, sender, registrar);
-        assertEquals(1, sender.replies.size());
+        assertEquals(List.of(), sender.replies,
+                "a REGISTERING handshake must not reply inline — the SessionConfig is deferred "
+                        + "into the registration so the client cannot declare into the Folia "
+                        + "pre-registration gap (its first want-set would be dropped uncounted)");
+        registrar.runDeferredReplies();
+        assertEquals(1, sender.replies.size(), "the deferred reply fires after registration");
         assertEquals(List.of(caps), registrar.caps,
                 "registration receives the client's full capabilities bitmask, not a normalized one");
         assertEquals(List.of(HandshakeGate.WireDialect.V18), registrar.dialects);
@@ -166,7 +181,7 @@ class LSSPaperPluginGlueTest {
         config.enableChunkGeneration = false; // differs from effectiveEnabled=true
         var sender = new RecordingSender();
         LSSPaperPlugin.handleHandshake(handshakeFrame(V, VOXEL_CAPS),
-                "Steve", config, true, sender, (caps, dialect) -> {});
+                "Steve", config, true, sender, (caps, dialect, reply) -> reply.run());
 
         assertEquals(List.of(new Reply(HandshakeGate.WireDialect.V18, true, 101,
                         LSSConstants.SYNC_ON_LOAD_SLOT_CAP, 7, false)), sender.replies,
@@ -188,6 +203,8 @@ class LSSPaperPluginGlueTest {
         LSSPaperPlugin.handleHandshake(handshakeFrame(16, VOXEL_CAPS),
                 "Herobrine", config, true, sender, registrar);
 
+        assertEquals(List.of(), sender.replies, "v16 registration defers its reply too");
+        registrar.runDeferredReplies();
         assertEquals(List.of(new Reply(HandshakeGate.WireDialect.V16, true, 101,
                         LSSConstants.SYNC_ON_LOAD_SLOT_CAP, 7, false)), sender.replies);
         assertEquals(List.of(VOXEL_CAPS), registrar.caps);
@@ -241,7 +258,7 @@ class LSSPaperPluginGlueTest {
         try (var capture = new LssLogCapture()) {
             assertDoesNotThrow(() -> LSSPaperPlugin.dispatchPluginMessage(
                     LSSConstants.CHANNEL_HANDSHAKE, "Steve", garbage,
-                    data -> LSSPaperPlugin.handleHandshake(data, "Steve", config(true), true, sender, (caps, dialect) -> {}),
+                    data -> LSSPaperPlugin.handleHandshake(data, "Steve", config(true), true, sender, (caps, dialect, reply) -> reply.run()),
                     data -> { throw new AssertionError("handshake frame must not reach the chunk-request handler"); }),
                     "a malformed frame must never propagate into Bukkit's messenger");
             assertEquals(List.of(), sender.replies, "no partial handshake handling");
@@ -256,7 +273,7 @@ class LSSPaperPluginGlueTest {
             // The channel survives: the next (valid) message dispatches normally.
             LSSPaperPlugin.dispatchPluginMessage(
                     LSSConstants.CHANNEL_HANDSHAKE, "Steve", handshakeFrame(V, VOXEL_CAPS),
-                    data -> LSSPaperPlugin.handleHandshake(data, "Steve", config(true), true, sender, (caps, dialect) -> {}),
+                    data -> LSSPaperPlugin.handleHandshake(data, "Steve", config(true), true, sender, (caps, dialect, reply) -> reply.run()),
                     data -> { throw new AssertionError("handshake frame must not reach the chunk-request handler"); });
             assertEquals(1, sender.replies.size(), "subsequent messages still dispatch after a contained failure");
             assertEquals(1, capture.rows().stream().filter(r -> r.level() == Level.ERROR).count());

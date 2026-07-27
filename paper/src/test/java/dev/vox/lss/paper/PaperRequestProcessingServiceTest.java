@@ -858,6 +858,39 @@ class PaperRequestProcessingServiceTest {
     }
 
     @Test
+    void deferredHandshakeReplyRunsOnlyAfterTheRegistrationApplies() {
+        // The Folia pre-registration fix: the SessionConfig reply is handed to
+        // enqueueRegister and must fire on the pump AFTER the player state exists —
+        // never before the drain — so the client's first want-set always has a mailbox.
+        var overworld = level(Level.OVERWORLD);
+        var player = playerIn(UUID.randomUUID(), overworld);
+        var stateExistedAtReply = new java.util.concurrent.atomic.AtomicBoolean();
+        var replied = new java.util.concurrent.atomic.AtomicBoolean();
+        service.enqueueRegister(player, 1, () -> {
+            stateExistedAtReply.set(service.getPlayers().containsKey(player.getUUID()));
+            replied.set(true);
+        });
+        assertFalse(replied.get(), "the reply must not run before the drain");
+        service.tick();
+        assertTrue(replied.get(), "the drain must run the deferred reply");
+        assertTrue(stateExistedAtReply.get(),
+                "the reply must observe the registered state — reply-before-register re-opens "
+                        + "the pre-registration first-declaration drop");
+    }
+
+    @Test
+    void deferredHandshakeReplyNeverFiresAfterShutdown() {
+        // A register racing shutdown is discarded with its reply: sending SessionConfig
+        // from a torn-down service would invite declarations nobody will ever drain.
+        var overworld = level(Level.OVERWORLD);
+        var replied = new java.util.concurrent.atomic.AtomicBoolean();
+        service.shutdown();
+        service.enqueueRegister(playerIn(UUID.randomUUID(), overworld), 1, () -> replied.set(true));
+        service.tick();
+        assertFalse(replied.get(), "no deferred reply may fire once the service is shut down");
+    }
+
+    @Test
     void enqueuedRemoveAppliesAtNextTick() {
         var overworld = level(Level.OVERWORLD);
         var player = playerIn(UUID.randomUUID(), overworld);
