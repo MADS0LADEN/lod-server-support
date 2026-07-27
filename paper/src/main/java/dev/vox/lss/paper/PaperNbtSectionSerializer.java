@@ -110,7 +110,7 @@ final class PaperNbtSectionSerializer {
             for (int i = 0; i < parsed.size(); i++) {
                 var p = parsed.get(i);
                 var masked = PaperXrayMaskFilter.mask(p.section(), p.sectionY(),
-                        maskEntry.mask(), maskEntry.kind());
+                        maskEntry.mask(), maskEntry.kind(), factory);
                 if (masked != p.section()) {
                     parsed.set(i, new ParsedSection(p.sectionY(), masked, p.blockLight(), p.skyLight()));
                     var manager = PaperXrayMaskManager.current();
@@ -205,14 +205,16 @@ final class PaperNbtSectionSerializer {
     // PalettedContainerFactory.create builds two strategies + codecs per call — measurable
     // allocation churn when every disk read pays it (review 2026-07-27). The registry access
     // is stable for a server's lifetime; a single-slot memo (atomic pair via one volatile)
-    // covers it and survives the odd registry swap in tests.
-    private static volatile java.util.Map.Entry<RegistryAccess, PalettedContainerFactory> factoryMemo;
+    // covers it and survives the odd registry swap in tests. The key is held WEAKLY so a
+    // departed world doesn't keep its dynamic registries pinned until the next world load
+    // (final review 2026-07-27); the factory dies with its key.
+    private static volatile java.util.Map.Entry<java.lang.ref.WeakReference<RegistryAccess>, PalettedContainerFactory> factoryMemo;
 
-    private static PalettedContainerFactory factoryFor(RegistryAccess registryAccess) {
+    static PalettedContainerFactory factoryFor(RegistryAccess registryAccess) {
         var memo = factoryMemo;
-        if (memo != null && memo.getKey() == registryAccess) return memo.getValue();
+        if (memo != null && memo.getKey().get() == registryAccess) return memo.getValue();
         var factory = PalettedContainerFactory.create(registryAccess);
-        factoryMemo = java.util.Map.entry(registryAccess, factory);
+        factoryMemo = java.util.Map.entry(new java.lang.ref.WeakReference<>(registryAccess), factory);
         return factory;
     }
 }
