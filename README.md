@@ -2,7 +2,7 @@
 
 Distributes LOD (Level of Detail) chunk data from servers to connected clients over a custom networking protocol. Built primarily as a multiplayer backend for [Voxy](https://modrinth.com/mod/voxy) — clients request distant chunks in batches, the server reads them from disk or memory and streams the data back, enabling Voxy to render terrain far beyond the vanilla render distance on multiplayer servers without the need to travel there first.
 
-Supports **Fabric** clients and **Fabric**, **Paper**, **Purpur**, **Folia** servers.
+Supports **Fabric** clients and **Fabric**, **Paper**, **Purpur** servers (**Folia** on the older support lines).
 
 https://github.com/user-attachments/assets/721fb344-890e-4e03-ab36-539444427f7b
 
@@ -57,15 +57,15 @@ Each Minecraft version has its own build; only the latest is listed. Older-MC bu
 
 | Minecraft | LSS Version | Fabric | Paper | Folia | Voxy | Java |
 |---|---|---|---|---|---|---|
-| **26.2** | v0.8.0 | ✅ | ✅ | — | 0.2.16-beta+ | 25+ |
-| **26.1.x** | v0.8.0+mc26.1 | ✅ | ✅ | ✅ | 0.2.16-beta+ | 25+ |
+| **26.2** | v0.8.0 | ✅ | ✅ | — | 0.2.17-alpha+ | 25+ |
+| **26.1.x** | v0.8.0+mc26.1 | ✅ | ✅ | ✅ | 0.2.14-alpha+ | 25+ |
 | **1.21.11** | v0.8.0+mc1.21.11 | ✅ | ✅ | ✅ | 0.2.15-beta+ | 21+ |
 | **1.21.8** | v0.6.1+mc1.21.8 | ✅ | ✅ | ✅ | 0.2.5-alpha+ | 21+ |
 
 Fabric builds are client + server; the Paper plugin is server-only and also runs on Purpur. On the older support lines Folia uses the same plugin JAR (experimental). The 26.2 plugin does **not** declare Folia support — no Folia build exists for MC 26.2, and support returns once Folia ships 26.2 and validation passes.
 
 > [!IMPORTANT]
-> **Update the server first.** LSS versions a networking protocol. A newer client on an older server establishes no LOD session — you see vanilla render distance and no error. A v0.7.0+ server keeps serving v0.6.x clients through a built-in compatibility layer (`enableV16Compat`, default on), so servers can update ahead of their players. Release notes call out which updates carry a protocol bump.
+> **Mixed versions are fine back to v0.4.x.** LSS versions a networking protocol with compatibility layers in BOTH directions: a v0.7.0+ server keeps serving older protocol-16 clients (v0.4.x–v0.6.x) via `enableV16Compat` (default on), and a v0.7.0+ client still gets LODs — including on-demand terrain generation — from v0.4.x–v0.6.x servers via `enableV16ServerCompat` (default on). Only against pre-v0.4 peers (or with the layers disabled) does no LOD session form: vanilla render distance, no error. Release notes call out which updates carry a protocol bump.
 
 On 1.21.8 the in-game config screen is unavailable (it requires Sodium 0.8+, and 1.21.8's newest Sodium is 0.7.3); the JSON config files still work as normal.
 
