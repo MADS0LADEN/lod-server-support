@@ -162,7 +162,7 @@ class NbtSectionSerializerTest {
      * The masked disk-path wiring pin (the Paper twin of the Fabric masked parity
      * gametest's disk leg — Paper has no gametest tier): a non-null MaskEntry through the
      * 3-arg {@code serializeChunkNbt} must actually mask (hidden states replaced on the
-     * wire, bytes differing from the unmasked 2-arg call). Deleting the maskInPlace block
+     * wire, bytes differing from the unmasked 2-arg call). Deleting the mask block
      * or null-ing the entry silently leaks real ores on Paper disk serves — this is the
      * failing-test path for that mutation.
      */

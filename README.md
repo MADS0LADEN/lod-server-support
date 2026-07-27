@@ -56,9 +56,9 @@ Each Minecraft version has its own build; only the latest is listed. Older-MC bu
 
 | Minecraft | LSS Version | Fabric | Paper | Folia | Voxy | Java |
 |---|---|---|---|---|---|---|
-| **26.2** | v0.7.0 | ✅ | ✅ | — | 0.2.16-beta+ | 25+ |
-| **26.1.x** | v0.5.1 | ✅ | ✅ | ✅ | 0.2.16-beta+ | 25+ |
-| **1.21.11** | v0.5.0+mc1.21.11 | ✅ | ✅ | ✅ | 0.2.15-beta+ | 21+ |
+| **26.2** | v0.8.0 | ✅ | ✅ | — | 0.2.16-beta+ | 25+ |
+| **26.1.x** | v0.8.0+mc26.1 | ✅ | ✅ | ✅ | 0.2.16-beta+ | 25+ |
+| **1.21.11** | v0.8.0+mc1.21.11 | ✅ | ✅ | ✅ | 0.2.15-beta+ | 21+ |
 | **1.21.8** | v0.6.1+mc1.21.8 | ✅ | ✅ | ✅ | 0.2.5-alpha+ | 21+ |
 
 Fabric builds are client + server; the Paper plugin is server-only and also runs on Purpur. On the older support lines Folia uses the same plugin JAR (experimental). The 26.2 plugin does **not** declare Folia support — no Folia build exists for MC 26.2, and support returns once Folia ships 26.2 and validation passes.

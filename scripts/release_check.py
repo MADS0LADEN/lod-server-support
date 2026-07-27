@@ -50,6 +50,11 @@ COMMON_FORBIDDEN = ("dev/vox/lss/common/soak/", "dev/vox/lss/common/benchmark/")
 RELEASE_GLOBS = ("lod-server-support-fabric-*.jar", "lod-server-support-paper-*.jar",
                  "voxy-server-side-fabric-*.jar", "voxy-server-side-paper-*.jar")
 CI_NAME_SUFFIX = "0.4.0+26.1.2.jar"  # a representative CI filename for glob round-tripping
+# The Fabric jar's mapping namespace for THIS line: 26.x fabric-loom ships official-mapped
+# jars; 1.21.x fabric-loom-remap ships intermediary. A forward merge swapping the loom
+# plugin produces a right-named, gate-green jar in the WRONG namespace — unloadable on any
+# real server of this line — so the manifest attribute is pinned like Paper's namespace.
+FABRIC_MAPPING_NAMESPACE = "official"
 SOAK_JAR_PREFIX = "lss-paper-soak"
 
 
@@ -133,6 +138,12 @@ def check_fabric_jar(jar, problems):
         problems.append(f"{base}: contains no dev/vox/lss classes (empty build?)")
     if not any(n.startswith("LICENSE") for n in names):
         problems.append(f"{base}: LICENSE not bundled")
+    ns_match = re.search(r"^Fabric-Mapping-Namespace:\s*(\S+)", _manifest(jar), re.MULTILINE)
+    got_ns = ns_match.group(1) if ns_match else "<absent>"
+    if got_ns != FABRIC_MAPPING_NAMESPACE:
+        problems.append(f"{base}: Fabric-Mapping-Namespace is {got_ns} — this line ships "
+                        f"{FABRIC_MAPPING_NAMESPACE}-mapped jars (wrong/missing namespace means "
+                        "the loom plugin flavor regressed and the jar cannot load on a real server)")
     # The Fabric jar ships common/ as nested Jar-in-Jar; a Loom include regression would
     # otherwise ship a jar with no shared classes, green on every other check.
     nested = _nested_jars(jar)
@@ -423,11 +434,32 @@ def discover(problems, expected_version=None, root=ROOT):
         if not jars:
             problems.append(f"no {what} jar found in build/libs — {hint}")
     if expected_version:
-        # A release ships all four; each must exist at the tag version.
-        fab = _require_version(fab, "lod-server-support-fabric", expected_version, problems)
-        pap = _require_version(pap, "lod-server-support-paper", expected_version, problems)
-        vfab = _require_version(vfab, "voxy-server-side-fabric", expected_version, problems)
-        vpap = _require_version(vpap, "voxy-server-side-paper", expected_version, problems)
+        # A release ships all four; each must exist at the tag version — pinned to THIS
+        # line's minecraft_version when known: on a multi-line repo the same mod_version
+        # legitimately exists per release line, so version pinning alone could select a
+        # stale other-line jar (0.7.3+26.2 beside 0.7.3+26.1.2) and green-light shipping it.
+        mc = _minecraft_version(root)
+        if mc is None:
+            # Fail CLOSED: without the line's minecraft_version the mc pin silently reverts
+            # to any-suffix matching — the exact multi-line stale-jar hole it exists to close.
+            problems.append("cannot read minecraft_version from gradle.properties — refusing "
+                            "to version-match release jars without the line pin")
+        fab = _require_version(fab, "lod-server-support-fabric", expected_version, problems, mc=mc)
+        pap = _require_version(pap, "lod-server-support-paper", expected_version, problems, mc=mc)
+        vfab = _require_version(vfab, "voxy-server-side-fabric", expected_version, problems, mc=mc)
+        vpap = _require_version(vpap, "voxy-server-side-paper", expected_version, problems, mc=mc)
+        # With --version the ambiguity guard is off, but release.yml's upload globs are
+        # greedy: any OTHER versioned jar sitting beside the selected one would be attached
+        # to the release too. Flag them (the suffixless local dev names stay tolerated).
+        for sel, allj, prefix in ((fab, _jars_in(fab_libs, "lod-server-support-fabric"), "lod-server-support-fabric"),
+                                  (pap, _jars_in(pap_libs, "lod-server-support-paper"), "lod-server-support-paper"),
+                                  (vfab, _jars_in(fab_libs, "voxy-server-side-fabric"), "voxy-server-side-fabric"),
+                                  (vpap, _jars_in(pap_libs, "voxy-server-side-paper"), "voxy-server-side-paper")):
+            stale = [os.path.basename(j) for j in allj
+                     if j not in sel and os.path.basename(j) != f"{prefix}.jar"]
+            if sel and stale:
+                problems.append(f"{prefix}: stale versioned jar(s) beside the release build: "
+                                f"{stale} — delete them (release.yml globs would attach them)")
     else:
         _flag_ambiguous(fab, "lod-server-support-fabric", problems)
         _flag_ambiguous(pap, "lod-server-support-paper", problems)
@@ -478,18 +510,42 @@ def _jars_in(d, prefix):
             if n.startswith(prefix) and n.endswith(".jar")]
 
 
-def _require_version(jars, prefix, version, problems):
+def _minecraft_version(root=ROOT):
+    """The line's minecraft_version from gradle.properties, or None if unreadable. Used to
+    pin --version matching to the FULL CI jar name: support branches make the same
+    mod_version exist on several MC lines at once, so `-{version}+` alone is ambiguous."""
+    try:
+        with open(os.path.join(root, "gradle.properties"), encoding="utf-8") as fh:
+            for line in fh:
+                if line.strip().startswith("minecraft_version="):
+                    return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
+def _require_version(jars, prefix, version, problems, mc=None):
     """Restrict checking to the exact release jar for `version`; a missing jar is a failure
     — otherwise a stale jar from an earlier build gets validated in its place and the
     pre-flight green-lights code that was never built. `prefix` is the full jar base name
-    (e.g. `lod-server-support-fabric` or `voxy-server-side-paper`)."""
-    want_prefix = f"{prefix}-{version}+"
+    (e.g. `lod-server-support-fabric` or `voxy-server-side-paper`). When `mc` is known the
+    match requires the full `-{version}+{mc}.jar` CI name, so a stale jar of the SAME
+    version from ANOTHER release line (0.7.3+26.2 vs 0.7.3+26.1.2) can never be selected;
+    mc=None keeps the legacy any-suffix behavior (single-line repos, selftest fixtures)."""
     want_exact = f"{prefix}-{version}.jar"
-    matched = [j for j in jars
-               if os.path.basename(j).startswith(want_prefix)
-               or os.path.basename(j) == want_exact]
+    if mc:
+        # Exact CI name only: the suffixless dev name never carries a version, and the bare
+        # escape would re-admit a same-version jar of unknown provenance.
+        want_versioned = f"{prefix}-{version}+{mc}.jar"
+        matched = [j for j in jars if os.path.basename(j) == want_versioned]
+    else:
+        want_prefix = f"{prefix}-{version}+"
+        matched = [j for j in jars
+                   if os.path.basename(j).startswith(want_prefix)
+                   or os.path.basename(j) == want_exact]
     if not matched:
-        problems.append(f"{prefix}: no jar for version {version} in build/libs "
+        problems.append(f"{prefix}: no jar for version {version}"
+                        + (f" on MC {mc}" if mc else "") + " in build/libs "
                         f"(found: {[os.path.basename(j) for j in jars] or 'none'}) — "
                         f"build with CI=true and -Pmod_version={version} first")
     return matched
@@ -529,6 +585,7 @@ def _selftest():
         return buf.getvalue()
 
     with tempfile.TemporaryDirectory() as td:
+        fab_manifest = "Manifest-Version: 1.0\nFabric-Mapping-Namespace: official\n"
         good_fab = os.path.join(td, "lod-server-support-fabric.jar")
         _make_jar(good_fab, {
             "fabric.mod.json": json.dumps({"version": "0.4.0"}),
@@ -536,10 +593,23 @@ def _selftest():
             "dev/vox/lss/common/PositionUtil.class": "x",
             "META-INF/jars/common-0.4.0.jar": _nested_common(),
             "LICENSE_lod-server-support-fabric": "MIT",
-        })
+        }, manifest=fab_manifest)
         p = []
         check_fabric_jar(good_fab, p)
         check(p == [], f"clean fabric jar flagged: {p}")
+
+        # the loom-flavor regression: right name, wrong mapping namespace must be caught
+        wrongns_fab = os.path.join(td, "wrongns-fabric.jar")
+        _make_jar(wrongns_fab, {
+            "fabric.mod.json": json.dumps({"version": "0.4.0"}),
+            "dev/vox/lss/LSSMod.class": "x",
+            "META-INF/jars/common-0.4.0.jar": _nested_common(),
+            "LICENSE_lod-server-support-fabric": "MIT",
+        }, manifest="Manifest-Version: 1.0\nFabric-Mapping-Namespace: named\n")
+        p = []
+        check_fabric_jar(wrongns_fab, p)
+        check(any("Fabric-Mapping-Namespace" in m for m in p),
+              f"wrong fabric mapping namespace not caught: {p}")
 
         # a fabric jar with NO nested common jar means the Loom include of :common broke
         no_common_fab = os.path.join(td, "no-common-fabric.jar")
@@ -576,7 +646,7 @@ def _selftest():
             "dev/vox/lss/LSSMod.class": "x",
             "META-INF/jars/common-0.4.0.jar": nested_clean.getvalue(),
             "LICENSE_lod-server-support-fabric": "MIT",
-        })
+        }, manifest=fab_manifest)
         p = []
         check_fabric_jar(nested_fab, p)
         check(p == [], f"clean nested common jar flagged: {p}")
@@ -675,6 +745,27 @@ def _selftest():
               == ["voxy-server-side-fabric-0.7.0+26.2.jar"],
               f"vss --version did not select the vss jar: {got} {p}")
 
+        # mc-pinned matching (support lines): the SAME mod_version exists on multiple
+        # release lines, so a stale other-line jar of the right version must be rejected
+        # when gradle.properties' minecraft_version is known.
+        p = []
+        got = _require_version(["a/lod-server-support-fabric-0.7.3+26.2.jar",
+                                "a/lod-server-support-fabric-0.7.3+26.1.2.jar"],
+                               "lod-server-support-fabric", "0.7.3", p, mc="26.1.2")
+        check(p == [] and [os.path.basename(j) for j in got]
+              == ["lod-server-support-fabric-0.7.3+26.1.2.jar"],
+              f"mc-pinned selection did not pick exactly this line's jar: {got} {p}")
+        p = []
+        got = _require_version(["a/lod-server-support-fabric-0.7.3+26.2.jar"],
+                               "lod-server-support-fabric", "0.7.3", p, mc="26.1.2")
+        check(got == [] and any("no jar for version 0.7.3 on MC 26.1.2" in m for m in p),
+              f"wrong-line stale jar passed the mc-pinned version gate: {got} {p}")
+        # mc known: the bare suffixless escape must be gone too (exact CI name only)
+        p = []
+        got = _require_version(["a/lod-server-support-fabric-0.7.3.jar"],
+                               "lod-server-support-fabric", "0.7.3", p, mc="26.1.2")
+        check(got == [], "suffixless same-version jar must not satisfy the mc-pinned gate")
+
         # ---- Voxy Server Side branded jars: full LSS gate + identity guardrail ----
         # A clean vss Fabric jar: rebranded name, but mod id STILL `lss` → passes both gates.
         good_vfab = os.path.join(td, "voxy-server-side-fabric.jar")
@@ -686,7 +777,7 @@ def _selftest():
             "META-INF/jars/common-0.7.0.jar": _nested_common("0.7.0"),
             "assets/lss/icon-vss.png": "PNG",
             "LICENSE_lod-server-support-fabric": "MIT",
-        })
+        }, manifest=fab_manifest)
         p = []
         check_fabric_jar(good_vfab, p)
         check_vss_fabric_identity(good_vfab, p)
@@ -1020,7 +1111,7 @@ def _selftest():
                 "LICENSE_lod-server-support-fabric": "MIT",
             }
             entries.update(extra or {})
-            _make_jar(os.path.join(dfab, name), entries)
+            _make_jar(os.path.join(dfab, name), entries, manifest=fab_manifest)
 
         def _write_tree_paper(name, yml, brand):
             _make_jar(os.path.join(dpap, name), {

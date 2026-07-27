@@ -25,6 +25,12 @@ dependencies {
 
 test {
     useJUnitPlatform()
+    // ReleaseWorkflowContractTest reads the workflow YAMLs from the source tree; without
+    // declaring them as inputs, a workflow-only edit leaves :paper:test UP-TO-DATE locally
+    // and the contract never re-checks (same pattern as fabric's gametest-listing inputs).
+    inputs.files(rootProject.file('.github/workflows/release.yml'),
+                 rootProject.file('.github/workflows/build.yml'))
+            .withPathSensitivity(PathSensitivity.RELATIVE)
 }
 
 processResources {

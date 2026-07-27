@@ -258,7 +258,9 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
      */
     @FunctionalInterface
     interface HandshakeRegistrar {
-        void register(int capabilities, HandshakeGate.WireDialect dialect);
+        /** {@code replyAfterRegister} MUST run after the registration is applied (the pump's
+         *  lifecycle drain in production) — never inline before it; see enqueueRegister. */
+        void register(int capabilities, HandshakeGate.WireDialect dialect, Runnable replyAfterRegister);
     }
 
     private void handleHandshake(Player bukkitPlayer, ServerPlayer nmsPlayer, byte[] data) {
@@ -281,11 +283,11 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                                 generationEnabled);
                     }
                 },
-                (capabilities, dialect) -> {
+                (capabilities, dialect, replyAfterRegister) -> {
                     if (dialect == HandshakeGate.WireDialect.V16) {
                         service.getV16CompatManager().onHandshake(nmsPlayer.getUUID());
                     }
-                    service.enqueueRegister(nmsPlayer, capabilities);
+                    service.enqueueRegister(nmsPlayer, capabilities, replyAfterRegister);
                 });
     }
 
@@ -320,7 +322,7 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
         }
 
         boolean v16 = decision.dialect() == HandshakeGate.WireDialect.V16;
-        configSender.send(decision.dialect(),
+        Runnable reply = () -> configSender.send(decision.dialect(),
                 decision.effectiveEnabled(),
                 config.lodDistanceChunks,
                 // The caps ARE the old client's pacing — the server's real admission values
@@ -330,6 +332,8 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                 config.enableChunkGeneration);
 
         if (decision.outcome() == HandshakeGate.Outcome.NO_CONSUMER) {
+            // Reply-only outcome: no state will exist, so the inline reply cannot race it.
+            reply.run();
             // Visible to admins via this log.
             LSSLogger.info("Player " + playerName
                     + " has no LOD consumer (caps=" + handshake.capabilities()
@@ -338,10 +342,18 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
         }
 
         if (decision.registerPlayer()) {
-            registrar.register(handshake.capabilities(), decision.dialect());
+            // REGISTERING outcome: the reply is DEFERRED into the registration so the
+            // client cannot declare before its state exists (the Folia pre-registration
+            // drop, soak-diagnosed 2026-07-27 — on Folia this handler runs on the region
+            // thread while the pump applies registrations next tick; a SessionConfig sent
+            // from here invited a first want-set into the gap, dropped uncounted).
+            registrar.register(handshake.capabilities(), decision.dialect(), reply);
             LSSLogger.info("Player " + playerName
                     + " registered for " + Brand.shortName() + " LOD request processing (caps="
                     + handshake.capabilities() + (v16 ? ", v16-compat" : "") + ")");
+        } else {
+            // Reply-without-register (e.g. DISABLED advertisement): nothing to race.
+            reply.run();
         }
     }
 

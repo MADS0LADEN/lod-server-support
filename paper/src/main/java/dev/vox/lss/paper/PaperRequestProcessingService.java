@@ -298,7 +298,7 @@ public class PaperRequestProcessingService {
      *  service's non-concurrent maps), so region-thread callers enqueue here and tick() drains
      *  first — one queue preserves arrival order across a kick→rejoin of the same UUID. */
     private sealed interface LifecycleEvent {
-        record Register(ServerPlayer player, int capabilities) implements LifecycleEvent {}
+        record Register(ServerPlayer player, int capabilities, Runnable replyAfterRegister) implements LifecycleEvent {}
         record Remove(UUID uuid) implements LifecycleEvent {}
     }
 
@@ -306,7 +306,20 @@ public class PaperRequestProcessingService {
 
     /** Any thread. Applied at the top of the next tick(). */
     public void enqueueRegister(ServerPlayer player, int capabilities) {
-        this.lifecycleMailbox.add(new LifecycleEvent.Register(player, capabilities));
+        enqueueRegister(player, capabilities, () -> { });
+    }
+
+    /**
+     * Any thread. Applied at the top of the next tick(); {@code replyAfterRegister} runs on
+     * the pump IMMEDIATELY AFTER the player state exists. This ordering is the fix for the
+     * Folia pre-registration drop (soak-diagnosed 2026-07-27): the handshake used to reply
+     * SessionConfig inline on the region thread while the registration waited here, so a
+     * well-behaved client's FIRST want-set could arrive before any state existed and was
+     * dropped uncounted. Replying only after the drain makes that window unreachable for
+     * clients that declare only after receiving SessionConfig (all of them).
+     */
+    public void enqueueRegister(ServerPlayer player, int capabilities, Runnable replyAfterRegister) {
+        this.lifecycleMailbox.add(new LifecycleEvent.Register(player, capabilities, replyAfterRegister));
     }
 
     /** Any thread. Applied at the top of the next tick(). */
@@ -318,7 +331,12 @@ public class PaperRequestProcessingService {
         LifecycleEvent ev;
         while ((ev = this.lifecycleMailbox.poll()) != null) {
             switch (ev) {
-                case LifecycleEvent.Register r -> registerPlayer(r.player(), r.capabilities());
+                case LifecycleEvent.Register r -> {
+                    registerPlayer(r.player(), r.capabilities());
+                    // State exists from this line on — the deferred SessionConfig reply may
+                    // now invite the client's first declaration.
+                    r.replyAfterRegister().run();
+                }
                 case LifecycleEvent.Remove r -> removePlayer(r.uuid());
             }
         }

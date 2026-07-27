@@ -70,7 +70,7 @@ public final class SectionSerializer {
                 if (maskEntry != null) {
                     // Masking INSIDE the choke point: probe, generation, and the
                     // DirtyContentFilter hash all see identical masked bytes by construction.
-                    var masked = XrayMaskFilter.maskCopy(section, info.sectionY,
+                    var masked = XrayMaskFilter.mask(section, info.sectionY,
                             maskEntry.mask(), maskEntry.kind());
                     if (masked != section) {
                         section = masked;

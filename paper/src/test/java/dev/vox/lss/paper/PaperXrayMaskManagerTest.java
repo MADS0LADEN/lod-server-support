@@ -32,12 +32,11 @@ class PaperXrayMaskManagerTest {
     }
 
     private static PaperXrayMaskManager.EngineConfig enabled(int maxY) {
-        return new PaperXrayMaskManager.EngineConfig(true,
-                List.of(Blocks.DIAMOND_ORE, Blocks.GOLD_ORE), maxY);
+        return new PaperXrayMaskManager.EngineConfig(true, List.of(Blocks.DIAMOND_ORE, Blocks.GOLD_ORE), List.of(), false, maxY);
     }
 
     private static final PaperXrayMaskManager.EngineConfig DISABLED =
-            new PaperXrayMaskManager.EngineConfig(false, List.of(), 64);
+            new PaperXrayMaskManager.EngineConfig(false, List.of(), List.of(), false, 64);
 
     @Test
     void autoWithDisabledWorldIsInactiveAndCachedWithOneEvaluation() {
@@ -72,7 +71,7 @@ class PaperXrayMaskManagerTest {
         // The Paper-specific fallback rung: enabled + hidden-blocks resolving empty.
         var manager = new PaperXrayMaskManager(config("auto"));
         var entry = manager.entryFor("minecraft:overworld",
-                () -> new PaperXrayMaskManager.EngineConfig(true, List.of(), 32));
+                () -> new PaperXrayMaskManager.EngineConfig(true, List.of(), List.of(), false, 32));
         assertNotNull(entry, "an enabled world must mask even when its list resolves empty");
         assertEquals("config", entry.sourceLabel());
         assertEquals(64, entry.mask().maxBlockHeight(),
@@ -133,5 +132,39 @@ class PaperXrayMaskManagerTest {
 
         PaperXrayMaskManager.deactivate(second);
         assertNull(PaperXrayMaskManager.current());
+    }
+
+    @Test
+    void adoptionRoundsMaxHeightDownToTheSectionBoundary() {
+        // Paper's engine ctor floors max-block-height to a section boundary ((h >> 4) << 4);
+        // adopting the raw value masked up to 15 blocks the near view shows real.
+        var mgr = new PaperXrayMaskManager(config("auto"));
+        var entry = mgr.entryFor("minecraft:overworld",
+                () -> new PaperXrayMaskManager.EngineConfig(true,
+                        List.of(Blocks.DIAMOND_ORE), List.of(), false, 100));
+        assertNotNull(entry);
+        assertEquals(96, entry.mask().maxBlockHeight(),
+                "adopted height must match the engine's section-floored value");
+    }
+
+    @Test
+    void obfuscateModeAdoptsTheReplacementBlocksToo() {
+        // Engine modes 2/3 obfuscate the replacement list as well — masking only the hidden
+        // list would leak exactly the states the engine hides (review 2026-07-27).
+        var mgr = new PaperXrayMaskManager(config("auto"));
+        var entry = mgr.entryFor("minecraft:overworld",
+                () -> new PaperXrayMaskManager.EngineConfig(true,
+                        List.of(Blocks.DIAMOND_ORE), List.of(Blocks.STONE), true, 64));
+        assertNotNull(entry);
+        assertTrue(entry.mask().contains(Blocks.DIAMOND_ORE.defaultBlockState()));
+        assertTrue(entry.mask().contains(Blocks.STONE.defaultBlockState()),
+                "OBFUSCATE-mode replacement blocks must be adopted into the mask");
+
+        var hideOnly = mgr.entryFor("minecraft:the_nether",
+                () -> new PaperXrayMaskManager.EngineConfig(true,
+                        List.of(Blocks.DIAMOND_ORE), List.of(Blocks.STONE), false, 64));
+        assertNotNull(hideOnly);
+        assertFalse(hideOnly.mask().contains(Blocks.STONE.defaultBlockState()),
+                "HIDE mode must not union the replacement list");
     }
 }

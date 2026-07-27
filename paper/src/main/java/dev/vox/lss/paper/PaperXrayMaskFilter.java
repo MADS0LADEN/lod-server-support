@@ -113,38 +113,53 @@ final class PaperXrayMaskFilter {
     }
 
     /**
-     * Live path: returns the section itself when untouched, or a masked COPY — the live
-     * chunk's containers are NEVER mutated (players see real terrain; only the serialized
-     * bytes are masked). Call on whatever thread legally serializes the section.
+     * Both serve paths (live copy and NBT-parsed): returns the section itself when
+     * untouched, or a REBUILT masked section. The source section is NEVER mutated (live
+     * chunks keep real terrain; parsed sections are simply abandoned). Call on whatever
+     * thread legally serializes the section.
+     *
+     * <p>The rebuild is the point (review 2026-07-27): {@code PalettedContainer.set} never
+     * prunes the palette and {@code write()} ships the palette verbatim, so an in-place
+     * mask still LISTED every hidden ore the section no longer contains — a
+     * section-resolution ore-presence oracle across the whole LOD radius. Masking into a
+     * {@code recreate()}d container builds a minimal palette (only referenced states), so
+     * the wire carries no trace of the hidden set. The section ctor recalculates the count
+     * headers from the masked states, which keeps live-vs-disk byte parity (both paths now
+     * share this exact construction).
      */
-    static LevelChunkSection maskCopy(LevelChunkSection section, int sectionY, MaskSet mask, FallbackKind kind) {
+    static LevelChunkSection mask(LevelChunkSection section, int sectionY, MaskSet mask, FallbackKind kind) {
         if (!needsMasking(section, sectionY, mask)) return section;
-        PalettedContainer<BlockState> states = section.getStates().copy();
-        maskStates(states, sectionY, mask, kind);
+        PalettedContainer<BlockState> masked = maskedStates(section.getStates(), sectionY, mask, kind);
         var biomes = section.getBiomes();
         if (!(biomes instanceof PalettedContainer<Holder<Biome>> biomeContainer)) {
-            // Unreachable on live sections (their biome container is always the concrete
-            // type); the instanceof exists because Paper's section ctor requires it, and the
-            // twins stay textually identical. A throw here is contained by every serve path.
-            throw new IllegalStateException("live section biomes are not a mutable PalettedContainer");
+            // Unreachable on live sections and codecRO-parsed sections alike (both yield the
+            // concrete type); the instanceof exists because Paper's section ctor requires
+            // it, and the twins stay textually identical. Contained by every serve path.
+            throw new IllegalStateException("section biomes are not a mutable PalettedContainer");
         }
         // The biome container is reused by REFERENCE (read-only here); only states differ.
-        // The ctor recalculates the count headers from the masked states — never-air keeps
-        // nonEmptyBlockCount identical, and maskInPlace mirrors this via recalcBlockCounts.
-        return new LevelChunkSection(states, biomeContainer);
+        return new LevelChunkSection(masked, biomeContainer);
     }
 
-    /** Disk path: NBT-parsed sections are throwaway — masks the section's states in place.
-     *  Returns whether the section was masked (the diag counter's signal). */
-    static boolean maskInPlace(LevelChunkSection section, int sectionY, MaskSet mask, FallbackKind kind) {
-        if (!needsMasking(section, sectionY, mask)) return false;
-        maskStates(section.getStates(), sectionY, mask, kind);
-        // Mutating states bypasses the section's count bookkeeping, and write() leads with
-        // nonEmptyBlockCount + fluidCount — without the recalc a masked waterlogged chest
-        // (fluid census change) serializes different header bytes than maskCopy's
-        // ctor-recalculated path, breaking live-vs-disk byte parity.
-        section.recalcBlockCounts();
-        return true;
+    /** One pass, one allocation: reads the source container, writes same-or-replacement
+     *  into a fresh same-strategy container whose palette ends minimal. */
+    private static PalettedContainer<BlockState> maskedStates(PalettedContainer<BlockState> states,
+                                                              int sectionY, MaskSet mask, FallbackKind kind) {
+        BlockState replacement = chooseReplacement(states, sectionY, mask, kind);
+        PalettedContainer<BlockState> fresh = states.recreate();
+        int bottomY = sectionY << 4;
+        // A section STRADDLING the cutoff keeps cells at/above it real — vanilla packets
+        // already reveal them, masking would only mismatch near terrain.
+        int yLimit = Math.min(16, mask.maxBlockHeight - bottomY);
+        for (int y = 0; y < 16; y++) {
+            for (int z = 0; z < 16; z++) {
+                for (int x = 0; x < 16; x++) {
+                    BlockState state = states.get(x, y, z);
+                    fresh.set(x, y, z, y < yLimit && mask.contains(state) ? replacement : state);
+                }
+            }
+        }
+        return fresh;
     }
 
     private static boolean needsMasking(LevelChunkSection section, int sectionY, MaskSet mask) {
@@ -157,22 +172,6 @@ final class PaperXrayMaskFilter {
         return section.getStates().maybeHas(mask::contains);
     }
 
-    private static void maskStates(PalettedContainer<BlockState> states, int sectionY, MaskSet mask, FallbackKind kind) {
-        BlockState replacement = chooseReplacement(states, sectionY, mask, kind);
-        int bottomY = sectionY << 4;
-        // A section STRADDLING the cutoff keeps cells at/above it real — vanilla packets
-        // already reveal them, masking would only mismatch near terrain.
-        int yLimit = Math.min(16, mask.maxBlockHeight - bottomY);
-        for (int y = 0; y < yLimit; y++) {
-            for (int z = 0; z < 16; z++) {
-                for (int x = 0; x < 16; x++) {
-                    if (mask.contains(states.get(x, y, z))) {
-                        states.set(x, y, z, replacement);
-                    }
-                }
-            }
-        }
-    }
 
     /**
      * The replacement is the section's dominant non-hidden, non-air state (adapts to
