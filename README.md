@@ -2,7 +2,7 @@
 
 Distributes LOD (Level of Detail) chunk data from servers to connected clients over a custom networking protocol. Built primarily as a multiplayer backend for [Voxy](https://modrinth.com/mod/voxy) — clients request distant chunks in batches, the server reads them from disk or memory and streams the data back, enabling Voxy to render terrain far beyond the vanilla render distance on multiplayer servers without the need to travel there first.
 
-Supports **Fabric** clients and **Fabric**, **Paper**, **Purpur**, **Folia** servers.
+Supports **Fabric** clients and **Fabric**, **Paper**, **Purpur** servers (**Folia** on the older support lines).
 
 https://github.com/user-attachments/assets/721fb344-890e-4e03-ab36-539444427f7b
 
@@ -57,7 +57,7 @@ Each Minecraft version has its own build; only the latest is listed. Older-MC bu
 
 | Minecraft | LSS Version | Fabric | Paper | Folia | Voxy | Java |
 |---|---|---|---|---|---|---|
-| **26.2** | v0.8.0 | ✅ | ✅ | — | 0.2.16-beta+ | 25+ |
+| **26.2** | v0.8.0 | ✅ | ✅ | — | 0.2.17-alpha+ | 25+ |
 | **26.1.x** | v0.8.0+mc26.1 | ✅ | ✅ | ✅ | 0.2.16-beta+ | 25+ |
 | **1.21.11** | v0.8.0+mc1.21.11 | ✅ | ✅ | ✅ | 0.2.15-beta+ | 21+ |
 | **1.21.8** | v0.6.1+mc1.21.8 | ✅ | ✅ | ✅ | 0.2.5-alpha+ | 21+ |

@@ -146,4 +146,17 @@ class PaperXrayMaskManagerTest {
         assertEquals(96, entry.mask().maxBlockHeight(),
                 "adopted height must match the engine's section-floored value");
     }
+
+    @Test
+    void throwingEngineViewFallsBackToConfigKeysNotUnmasked() {
+        // The paperConfig() read binds Paper-INTERNAL config classes; if a future build
+        // reshapes them, the supplier throws. That must degrade like Fabric's UNREADABLE
+        // probe — LSS-config-key masking (fail-safe, masking ON) — never an exception into
+        // the pump tick and never a silently unmasked serve (final compat review 2026-07-27).
+        var manager = new PaperXrayMaskManager(config("auto"));
+        var entry = manager.entryFor("minecraft:overworld",
+                () -> new PaperXrayMaskManager.EngineConfig(true, List.of(), 0));
+        assertNotNull(entry, "unreadable engine must still mask");
+        assertEquals("config", entry.sourceLabel(), "fallback tier is the LSS config keys");
+    }
 }
