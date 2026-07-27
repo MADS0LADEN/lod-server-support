@@ -11,7 +11,9 @@ Inspects the built release jars and the workflow/metadata that publishes them, a
   * required content is present — fabric.mod.json / plugin.yml, the common classes, LICENSE;
   * version placeholders are expanded (no literal ${version} in plugin.yml / fabric.mod.json);
   * Paper keeps the paperweight-mappings-namespace: mojang manifest attr through the shadowJar;
-  * release.yml's publish globs actually match the CI artifact names (and not the soak jar);
+  * the local RELEASE_GLOBS artifact contract matches the CI artifact names (and not the
+    soak jar) — NOTE: release.yml publishes only the LSS pair on EVERY line since v0.8.0;
+    the VSS globs here still gate the locally built byte-copies (built, not published);
   * discovery is unambiguous — stale jars from earlier builds fail the run (or are excluded
     by an explicit --version), so a green pre-flight always validated the jar being tagged.
 

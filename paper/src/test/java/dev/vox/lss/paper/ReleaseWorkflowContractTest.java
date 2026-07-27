@@ -113,17 +113,18 @@ class ReleaseWorkflowContractTest {
     }
 
     @Test
-    void githubReleaseStepShipsAllFourJars() {
-        // Main is the one line that ships the VSS pair alongside LSS; a merge from a support
-        // branch (whose gh-release step drops VSS) must not shrink the asset list.
+    void githubReleaseStepShipsExactlyTheLssPair() {
+        // VSS publishing is disabled as of v0.8.0 (user decision at the tri-release): the
+        // vssJar tasks still build the branded byte-copies and release_check still gates the
+        // pair, but no VSS jar may be distributed — from ANY line now.
         String gh = stepBlock("- uses: softprops/action-gh-release");
         for (String glob : new String[]{
                 "fabric/build/libs/lod-server-support-fabric-*.jar",
-                "paper/build/libs/lod-server-support-paper-*.jar",
-                "fabric/build/libs/voxy-server-side-fabric-*.jar",
-                "paper/build/libs/voxy-server-side-paper-*.jar"}) {
+                "paper/build/libs/lod-server-support-paper-*.jar"}) {
             assertTrue(gh.contains(glob), "the gh-release assets must include " + glob);
         }
+        assertFalse(gh.contains("voxy-server-side-"),
+                "no VSS jar may be attached to the GitHub release");
         assertTrue(gh.contains("fail_on_unmatched_files: true"),
                 "fail_on_unmatched_files guards against publishing an empty release");
         assertFalse(gh.contains("make_latest: false"),
@@ -132,18 +133,20 @@ class ReleaseWorkflowContractTest {
     }
 
     @Test
-    void allFourModrinthStepsTargetTheirProjects() {
-        // Two LSS steps + two VSS steps, each on its own project id — a support-branch merge
-        // dropping the VSS steps (they don't publish VSS) must not survive here.
+    void onlyTheLssModrinthStepsExist() {
+        // Two LSS steps, and NO VSS channel anywhere: restoring the 84zcagOb steps would
+        // irreversibly resume publishing to the retired second distribution channel.
         assertEquals(2, Pattern.compile(Pattern.quote("modrinth-id: " + LSS_MODRINTH_ID))
                         .matcher(releaseYml).results().count(),
                 "both LSS Modrinth steps must target " + LSS_MODRINTH_ID);
-        assertEquals(2, Pattern.compile(Pattern.quote("modrinth-id: " + VSS_MODRINTH_ID))
-                        .matcher(releaseYml).results().count(),
-                "both VSS Modrinth steps must target " + VSS_MODRINTH_ID);
+        assertFalse(releaseYml.contains(VSS_MODRINTH_ID),
+                "release.yml must not reference the VSS Modrinth project " + VSS_MODRINTH_ID);
+        assertFalse(releaseYml.contains("voxy-server-side-"),
+                "release.yml must not upload/attach VSS jars (the vssJar tasks still BUILD "
+                        + "them — only publishing is out)");
         for (String id : MODRINTH_VERSION_IDS) {
-            assertEquals(2, Pattern.compile(Pattern.quote(id)).matcher(releaseYml).results().count(),
-                    "LSS + VSS steps must share the version id form '" + id + "'");
+            assertEquals(1, Pattern.compile(Pattern.quote(id)).matcher(releaseYml).results().count(),
+                    "exactly one (LSS) step per version id form '" + id + "'");
         }
     }
 
