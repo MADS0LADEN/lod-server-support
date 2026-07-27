@@ -75,7 +75,7 @@ final class NbtSectionSerializer {
         var statusStr = chunkNbt.getStringOr("Status", null);
         if (statusStr == null || ChunkStatus.byName(statusStr) != ChunkStatus.FULL) return null;
 
-        var factory = PalettedContainerFactory.create(registryAccess);
+        var factory = factoryFor(registryAccess);
         var blockStateCodec = factory.blockStatesContainerCodec();
         var biomeCodec = factory.biomeContainerCodec();
         var biomeRegistry = registryAccess.lookupOrThrow(Registries.BIOME);
@@ -113,9 +113,12 @@ final class NbtSectionSerializer {
             // counter attributes to whatever manager is current at COMPLETION time (a read
             // straddling a service restart credits the successor) — diag-only cosmetics;
             // the mask itself always comes from the immutable submit-time entry.
-            for (var p : parsed) {
-                if (XrayMaskFilter.maskInPlace(p.section, p.sectionY,
-                        maskEntry.mask(), maskEntry.kind())) {
+            for (int i = 0; i < parsed.size(); i++) {
+                var p = parsed.get(i);
+                var masked = XrayMaskFilter.mask(p.section(), p.sectionY(),
+                        maskEntry.mask(), maskEntry.kind());
+                if (masked != p.section()) {
+                    parsed.set(i, new ParsedSection(p.sectionY(), masked, p.blockLight(), p.skyLight()));
                     var manager = XrayMaskManager.current();
                     if (manager != null) manager.countMaskedSection();
                 }
@@ -207,5 +210,19 @@ final class NbtSectionSerializer {
             if (b != 0) return true;
         }
         return false;
+    }
+
+    // PalettedContainerFactory.create builds two strategies + codecs per call — measurable
+    // allocation churn when every disk read pays it (review 2026-07-27). The registry access
+    // is stable for a server's lifetime; a single-slot memo (atomic pair via one volatile)
+    // covers it and survives the odd registry swap in tests.
+    private static volatile java.util.Map.Entry<RegistryAccess, PalettedContainerFactory> factoryMemo;
+
+    private static PalettedContainerFactory factoryFor(RegistryAccess registryAccess) {
+        var memo = factoryMemo;
+        if (memo != null && memo.getKey() == registryAccess) return memo.getValue();
+        var factory = PalettedContainerFactory.create(registryAccess);
+        factoryMemo = java.util.Map.entry(registryAccess, factory);
+        return factory;
     }
 }

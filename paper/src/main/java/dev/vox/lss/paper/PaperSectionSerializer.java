@@ -73,7 +73,7 @@ final class PaperSectionSerializer {
                 if (maskEntry != null) {
                     // Masking INSIDE the choke point: probe, generation, and every consumer
                     // see identical masked bytes by construction.
-                    var masked = PaperXrayMaskFilter.maskCopy(section, info.sectionY,
+                    var masked = PaperXrayMaskFilter.mask(section, info.sectionY,
                             maskEntry.mask(), maskEntry.kind());
                     if (masked != section) {
                         section = masked;

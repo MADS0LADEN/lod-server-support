@@ -35,7 +35,11 @@ final class PaperXrayMaskManager {
     record MaskEntry(PaperXrayMaskFilter.MaskSet mask, FallbackKind kind, String sourceLabel) {}
 
     /** Paper's per-world anti-xray inputs, extracted so Tier 1 can inject them level-free. */
-    record EngineConfig(boolean enabled, List<Block> hiddenBlocks, int maxBlockHeight) {}
+    /** {@code obfuscatesReplacements}: Paper engine modes 2/3 (OBFUSCATE / OBFUSCATE_LAYER)
+     *  obfuscate the replacement-block list too — "mask exactly what the engine masks"
+     *  means adopting the union there (review 2026-07-27). */
+    record EngineConfig(boolean enabled, List<Block> hiddenBlocks, List<Block> replacementBlocks,
+                        boolean obfuscatesReplacements, int maxBlockHeight) {}
 
     private static volatile PaperXrayMaskManager active;
 
@@ -79,7 +83,10 @@ final class PaperXrayMaskManager {
     MaskEntry entryFor(ServerLevel level) {
         return entryFor(level.dimension().identifier().toString(), () -> {
             var antiXray = level.paperConfig().anticheat.antiXray;
-            return new EngineConfig(antiXray.enabled, antiXray.hiddenBlocks, antiXray.maxBlockHeight);
+            return new EngineConfig(antiXray.enabled, antiXray.hiddenBlocks,
+                    antiXray.replacementBlocks,
+                    antiXray.engineMode != io.papermc.paper.configuration.type.EngineMode.HIDE,
+                    antiXray.maxBlockHeight);
         });
     }
 
@@ -115,8 +122,19 @@ final class PaperXrayMaskManager {
         boolean engineActiveForWorld = view != null && view.enabled();
         PaperXrayMaskFilter.MaskSet engineMask = null;
         if (engineActiveForWorld) {
+            var adopted = view.hiddenBlocks();
+            if (view.obfuscatesReplacements() && view.replacementBlocks() != null
+                    && !view.replacementBlocks().isEmpty()) {
+                var union = new java.util.ArrayList<Block>(adopted);
+                union.addAll(view.replacementBlocks());
+                adopted = union;
+            }
+            // Paper's engine rounds the configured max-block-height DOWN to a section
+            // boundary ((h >> 4) << 4) in its controller ctor; adopting the raw value made
+            // LOD mask up to 15 blocks the near view shows real (review 2026-07-27).
+            int effectiveHeight = (view.maxBlockHeight() >> 4) << 4;
             engineMask = PaperXrayMaskFilter.MaskSet.fromStates(
-                    expandToStates(view.hiddenBlocks()), view.maxBlockHeight());
+                    expandToStates(adopted), effectiveHeight);
             if (engineMask.isEmpty()) {
                 // An enabled world whose hidden list resolves to nothing — adopt-nothing
                 // would silently leak, so fall back to the LSS keys (design §3 Detection).

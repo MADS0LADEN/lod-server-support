@@ -154,8 +154,8 @@ public class SerializerParityGameTests {
     /**
      * Masked disk/live parity (docs/planning/antixray-compat-design.md §3): with
      * {@code xrayObfuscation: "on"}, an ore-bearing chunk must serialize byte-identically
-     * from disk (NbtSectionSerializer + maskInPlace) and from memory (SectionSerializer +
-     * maskCopy) — the same parity contract the unmasked test above pins, now through the
+     * from disk (NbtSectionSerializer + mask) and from memory (SectionSerializer +
+     * mask) — the same parity contract the unmasked test above pins, now through the
      * full masking wiring (manager activation, submit-time entry capture, choke-point
      * hooks). Also pins engagement: masked bytes must differ from unmasked bytes of the
      * same chunk, and the manager's section counter must move.
