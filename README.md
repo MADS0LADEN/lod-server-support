@@ -12,13 +12,14 @@ https://github.com/user-attachments/assets/721fb344-890e-4e03-ab36-539444427f7b
 
 All builds are on [Modrinth](https://modrinth.com/plugin/lod-server-support) — pick the file matching your Minecraft version: `lod-server-support-fabric` (the client/server Fabric mod) or `lod-server-support-paper` (the server plugin). GitHub Releases on this repository mirror every version.
 
-### Also published as "Voxy Server Side"
+### Also published as "Voxy Server Side" (v0.7.x only)
 
-Since v0.7.0, every release is additionally published to the
-[Voxy Server Side](https://modrinth.com/plugin/voxy-server-side) Modrinth page. Both listings
-ship the **same mod** — identical internals and networking protocol; only the display name,
-description, and icon differ. Compatibility is total, you can join LSS servers with a VSS
-client and vice versa.
+Releases v0.7.0–v0.7.3 were additionally published to the
+[Voxy Server Side](https://modrinth.com/plugin/voxy-server-side) Modrinth page; **from v0.8.0
+on, new versions ship only on this LOD Server Support listing.** Both carry the **same mod** —
+identical internals and networking protocol; only the display name, description, and icon
+differ. Compatibility is total: a v0.7.x VSS install interoperates with LSS peers, and
+switching a VSS install to the LSS jar is drop-in (same config, same networking).
 
 ### Redistribution
 
