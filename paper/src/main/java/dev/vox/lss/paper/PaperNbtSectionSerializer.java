@@ -91,13 +91,30 @@ final class PaperNbtSectionSerializer {
             if (sectionY == Integer.MIN_VALUE) continue;
 
             byte[] blockLightData = sectionTag.getByteArray("BlockLight").orElse(EMPTY);
+            byte[] skyLightData = sectionTag.getByteArray("SkyLight").orElse(EMPTY);
             var result = parseSection(sectionTag, sectionY, blockStateCodec, biomeCodec,
-                    factory, blockLightData);
+                    factory, blockLightData, skyLightData);
             if (result != null) {
-                byte[] skyLightData = sectionTag.getByteArray("SkyLight").orElse(EMPTY);
                 parsed.add(new ParsedSection(sectionY, result, blockLightData, skyLightData));
             }
         }
+
+        // Boundary-light band (2026-07-27, black-boundary-faces fix — see the Fabric twin):
+        // SKY-lit air serves only within one section of the content band; a column with NO
+        // content sections stays a zero-section CLEAR. BLOCK-lit air keeps its
+        // long-standing unconditional serve.
+        int minContent = Integer.MAX_VALUE, maxContent = Integer.MIN_VALUE;
+        for (var p : parsed) {
+            if (!p.section().hasOnlyAir()) {
+                minContent = Math.min(minContent, p.sectionY());
+                maxContent = Math.max(maxContent, p.sectionY());
+            }
+        }
+        final boolean noContent = minContent == Integer.MAX_VALUE;
+        final int lo = minContent - 1, hi = maxContent + 1;
+        parsed.removeIf(p -> p.section().hasOnlyAir()
+                && !(p.blockLight().length == 2048 && hasNonZeroNibble(p.blockLight()))
+                && (noContent || p.sectionY() < lo || p.sectionY() > hi));
 
         if (parsed.isEmpty()) return new byte[0];
 
@@ -161,14 +178,19 @@ final class PaperNbtSectionSerializer {
             Codec<PalettedContainer<BlockState>> blockStateCodec,
             Codec<PalettedContainerRO<Holder<Biome>>> biomeCodec,
             PalettedContainerFactory factory,
-            byte[] blockLightData) {
+            byte[] blockLightData, byte[] skyLightData) {
 
         var blockStatesOpt = sectionTag.getCompound("block_states");
-        if (blockStatesOpt.isEmpty()) return null;
-
-        var blockStatesResult = blockStateCodec.parse(NbtOps.INSTANCE, blockStatesOpt.get());
-        var blockStates = blockStatesResult.result().orElse(null);
-        if (blockStates == null) return null;
+        PalettedContainer<BlockState> blockStates;
+        if (blockStatesOpt.isEmpty()) {
+            // Vanilla's light-only cap entries (heightmap+1) carry SkyLight but no
+            // block_states — exactly the boundary layers the fix serves.
+            blockStates = factory.createForBlockStates();
+        } else {
+            var blockStatesResult = blockStateCodec.parse(NbtOps.INSTANCE, blockStatesOpt.get());
+            blockStates = blockStatesResult.result().orElse(null);
+            if (blockStates == null) return null;
+        }
 
         PalettedContainerRO<Holder<Biome>> biomes;
         var optBiomes = sectionTag.getCompound("biomes");
@@ -187,7 +209,9 @@ final class PaperNbtSectionSerializer {
         }
 
         if (section.hasOnlyAir()) {
-            if (blockLightData.length != 2048 || !hasNonZeroNibble(blockLightData)) {
+            boolean litByBlock = blockLightData.length == 2048 && hasNonZeroNibble(blockLightData);
+            boolean litBySky = skyLightData.length == 2048 && hasNonZeroNibble(skyLightData);
+            if (!litByBlock && !litBySky) {
                 return null;
             }
         }

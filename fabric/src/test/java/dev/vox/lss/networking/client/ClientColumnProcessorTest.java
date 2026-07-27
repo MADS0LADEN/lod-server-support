@@ -158,7 +158,7 @@ class ClientColumnProcessorTest {
     }
 
     private void drainNow() {
-        processor.drainColumnQueue(dim, LEVEL_SECTIONS, MIN_SECTION_Y, FACTORY, recordingDispatcher,
+        processor.drainColumnQueue(dim, LEVEL_SECTIONS, MIN_SECTION_Y, false, FACTORY, recordingDispatcher,
                 processor.sessionEpochForTest());
     }
 
@@ -218,7 +218,7 @@ class ClientColumnProcessorTest {
         var wire = sectionWire(1, 1);
         processor.offer(new VoxelColumnS2CPayload(3, 4, dim, 9L, wire), false);
         assertThrows(LinkageError.class, () -> processor.drainColumnQueue(dim, LEVEL_SECTIONS,
-                MIN_SECTION_Y, FACTORY,
+                MIN_SECTION_Y, false, FACTORY,
                 (d, cx, cz, data) -> { throw new LinkageError("boom"); },
                 processor.sessionEpochForTest()));
         assertEquals(List.of(new Report(dim, 3, 4)), reports,
@@ -289,6 +289,45 @@ class ClientColumnProcessorTest {
                 "disabled session must drop the backlog and release the backpressure signal");
     }
 
+    // ---- implicit-sky fill: absent air ABOVE the served band is full-bright (2026-07-27) ----
+
+    @Test
+    void implicitSkyFillAddsBrightAirAboveTheTopServedSection() {
+        // Vanilla stores sky layers only to heightmap+1; above is IMPLICITLY full-bright.
+        // Without the fill, faces sampling never-served air above/beside terrain (leaf
+        // tops, cliff sides at a chunk border against a lower column) shade black.
+        var present = new VoxelColumnData.SectionData[]{
+                new VoxelColumnData.SectionData(-4, new LevelChunkSection(FACTORY), null, null),
+                new VoxelColumnData.SectionData(-3, new LevelChunkSection(FACTORY), null, null)};
+        var filled = ClientColumnProcessor.withImplicitSkyAbove(present, LEVEL_SECTIONS, MIN_SECTION_Y, FACTORY);
+
+        var byY = new java.util.HashMap<Integer, VoxelColumnData.SectionData>();
+        for (var s : filled) byY.put(s.sectionY(), s);
+        assertEquals(java.util.Set.of(-4, -3, -2, -1), byY.keySet(),
+                "every absent Y above the top served section fills to the level top");
+        for (int y : new int[]{-2, -1}) {
+            var s = byY.get(y);
+            assertTrue(s.section().hasOnlyAir(), "fill sections are all-air");
+            assertNull(s.blockLight(), "no fabricated block light");
+            assertNotNull(s.skyLight(), "fill sections carry sky light");
+            for (byte b : s.skyLight().getData()) {
+                assertEquals((byte) 0xFF, b, "fill sky light is full-bright");
+            }
+        }
+        assertNull(byY.get(-4).skyLight(), "served sections are untouched");
+    }
+
+    @Test
+    void implicitSkyFillLeavesClearsAndFullColumnsAlone() {
+        assertEquals(0, ClientColumnProcessor.withImplicitSkyAbove(
+                        new VoxelColumnData.SectionData[0], LEVEL_SECTIONS, MIN_SECTION_Y, FACTORY).length,
+                "a zero-section CLEAR must stay a clear");
+        var full = new VoxelColumnData.SectionData[]{
+                new VoxelColumnData.SectionData(-1, new LevelChunkSection(FACTORY), null, null)};
+        assertSame(full, ClientColumnProcessor.withImplicitSkyAbove(full, LEVEL_SECTIONS, MIN_SECTION_Y, FACTORY),
+                "a column already serving the top section gains nothing");
+    }
+
     // ---- WS3 authoritative air-fill: a resync clears ghost terrain for absent sections ----
 
     @Test
@@ -317,13 +356,13 @@ class ClientColumnProcessorTest {
         byte[] wire = sectionWire(1, 1); // one section at Y=0
 
         processor.offer(new VoxelColumnS2CPayload(0, 0, dim, 5000L, wire), true); // resync
-        processor.drainColumnQueue(dim, LEVEL_SECTIONS, 0, FACTORY, recordingDispatcher,
+        processor.drainColumnQueue(dim, LEVEL_SECTIONS, 0, false, FACTORY, recordingDispatcher,
                 processor.sessionEpochForTest());
         assertEquals(LEVEL_SECTIONS, dispatches.get(dispatches.size() - 1).sectionCount(),
                 "a resync fills every absent section-Y with air (present + air = full level range)");
 
         processor.offer(new VoxelColumnS2CPayload(1, 1, dim, 5000L, wire), false); // first serve
-        processor.drainColumnQueue(dim, LEVEL_SECTIONS, 0, FACTORY, recordingDispatcher,
+        processor.drainColumnQueue(dim, LEVEL_SECTIONS, 0, false, FACTORY, recordingDispatcher,
                 processor.sessionEpochForTest());
         assertEquals(1, dispatches.get(dispatches.size() - 1).sectionCount(),
                 "a first serve dispatches only the carried section — no air-fill (absent == air == no-op)");
@@ -478,7 +517,7 @@ class ClientColumnProcessorTest {
             processor.reportUndispatched(manager);
             processor.offer(new VoxelColumnS2CPayload(4, 4, dim, 5000L, sectionWire(1, 1)), false);
         };
-        processor.drainColumnQueue(dim, LEVEL_SECTIONS, MIN_SECTION_Y, FACTORY, teardownMidDispatch, epoch);
+        processor.drainColumnQueue(dim, LEVEL_SECTIONS, MIN_SECTION_Y, false, FACTORY, teardownMidDispatch, epoch);
 
         assertEquals(List.of(new Dispatched(1, 1, 1)), dispatches,
                 "at most the already-polled column dispatches (the accepted ≤1 residual)");
@@ -621,14 +660,14 @@ class ClientColumnProcessorTest {
         processor.reportUndispatched(manager); // teardown bumps the session epoch
         processor.offer(new VoxelColumnS2CPayload(2, 2, dim, 1L, sectionWire(1, 1)), false); // straggler
 
-        processor.drainColumnQueue(dim, LEVEL_SECTIONS, MIN_SECTION_Y, FACTORY, recordingDispatcher, staleEpoch);
+        processor.drainColumnQueue(dim, LEVEL_SECTIONS, MIN_SECTION_Y, false, FACTORY, recordingDispatcher, staleEpoch);
 
         assertEquals(List.of(), dispatches,
                 "a drain scheduled before teardown must not dispatch into the new session");
         assertEquals(1, processor.getQueuedCount(),
                 "the straggler is left for shutdown, not consumed by the stale drain");
 
-        processor.drainColumnQueue(dim, LEVEL_SECTIONS, MIN_SECTION_Y, FACTORY, recordingDispatcher,
+        processor.drainColumnQueue(dim, LEVEL_SECTIONS, MIN_SECTION_Y, false, FACTORY, recordingDispatcher,
                 processor.sessionEpochForTest());
         assertEquals(List.of(new Dispatched(2, 2, 1)), dispatches,
                 "only the epoch gates the drain — a current-epoch drain still serves");
@@ -656,7 +695,7 @@ class ClientColumnProcessorTest {
                 64, true), true, true);
         try {
             proc.offer(new VoxelColumnS2CPayload(11, 11, dim, 6000L, truncatedColumnWire()), false);
-            proc.drainColumnQueue(dim, LEVEL_SECTIONS, MIN_SECTION_Y, FACTORY, (d, cx, cz, data) -> {},
+            proc.drainColumnQueue(dim, LEVEL_SECTIONS, MIN_SECTION_Y, false, FACTORY, (d, cx, cz, data) -> {},
                     proc.sessionEpochForTest());
             assertEquals(-1L, manager.getColumnTimestamp(11, 11),
                     "premise: the decode failure unstamped the position");
