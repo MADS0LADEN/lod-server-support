@@ -140,13 +140,22 @@ public final class AntiXrayCompat {
     // ------------------------------------------------------------------
 
     /** What the engine says about ONE world. ABSENT: no mod. DISABLED: mod present, this
-     *  world off. ACTIVE: this world obfuscates {@code hiddenStates} below {@code maxBlockHeight}.
-     *  UNREADABLE: mod present but its internals did not resolve — callers fall back to the
-     *  LSS config keys (masking stays on rather than silently leaking). */
+     *  world off. ACTIVE: this world HIDES {@code hiddenStates} below {@code maxBlockHeight}
+     *  (engine mode 1 — the obfuscateGlobal map IS the hidden list there).
+     *  REPLACEMENT_NOISE: engine modes 2/3 — the controller's obfuscateGlobal is the
+     *  hidden ∪ replacement UNION (every toObfuscate state is marked true in the mod's
+     *  ctor, verified against 1.4.16 bytecode), and on real configs that includes bulk
+     *  terrain (stone/deepslate/dirt/sand). Adopting it would make the flatten-masker
+     *  rewrite essentially every section below the cutoff into its dominant NON-masked
+     *  state — sculk/water/bedrock section-flattening, the black-LOD report of
+     *  2026-07-27 — so callers mask the LSS config list at the ENGINE's height instead.
+     *  UNREADABLE: mod present but its internals did not resolve — callers fall back to
+     *  the LSS config keys (masking stays on rather than silently leaking). */
     public sealed interface EngineView {
         record Absent() implements EngineView {}
         record Disabled() implements EngineView {}
         record Active(List<BlockState> hiddenStates, int maxBlockHeight) implements EngineView {}
+        record ReplacementNoise(int maxBlockHeight) implements EngineView {}
         record Unreadable() implements EngineView {}
     }
 
@@ -170,6 +179,7 @@ public final class AntiXrayCompat {
         final MethodHandle getBlockController;
         final Class<?> disabledClass;
         final Class<?> antiXrayBase;
+        final Class<?> hideClass;
         final MethodHandle obfuscateGlobalGetter;
         final MethodHandle maxBlockHeightGetter;
 
@@ -182,6 +192,10 @@ public final class AntiXrayCompat {
                     "me.drex.antixray.common.util.controller.DisabledChunkPacketBlockController");
             this.antiXrayBase = resolver.resolve(
                     "me.drex.antixray.common.util.controller.ChunkPacketBlockControllerAntiXray");
+            // Engine-mode discrimination by controller subclass: only HIDE's obfuscateGlobal
+            // is a usable hidden list (modes 2/3 bake in the replacement-noise union).
+            this.hideClass = resolver.resolve(
+                    "me.drex.antixray.common.util.controller.HideChunkPacketBlockController");
             this.getBlockController = lookup.findStatic(util, "getBlockController",
                             MethodType.methodType(controllerInterface, Level.class))
                     .asType(MethodType.methodType(Object.class, Level.class));
@@ -248,8 +262,13 @@ public final class AntiXrayCompat {
                     // treat as unreadable (LSS-keys fallback), not as disabled.
                     throw new IllegalStateException("unknown controller " + controller.getClass().getName());
                 }
-                Object rawMap = handles.obfuscateGlobalGetter.invokeExact(controller);
                 int maxBlockHeight = (int) handles.maxBlockHeightGetter.invokeExact(controller);
+                if (!handles.hideClass.isInstance(controller)) {
+                    // Obfuscate / ObfuscateLayer (modes 2/3): obfuscateGlobal is the
+                    // hidden ∪ replacement union — see the EngineView doc.
+                    return new EngineView.ReplacementNoise(maxBlockHeight);
+                }
+                Object rawMap = handles.obfuscateGlobalGetter.invokeExact(controller);
                 var states = new ArrayList<BlockState>();
                 for (var entry : ((java.util.Map<?, ?>) rawMap).entrySet()) {
                     if (Boolean.TRUE.equals(entry.getValue()) && entry.getKey() instanceof BlockState state) {

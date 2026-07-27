@@ -77,6 +77,24 @@ class XrayMaskManagerTest {
     }
 
     @Test
+    void autoWithObfuscateModeEngineMasksTheLssListAtTheEngineHeight() {
+        // Engine modes 2/3 (ReplacementNoise): the engine's list is the hidden ∪
+        // replacement union (bulk terrain) — adopting it flattened whole sections to
+        // their dominant non-masked state (sculk/water black-LOD, 2026-07-27). The rung
+        // must mask the LSS config list, but at the ENGINE's cutoff, under its own label.
+        var manager = new XrayMaskManager(config("auto"));
+        var entry = manager.entryFor("minecraft:overworld",
+                () -> new EngineView.ReplacementNoise(256));
+        assertNotNull(entry, "an active mode-2/3 engine must still mask");
+        assertEquals("antixray-mod+lss-list", entry.sourceLabel());
+        assertEquals(256, entry.mask().maxBlockHeight(), "the ENGINE height, not the LSS default");
+        assertTrue(entry.mask().contains(Blocks.DIAMOND_ORE.defaultBlockState()),
+                "the LSS ore list is the mask");
+        assertFalse(entry.mask().contains(Blocks.STONE.defaultBlockState()),
+                "bulk terrain must never enter the mask via mode-2/3 adoption");
+    }
+
+    @Test
     void autoWithUnreadableEngineFallsBackToConfigKeys() {
         var manager = new XrayMaskManager(config("auto"));
         var entry = manager.entryFor("minecraft:overworld", () -> UNREADABLE);

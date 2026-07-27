@@ -112,9 +112,10 @@ class AntiXrayCompatTest {
         net.minecraft.server.Bootstrap.bootStrap();
     }
 
-    /** Concrete stub controller carrying staged obfuscation inputs. */
+    /** Concrete HIDE-mode stub controller (mode 1) carrying staged obfuscation inputs —
+     *  extends the Hide class because the probe adopts obfuscateGlobal ONLY from it. */
     private static final class StubActiveController
-            extends me.drex.antixray.common.util.controller.ChunkPacketBlockControllerAntiXray {
+            extends me.drex.antixray.common.util.controller.HideChunkPacketBlockController {
         StubActiveController(java.util.Map<net.minecraft.world.level.block.state.BlockState, Boolean> entries,
                              int maxBlockHeight) {
             super(toFastutil(entries), maxBlockHeight);
@@ -125,6 +126,16 @@ class AntiXrayCompatTest {
             var map = new it.unimi.dsi.fastutil.objects.Object2BooleanOpenHashMap<net.minecraft.world.level.block.state.BlockState>();
             entries.forEach(map::put);
             return map;
+        }
+    }
+
+    /** Concrete OBFUSCATE-mode stub (modes 2/3): an antiXrayBase subclass that is NOT the
+     *  Hide controller — its obfuscateGlobal is the hidden ∪ replacement union and must
+     *  never be adopted as a mask. */
+    private static final class StubObfuscateController
+            extends me.drex.antixray.common.util.controller.ChunkPacketBlockControllerAntiXray {
+        StubObfuscateController(int maxBlockHeight) {
+            super(new it.unimi.dsi.fastutil.objects.Object2BooleanOpenHashMap<>(), maxBlockHeight);
         }
     }
 
@@ -173,6 +184,25 @@ class AntiXrayCompatTest {
         // The null rung above must NOT have latched: this Active read proves the probe
         // stayed live. Reset the staged stub so later tests inherit no hidden state.
         me.drex.antixray.common.util.Util.stagedController = null;
+    }
+
+    @Test
+    void engineProbeObfuscateModeControllerIsReplacementNoiseNotActive() {
+        // Modes 2/3 (Obfuscate/ObfuscateLayer controllers): obfuscateGlobal is the
+        // hidden ∪ replacement UNION — on real configs that includes stone/deepslate/
+        // dirt/sand, and adopting it flattened whole sections to their dominant
+        // non-masked state (the sculk/water black-LOD report, 2026-07-27). The probe
+        // must surface the mode WITHOUT the unusable list, keeping the engine height.
+        var probe = AntiXrayCompat.buildEngineProbe(true, Class::forName);
+        me.drex.antixray.common.util.Util.stagedController = new StubObfuscateController(256);
+        try {
+            var view = probe.probe(null);
+            var noise = assertInstanceOf(AntiXrayCompat.EngineView.ReplacementNoise.class, view);
+            assertEquals(256, noise.maxBlockHeight(),
+                    "the engine's cutoff height is still adopted in modes 2/3");
+        } finally {
+            me.drex.antixray.common.util.Util.stagedController = null;
+        }
     }
 
     @Test
