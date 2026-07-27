@@ -58,7 +58,7 @@ Each Minecraft version has its own build; only the latest is listed. Older-MC bu
 | Minecraft | LSS Version | Fabric | Paper | Folia | Voxy | Java |
 |---|---|---|---|---|---|---|
 | **26.2** | v0.8.0 | ✅ | ✅ | — | 0.2.17-alpha+ | 25+ |
-| **26.1.x** | v0.8.0+mc26.1 | ✅ | ✅ | ✅ | 0.2.16-beta+ | 25+ |
+| **26.1.x** | v0.8.0+mc26.1 | ✅ | ✅ | ✅ | 0.2.14-alpha+ | 25+ |
 | **1.21.11** | v0.8.0+mc1.21.11 | ✅ | ✅ | ✅ | 0.2.15-beta+ | 21+ |
 | **1.21.8** | v0.6.1+mc1.21.8 | ✅ | ✅ | ✅ | 0.2.5-alpha+ | 21+ |
 
