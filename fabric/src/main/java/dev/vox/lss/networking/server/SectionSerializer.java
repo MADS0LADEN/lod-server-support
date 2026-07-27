@@ -60,6 +60,7 @@ public final class SectionSerializer {
 
         // Second pass: serialize using cached results
         var maskEntry = XrayMaskManager.entryForActive(level);
+        var maskFactory = maskEntry != null ? NbtSectionSerializer.factoryFor(level.registryAccess()) : null;
         var buf = new FriendlyByteBuf(Unpooled.buffer(sections.length * 1024));
         try {
             buf.writeVarInt(includedSections.size());
@@ -71,7 +72,7 @@ public final class SectionSerializer {
                     // Masking INSIDE the choke point: probe, generation, and the
                     // DirtyContentFilter hash all see identical masked bytes by construction.
                     var masked = XrayMaskFilter.mask(section, info.sectionY,
-                            maskEntry.mask(), maskEntry.kind());
+                            maskEntry.mask(), maskEntry.kind(), maskFactory);
                     if (masked != section) {
                         section = masked;
                         var manager = XrayMaskManager.current();

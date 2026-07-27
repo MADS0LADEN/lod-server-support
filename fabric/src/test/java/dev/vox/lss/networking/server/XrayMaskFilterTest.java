@@ -20,6 +20,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -123,7 +124,7 @@ class XrayMaskFilterTest {
         fillAll(section, Blocks.STONE.defaultBlockState());
         int ores = sprinkle(section, Blocks.DIAMOND_ORE.defaultBlockState(), 37, 0);
 
-        var masked = XrayMaskFilter.mask(section, 0, defaultMask(), FallbackKind.OVERWORLD);
+        var masked = XrayMaskFilter.mask(section, 0, defaultMask(), FallbackKind.OVERWORLD, FACTORY);
 
         assertNotSame(section, masked, "an ore-bearing section must be copied");
         assertEquals(0, countCells(masked, s -> s.is(Blocks.DIAMOND_ORE)), "every ore masked");
@@ -139,7 +140,7 @@ class XrayMaskFilterTest {
         section.setBlockState(1, 1, 1, Blocks.REDSTONE_ORE.defaultBlockState().setValue(BlockStateProperties.LIT, true));
         section.setBlockState(2, 2, 2, Blocks.REDSTONE_ORE.defaultBlockState());
 
-        var masked = XrayMaskFilter.mask(section, 0, mask(2048, "redstone_ore"), FallbackKind.OVERWORLD);
+        var masked = XrayMaskFilter.mask(section, 0, mask(2048, "redstone_ore"), FallbackKind.OVERWORLD, FACTORY);
 
         assertEquals(0, countCells(masked, s -> s.is(Blocks.REDSTONE_ORE)),
                 "hiding a block must hide ALL its states (lit and unlit)");
@@ -150,7 +151,7 @@ class XrayMaskFilterTest {
     void oreFreeSectionReturnsTheSameInstance() {
         var section = newSection();
         fillAll(section, Blocks.STONE.defaultBlockState());
-        assertSame(section, XrayMaskFilter.mask(section, 0, defaultMask(), FallbackKind.OVERWORLD),
+        assertSame(section, XrayMaskFilter.mask(section, 0, defaultMask(), FallbackKind.OVERWORLD, FACTORY),
                 "the palette fast path must not copy ore-free sections");
     }
 
@@ -162,7 +163,7 @@ class XrayMaskFilterTest {
 
         // Cutoff 64: sectionY 4 starts AT world 64 — entirely public in vanilla packets.
         assertSame(section, XrayMaskFilter.mask(section,
-                4, mask(64, "gold_ore"), FallbackKind.OVERWORLD));
+                4, mask(64, "gold_ore"), FallbackKind.OVERWORLD, FACTORY));
         // Gated means untouched: same instance back, ores intact (no rebuild happened).
         assertTrue(countCells(section, s -> s.is(Blocks.GOLD_ORE)) > 0);
     }
@@ -174,7 +175,7 @@ class XrayMaskFilterTest {
         for (int y = 0; y < 16; y++) section.setBlockState(3, y, 3, Blocks.IRON_ORE.defaultBlockState());
 
         // sectionY 4 spans world 64..79; cutoff 72 masks local y 0..7 only.
-        var masked = XrayMaskFilter.mask(section, 4, mask(72, "iron_ore"), FallbackKind.OVERWORLD);
+        var masked = XrayMaskFilter.mask(section, 4, mask(72, "iron_ore"), FallbackKind.OVERWORLD, FACTORY);
 
         for (int y = 0; y < 8; y++) {
             assertTrue(masked.getBlockState(3, y, 3).is(Blocks.STONE),
@@ -197,7 +198,7 @@ class XrayMaskFilterTest {
             var section = newSection();
             fillAll(section, Blocks.DIAMOND_ORE.defaultBlockState());
             var masked = XrayMaskFilter.mask(section, c.sectionY(),
-                    mask(2048, "diamond_ore"), c.kind());
+                    mask(2048, "diamond_ore"), c.kind(), FACTORY);
             assertEquals(4096, countCells(masked, s -> s.is(c.expected())),
                     c.kind() + "/sectionY=" + c.sectionY() + " must fall back to " + c.expected());
         }
@@ -217,7 +218,7 @@ class XrayMaskFilterTest {
         var expected = Block.BLOCK_STATE_REGISTRY.getId(granite) < Block.BLOCK_STATE_REGISTRY.getId(diorite)
                 ? granite : diorite;
 
-        var masked = XrayMaskFilter.mask(section, 0, mask(2048, "diamond_ore"), FallbackKind.OVERWORLD);
+        var masked = XrayMaskFilter.mask(section, 0, mask(2048, "diamond_ore"), FallbackKind.OVERWORLD, FACTORY);
 
         // Live and NBT-parsed palettes order entries differently for the same content, so a
         // palette-order-dependent winner would break live-vs-disk byte parity.
@@ -236,8 +237,8 @@ class XrayMaskFilterTest {
         }
         var m = defaultMask();
 
-        var maskedA = XrayMaskFilter.mask(a, 0, m, FallbackKind.OVERWORLD);
-        var maskedB = XrayMaskFilter.mask(b, 0, m, FallbackKind.OVERWORLD);
+        var maskedA = XrayMaskFilter.mask(a, 0, m, FallbackKind.OVERWORLD, FACTORY);
+        var maskedB = XrayMaskFilter.mask(b, 0, m, FallbackKind.OVERWORLD, FACTORY);
 
         for (int y = 0; y < 16; y++)
             for (int z = 0; z < 16; z++)
@@ -263,8 +264,8 @@ class XrayMaskFilterTest {
         }
         var m = defaultMask();
 
-        var maskedA = XrayMaskFilter.mask(a, 0, m, FallbackKind.OVERWORLD);
-        var maskedB = XrayMaskFilter.mask(b, 0, m, FallbackKind.OVERWORLD);
+        var maskedA = XrayMaskFilter.mask(a, 0, m, FallbackKind.OVERWORLD, FACTORY);
+        var maskedB = XrayMaskFilter.mask(b, 0, m, FallbackKind.OVERWORLD, FACTORY);
 
         assertArrayEquals(sectionBytes(maskedA), sectionBytes(maskedB),
                 "live-copy and in-place masking must serialize byte-identically — "
@@ -285,10 +286,40 @@ class XrayMaskFilterTest {
         sprinkle(section, Blocks.IRON_ORE.defaultBlockState(), 17, 2);
         var m = defaultMask();
 
-        var masked = XrayMaskFilter.mask(section, 0, m, FallbackKind.OVERWORLD);
+        var masked = XrayMaskFilter.mask(section, 0, m, FallbackKind.OVERWORLD, FACTORY);
 
         assertFalse(masked.getStates().maybeHas(m::contains),
                 "the masked palette must not name any hidden state");
+    }
+
+
+    @Test
+    void maskedPaletteDropsTheRecreateSeedResidue() {
+        // The recreate() trap (final review 2026-07-27): recreate() seeds the fresh
+        // container with the SOURCE palette's entry 0 — for any disk-order palette that is
+        // the block at local (0,0,0) — and the seed survives in the palette even with zero
+        // referencing cells. A section whose corner block is itself hidden therefore still
+        // shipped that one ore id. The replacement-seeded rebuild must not: this source
+        // container is seeded on the ore (palette entry 0 == DIAMOND_ORE), exactly the
+        // disk shape that leaked.
+        var oreSeeded = new PalettedContainer<>(Blocks.DIAMOND_ORE.defaultBlockState(),
+                FACTORY.blockStatesStrategy());
+        for (int y = 0; y < 16; y++) {
+            for (int z = 0; z < 16; z++) {
+                for (int x = 0; x < 16; x++) {
+                    if (x + y + z > 0) oreSeeded.set(x, y, z, Blocks.STONE.defaultBlockState());
+                }
+            }
+        }
+        var section = new LevelChunkSection(oreSeeded, FACTORY.createForBiomes());
+        var m = defaultMask();
+        var masked = XrayMaskFilter.mask(section, 0, m, FallbackKind.OVERWORLD, FACTORY);
+
+        assertNotSame(section, masked, "the corner ore must trigger masking");
+        assertFalse(masked.getStates().maybeHas(m::contains),
+                "the ex-palette-entry-0 ore must not survive as an unreferenced palette seed");
+        assertEquals(Blocks.STONE.defaultBlockState(), masked.getStates().get(0, 0, 0),
+                "the corner cell masks to the section's dominant state");
     }
 
     private static byte[] sectionBytes(LevelChunkSection s) {
@@ -310,7 +341,7 @@ class XrayMaskFilterTest {
         fillAll(section, Blocks.DEEPSLATE.defaultBlockState());
         for (int y = 0; y < 16; y++) section.setBlockState(6, y, 6, Blocks.DEEPSLATE_GOLD_ORE.defaultBlockState());
 
-        var masked = XrayMaskFilter.mask(section, -4, mask(-60, "deepslate_gold_ore"), FallbackKind.OVERWORLD);
+        var masked = XrayMaskFilter.mask(section, -4, mask(-60, "deepslate_gold_ore"), FallbackKind.OVERWORLD, FACTORY);
         for (int y = 0; y < 4; y++) {
             assertTrue(masked.getBlockState(6, y, 6).is(Blocks.DEEPSLATE),
                     "below the negative cutoff (world " + (-64 + y) + ") must be masked");
@@ -322,7 +353,7 @@ class XrayMaskFilterTest {
 
         // Cutoff at the section's own bottom: fully gated, same instance.
         assertSame(section, XrayMaskFilter.mask(section, -4,
-                mask(-64, "deepslate_gold_ore"), FallbackKind.OVERWORLD));
+                mask(-64, "deepslate_gold_ore"), FallbackKind.OVERWORLD, FACTORY));
     }
 
     @Test
@@ -344,7 +375,7 @@ class XrayMaskFilterTest {
             for (int z = 0; z < 16; z++)
                 section.setBlockState(x, 15, z, Blocks.AIR.defaultBlockState());
 
-        var masked = XrayMaskFilter.mask(section, 0, defaultMask(), FallbackKind.OVERWORLD);
+        var masked = XrayMaskFilter.mask(section, 0, defaultMask(), FallbackKind.OVERWORLD, FACTORY);
 
         assertFalse(masked.hasOnlyAir());
         for (int y = 0; y < 16; y++)
@@ -368,7 +399,7 @@ class XrayMaskFilterTest {
         assertTrue(allUnknown.isEmpty());
         var section = newSection();
         fillAll(section, Blocks.DIAMOND_ORE.defaultBlockState());
-        assertSame(section, XrayMaskFilter.mask(section, 0, allUnknown, FallbackKind.OVERWORLD),
+        assertSame(section, XrayMaskFilter.mask(section, 0, allUnknown, FallbackKind.OVERWORLD, FACTORY),
                 "a mask that resolved nothing must no-op, not serve a false sense of cover");
     }
 
@@ -439,7 +470,7 @@ class XrayMaskFilterTest {
         fillAll(deep, Blocks.DEEPSLATE.defaultBlockState());
         sprinkle(deep, Blocks.DEEPSLATE_DIAMOND_ORE.defaultBlockState(), 41, 0);
         sprinkle(deep, Blocks.DEEPSLATE_IRON_ORE.defaultBlockState(), 29, 3);
-        deep = XrayMaskFilter.mask(deep, -4, m, FallbackKind.OVERWORLD);
+        deep = XrayMaskFilter.mask(deep, -4, m, FallbackKind.OVERWORLD, FACTORY);
         assertEquals(0, countCells(deep, s -> s.is(Blocks.DEEPSLATE_DIAMOND_ORE)));
 
         // Surface-band section (world 0..15): stone, ores incl. a lit redstone state, air roof.
@@ -450,14 +481,14 @@ class XrayMaskFilterTest {
         for (int x = 0; x < 16; x++)
             for (int z = 0; z < 16; z++)
                 mid.setBlockState(x, 15, z, Blocks.AIR.defaultBlockState());
-        mid = XrayMaskFilter.mask(mid, 0, m, FallbackKind.OVERWORLD);
+        mid = XrayMaskFilter.mask(mid, 0, m, FallbackKind.OVERWORLD, FACTORY);
         assertEquals(0, countCells(mid, s -> s.is(Blocks.IRON_ORE) || s.is(Blocks.REDSTONE_ORE)));
 
         // Above the cutoff (world 64..79): gold ore stays real — the height-gate pin.
         var high = newSection();
         fillAll(high, Blocks.STONE.defaultBlockState());
         int highOres = sprinkle(high, Blocks.GOLD_ORE.defaultBlockState(), 61, 2);
-        high = XrayMaskFilter.mask(high, 4, m, FallbackKind.OVERWORLD);
+        high = XrayMaskFilter.mask(high, 4, m, FallbackKind.OVERWORLD, FACTORY);
         assertEquals(highOres, countCells(high, s -> s.is(Blocks.GOLD_ORE)));
 
         var buf = new FriendlyByteBuf(Unpooled.buffer());

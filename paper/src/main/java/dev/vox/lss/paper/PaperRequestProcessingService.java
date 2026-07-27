@@ -330,14 +330,29 @@ public class PaperRequestProcessingService {
     private void drainLifecycleMailbox() {
         LifecycleEvent ev;
         while ((ev = this.lifecycleMailbox.poll()) != null) {
-            switch (ev) {
-                case LifecycleEvent.Register r -> {
-                    registerPlayer(r.player(), r.capabilities());
-                    // State exists from this line on — the deferred SessionConfig reply may
-                    // now invite the client's first declaration.
-                    r.replyAfterRegister().run();
+            // Contained per event: one throwing register/remove must not abort the rest of
+            // the drain (a register after it would silently never apply) — and a register
+            // that DID publish state before throwing must still run its deferred reply, or
+            // the client sits SessionConfig-less until the v16 discovery timer degrades the
+            // session (final review 2026-07-27).
+            try {
+                switch (ev) {
+                    case LifecycleEvent.Register r -> {
+                        try {
+                            registerPlayer(r.player(), r.capabilities());
+                        } finally {
+                            if (this.players.containsKey(r.player().getUUID())) {
+                                // State exists from this line on — the deferred SessionConfig
+                                // reply may now invite the client's first declaration.
+                                r.replyAfterRegister().run();
+                            }
+                        }
+                    }
+                    case LifecycleEvent.Remove r -> removePlayer(r.uuid());
                 }
-                case LifecycleEvent.Remove r -> removePlayer(r.uuid());
+            } catch (Exception e) {
+                LSSLogger.error("Lifecycle event failed to apply (" + ev.getClass().getSimpleName()
+                        + ") — continuing the drain", e);
             }
         }
     }

@@ -63,6 +63,7 @@ final class PaperSectionSerializer {
 
         // Second pass: serialize using cached results
         var maskEntry = PaperXrayMaskManager.entryForActive(level);
+        var maskFactory = maskEntry != null ? PaperNbtSectionSerializer.factoryFor(level.registryAccess()) : null;
         var buf = new FriendlyByteBuf(Unpooled.buffer(sections.length * 1024));
         try {
             buf.writeVarInt(includedSections.size());
@@ -74,7 +75,7 @@ final class PaperSectionSerializer {
                     // Masking INSIDE the choke point: probe, generation, and every consumer
                     // see identical masked bytes by construction.
                     var masked = PaperXrayMaskFilter.mask(section, info.sectionY,
-                            maskEntry.mask(), maskEntry.kind());
+                            maskEntry.mask(), maskEntry.kind(), maskFactory);
                     if (masked != section) {
                         section = masked;
                         var manager = PaperXrayMaskManager.current();
