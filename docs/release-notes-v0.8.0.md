@@ -7,4 +7,3 @@
 
 - **Three Minecraft versions at once** — v0.8.0 also ships as `v0.8.0+mc26.1` (MC 26.1.x, experimental Folia support) and `v0.8.0+mc1.21.11` (experimental Folia support). Install the build matching your Minecraft version.
 - **No protocol change** — v0.7.x clients and servers keep working with v0.8.0 unchanged, and the compatibility layer for v0.4.x–v0.6.x clients is untouched.
-- **"Voxy Server Side" listing retired** — From v0.8.0, updates ship only as LOD Server Support. It is the same mod; switching is drop-in and keeps your config.
