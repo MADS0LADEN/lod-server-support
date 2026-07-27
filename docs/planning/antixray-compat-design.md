@@ -328,3 +328,20 @@ playerless server reads `active=off` even with `"on"` configured — the first s
   max-block-height, Paper via typed config, Fabric via controller-field reflection with
   the LSS-keys fallback ladder. Engine-mode itself is never adopted (see Detection).
 - Recall/re-serve of stale unmasked columns on enable: OUT (documented limitation).
+
+
+## Addendum (2026-07-27, v0.8.0): engine modes 2/3 are not adoptable
+
+Live black-LOD report on a mode-3 server closed the loop on §3's adoption design: the
+controller's `obfuscateGlobal` marks EVERY toObfuscate state true (mod ctor bytecode,
+1.4.16), and in modes 2/3 toObfuscate = hiddenBlocks ∪ replacementBlocks — on real configs
+that is stone/deepslate/dirt/sand/gravel up to maxBlockHeight. LSS's dominant-state
+flattening masker then rewrote nearly every section below the cutoff to its dominant
+NON-masked survivor (sculk in the deepslate band → black LOD faces; water on ocean floors;
+grass on the surface band). Since v0.8.0 the probe discriminates the controller subclass:
+Hide (mode 1) adopts as before; Obfuscate/ObfuscateLayer yield `EngineView.ReplacementNoise`
+and the manager masks the LSS `xrayHiddenBlocks` list at the ENGINE's height (label
+`antixray-mod+lss-list`). Mirroring modes 2/3 faithfully would require per-cell
+deterministic noise replacement (the engine's preset mechanism), not flattening — a
+possible future feature, deliberately out of scope for v0.8.0. Wire innocence during the
+diagnosis is pinned by `MaskedWireRoundTripTest`.

@@ -121,7 +121,8 @@ public final class XrayMaskManager {
     private MaskEntry evaluate(String dimension, EngineView view) {
         if (this.mode == XrayMaskPolicy.Mode.OFF) return null;
         boolean engineActiveForWorld = view instanceof EngineView.Active
-                || view instanceof EngineView.Unreadable;
+                || view instanceof EngineView.Unreadable
+                || view instanceof EngineView.ReplacementNoise;
         boolean engineValuesUsable = view instanceof EngineView.Active;
         var decision = XrayMaskPolicy.decide(this.mode, engineActiveForWorld, engineValuesUsable);
         if (!decision.active()) return null;
@@ -137,6 +138,18 @@ public final class XrayMaskManager {
             // config list is ambiguous when empty, so the design gives it the fail-safe.
             mask = XrayMaskFilter.MaskSet.fromStates(engine.hiddenStates(), engine.maxBlockHeight());
             source = "antixray-mod";
+        } else if (view instanceof EngineView.ReplacementNoise noise) {
+            // Engine modes 2/3: the engine's list is the hidden ∪ replacement union (bulk
+            // terrain) — flattening it destroyed LOD terrain (sculk/water section-flattening,
+            // 2026-07-27). The LOD threat model is the ore-location oracle, so mask the LSS
+            // config list, but at the ENGINE's cutoff so coverage height still mirrors the
+            // server's anti-xray intent.
+            mask = XrayMaskFilter.MaskSet.resolve(
+                    this.config.xrayHiddenBlocks, noise.maxBlockHeight());
+            source = "antixray-mod+lss-list";
+            LSSLogger.info("AntiXray engine mode 2/3 detected for " + dimension
+                    + " — its obfuscation list includes replacement terrain, so LOD masking "
+                    + "uses the LSS xrayHiddenBlocks list at the engine's height instead");
         } else {
             mask = fallbackMask();
             source = "config";
