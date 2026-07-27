@@ -25,10 +25,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public class ChunkDiskReader extends AbstractChunkDiskReader {
 
-    // IOWorker$Priority is package-private and cannot be named here (and Fabric's intermediary
-    // remapping rules out resolving it reflectively), so the ordinal is pinned. Verified against
-    // the 26.2 jar: FOREGROUND(0), BACKGROUND(1), SHUTDOWN(2) — scheduleWithResult takes the
-    // priority as an int, which is how vanilla passes it too.
+    // IOWorker$Priority is package-private and cannot be named here, so the ordinal is
+    // pinned. Verified against the 26.2 jar: FOREGROUND(0), BACKGROUND(1), SHUTDOWN(2) — scheduleWithResult takes the
+    // priority as an int, which is how vanilla passes it too. The SerializerParityGameTests
+    // byte-parity test exercises this path end-to-end but does NOT pin the enum order (any
+    // in-range ordinal returns identical bytes); a vanilla reorder must be re-verified by hand.
     //
     // Where this lands us on the shared per-dimension executor: vanilla's chunk loads
     // (loadAsync -> submitTask) run FOREGROUND, and vanilla's chunk saves (storePendingChunk) run

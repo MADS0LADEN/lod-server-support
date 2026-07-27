@@ -152,8 +152,14 @@ class VoxyCompat {
         var lookup = MethodHandles.lookup();
         Class<?> voxyConfigClass = classResolver.resolve("me.cortex.voxy.client.config.VoxyConfig");
         var configField = voxyConfigClass.getField("CONFIG");
-        getSectionRenderDist = lookup.findGetter(voxyConfigClass, "sectionRenderDistance", float.class)
-                .asType(MethodType.methodType(float.class, Object.class));
+        // Type-agnostic on purpose (review 2026-07-27): shipped Voxy 0.2.16 declares this
+        // field as float, but the in-development Voxy source declares it int — an
+        // exact-typed findGetter would throw on the next Voxy release and silently kill
+        // slider adoption (the catch below returns empty). unreflectGetter + asType widens
+        // int/float/double alike.
+        var sectionRenderDistField = voxyConfigClass.getField("sectionRenderDistance");
+        getSectionRenderDist = lookup.unreflectGetter(sectionRenderDistField)
+                .asType(MethodType.methodType(double.class, Object.class));
         // Assign getVoxyConfig last — it's the guard checked by callers
         getVoxyConfig = lookup.unreflectGetter(configField)
                 .asType(MethodType.methodType(Object.class));
@@ -163,8 +169,8 @@ class VoxyCompat {
         try {
             initConfigHandles();
             Object config = (Object) getVoxyConfig.invokeExact();
-            float sectionDist = (float) getSectionRenderDist.invokeExact(config);
-            return OptionalInt.of(Math.round(sectionDist * 32));
+            double sectionDist = (double) getSectionRenderDist.invokeExact(config);
+            return OptionalInt.of((int) Math.round(sectionDist * 32));
         } catch (Throwable e) {
             return OptionalInt.empty();
         }
