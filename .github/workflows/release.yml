@@ -2,11 +2,12 @@ name: Release
 
 on:
   push:
-    # The +mc* exclusion keeps this MAIN-line workflow off support-line tags (v0.8.0+mc26.1
-    # etc.): a support tag mistakenly pushed onto a main commit would otherwise publish 26.2
-    # jars under a support-line name, with the +mc suffix corrupting -Pmod_version below.
-    # (The support branches' release.yml carry the mirror-image scoped triggers.)
-    tags: ['v*', '!v*+mc*']
+    # Deliberately the broad v* glob: GitHub's filter-pattern language treats '+' as a
+    # quantifier, so any pattern containing '*+' (e.g. '!v*+mc*') is INVALID and turns
+    # every push into a phantom failed run — worse, a real tag push would trigger NOTHING.
+    # The wrong-line protection lives in the guard step below instead, where '+' is
+    # literal shell text. (The support branches' release.yml scope the same way.)
+    tags: ['v*']
 
 jobs:
   release:
@@ -14,6 +15,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      # A support-line tag (v0.8.0+mc26.1 etc.) mistakenly pushed onto a main commit must
+      # not publish: it would ship 26.2 jars under a support-line name, and the +mc suffix
+      # would corrupt -Pmod_version below. This cannot live in the on.push.tags filter —
+      # see the comment there.
+      - name: Refuse support-line tags
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            *+mc*) echo "::error::${GITHUB_REF_NAME} is a support-line tag — the mainline release.yml must not publish it"; exit 1 ;;
+          esac
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0

@@ -30,7 +30,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ReleaseWorkflowContractTest {
 
     // ---- the line's expected values (the support branches carry their own flavors) ----
-    private static final String TRIGGER_LINE = "tags: ['v*', '!v*+mc*']";
+    // NOTE: GitHub's filter-pattern language treats '+' as a quantifier, so a pattern
+    // containing '*+' is INVALID — it phantom-fails every push and a real tag triggers
+    // NOTHING. The literal-'+' scoping must stay in shell (the guard step), never the glob.
+    private static final String TRIGGER_LINE = "tags: ['v*']";
+    private static final String GUARD_CASE_LINE = "*+mc*)";
     private static final String PREV_TAG_PIPELINE =
             "git tag -l 'v*' --sort=-v:refname | grep -v \"^${TAG}$\" | grep -v '+mc' | head -1 || true";
     private static final String LSS_MODRINTH_ID = "lKiXKLvv";
@@ -75,12 +79,26 @@ class ReleaseWorkflowContractTest {
     }
 
     @Test
-    void triggerExcludesSupportLineTags() {
-        // A support-line tag (v0.8.0+mc26.1 etc.) mistakenly pushed onto a main commit must
-        // not run this workflow: it would publish 26.2 jars under a support-line name, and
-        // ${GITHUB_REF_NAME#v} would feed the +mc suffix into -Pmod_version.
+    void triggerIsTheBroadGlobWithNoQuantifierConstruct() {
         assertTrue(releaseYml.contains(TRIGGER_LINE),
-                "release.yml must trigger on v* while excluding v*+mc* (" + TRIGGER_LINE + ")");
+                "release.yml must trigger on the plain v* glob (" + TRIGGER_LINE + ")");
+        assertFalse(Pattern.compile("tags:.*\\*\\+").matcher(releaseYml).find(),
+                "no tag filter may contain '*+' — GitHub treats '+' as a quantifier, the "
+                        + "pattern is invalid, and a real tag push would trigger NOTHING");
+    }
+
+    @Test
+    void guardStepRefusesSupportLineTags() {
+        // A support-line tag (v0.8.0+mc26.1 etc.) mistakenly pushed onto a main commit must
+        // not publish: it would ship 26.2 jars under a support-line name, and
+        // ${GITHUB_REF_NAME#v} would feed the +mc suffix into -Pmod_version. This lives in
+        // a shell guard because the on.push.tags filter cannot express a literal '+'.
+        String guard = stepBlock("- name: Refuse support-line tags");
+        assertTrue(guard.contains(GUARD_CASE_LINE) && guard.contains("exit 1"),
+                "the guard step must fail the run on any *+mc* tag");
+        assertTrue(releaseYml.indexOf("- name: Refuse support-line tags")
+                        < releaseYml.indexOf("- uses: actions/checkout"),
+                "the guard must be the FIRST step — before checkout, builds, or any publish");
     }
 
     @Test
