@@ -365,6 +365,45 @@ class SpiralScannerTest {
     }
 
     @Test
+    void retryMarkUnderVanillaExclusionDoesNotResetConfirmedRing() {
+        var columns = new ColumnStateMap();
+        int[] c = new int[2];
+        for (int r = 3; r <= 4; r++) {
+            for (int i = 0; i < 8 * r; i++) {
+                SpiralScanner.ringIndexToCoord(r, i, CX, CZ, c);
+                long packed = PositionUtil.packPosition(c[0], c[1]);
+                columns.onReceived(packed, 1000L);
+                columns.onUpToDate(packed);
+            }
+        }
+        var s = scanner(4);
+        var queue = new Sink();
+        assertEquals(0, fireScan(s, 2, columns, queue));
+        assertEquals(5, s.getConfirmedRing(), "precondition: disc confirmed past lodDistance");
+
+        // The mark's position sits INSIDE the vanilla-view exclusion (vd 2): the walk skips
+        // excluded positions without declaring them, so no terminal answer can ever consume
+        // this mark — resetting the ring for it re-walked the full distance EVERY scan for
+        // as long as the player lingered (a render-thread hitch per scan at big distances).
+        long excluded = PositionUtil.packPosition(CX + 1, CZ);
+        columns.onReceived(excluded, 1000L);
+        columns.onIngestFailed(excluded);
+        assertTrue(columns.hasRetries(), "the mark exists (parked) — it just isn't actionable");
+
+        assertEquals(0, fireScan(s, 2, columns, queue), "nothing declarable");
+        assertEquals(5, s.getConfirmedRing(),
+                "an unconsumable (vanilla-excluded) retry mark must not reset the confirmed ring");
+
+        // Heal path: the exclusion is anchored on the player, so once the player moves off,
+        // the same mark becomes actionable — and movement recenters the walk from ring 0,
+        // which reaches it. Pinned at the predicate level (fireScan fixes the center).
+        assertTrue(columns.hasActionableRetries(CX + 10, CZ, 2),
+                "the parked mark becomes actionable from a position whose exclusion misses it");
+        assertFalse(columns.hasActionableRetries(CX, CZ, 2),
+                "still parked from the original center");
+    }
+
+    @Test
     void queuePressureShrinksBudgetLinearlyWithFloorOne() {
         // base budget = WANT_SET_BUDGET (800); rings 3..16 hold 1064 candidates, above it
         var s = scanner(16);

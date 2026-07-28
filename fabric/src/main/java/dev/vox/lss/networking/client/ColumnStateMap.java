@@ -447,6 +447,28 @@ class ColumnStateMap {
 
     boolean isEmptyMap() { return this.timestamps.isEmpty(); }
     boolean hasRetries() { return !this.retry.isEmpty(); }
+
+    /**
+     * True when some retry mark lies OUTSIDE the vanilla-view exclusion — a mark the
+     * scanner's walk can actually reach, declare, and (via a terminal answer) consume.
+     * Marks INSIDE the exclusion are parked: excluded positions are never declared, so
+     * nothing consumes their marks, and letting them reset the confirmed ring forced a
+     * full-distance re-walk every scan (see the call site in {@link SpiralScanner#scan}).
+     * Movement recenters the walk from ring 0, so a parked mark heals as soon as the
+     * exclusion moves off its position. O(|retry|); the retry set is small.
+     */
+    boolean hasActionableRetries(int playerCx, int playerCz, int exclusionRadius) {
+        if (this.retry.isEmpty()) return false;
+        var iter = this.retry.iterator();
+        while (iter.hasNext()) {
+            long packed = iter.nextLong();
+            if (!SpiralScanner.isVanillaRendered(PositionUtil.unpackX(packed),
+                    PositionUtil.unpackZ(packed), playerCx, playerCz, exclusionRadius)) {
+                return true;
+            }
+        }
+        return false;
+    }
     int receivedCount() { return this.receivedCount; }
     int emptyCount() { return this.emptyCount; }
     int dirtyCount() { return this.dirty.size(); }

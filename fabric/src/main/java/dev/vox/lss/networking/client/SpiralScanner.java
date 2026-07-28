@@ -103,7 +103,17 @@ class SpiralScanner {
         int localScanRing = -1;
         int queued = 0;
 
-        if (columns.hasRetries()) {
+        // Only an ACTIONABLE retry mark (outside the vanilla-view exclusion) resets the
+        // confirmed ring. A mark whose position slipped INSIDE the exclusion after it was
+        // set is unconsumable — an excluded position is never declared, so no terminal
+        // answer ever consumes it — and letting it reset the ring forced a full-distance
+        // re-walk EVERY scan for as long as the player lingered (negligible at the default
+        // distance, a render-thread hitch per scan at the 2048 ceiling). The parked mark
+        // stays; movement recenters the walk from ring 0 anyway, so once the exclusion
+        // moves off the position the mark is reachable again. (A mark beyond a SHRUNK
+        // lodDistance is a separate, deliberately-unhandled flavor — it still resets the
+        // ring every scan, bounded by the smaller walk it forces.)
+        if (columns.hasActionableRetries(playerCx, playerCz, exclusionRadius)) {
             this.confirmedRing = 0;
         }
 
@@ -131,9 +141,7 @@ class SpiralScanner {
                 // skip, an excluded (in-view) chunk does NOT break ring confirmation. Loop-safe:
                 // DirtyContentFilter suppresses metadata-only (inhabitedTime) re-saves of a served
                 // corner, so re-serving one cannot revive the old re-request loop.
-                int adx = Math.max(0, Math.abs(cx - playerCx) - 1);
-                int adz = Math.max(0, Math.abs(cz - playerCz) - 1);
-                if ((long) adx * adx + (long) adz * adz < (long) exclusionRadius * exclusionRadius) continue;
+                if (isVanillaRendered(cx, cz, playerCx, playerCz, exclusionRadius)) continue;
 
                 // No in-flight suppression: re-declaration is load-bearing. The server may
                 // silently supersede any not-yet-admitted ask; only the 1 Hz re-declare heals
@@ -165,6 +173,17 @@ class SpiralScanner {
         this.lastQueued = queued;
 
         return count;
+    }
+
+    /**
+     * Vanilla's own view-distance test (ChunkTrackingView.isInViewDistance): a 1-chunk-
+     * buffered Euclidean radius. Shared by the ring walk's exclusion skip and
+     * {@link ColumnStateMap#hasActionableRetries} so the two tests cannot drift.
+     */
+    static boolean isVanillaRendered(int cx, int cz, int playerCx, int playerCz, int exclusionRadius) {
+        int adx = Math.max(0, Math.abs(cx - playerCx) - 1);
+        int adz = Math.max(0, Math.abs(cz - playerCz) - 1);
+        return (long) adx * adx + (long) adz * adz < (long) exclusionRadius * exclusionRadius;
     }
 
     /**
