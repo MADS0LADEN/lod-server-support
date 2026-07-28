@@ -390,6 +390,10 @@ public class GenerationLifecycleGameTests {
             helper.assertTrue(gen.getTotalCompleted() == 0 && gen.getTotalRemovedInFlight() == 0,
                     "a timeout must book neither a completion nor an in-flight removal");
             helper.assertTrue(gen.getActiveCount() == 0, "the timed-out entry must leave the active set");
+            // Timeout releases are DEFERRED (staggered ≤4/tick, the mass-removal C2ME freeze
+            // guard — see DeferredTicketReleases); one pending release drains at the top of
+            // the next tick. The pin's spirit is unchanged: the ticket must not leak.
+            gen.tick();
             helper.assertTrue(lssTicketCount(tickets, cx, cz) == 0,
                     "timeout must release the generation ticket (or the never-loading chunk's "
                             + "ticket leaks forever)");
