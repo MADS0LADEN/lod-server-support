@@ -14,9 +14,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -110,11 +109,20 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     // life, leaking one thread + classloader on every /reload. Bounding it to the processor
     // and stopping it in shutdown() ties its lifetime to the server run. The factory captures
     // no instance state, so initializing it in the field initializer is this-escape-safe.
-    private final ExecutorService saveExecutor = Executors.newSingleThreadExecutor(r -> {
+    // A bare ThreadPoolExecutor (identical semantics to Executors.newSingleThreadExecutor
+    // minus the delegation wrapper) so the coalescing wiring pin can observe the real queue.
+    private final ThreadPoolExecutor saveExecutor = new ThreadPoolExecutor(1, 1,
+            0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(), r -> {
         Thread t = new Thread(r, Brand.shortName() + "-TimestampSave");
         t.setDaemon(true);
         return t;
     });
+
+    // Latest-wins save coalescing (issue #62): due saves publish their snapshot to a
+    // single slot instead of enqueueing one closure each — the executor queue stays
+    // bounded no matter how slow a save is. Null iff dataDir is null (both call sites
+    // sit behind the same dataDir guard).
+    private final TimestampSaveScheduler saveScheduler;
 
     // this-escape is benign: the Thread is created here but only started later via start()
     // (post-construction), and the router's back-reference is only used from the processing
@@ -131,6 +139,8 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
         // normalize(): both platforms derive this from getWorldPath(LevelResource.ROOT), which
         // ends in "/." and otherwise prints as "./world/./data/..." in every cache log line (#32)
         this.dataDir = dataDir == null ? null : dataDir.normalize();
+        this.saveScheduler = this.dataDir == null ? null
+                : new TimestampSaveScheduler(this.saveExecutor, this.dataDir);
         this.timestampCache = new ColumnTimestampCache(
                 ColumnTimestampCache.mbToEntries(perDimensionTimestampCacheSizeMB),
                 java.util.concurrent.TimeUnit.SECONDS.toNanos(
@@ -435,16 +445,10 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
         if (this.dataDir != null && (periodicDue || invalidationDue)) {
             this.saveCounter = 0;
             this.invalidationDirty = false; // a save flushes any pending invalidation too
-            var cacheSnapshot = this.timestampCache.snapshotForSave();
-            try {
-                this.saveExecutor.execute(() -> cacheSnapshot.save(this.dataDir));
-            } catch (RejectedExecutionException e) {
-                // Shutdown already called saveExecutor.shutdown() while this processing thread
-                // was still finishing a cycle (it outlived the join timeout). The final save is
-                // handled there; swallow rather than let this surface as a spurious ERROR from
-                // the processingLoop catch — the state is already being persisted on the way out.
-                LSSLogger.debug("Skipped periodic timestamp cache save — save executor is shutting down");
-            }
+            // Latest-wins slot, never a per-save closure on the executor queue: a save
+            // slower than the due cadence must coalesce, not backlog (issue #62 retained
+            // ~42 queued snapshots / 1.76 GB). Shutdown rejection is handled inside.
+            this.saveScheduler.schedule(this.timestampCache.snapshotForSave());
         }
     }
 
@@ -775,6 +779,16 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
         return this.timestampCache;
     }
 
+    /** The real save executor — the coalescing wiring pin blocks its worker and reads its queue. */
+    ThreadPoolExecutor saveExecutorForTest() {
+        return this.saveExecutor;
+    }
+
+    /** The coalescing slot (null iff dataDir is null) — wiring-pin observability. */
+    TimestampSaveScheduler saveSchedulerForTest() {
+        return this.saveScheduler;
+    }
+
     /** Server-owned generation: a disk miss IS the generation trigger — no client
      *  classification is consulted. Gen available: take a GENERATION slot and queue a
      *  ticket; a full slot is TRANSIENT (silent drop, counted superseded — the next
@@ -1047,6 +1061,11 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
         if (this.processingThread.isAlive()) {
             LSSLogger.warn("Skipping final timestamp cache save — processing thread still running");
         } else if (this.dataDir != null) {
+            // This snapshot supersedes anything still in the coalescing slot; discarding
+            // lets a queued-but-not-started drain no-op instead of spending part of the
+            // SHUTDOWN_JOIN_MS window writing a stale full file first. (A drain already
+            // RUNNING finishes before the submit below — same FIFO executor.)
+            this.saveScheduler.discardPending();
             var snapshot = this.timestampCache.snapshotForSave();
             try {
                 this.saveExecutor.submit(() -> snapshot.save(this.dataDir))

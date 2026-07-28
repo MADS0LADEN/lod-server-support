@@ -148,6 +148,27 @@ class ColumnTimestampCacheTest {
     }
 
     @Test
+    void saveAndLoadRoundTripLargeCrossesBufferBoundaries(@TempDir Path tempDir) {
+        // 12k entries × 16 B/record ≈ 192 KB: the 64 KB stream buffer holds exactly 4096
+        // records, so this forces multiple flushes on save and multiple refills on load —
+        // a smaller "few thousand" corpus can fit in ONE buffer and never cross a boundary.
+        var big = new ColumnTimestampCache(DEFAULT_MAX, 0);
+        for (long i = 0; i < 6000; i++) {
+            big.put(LSSConstants.DIM_STR_OVERWORLD, i, i + 1_000_000L, now);
+            big.put(LSSConstants.DIM_STR_THE_NETHER, i, i + 2_000_000L, now);
+        }
+        big.save(tempDir);
+
+        var loaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
+        loaded.load(tempDir);
+        assertEquals(12000, loaded.size());
+        for (long i : new long[]{0, 1, 4095, 4096, 4097, 5999}) { // straddle the 4096-record buffer edge
+            assertEquals(i + 1_000_000L, loaded.get(LSSConstants.DIM_STR_OVERWORLD, i));
+            assertEquals(i + 2_000_000L, loaded.get(LSSConstants.DIM_STR_THE_NETHER, i));
+        }
+    }
+
+    @Test
     void loadFromNonexistentDirDoesNothing(@TempDir Path tempDir) {
         var loaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
         loaded.load(tempDir.resolve("nonexistent"));
