@@ -437,6 +437,9 @@ class ClientColumnProcessorTest {
     }
 
     @Test
+    // NOT the drain-order guard (it calls the helpers directly in the fixed order and
+    // stays green under a drain regression) — resyncDeliveryKeepsImplicitSkyAboveTheServedBand
+    // is the real pin; this documents the unit-level composition semantics.
     void skyThenAirFillUnitCompositionMatchesTheDrainOrder() {
         var present = new VoxelColumnData.SectionData[]{
                 new VoxelColumnData.SectionData(-2, new LevelChunkSection(FACTORY), null, null)};

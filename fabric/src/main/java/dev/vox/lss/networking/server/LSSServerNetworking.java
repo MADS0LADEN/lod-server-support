@@ -61,6 +61,11 @@ public class LSSServerNetworking {
     }
 
     private static synchronized void startServiceForLanOnServerThread(MinecraftServer server) {
+        // A hop task queued in the last tick before Save-and-Quit runs AFTER the
+        // SERVER_STOPPING handler nulled requestService (stopServer drains pending tasks
+        // after the Fabric event fires) — starting here would leave a zombie service bound
+        // to a dead server for the rest of the client JVM.
+        if (!server.isRunning()) return;
         if (requestService != null) return;
         LSSLogger.info(Brand.shortName() + " LOD request processing service starting (LAN server)");
         requestService = new RequestProcessingService(server);

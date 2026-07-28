@@ -197,6 +197,32 @@ already order-agnostic (any member can lead).
    (disconnect of a rotated leader cancels attached reads — self-heals, counted superseded)
    is documented; `SectionLightDefaultsTest`'s "statement-for-statement" comment updated.
 
+## Implementation-review round (2 Opus agents, post-implementation — all applied or accepted)
+
+M1/M2 lane: core claims verified clean at the bytecode level (all three RETURN sites
+filtered, one fire per publish path, fill-coverage union intact, no pin weakened). Fixed:
+the sky pass's missing lower clamp (live on resync for deeper-than-client worlds),
+`FULL_BRIGHT_SKY` handed out by reference (now clone()d per section — DataLayer stores and
+mutates arrays in place, and columns are shared across all consumers), the hop task's
+zombie-service window on Save-and-Quit (`!server.isRunning()` guard), the contract test's
+brittle regex + CWD assumption. Accepted as documented: `col_light` fires pre-fill (it
+reports the wire; a post-fill summary is future work), `isClearColumn`'s negative-varint
+divergence from the decode clamp (hostile-server cosmetic), and `LanHookContractTest` is
+MAIN-ONLY — it must not ride a keep-ours merge onto support/** (their mixins use the bare
+selector; same per-line-flavor rule as ReleaseWorkflowContractTest).
+
+M3/M4 lane: the sweep's memory hole (fastutil sets never shrink → trim()), all-players
+cadence, fail-safe default radius, honest-heal wiring pin, deterministic fairness gating —
+see the revised amendment 3 above. Accepted: no sweep counter (exporter-schema churn ×3
+lines), no direct production-radius pin (the fail-safe default bounds that mistake to
+extra memory).
+
+Environmental note for posterity: a warm-rejoin soak red during this round was
+diagnosed to concurrent Gradle builds rewriting `common-0.8.0.jar` under the running soak
+server (`ZipException: invalid LOC header` on lazy classloads → the processing thread
+errored every cycle). NEVER run builds or reviews concurrently with a soak; final
+validation reran on an idle box.
+
 ## Release integration
 
 - v0.8.1 notes gain the new bullets on every line (M1 phrased as "fixes dark faces

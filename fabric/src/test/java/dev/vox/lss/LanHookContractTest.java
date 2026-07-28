@@ -30,12 +30,20 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class LanHookContractTest {
 
-    private static final Path MIXIN_SOURCE = Path.of("src/main/java/dev/vox/lss/mixin/IntegratedServerLanHook.java");
-    private static final Pattern INJECT_METHOD = Pattern.compile("@Inject\\(method\\s*=\\s*\"([^\"]+)\"");
+    // Arg-order- and line-break-tolerant (DOTALL): a pure reformat must not red this test.
+    private static final Pattern INJECT_METHOD =
+            Pattern.compile("@Inject\\([^)]*?method\\s*=\\s*\"([^\"]+)\"", Pattern.DOTALL);
+
+    /** Survives both the Gradle CWD (module dir) and an IDE repo-root CWD. */
+    private static Path mixinSource() {
+        var moduleRelative = Path.of("src/main/java/dev/vox/lss/mixin/IntegratedServerLanHook.java");
+        if (Files.exists(moduleRelative)) return moduleRelative;
+        return Path.of("fabric").resolve(moduleRelative);
+    }
 
     @Test
     void injectDescriptorTargetsTheTwoArgOverloadTheLanGuiCalls() throws Exception {
-        String source = Files.readString(MIXIN_SOURCE);
+        String source = Files.readString(mixinSource());
         var matcher = INJECT_METHOD.matcher(source);
         assertTrue(matcher.find(), "the mixin declares exactly one @Inject with a method descriptor");
         String descriptor = matcher.group(1);

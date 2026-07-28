@@ -303,8 +303,10 @@ class ClientColumnProcessor {
      * until written — with null light layers (dark), consistent with the absent-means-all-zero
      * light default.
      */
-    /** One shared full-bright nibble array — consumers receive light layers READ-ONLY
-     *  (they already share the decoded per-column objects across all consumers). */
+    /** Full-bright nibble template. Every DataLayer built from it takes a clone():
+     *  DataLayer stores the array by reference and DataLayer.set() writes in place, and
+     *  the same VoxelColumnData goes to EVERY registered consumer — one consumer mutating
+     *  a shared array would corrupt the sky of every later fill section process-wide. */
     private static final byte[] FULL_BRIGHT_SKY = fullBrightNibbles();
 
     private static byte[] fullBrightNibbles() {
@@ -333,9 +335,12 @@ class ClientColumnProcessor {
         var out = new java.util.ArrayList<VoxelColumnData.SectionData>(
                 present.length + (levelTop - top));
         out.addAll(java.util.Arrays.asList(present));
-        for (int y = top + 1; y <= levelTop; y++) {
+        // Lower clamp: a server world deeper than the client level delivers sections below
+        // minSectionY (a supported case — see decodeTruncatesSectionsBeyondLevelHeight);
+        // fill must stay inside the client level like the air-fill does.
+        for (int y = Math.max(top + 1, minSectionY); y <= levelTop; y++) {
             out.add(new VoxelColumnData.SectionData(y, new LevelChunkSection(factory),
-                    null, new DataLayer(FULL_BRIGHT_SKY)));
+                    null, new DataLayer(FULL_BRIGHT_SKY.clone())));
         }
         return out.toArray(new VoxelColumnData.SectionData[0]);
     }
@@ -354,7 +359,7 @@ class ClientColumnProcessor {
                 // brightSky is set ONLY for the whole-column clear in a sky dimension —
                 // below/among-band fills on a non-empty resync must stay dark.
                 out.add(new VoxelColumnData.SectionData(y, new LevelChunkSection(factory), null,
-                        brightSky ? new DataLayer(FULL_BRIGHT_SKY) : null));
+                        brightSky ? new DataLayer(FULL_BRIGHT_SKY.clone()) : null));
             }
         }
         return out.toArray(new VoxelColumnData.SectionData[0]);
