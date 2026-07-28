@@ -129,11 +129,12 @@ class DirtyColumnBroadcaster {
 
                     long[] result = new long[count];
                     System.arraycopy(this.positionFilterBuffer, 0, result, 0, count);
-                    // clearDiskReadDone only ENQUEUES a mailbox event; correctness comes from
-                    // applyEvents (which applies it) running before routeIncomingRequests in
-                    // every processing cycle, so a re-request routed after this notification
-                    // (network + client-scan latency later) sees the cleared done-bit and
-                    // re-resolves — never a stale up_to_date.
+                    // clearDiskReadDone only ENQUEUES a mailbox event. The clear is enqueued
+                    // BEFORE the notice is sent, and the processor late-drains dirty-clears
+                    // right before routing (applyLateDirtyEvents), so a re-request CAUSED by
+                    // this notification can never route ahead of its clear — the residual
+                    // race is only an event landing inside the phase-4 window itself
+                    // (milliseconds), not the old full-cycle skew.
                     this.offThreadProcessor.clearDiskReadDone(uuid, result);
                     try {
                         this.playerView.send(state, new DirtyColumnsS2CPayload(result));

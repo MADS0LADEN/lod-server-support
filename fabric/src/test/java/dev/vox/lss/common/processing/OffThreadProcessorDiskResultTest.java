@@ -64,6 +64,13 @@ class OffThreadProcessorDiskResultTest {
         final ConcurrentLinkedQueue<EnqueuedColumn> enqueuedColumns = new ConcurrentLinkedQueue<>();
         volatile boolean rejectEnqueue; // blanket rejection (queue-full style)
         volatile boolean throwOnNextSubmit; // one-shot: fail a phase-4 disk submit to exercise requeue
+        // One-shot mid-cycle injection point: runs on the processing thread after phases 1-3,
+        // before the late dirty-event drain — the deterministic stand-in for an event/batch
+        // arriving while a cycle is in flight (the F1 stale-up_to_date race window).
+        final AtomicReference<Runnable> beforeRouteAction = new AtomicReference<>();
+        // Position-keyed payload-build failure (packed coords; MIN_VALUE = off) — exercises
+        // the per-outcome containment in processGenerationReady.
+        volatile long throwOnPayloadBuildForPacked = Long.MIN_VALUE;
         // Mirrors the REAL platform guard: only payloads over the send limit bounce, so the
         // 1-byte clearing column would be accepted — pins that no clear is fabricated for a
         // rejected real column (the blanket flag above can't: it rejects the clear too).
@@ -90,9 +97,18 @@ class OffThreadProcessorDiskResultTest {
         }
 
         @Override
+        protected void beforeRouteHook() {
+            var action = beforeRouteAction.getAndSet(null);
+            if (action != null) action.run();
+        }
+
+        @Override
         protected boolean buildAndEnqueueColumnPayload(TestState state, int cx, int cz, String dimension,
                                                      long columnTimestamp, long submissionOrder,
                                                      byte[] sectionBytes, int estimatedBytes, byte source) {
+            if (throwOnPayloadBuildForPacked == PositionUtil.packPosition(cx, cz)) {
+                throw new RuntimeException("injected payload-build failure for " + cx + "," + cz);
+            }
             if (rejectEnqueue) return false;
             if (rejectOversizedOnly && sectionBytes.length > LSSConstants.MAX_SEND_SECTIONS_SIZE) return false;
             enqueuedColumns.add(new EnqueuedColumn(state.getPlayerUUID(), cx, cz, dimension,
@@ -455,6 +471,154 @@ class OffThreadProcessorDiskResultTest {
         } finally {
             rig.proc.shutdown();
         }
+    }
+
+    @Test
+    void dirtyClearEnqueuedMidCycleAppliesBeforeRouting() throws Exception {
+        // The F1 race: the router takes each player's batch at ROUTE time (fresher than the
+        // cycle-start event take), so a dirty-clear enqueued mid-cycle used to sit in the
+        // pending buffer while a just-arrived ts>0 re-ask was answered up_to_date off the
+        // stale done-bit — which the client's answer-time dirty-mark consumption turns into
+        // a sealed pre-edit column. The late drain (applyLateDirtyEvents) must apply the
+        // clear before routing so the re-ask re-resolves honestly.
+        var rig = new Rig(false);
+        try {
+            rig.state.markDiskReadDone(3, 3);
+            long packed = PositionUtil.packPosition(3, 3);
+            rig.proc.beforeRouteAction.set(() -> {
+                rig.proc.clearDiskReadDone(rig.uuid, new long[]{packed});
+                rig.state.enqueue(new IncomingRequest(3, 3, COLUMN_TS));
+            });
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+
+            waitFor(() -> rig.proc.diskSubmits.stream().anyMatch(s -> s.cx() == 3 && s.cz() == 3),
+                    "the mid-cycle clear must apply before routing so the re-ask re-resolves");
+            assertFalse(drainSendActions(rig.proc).stream()
+                            .anyMatch(r -> r.type() == LSSConstants.RESPONSE_UP_TO_DATE && r.packed() == packed),
+                    "no stale up_to_date off the pre-clear done-bit");
+            assertFalse(rig.state.hasDiskReadDone(3, 3), "the done-bit stays cleared");
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
+    @Test
+    void invalidationEnqueuedMidCycleAppliesBeforeRouting() throws Exception {
+        // Timestamp flavor of the F1 race: an invalidation enqueued mid-cycle must reach the
+        // cache before routing, or a ts>0 re-ask is answered up_to_date off the pre-edit stamp.
+        var rig = new Rig(false);
+        try {
+            long packed = PositionUtil.packPosition(4, 4);
+            // Serve all-air to stamp the timestamp cache (and the done-bit)...
+            rig.state.enqueue(new IncomingRequest(4, 4, -1L));
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+            waitFor(() -> rig.proc.diskSubmits.size() == 1, "disk submit");
+            rig.inject(allAirResult(rig.uuid, 4, 4, DIM, COLUMN_TS, 1L));
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+            drainUntil(rig.proc, received(rig.uuid, LSSConstants.RESPONSE_UP_TO_DATE, packed));
+            // ...then clear the done-bit through a normal cycle so only the stamp remains.
+            rig.proc.clearDiskReadDone(rig.uuid, new long[]{packed});
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+            waitFor(() -> !rig.state.hasDiskReadDone(4, 4), "done-bit cleared");
+
+            rig.proc.beforeRouteAction.set(() -> {
+                rig.proc.invalidateTimestamps(DIM, new long[]{packed});
+                rig.state.enqueue(new IncomingRequest(4, 4, COLUMN_TS));
+            });
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+
+            waitFor(() -> rig.proc.diskSubmits.size() == 2,
+                    "the mid-cycle invalidation must apply before routing so the re-ask re-reads");
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
+    @Test
+    void midListOutcomeFailureDoesNotReplayConsumedOutcomes() throws Exception {
+        // Per-outcome containment (F5): a throw while processing outcome #2 of 3 must not
+        // fail the cycle — requeueLosslessEvents would replay the already-consumed #1
+        // (non-idempotent: a replayed stale-tainted outcome re-stamps pre-edit terrain).
+        // The failed outcome becomes a standard transient drop; its done-bit (set before
+        // the payload build threw) must be cleared or a ts>0 re-ask draws a false
+        // up_to_date with nothing in the pipeline. Same-ring positions: the generation
+        // cohort-span pacing admits ring-5 tickets while a ring-5 ticket is outstanding.
+        var rig = new Rig(true);
+        try {
+            var t1 = escalateToGenTicket(rig, 5, 5);
+            var t2 = escalateToGenTicket(rig, 5, 0);
+            var t3 = escalateToGenTicket(rig, 0, 5);
+            rig.proc.throwOnPayloadBuildForPacked = PositionUtil.packPosition(5, 0);
+            byte[] bytes = {1, 2};
+            var outcomes = new ArrayList<>(List.of(
+                    outcome(rig.uuid, 5, 5, bytes, t1.submissionOrder()),
+                    outcome(rig.uuid, 5, 0, bytes, t2.submissionOrder()),
+                    outcome(rig.uuid, 0, 5, bytes, t3.submissionOrder())));
+            long supersededBefore = rig.proc.getDiagnostics().getTotalSuperseded();
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), outcomes);
+
+            waitFor(() -> rig.proc.enqueuedColumns.stream().anyMatch(c -> c.cx() == 0 && c.cz() == 5),
+                    "outcome #3 processed despite #2 throwing");
+            assertEquals(1, rig.proc.enqueuedColumns.stream().filter(c -> c.cx() == 5 && c.cz() == 5).count(),
+                    "outcome #1 delivered exactly once");
+            assertEquals(0, rig.proc.enqueuedColumns.stream().filter(c -> c.cx() == 5 && c.cz() == 0).count(),
+                    "the failed outcome is dropped, not delivered");
+            assertFalse(rig.state.hasDiskReadDone(5, 0),
+                    "the failed outcome's done-bit is cleared — a ts>0 re-ask must re-resolve, "
+                            + "not draw up_to_date off an orphaned bit");
+            assertEquals(supersededBefore + 1, rig.proc.getDiagnostics().getTotalSuperseded(),
+                    "the contained failure books as a standard transient drop");
+
+            // Recovery cycle: nothing may be re-delivered (the phase completed, so
+            // requeueLosslessEvents has nothing generation-shaped to re-add).
+            rig.proc.throwOnPayloadBuildForPacked = Long.MIN_VALUE;
+            rig.state.enqueue(new IncomingRequest(8, 8, -1L));
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+            waitFor(() -> rig.proc.diskSubmits.stream().anyMatch(s -> s.cx() == 8),
+                    "recovery cycle routed");
+            assertEquals(1, rig.proc.enqueuedColumns.stream().filter(c -> c.cx() == 5 && c.cz() == 5).count(),
+                    "no replay of consumed outcome #1");
+            assertEquals(0, rig.proc.enqueuedColumns.stream().filter(c -> c.cx() == 5 && c.cz() == 0).count(),
+                    "no replay of the failed outcome either");
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
+    @Test
+    void flushPendingInvalidationsOnExitAppliesQueuedInvalidations() throws Exception {
+        // F4: when the processing thread exits via an interrupted wait/backoff-sleep instead
+        // of the shutdown sentinel, queued invalidations must still hit the cache — the
+        // final save otherwise persists pre-edit stamps that answer false up_to_date across
+        // a restart. Pins the exit-path helper both catch sites call.
+        var rig = new Rig(false);
+        try {
+            long packed = PositionUtil.packPosition(2, 2);
+            rig.state.enqueue(new IncomingRequest(2, 2, -1L));
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+            waitFor(() -> rig.proc.diskSubmits.size() == 1, "disk submit");
+            rig.inject(allAirResult(rig.uuid, 2, 2, DIM, COLUMN_TS, 1L));
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+            drainUntil(rig.proc, received(rig.uuid, LSSConstants.RESPONSE_UP_TO_DATE, packed));
+            waitFor(() -> rig.proc.getHarnessInternals().tscacheSizePerDimension()
+                    .getOrDefault(DIM, 0) == 1, "cache stamped by the all-air serve");
+
+            rig.proc.invalidateTimestamps(DIM, new long[]{packed}); // queued, no cycle posted
+            assertEquals(1, rig.proc.getHarnessInternals().tscacheSizePerDimension().getOrDefault(DIM, 0),
+                    "still pending — no cycle has applied it");
+            rig.proc.flushPendingInvalidationsOnExit();
+            assertEquals(0, rig.proc.getHarnessInternals().tscacheSizePerDimension().getOrDefault(DIM, 0),
+                    "the exit-path flush applies queued invalidations directly");
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
+    private static TickSnapshot.GenerationReadyData outcome(UUID uuid, int cx, int cz,
+                                                            byte[] bytes, long order) {
+        var data = new LoadedColumnData(cx, cz, bytes,
+                bytes.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES);
+        return new TickSnapshot.GenerationReadyData(uuid, cx, cz, DIM, data, COLUMN_TS, order);
     }
 
     @Test
