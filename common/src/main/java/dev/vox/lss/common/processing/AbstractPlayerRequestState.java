@@ -666,6 +666,38 @@ public abstract class AbstractPlayerRequestState<T> {
         this.diskReadDone.remove(packed);
     }
 
+    /**
+     * Sweep {@code diskReadDone} entries beyond {@code radiusChunks} (Chebyshev) of the
+     * player's current chunk (M3, 2026-07-28 review round): without a sweep the served-set
+     * grows monotonically for the whole session — tens of MB per long roaming player,
+     * released only at disconnect. Sweeping out-of-range bits is semantically free: ingress
+     * range-filters every declaration strictly INSIDE this radius, so a swept bit can next
+     * be consulted only after the player returns — where a ts&gt;0 re-declaration still
+     * short-circuits on the timestamp cache, and a ts&le;0 one re-resolves honestly (the
+     * designed self-heal; worst case one extra read, or a redundant re-serve if the
+     * timestamp cache also evicted the stamp). Entries with a payload still in the send
+     * pipeline or inside the departure grace are KEPT — sweeping those would drop the
+     * duplicate-serve silent skip and double-serve after a teleport with a backed-up
+     * queue. Processing thread only; no-op until the platform stamps the player chunk.
+     */
+    public int sweepDiskReadDoneOutsideRange(int radiusChunks) {
+        long playerPacked = this.playerChunkPacked;
+        if (playerPacked == NO_PLAYER_CHUNK || this.diskReadDone.isEmpty()) return 0;
+        int pcx = PositionUtil.unpackX(playerPacked);
+        int pcz = PositionUtil.unpackZ(playerPacked);
+        int removed = 0;
+        var it = this.diskReadDone.iterator();
+        while (it.hasNext()) {
+            long packed = it.nextLong();
+            if (PositionUtil.chebyshevDistance(PositionUtil.unpackX(packed),
+                    PositionUtil.unpackZ(packed), pcx, pcz) <= radiusChunks) continue;
+            if (hasEnqueuedColumn(packed) || isWithinDepartureGrace(packed)) continue;
+            it.remove();
+            removed++;
+        }
+        return removed;
+    }
+
     /** True while a column payload for this position sits in the send pipeline (any thread). */
     public boolean hasEnqueuedColumn(long packed) {
         return this.enqueuedColumns.containsKey(packed);

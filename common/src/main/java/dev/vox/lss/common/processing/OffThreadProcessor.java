@@ -124,6 +124,27 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     // sit behind the same dataDir guard).
     private final TimestampSaveScheduler saveScheduler;
 
+    /** Margin the served-set sweep radius adds over the ingress range filter, so a
+     *  position can never be swept while still declarable (M3). */
+    public static final int SWEEP_RADIUS_MARGIN_CHUNKS = 16;
+    /** Sweep radius for the old-signature constructor (test rigs): the max ingress radius
+     *  any config can produce (256 max lodDistanceChunks + 32 buffer) + the margin. */
+    private static final int DEFAULT_SWEEP_RADIUS_CHUNKS = 256 + 32 + SWEEP_RADIUS_MARGIN_CHUNKS;
+
+    // diskReadDone sweep (M3): radius captured at construction — safe while no config
+    // reload path exists (none today; a future reload must re-derive it).
+    private final int diskReadDoneSweepRadiusChunks;
+    private int sweepRotation;
+
+    /** Old-signature overload (test rigs) — production passes the config-derived radius. */
+    protected OffThreadProcessor(Map<UUID, PlayerState> players,
+                                  AbstractChunkDiskReader diskReader, boolean generationAvailable,
+                                  Path dataDir, int perDimensionTimestampCacheSizeMB,
+                                  int missMemoTtlSeconds) {
+        this(players, diskReader, generationAvailable, dataDir, perDimensionTimestampCacheSizeMB,
+                missMemoTtlSeconds, DEFAULT_SWEEP_RADIUS_CHUNKS);
+    }
+
     // this-escape is benign: the Thread is created here but only started later via start()
     // (post-construction), and the router's back-reference is only used from the processing
     // loop after start(), so no partially-initialized subclass state is touched before
@@ -132,7 +153,8 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     protected OffThreadProcessor(Map<UUID, PlayerState> players,
                                   AbstractChunkDiskReader diskReader, boolean generationAvailable,
                                   Path dataDir, int perDimensionTimestampCacheSizeMB,
-                                  int missMemoTtlSeconds) {
+                                  int missMemoTtlSeconds, int diskReadDoneSweepRadiusChunks) {
+        this.diskReadDoneSweepRadiusChunks = diskReadDoneSweepRadiusChunks;
         this.players = players;
         this.diskReader = diskReader;
         this.generationAvailable = generationAvailable;
@@ -438,6 +460,7 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
             if (evicted > 0 && LSSLogger.isDebugEnabled()) {
                 LSSLogger.debug("Evicted " + evicted + " oversized timestamp cache entries (" + this.timestampCache.size() + " remaining)");
             }
+            sweepOneRegisteredPlayerServedSet();
         }
 
         boolean periodicDue = ++this.saveCounter >= SAVE_INTERVAL_CYCLES;
@@ -777,6 +800,26 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
      *  rung (e.g. that a gen-disabled server writes no memo entries at all). */
     ColumnTimestampCache timestampCacheForTest() {
         return this.timestampCache;
+    }
+
+    /** Round-robin ONE player's served-set sweep per eviction cycle (M3): bounds the
+     *  per-cycle iteration on the processing thread; inter-sweep growth between a player's
+     *  turns is transient and small (~minutes × declaration rate). */
+    private void sweepOneRegisteredPlayerServedSet() {
+        if (this.players.isEmpty()) return;
+        var states = new ArrayList<>(this.players.values());
+        var state = states.get(Math.floorMod(this.sweepRotation++, states.size()));
+        int swept = state.sweepDiskReadDoneOutsideRange(this.diskReadDoneSweepRadiusChunks);
+        if (swept > 0 && LSSLogger.isDebugEnabled()) {
+            LSSLogger.debug("Swept " + swept + " out-of-range served-set entries for "
+                    + state.getPlayerName());
+        }
+    }
+
+    /** Sets the eviction counter to threshold−1 so the NEXT cycle runs the real periodic
+     *  maintenance block (eviction + served-set sweep) — the wiring pin's seam. */
+    void primeEvictionCounterForTest() {
+        this.evictionCounter = EVICTION_INTERVAL_CYCLES - 1;
     }
 
     /** The real save executor — the coalescing wiring pin blocks its worker and reads its queue. */
