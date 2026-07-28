@@ -13,7 +13,6 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.HttpUtil;
-import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Block;
@@ -324,21 +323,23 @@ public class LSSClientGameTests implements FabricClientGameTest {
                 throw new AssertionError("No LodRequestManager may exist before LAN publish");
             }
 
-            // Publish from the client thread, exactly like ShareToLanScreen does. MC 26.2 added a
-            // leading MultiplayerScope argument (LAN = share to LAN).
+            // Publish from the client thread via the 2-arg overload — exactly like the real
+            // LAN screen (MultiplayerOptionsScreen.changeMultiplayerScope) does on 26.2. The
+            // 4-arg overload is a delegating wrapper only /publish uses; the shipped
+            // v0.6.0–v0.8.0 hook targeted THAT wrapper and never fired for the GUI (M2 of
+            // the 2026-07-28 review round), which this call would have caught.
             boolean published = context.computeOnClient(client ->
                     client.getSingleplayerServer().publishServer(
-                            MinecraftServer.MultiplayerScope.LAN, GameType.SURVIVAL, false,
-                            HttpUtil.getAvailablePort()));
+                            MinecraftServer.MultiplayerScope.LAN, HttpUtil.getAvailablePort()));
             if (!published) {
                 throw new AssertionError("publishServer must succeed (LAN port bind failed?)");
             }
 
-            // IntegratedServerLanHook injects at publishServer RETURN, so the service start is
-            // synchronous with the publish call.
-            if (LSSServerNetworking.getRequestService() == null) {
-                throw new AssertionError("LAN publish must start the request processing service");
-            }
+            // The hook fires at publishServer RETURN but defers construction to the server
+            // thread (startServiceForLan's hop — the publish call runs on the render thread),
+            // so the service appears within a tick, not synchronously.
+            waitForOrFail(context, () -> LSSServerNetworking.getRequestService() != null, 100,
+                    "LAN publish must start the request processing service");
 
             // Host handshake: triggerHostHandshake -> C2S handshake -> SessionConfig -> manager.
             waitForOrFail(context, LSSClientNetworking::isServerEnabled, 400,

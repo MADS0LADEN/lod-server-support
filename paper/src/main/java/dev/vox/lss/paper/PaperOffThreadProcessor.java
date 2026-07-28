@@ -38,6 +38,17 @@ public class PaperOffThreadProcessor extends OffThreadProcessor<PaperPlayerReque
         this.diskReader = diskReader;
     }
 
+    public PaperOffThreadProcessor(Map<UUID, PaperPlayerRequestState> players,
+                                    PaperChunkDiskReader diskReader,
+                                    boolean generationAvailable,
+                                    Path dataDir, int perDimensionTimestampCacheSizeMB,
+                                    int missMemoTtlSeconds, int diskReadDoneSweepRadiusChunks) {
+        super(players,
+                diskReader, generationAvailable, dataDir, perDimensionTimestampCacheSizeMB,
+                missMemoTtlSeconds, diskReadDoneSweepRadiusChunks);
+        this.diskReader = diskReader;
+    }
+
     public void updateDimensionContext(String dimension, ServerLevel level) {
         this.dimensionLevelMap.put(dimension, level);
     }

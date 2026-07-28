@@ -41,6 +41,16 @@ public class FabricOffThreadProcessor extends OffThreadProcessor<PlayerRequestSt
         this.diskReader = diskReader;
     }
 
+    public FabricOffThreadProcessor(Map<UUID, PlayerRequestState> players,
+                                     ChunkDiskReader diskReader,
+                                     boolean generationAvailable,
+                                     Path dataDir, int perDimensionTimestampCacheSizeMB,
+                                     int missMemoTtlSeconds, int diskReadDoneSweepRadiusChunks) {
+        super(players, diskReader, generationAvailable, dataDir, perDimensionTimestampCacheSizeMB,
+                missMemoTtlSeconds, diskReadDoneSweepRadiusChunks);
+        this.diskReader = diskReader;
+    }
+
     /** Register a dimension context for disk read submission (called from main thread). */
     public void updateDimensionContext(String dimension, ServerLevel level) {
         // put, not putIfAbsent: refresh to the current ServerLevel so a recreated dimension

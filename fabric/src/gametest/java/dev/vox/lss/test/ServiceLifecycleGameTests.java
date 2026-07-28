@@ -928,6 +928,9 @@ public class ServiceLifecycleGameTests {
         var service = new RequestProcessingService(server);
         var state = service.registerPlayer(mock, LSSConstants.CAPABILITY_VOXEL_COLUMNS);
         // ONE declared want-set: 512 filler entries AHEAD of the loaded pair. Far synthetic
+        // NOTE (M3): these far seeds sit outside the served-set sweep radius; safe only
+        // because maxTicks < EVICTION_INTERVAL_CYCLES (1200) — a budget bump past 1200
+        // would let the sweep delete them mid-test.
         // coords: never loaded (probe miss), pre-seeded done-bit + ts>0 resolves them
         // up-to-date before slot admission.
         var packed = new long[514];
@@ -1004,6 +1007,8 @@ public class ServiceLifecycleGameTests {
             packed[i] = packedC;
             stamps[i] = 5L;
         }
+        // NOTE (M3): far seeds outside the sweep radius — see the sweep note above
+        // (safe while maxTicks < 1200).
         for (int i = 0; i < 510; i++) {
             state.markDiskReadDone(1_010_000 + i, 88);
             packed[5 + i] = PositionUtil.packPosition(1_010_000 + i, 88);

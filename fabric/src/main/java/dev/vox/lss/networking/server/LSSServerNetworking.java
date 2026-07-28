@@ -47,7 +47,25 @@ public class LSSServerNetworking {
         return scenario != null && !scenario.isBlank();
     }
 
-    public static synchronized void startServiceForLan(MinecraftServer server) {
+    public static void startServiceForLan(MinecraftServer server) {
+        // The LAN publish hook fires on the RENDER thread (the share/options screen calls
+        // publishServer directly), and construction is heavy: it starts the processing,
+        // save, and disk-reader threads and does a blocking ColumnTimestampCache.load().
+        // Hop to the server thread — the same context the dedicated-server start uses.
+        // Accepted ≤1-tick window between the LAN listener being up and the service being
+        // non-null: a joining client cannot complete login inside it, and the host's own
+        // handshake already hops through the client executor. From the server thread
+        // itself (the /publish command path) execute() runs inline, so nothing changes
+        // there.
+        server.execute(() -> startServiceForLanOnServerThread(server));
+    }
+
+    private static synchronized void startServiceForLanOnServerThread(MinecraftServer server) {
+        // A hop task queued in the last tick before Save-and-Quit runs AFTER the
+        // SERVER_STOPPING handler nulled requestService (stopServer drains pending tasks
+        // after the Fabric event fires) — starting here would leave a zombie service bound
+        // to a dead server for the rest of the client JVM.
+        if (!server.isRunning()) return;
         if (requestService != null) return;
         LSSLogger.info(Brand.shortName() + " LOD request processing service starting (LAN server)");
         requestService = new RequestProcessingService(server);
