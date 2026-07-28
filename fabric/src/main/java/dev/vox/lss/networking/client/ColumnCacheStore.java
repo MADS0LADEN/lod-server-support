@@ -2,7 +2,10 @@ package dev.vox.lss.networking.client;
 
 import dev.vox.lss.common.Brand;
 import dev.vox.lss.common.LSSLogger;
+import dev.vox.lss.common.PositionUtil;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
+import it.unimi.dsi.fastutil.longs.LongArrays;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
@@ -12,10 +15,12 @@ import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.HashMap;
 import java.util.regex.Pattern;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -23,11 +28,19 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class ColumnCacheStore {
     private static final Pattern SANITIZE_PATTERN = Pattern.compile("[^a-zA-Z0-9._-]");
     static final int FORMAT_VERSION = 4; // package-visible: corruption tests write real headers
     private static final int MAX_CACHE_ENTRIES = 2_000_000;
+    // Merge-save eviction threshold. Defaults to the load cap (the loader discards oversized
+    // files WHOLESALE, so a merged file must never exceed it); package-visible so tests can
+    // exercise eviction without writing 2M entries. The load-side validity guard stays on the
+    // constant — a crafted file must not get a bigger allowance from a test override.
+    static volatile int mergeEvictionCap = MAX_CACHE_ENTRIES;
+    // Test observability: save() attempts (the coalesced-removal pin counts rewrites).
+    static final AtomicInteger SAVE_WRITES_FOR_TEST = new AtomicInteger();
     /** save()/load() stream buffer — see the buffering note in save(). */
     private static final int IO_BUFFER_BYTES = 1 << 16;
     private static final Path CACHE_DIR = FabricLoader.getInstance().getConfigDir().resolve("lss").resolve("cache");
@@ -92,6 +105,7 @@ public class ColumnCacheStore {
 
     public static void save(String serverAddress, ResourceKey<Level> dimension, Long2LongOpenHashMap columns) {
         if (columns.isEmpty()) return;
+        SAVE_WRITES_FOR_TEST.incrementAndGet();
 
         var file = getCacheFile(serverAddress, dimension);
         var tmpFile = file.resolveSibling(file.getFileName() + ".tmp");
@@ -108,7 +122,13 @@ public class ColumnCacheStore {
                     out.writeLong(entry.getLongValue()); // raw timestamp
                 }
             }
-            Files.move(tmpFile, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            try {
+                Files.move(tmpFile, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                // Filesystems without atomic rename (some network mounts — same fallback as
+                // JsonConfig.save): a torn file on crash is tolerable, the loader discards it.
+                Files.move(tmpFile, file, StandardCopyOption.REPLACE_EXISTING);
+            }
             LSSLogger.info("Saved " + columns.size() + " cached column entries for " + dimensionKey(dimension));
         } catch (IOException e) {
             LSSLogger.warn("Failed to save column cache to " + file, e);
@@ -119,24 +139,131 @@ public class ColumnCacheStore {
     }
 
     /**
-     * Remove one position from a dimension's persisted cache on the IO thread. Used for a
+     * Merge-save on the IO thread: overlays the in-memory map onto the FILE's current
+     * contents instead of overwriting it. The movement prune bounds the in-memory map to a
+     * disc around the player, so a plain overwrite silently truncated the persisted cache
+     * to "near where you last stood" — every previously-visited region re-declared ts=-1 on
+     * revisit, re-downloading in full AND treating deliveries as first serves (no air-fill),
+     * which re-opened the ghost-terrain hole the delivery-honesty work closed. Order:
+     * existing file (a corrupt/oversized/old-version file degrades to empty — merge becomes
+     * a plain overwrite, never a failed save) → delete {@code removals} (the session's
+     * deliberate unstamps; applied to the file BEFORE the overlay so a re-received position
+     * survives) → overlay memory (memory wins) → evict farthest-first past the cap (the
+     * loader discards oversized files wholesale). Both inputs are snapshotted on the caller
+     * thread. Safe against the coalesced removal drain ONLY because both run on the single
+     * FIFO IO thread — parallelizing this executor would corrupt the load-modify-write.
+     */
+    public static void mergeSaveAsync(String serverAddress, ResourceKey<Level> dimension,
+                                      Long2LongOpenHashMap columns, LongOpenHashSet removals,
+                                      int centerCx, int centerCz) {
+        if (columns.isEmpty() && (removals == null || removals.isEmpty())) return;
+        // Defensive copies so the caller can mutate the originals freely
+        var mapCopy = new Long2LongOpenHashMap(columns);
+        mapCopy.defaultReturnValue(-1L);
+        var removalsCopy = removals == null ? new LongOpenHashSet() : new LongOpenHashSet(removals);
+        IO_EXECUTOR.execute(() -> mergeSave(serverAddress, dimension, mapCopy, removalsCopy,
+                centerCx, centerCz));
+    }
+
+    /** IO-thread body of {@link #mergeSaveAsync}; package-visible so tests can run it inline. */
+    static void mergeSave(String serverAddress, ResourceKey<Level> dimension,
+                          Long2LongOpenHashMap columns, LongOpenHashSet removals,
+                          int centerCx, int centerCz) {
+        var merged = load(serverAddress, dimension);
+        var removalIter = removals.iterator();
+        while (removalIter.hasNext()) {
+            merged.remove(removalIter.nextLong());
+        }
+        merged.putAll(columns);
+        if (merged.size() > mergeEvictionCap) {
+            merged = evictFarthest(merged, centerCx, centerCz, mergeEvictionCap);
+        }
+        if (merged.isEmpty()) {
+            // save() skips empty maps; a removals-only merge that emptied the file must
+            // actually delete it, or the dishonest stamps survive.
+            deleteCacheFile(serverAddress, dimension);
+        } else {
+            save(serverAddress, dimension, merged);
+        }
+    }
+
+    /**
+     * Keep the {@code cap} entries nearest (Chebyshev) to the save-time player position —
+     * the in-memory disc is within prune radius of it, so the hot working set always
+     * survives; what falls off is the farthest history, which a revisit re-downloads
+     * honestly. Primitive sort (no boxing); ~2M keys is a few hundred ms on the FIFO IO
+     * thread, and only when the cap is actually hit.
+     */
+    private static Long2LongOpenHashMap evictFarthest(Long2LongOpenHashMap merged,
+                                                      int centerCx, int centerCz, int cap) {
+        long[] keys = merged.keySet().toLongArray();
+        LongArrays.quickSort(keys, (a, b) -> Integer.compare(
+                PositionUtil.chebyshevDistance(PositionUtil.unpackX(a), PositionUtil.unpackZ(a), centerCx, centerCz),
+                PositionUtil.chebyshevDistance(PositionUtil.unpackX(b), PositionUtil.unpackZ(b), centerCx, centerCz)));
+        var kept = new Long2LongOpenHashMap(cap);
+        kept.defaultReturnValue(-1L);
+        for (int i = 0; i < cap; i++) {
+            kept.put(keys[i], merged.get(keys[i]));
+        }
+        return kept;
+    }
+
+    private static void deleteCacheFile(String serverAddress, ResourceKey<Level> dimension) {
+        try {
+            Files.deleteIfExists(getCacheFile(serverAddress, dimension));
+        } catch (IOException e) {
+            LSSLogger.warn("Failed to delete emptied column cache for " + dimensionKey(dimension), e);
+        }
+    }
+
+    // Coalesced cross-dimension removals: (sanitized server dir, sanitized dimension) → queued
+    // positions. Keyed on the SANITIZED strings so key equality matches file identity. Guarded
+    // by REMOVAL_LOCK; drained on the FIFO IO thread (one load-modify-write per burst).
+    private static final Object REMOVAL_LOCK = new Object();
+    private static final HashMap<String, LongOpenHashSet> PENDING_REMOVALS = new HashMap<>();
+
+    /**
+     * Remove positions from a dimension's persisted cache on the IO thread. Used for a
      * cross-dimension ingest-failure report: the failing column's stamp is already saved in the
      * OTHER dimension's cache (the report arrived after the player changed dimension, so its
      * in-memory state map is gone), and leaving it would answer a false up_to_date next time
      * that dimension is visited. Unconditional (like the same-dimension unstamp): a legitimate
      * re-serve since then just costs one harmless re-request on the next visit.
+     *
+     * <p>Coalesced: a burst of reports (a consumer whose storage hiccups across a portal
+     * transition can emit dozens in one tick) queues into one pending set per dimension and
+     * pays ONE whole-file load+rewrite when the drain runs — each call used to rewrite a
+     * potentially multi-MB file by itself, serialized ahead of the new dimension's cache
+     * load on the single IO thread (which gates scanning).
      */
     public static void removeAsync(String serverAddress, ResourceKey<Level> dimension, long packed) {
+        String key = sanitizeForFilePath(serverAddress) + "/" + dimensionKey(dimension);
+        synchronized (REMOVAL_LOCK) {
+            var pending = PENDING_REMOVALS.get(key);
+            if (pending != null) {
+                pending.add(packed); // an already-queued drain picks this up
+                return;
+            }
+            var fresh = new LongOpenHashSet();
+            fresh.add(packed);
+            PENDING_REMOVALS.put(key, fresh);
+        }
         IO_EXECUTOR.execute(() -> {
+            LongOpenHashSet batch;
+            synchronized (REMOVAL_LOCK) {
+                batch = PENDING_REMOVALS.remove(key);
+            }
+            if (batch == null || batch.isEmpty()) return;
             var map = load(serverAddress, dimension); // reuses the FIFO IO thread's file access
-            if (map.remove(packed) == map.defaultReturnValue()) return; // wasn't present
+            boolean changed = false;
+            var iter = batch.iterator();
+            while (iter.hasNext()) {
+                changed |= map.remove(iter.nextLong()) != map.defaultReturnValue();
+            }
+            if (!changed) return; // none were present
             if (map.isEmpty()) {
                 // save() skips empty maps, so delete the now-empty file directly.
-                try {
-                    Files.deleteIfExists(getCacheFile(serverAddress, dimension));
-                } catch (IOException e) {
-                    LSSLogger.warn("Failed to delete emptied column cache for " + dimensionKey(dimension), e);
-                }
+                deleteCacheFile(serverAddress, dimension);
             } else {
                 save(serverAddress, dimension, map);
             }
@@ -240,6 +367,12 @@ public class ColumnCacheStore {
     }
 
     static String sanitizeForFilePath(String name) {
-        return SANITIZE_PATTERN.matcher(name).replaceAll("_");
+        String sanitized = SANITIZE_PATTERN.matcher(name).replaceAll("_");
+        // The pattern allows dots, so a name that is ENTIRELY dots ("." / "..") survives as a
+        // path-walking segment — the embedded case is neutralized by the separator
+        // substitution, but a bare ".." would resolve one level above the cache dir (and a
+        // bare "." / empty result into it). Collapse those to a plain segment.
+        if (sanitized.isEmpty() || sanitized.chars().allMatch(c -> c == '.')) return "_";
+        return sanitized;
     }
 }

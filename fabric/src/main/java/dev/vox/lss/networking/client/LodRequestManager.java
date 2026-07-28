@@ -585,8 +585,16 @@ public class LodRequestManager {
     }
 
     public void saveCache() {
-        if (this.serverAddress != null && this.lastDimension != null && !this.columns.isEmptyMap()) {
-            ColumnCacheStore.saveAsync(this.serverAddress, this.lastDimension, this.columns.mapForSave());
+        // Merge-on-save: the movement prune bounds the in-memory map to a disc around the
+        // player, so a plain overwrite truncated the persisted cache to that disc (ghost
+        // terrain + full re-download on revisit — see ColumnCacheStore.mergeSaveAsync).
+        // A session whose map ended EMPTY but which deliberately unstamped positions must
+        // still save: skipping would resurrect the dishonest stamps from the file.
+        if (this.serverAddress != null && this.lastDimension != null
+                && (!this.columns.isEmptyMap() || this.columns.hasPersistentRemovals())) {
+            ColumnCacheStore.mergeSaveAsync(this.serverAddress, this.lastDimension,
+                    this.columns.mapForSave(), this.columns.persistentRemovalsForSave(),
+                    this.lastChunkX, this.lastChunkZ);
         }
     }
 

@@ -57,6 +57,15 @@ class ColumnStateMap {
     // the server re-sends the clearing column — a ts=-1 re-request would draw an all-air up_to_date
     // (a clear is only sent for claimsData/ts>0), stranding ghost terrain. Content supersedes.
     private final Long2LongOpenHashMap clearedResync = new Long2LongOpenHashMap();
+    // Honesty removals awaiting persistence: positions whose stamp was deliberately DELETED
+    // (ingest-failure unstamp, legacy-0 purge) rather than range-pruned. The merge-on-save
+    // cache path preserves file entries the movement prune dropped from memory, so without
+    // this record a deliberate removal would be resurrected from the file and answer a false
+    // up_to_date next session — the delivery-honesty hole re-opened from disk. Accumulates
+    // for the session (tiny: ingest failures cap at 3/position, purges are one-time);
+    // NOT pruned by distance — pruning it would resurrect any removal whose position the
+    // player walked away from before the next save.
+    private final LongOpenHashSet persistentRemovals = new LongOpenHashSet();
 
     // Derived counts, maintained on every timestamp transition.
     private int receivedCount;
@@ -217,6 +226,7 @@ class ColumnStateMap {
                 // immortal. Removing it converts the position to -1/unknown, which asks the
                 // SAME thing on the wire (<=0 = "I hold nothing") but finally lets it die.
                 this.timestamps.remove(packed);
+                this.persistentRemovals.add(packed); // deliberate delete — must reach the file
                 this.emptyCount--;
             }
         } else {
@@ -243,6 +253,7 @@ class ColumnStateMap {
         // untouched as documented above.
         if (this.timestamps.get(packed) == 0L) {
             this.timestamps.remove(packed);
+            this.persistentRemovals.add(packed); // deliberate delete — must reach the file
             this.emptyCount--;
         }
     }
@@ -290,6 +301,7 @@ class ColumnStateMap {
                 // session it re-asks -1; a transient failure (storage briefly down) heals, a
                 // permanent one (incompatible consumer) costs one re-attempt per session.
                 this.timestamps.remove(packed);
+                this.persistentRemovals.add(packed); // deliberate delete — must reach the file
                 if (old > 0) this.receivedCount--;
                 else if (old == 0) this.emptyCount--;
             }
@@ -320,6 +332,7 @@ class ColumnStateMap {
 
         // Lost CONTENT: forget the stamp (honest "I hold nothing") so the server re-serves on ts=-1.
         this.timestamps.remove(packed);
+        this.persistentRemovals.add(packed); // deliberate delete — must reach the file
         if (old > 0) this.receivedCount--;
         else if (old == 0) this.emptyCount--;
         this.validated.remove(packed);
@@ -328,6 +341,7 @@ class ColumnStateMap {
     }
 
     void pruneOutOfRange(int playerCx, int playerCz, int pruneDistance) {
+        int removed = 0;
         var iter = this.timestamps.long2LongEntrySet().iterator();
         while (iter.hasNext()) {
             var entry = iter.next();
@@ -336,6 +350,7 @@ class ColumnStateMap {
                 if (ts > 0) this.receivedCount--;
                 else if (ts == 0) this.emptyCount--;
                 iter.remove();
+                removed++;
             }
         }
         pruneSet(this.dirty, playerCx, playerCz, pruneDistance);
@@ -354,6 +369,22 @@ class ColumnStateMap {
             if (PositionUtil.isOutOfRange(clearIter.next().getLongKey(), playerCx, playerCz, pruneDistance)) {
                 clearIter.remove();
             }
+        }
+        // persistentRemovals is deliberately NOT pruned — a deliberate delete must reach the
+        // next merge-save even after the player walks away from the position (see the field).
+        // Removal alone reclaims nothing: fastutil open-hash structures never shrink their
+        // backing arrays, so a big cache-file load pruned down to the local disc would keep
+        // its peak-size array resident all session (the client twin of the M3 served-set
+        // sweep). Rebuild when the prune removed more than what remains.
+        if (removed > this.timestamps.size()) {
+            this.timestamps.trim();
+            this.dirty.trim();
+            this.retry.trim();
+            this.validated.trim();
+            this.sessionSatisfied.trim();
+            this.staleInFlight.trim();
+            this.ingestFailures.trim();
+            this.clearedResync.trim();
         }
     }
 
@@ -375,6 +406,7 @@ class ColumnStateMap {
         this.staleInFlight.clear();
         this.ingestFailures.clear();
         this.clearedResync.clear();
+        this.persistentRemovals.clear();
         this.receivedCount = 0;
         this.emptyCount = 0;
     }
@@ -391,10 +423,23 @@ class ColumnStateMap {
         }
     }
 
-    /** The raw timestamp map, for {@link ColumnCacheStore} persistence (v3 format). */
+    /** The raw timestamp map, for {@link ColumnCacheStore} persistence. */
     Long2LongOpenHashMap mapForSave() {
         return this.timestamps;
     }
+
+    /**
+     * The session's deliberate stamp deletions, for the merge-save's removal pass (applied
+     * to the FILE before the in-memory overlay, so a position re-received after its removal
+     * survives via the overlay). Deliberately not drained at save: a failed save must not
+     * lose them, and over-deletion of a file entry re-served since a prior save costs one
+     * honest re-request on the next visit — the safe direction.
+     */
+    LongOpenHashSet persistentRemovalsForSave() {
+        return this.persistentRemovals;
+    }
+
+    boolean hasPersistentRemovals() { return !this.persistentRemovals.isEmpty(); }
 
     /** Raw stored timestamp for one position: -1 absent, 0 a legacy pre-v17 cache artifact
      *  (never written by v17 clients; purged at park — see onUpToDate), &gt;0 received. */
