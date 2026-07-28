@@ -4,6 +4,8 @@ import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.LSSLogger;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -31,6 +33,8 @@ public class ColumnTimestampCache {
     private static final String FILE_NAME = "lss-timestamps.bin";
     /** On-disk record size (8 bytes packed position + 8 bytes timestamp) — load sanity bound. */
     private static final int DISK_BYTES_PER_ENTRY = 16;
+    /** save()/load() stream buffer (holds 4096 records) — see the buffering note in save(). */
+    private static final int IO_BUFFER_BYTES = 1 << 16;
     /** Approximate LIVE heap per entry: each entry occupies a slot in TWO Long2LongOpenHashMaps
      *  (timestamps + insertionTimes), each 16 bytes/slot at a 0.75 load factor with pow2
      *  capacity overshoot — ~43 bytes typical, ~85 worst right after a resize. 64 is the honest
@@ -263,7 +267,11 @@ public class ColumnTimestampCache {
         var tmpFile = file.resolveSibling(FILE_NAME + ".tmp." + Long.toHexString(System.nanoTime()));
         try {
             Files.createDirectories(dataDir);
-            try (var out = new DataOutputStream(Files.newOutputStream(tmpFile))) {
+            // Buffered: an unbuffered DataOutputStream turns every writeLong into an 8-byte
+            // write syscall — ~3M syscalls / multi-second saves at default cache caps, the
+            // save-duration half of issue #62.
+            try (var out = new DataOutputStream(new BufferedOutputStream(
+                    Files.newOutputStream(tmpFile), IO_BUFFER_BYTES))) {
                 out.writeInt(FORMAT_VERSION);
                 out.writeInt(caches.size());
                 for (var entry : caches.entrySet()) {
@@ -322,7 +330,8 @@ public class ColumnTimestampCache {
             return;
         }
 
-        try (var in = new DataInputStream(Files.newInputStream(file))) {
+        try (var in = new DataInputStream(new BufferedInputStream(
+                Files.newInputStream(file), IO_BUFFER_BYTES))) {
             int version = in.readInt();
             if (version != FORMAT_VERSION) {
                 LSSLogger.warn("Timestamp cache " + file + " has unsupported version " + version + ", discarding");

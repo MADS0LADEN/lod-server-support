@@ -7,6 +7,8 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -26,6 +28,8 @@ public class ColumnCacheStore {
     private static final Pattern SANITIZE_PATTERN = Pattern.compile("[^a-zA-Z0-9._-]");
     static final int FORMAT_VERSION = 4; // package-visible: corruption tests write real headers
     private static final int MAX_CACHE_ENTRIES = 2_000_000;
+    /** save()/load() stream buffer — see the buffering note in save(). */
+    private static final int IO_BUFFER_BYTES = 1 << 16;
     private static final Path CACHE_DIR = FabricLoader.getInstance().getConfigDir().resolve("lss").resolve("cache");
     // Daemon thread — saves use atomic rename so JVM shutdown mid-write won't corrupt,
     // but the save may be lost. Acceptable for a rebuildable client cache.
@@ -41,7 +45,8 @@ public class ColumnCacheStore {
         var file = getCacheFile(serverAddress, dimension);
         if (!Files.exists(file)) return map;
 
-        try (var in = new DataInputStream(Files.newInputStream(file))) {
+        try (var in = new DataInputStream(new BufferedInputStream(
+                Files.newInputStream(file), IO_BUFFER_BYTES))) {
             int version = in.readInt();
             if (version != FORMAT_VERSION) {
                 // Pre-v4 caches may hold fabricated client-clock stamps that are
@@ -92,7 +97,10 @@ public class ColumnCacheStore {
         var tmpFile = file.resolveSibling(file.getFileName() + ".tmp");
         try {
             Files.createDirectories(file.getParent());
-            try (var out = new DataOutputStream(Files.newOutputStream(tmpFile))) {
+            // Buffered: unbuffered per-writeLong 8-byte syscalls made big-cache disconnect
+            // flushes take seconds (same pattern as the server-side half of issue #62).
+            try (var out = new DataOutputStream(new BufferedOutputStream(
+                    Files.newOutputStream(tmpFile), IO_BUFFER_BYTES))) {
                 out.writeInt(FORMAT_VERSION);
                 out.writeInt(columns.size());
                 for (var entry : columns.long2LongEntrySet()) {
