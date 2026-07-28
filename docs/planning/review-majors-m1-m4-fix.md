@@ -159,8 +159,17 @@ already order-agnostic (any member can lead).
 2. **M3 sweep keeps in-pipeline and grace-window positions**: skip entries with
    `hasEnqueuedColumn(packed)` or `isWithinDepartureGrace(packed, now)` — both same-class,
    O(1) — so a teleport with a backed-up send queue cannot double-serve.
-3. **M3 sweeps ONE player per eviction cycle** (round-robin), not all — bounds the
-   processing-thread spike; inter-sweep growth at 20 players is ~7 MB transient, acceptable.
+3. **M3 sweeps ALL players per eviction cycle** (revised by the implementation review:
+   the first cut's one-player round-robin let a roamer's set grow to the between-turns
+   peak, and fastutil sets never shrink — so the peak-size backing array stayed resident.
+   The sweep now also `trim()`s the set when a sweep removed more than remains; measured
+   cost ~1 ms per 333k entries per player, once a minute, on the processing thread). The
+   old-signature default radius is MAX-config-derived (2096) — fail-safe: a mistaken
+   fallback under-sweeps rather than destroying declarable done-bits under a raised
+   `lodDistanceChunks`. Accepted as documented: the sweep has no counter (a post-sweep
+   re-serve shows as a normal re-resolution; adding a counter means exporter-schema churn
+   on three lines), and there is no direct pin that production passes the config-derived
+   radius (the fail-safe default bounds the blast radius of that mistake to extra memory).
 4. **M3 constructor churn contained**: the new `sweepRadiusChunks` lands on the full
    constructor; a delegating overload keeps the old signature (production sites pass the
    real radius; test harnesses stay untouched). Radius captured at construction — safe today

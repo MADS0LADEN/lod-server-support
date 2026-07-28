@@ -37,12 +37,15 @@ class DiskReadDoneSweepTest {
     }
 
     private static final class TestProcessor extends OffThreadProcessor<TestState> {
+        final java.util.concurrent.ConcurrentLinkedQueue<Long> submits =
+                new java.util.concurrent.ConcurrentLinkedQueue<>();
         TestProcessor(Map<UUID, TestState> players) {
-            // Old-signature ctor: the DEFAULT sweep radius (304) applies.
+            // Old-signature ctor: the fail-safe DEFAULT sweep radius (2096) applies.
             super(players, new StubDiskReader(), false, null, 1, 0);
         }
         @Override
         protected boolean submitDiskRead(UUID playerUuid, String dimension, int cx, int cz, long order) {
+            this.submits.add(PositionUtil.packPosition(cx, cz));
             return true;
         }
         @Override
@@ -136,12 +139,14 @@ class DiskReadDoneSweepTest {
     // ---- Wiring pin: the eviction cycle actually runs the sweep ----
 
     @Test
-    void processorSweepsARegisteredPlayerOnTheEvictionCycle() throws Exception {
+    void processorSweepsARegisteredPlayerOnTheEvictionCycleAndTheHealIsHonest() throws Exception {
         var players = new ConcurrentHashMap<UUID, TestState>();
         var state = new TestState(UUID.randomUUID());
+        state.markHandshakeComplete();
+        state.setCapabilities(dev.vox.lss.common.LSSConstants.CAPABILITY_VOXEL_COLUMNS);
         players.put(state.getPlayerUUID(), state);
         state.updatePlayerChunk(0, 0);
-        state.markDiskReadDone(500, 500); // beyond the default radius (304)
+        state.markDiskReadDone(5000, 5000); // beyond the fail-safe default radius (2096)
         state.markDiskReadDone(1, 1);
 
         var proc = new TestProcessor(players);
@@ -149,9 +154,20 @@ class DiskReadDoneSweepTest {
             proc.primeEvictionCounterForTest();
             proc.start();
             proc.postSnapshot(new TickSnapshot(new HashMap<>(), Map.of(), 0, false), List.of());
-            waitFor(() -> !state.hasDiskReadDone(500, 500),
+            waitFor(() -> !state.hasDiskReadDone(5000, 5000),
                     "the eviction cycle to sweep the out-of-range served-set entry");
             assertTrue(state.hasDiskReadDone(1, 1), "in-range entries survive");
+
+            // The honest heal — the property that makes sweeping SAFE: a ts<=0
+            // re-declaration of the swept position must re-resolve (submit a disk read),
+            // never terminally answer off a phantom done-bit.
+            state.offerIncomingBatch(new IncomingBatch(new IncomingRequest[]{
+                    new IncomingRequest(5000, 5000, -1)}));
+            var dims = new HashMap<UUID, String>();
+            dims.put(state.getPlayerUUID(), dev.vox.lss.common.LSSConstants.DIM_STR_OVERWORLD);
+            proc.postSnapshot(new TickSnapshot(dims, Map.of(), 0, false), List.of());
+            waitFor(() -> proc.submits.contains(PositionUtil.packPosition(5000, 5000)),
+                    "the swept position's re-declaration to re-resolve via a disk read");
         } finally {
             proc.shutdown();
         }

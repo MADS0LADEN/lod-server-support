@@ -127,14 +127,18 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     /** Margin the served-set sweep radius adds over the ingress range filter, so a
      *  position can never be swept while still declarable (M3). */
     public static final int SWEEP_RADIUS_MARGIN_CHUNKS = 16;
-    /** Sweep radius for the old-signature constructor (test rigs): the max ingress radius
-     *  any config can produce (256 max lodDistanceChunks + 32 buffer) + the margin. */
-    private static final int DEFAULT_SWEEP_RADIUS_CHUNKS = 256 + 32 + SWEEP_RADIUS_MARGIN_CHUNKS;
+    /** Sweep radius for the old-signature constructor (test rigs and any future call site
+     *  that forgets the 7-arg form): the LARGEST radius any config can produce
+     *  (MAX_LOD_DISTANCE + LOD_DISTANCE_BUFFER) + the margin — deliberately fail-SAFE: a
+     *  mistaken fallback under-sweeps (keeps more memory than needed) and can never
+     *  destroy a still-declarable done-bit under a raised lodDistanceChunks. Production
+     *  passes the config-derived radius. */
+    private static final int DEFAULT_SWEEP_RADIUS_CHUNKS =
+            LSSConstants.MAX_LOD_DISTANCE + LSSConstants.LOD_DISTANCE_BUFFER + SWEEP_RADIUS_MARGIN_CHUNKS;
 
     // diskReadDone sweep (M3): radius captured at construction — safe while no config
     // reload path exists (none today; a future reload must re-derive it).
     private final int diskReadDoneSweepRadiusChunks;
-    private int sweepRotation;
 
     /** Old-signature overload (test rigs) — production passes the config-derived radius. */
     protected OffThreadProcessor(Map<UUID, PlayerState> players,
@@ -460,7 +464,7 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
             if (evicted > 0 && LSSLogger.isDebugEnabled()) {
                 LSSLogger.debug("Evicted " + evicted + " oversized timestamp cache entries (" + this.timestampCache.size() + " remaining)");
             }
-            sweepOneRegisteredPlayerServedSet();
+            sweepRegisteredPlayerServedSets();
         }
 
         boolean periodicDue = ++this.saveCounter >= SAVE_INTERVAL_CYCLES;
@@ -802,17 +806,18 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
         return this.timestampCache;
     }
 
-    /** Round-robin ONE player's served-set sweep per eviction cycle (M3): bounds the
-     *  per-cycle iteration on the processing thread; inter-sweep growth between a player's
-     *  turns is transient and small (~minutes × declaration rate). */
-    private void sweepOneRegisteredPlayerServedSet() {
-        if (this.players.isEmpty()) return;
-        var states = new ArrayList<>(this.players.values());
-        var state = states.get(Math.floorMod(this.sweepRotation++, states.size()));
-        int swept = state.sweepDiskReadDoneOutsideRange(this.diskReadDoneSweepRadiusChunks);
-        if (swept > 0 && LSSLogger.isDebugEnabled()) {
-            LSSLogger.debug("Swept " + swept + " out-of-range served-set entries for "
-                    + state.getPlayerName());
+    /** Sweep EVERY player's served-set each eviction cycle (M3). All-players, not
+     *  round-robin: a per-player turn every N minutes let the set's backing array grow to
+     *  the between-turns peak — and open-hash sets never shrink, so that peak stayed
+     *  resident (the trim() in the sweep needs the sweep to actually run to help). The
+     *  cost is ~1 ms per 333k entries on the processing thread, once a minute. */
+    private void sweepRegisteredPlayerServedSets() {
+        for (var state : this.players.values()) {
+            int swept = state.sweepDiskReadDoneOutsideRange(this.diskReadDoneSweepRadiusChunks);
+            if (swept > 0 && LSSLogger.isDebugEnabled()) {
+                LSSLogger.debug("Swept " + swept + " out-of-range served-set entries for "
+                        + state.getPlayerUUID());
+            }
         }
     }
 
@@ -820,6 +825,11 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
      *  maintenance block (eviction + served-set sweep) — the wiring pin's seam. */
     void primeEvictionCounterForTest() {
         this.evictionCounter = EVICTION_INTERVAL_CYCLES - 1;
+    }
+
+    /** Completed router passes — deterministic cycle gating for test rigs. */
+    int routeCyclesForTest() {
+        return this.requestRouter.routeCyclesForTest();
     }
 
     /** The real save executor — the coalescing wiring pin blocks its worker and reads its queue. */

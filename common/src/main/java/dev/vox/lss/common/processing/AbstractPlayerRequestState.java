@@ -695,6 +695,13 @@ public abstract class AbstractPlayerRequestState<T> {
             it.remove();
             removed++;
         }
+        // Removal alone reclaims NOTHING: fastutil open-hash sets never shrink their
+        // backing array, so a roamer's peak-size long[] would stay resident for the
+        // session (the reviewer-measured hole in the first cut of this fix). Rebuild when
+        // the sweep removed more than what remains — capacity is then ≥2× the need.
+        if (removed > this.diskReadDone.size()) {
+            this.diskReadDone.trim();
+        }
         return removed;
     }
 

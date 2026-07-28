@@ -101,14 +101,19 @@ class RouteRotationFairnessTest {
             // hits NO_DISK_HEADROOM on its first cold entry and retains.
             proc.headroomBudget.set(1);
             proc.postSnapshot(snapshotOf(players), List.of());
-            waitFor(() -> proc.submitters.size() == 1, "first cycle's single submission");
+            // Gate on CYCLE COMPLETION, not on the submission count: refilling the budget
+            // mid-cycle would let the leading player consume it for its second entry
+            // within the same pass on a descheduled-thread window (a misleading red).
+            waitFor(() -> proc.routeCyclesForTest() >= 1, "first routing cycle to complete");
+            assertEquals(1, proc.submitters.size(), "one slot, one submission in cycle 1");
 
             // Cycle 2: one more slot. Under the unrotated order the SAME player leads
             // (it still holds a backlog) and takes this slot too — the starvation this
             // test exists to pin. With rotation the other player leads.
             proc.headroomBudget.set(1);
             proc.postSnapshot(snapshotOf(players), List.of());
-            waitFor(() -> proc.submitters.size() == 2, "second cycle's single submission");
+            waitFor(() -> proc.routeCyclesForTest() >= 2, "second routing cycle to complete");
+            assertEquals(2, proc.submitters.size(), "one slot, one submission in cycle 2");
 
             assertEquals(2, proc.submitters.stream().distinct().count(),
                     "two saturated cycles must serve TWO distinct players — a repeat "
@@ -121,7 +126,10 @@ class RouteRotationFairnessTest {
     }
 
     @Test
-    void rotationDoesNotWedgeOnPlayersWithEmptyBacklogs() throws Exception {
+    void emptyBacklogPlayerNeverBlocksTheWorkingOneInAnyLeadPosition() throws Exception {
+        // Not a rotation discriminator (fixed order also serves only the working player) —
+        // this pins that an idle player in the LEAD position drains nothing and cannot
+        // wedge or consume the budget, across both parities of the rotation.
         var players = new ConcurrentHashMap<UUID, TestState>();
         registeredPlayer(players);                    // empty backlog
         var b = registeredPlayer(players, 30, 0, 31, 0);
@@ -132,10 +140,11 @@ class RouteRotationFairnessTest {
                 proc.headroomBudget.set(1);
                 proc.postSnapshot(snapshotOf(players), List.of());
                 final int expected = cycle;
-                waitFor(() -> proc.submitters.size() == expected, "submission in cycle " + expected);
+                waitFor(() -> proc.routeCyclesForTest() >= expected, "cycle " + expected);
+                assertEquals(expected, proc.submitters.size(), "one submission per cycle");
             }
             assertTrue(proc.submitters.stream().allMatch(u -> u.equals(b.getPlayerUUID())),
-                    "the empty-backlog player never blocks the working one, in either lead position");
+                    "only the working player submits, in either lead position");
         } finally {
             proc.shutdown();
         }

@@ -46,6 +46,9 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
     // players got no disk reads — and no generation, since the disk miss is the trigger —
     // until the first converged. Mirrors the lifecycle pass's probe-budget rotation.
     private int routeRotation;
+    // Completed routeAll passes — volatile so test rigs can gate deterministically on
+    // "the cycle ended" instead of racing mid-cycle observations.
+    private volatile int routeCycles;
 
     IncomingRequestRouter(OffThreadProcessor<PS> processor,
                           Map<UUID, PS> players,
@@ -64,7 +67,7 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
 
     void routeAll(TickSnapshot snapshot, long cycleNow) {
         this.cycleNow = cycleNow;
-        var entries = new java.util.ArrayList<>(snapshot.playerDimensions().entrySet());
+        var entries = new ArrayList<>(snapshot.playerDimensions().entrySet());
         int size = entries.size();
         // Rotation advances once per cycle with players present, whatever their backlogs
         // hold. Within-cycle relative order is unchanged; dedup group leadership moves
@@ -87,6 +90,12 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
 
             processIncomingRequests(state, entry.getKey(), entry.getValue(), snapshot);
         }
+        this.routeCycles++;
+    }
+
+    /** Completed routeAll passes — deterministic cycle gating for test rigs. */
+    int routeCyclesForTest() {
+        return this.routeCycles;
     }
 
     private void processIncomingRequests(PS state, UUID playerUuid, String dimension,
