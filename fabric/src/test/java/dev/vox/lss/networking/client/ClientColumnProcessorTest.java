@@ -334,7 +334,7 @@ class ClientColumnProcessorTest {
     void airFillAddsAllAirSectionsForEveryAbsentYOnResync() {
         var present = new VoxelColumnData.SectionData[]{
                 new VoxelColumnData.SectionData(-4, new LevelChunkSection(FACTORY), null, null)};
-        var filled = ClientColumnProcessor.withAirFilledAbsentSections(present, LEVEL_SECTIONS, MIN_SECTION_Y, FACTORY);
+        var filled = ClientColumnProcessor.withAirFilledAbsentSections(present, LEVEL_SECTIONS, MIN_SECTION_Y, FACTORY, false);
 
         var ys = new java.util.HashSet<Integer>();
         for (var s : filled) ys.add(s.sectionY());
@@ -410,12 +410,17 @@ class ClientColumnProcessorTest {
     }
 
     @Test
-    void resyncClearInSkyDimensionAirFillsAllSections() {
+    void resyncClearInSkyDimensionAirFillsBright() {
+        // An all-air column in a sky dimension is sky-15 top to bottom (vertical
+        // propagation undiminished) — a dark fill turned WorldEdit-cleared columns into
+        // light-0 volumes that shaded every neighbouring face black.
         var byY = drainWithSkyAndCapture(sectionWire(0, 0), true);
         assertEquals(java.util.Set.of(-4, -3, -2, -1), byY.keySet(),
                 "an authoritative clear air-fills the whole column");
         for (var s : byY.values()) {
-            assertNull(s.skyLight(), "clear fill is dark (pre-clear-bright pin)");
+            assertNotNull(s.skyLight(), "sky-dimension clear fill is FULL BRIGHT");
+            for (byte b : s.skyLight().getData()) assertEquals((byte) 0xFF, b);
+            assertTrue(s.section().hasOnlyAir(), "the clear is still all-air");
         }
     }
 
@@ -436,7 +441,7 @@ class ClientColumnProcessorTest {
         var present = new VoxelColumnData.SectionData[]{
                 new VoxelColumnData.SectionData(-2, new LevelChunkSection(FACTORY), null, null)};
         var sky = ClientColumnProcessor.withImplicitSkyAbove(present, LEVEL_SECTIONS, MIN_SECTION_Y, FACTORY);
-        var full = ClientColumnProcessor.withAirFilledAbsentSections(sky, LEVEL_SECTIONS, MIN_SECTION_Y, FACTORY);
+        var full = ClientColumnProcessor.withAirFilledAbsentSections(sky, LEVEL_SECTIONS, MIN_SECTION_Y, FACTORY, false);
         assertEquals(4, full.length);
         var byY = new java.util.HashMap<Integer, VoxelColumnData.SectionData>();
         for (var s : full) byY.put(s.sectionY(), s);

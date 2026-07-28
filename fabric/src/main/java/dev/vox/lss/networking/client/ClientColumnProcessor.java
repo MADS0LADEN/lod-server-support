@@ -267,7 +267,13 @@ class ClientColumnProcessor {
                     // served band, where unserved air is dark (correct for normal terrain;
                     // the serializer's band rule already approximates floating-island
                     // below-band sky air away, unchanged by this ordering).
-                    sections = withAirFilledAbsentSections(sections, levelSectionCount, minSectionY, factory);
+                    // The ONE exception: a 0-section CLEAR in a sky dimension fills BRIGHT —
+                    // vanilla sky light in an all-air column is 15 top to bottom (vertical
+                    // propagation is undiminished), so a dark fill turned a WorldEdit-cleared
+                    // column into a light-0 volume that shaded every neighbouring face black.
+                    boolean brightClear = hasSkyLight && sections.length == 0;
+                    sections = withAirFilledAbsentSections(sections, levelSectionCount, minSectionY,
+                            factory, brightClear);
                 }
                 var columnData = new VoxelColumnData(sections, payload.columnTimestamp());
                 dispatcher.dispatch(payload.dimension(),
@@ -336,7 +342,7 @@ class ClientColumnProcessor {
 
     static VoxelColumnData.SectionData[] withAirFilledAbsentSections(
             VoxelColumnData.SectionData[] present, int levelSectionCount, int minSectionY,
-            PalettedContainerFactory factory) {
+            PalettedContainerFactory factory, boolean brightSky) {
         var seen = new java.util.HashSet<Integer>(present.length * 2);
         for (var s : present) seen.add(s.sectionY());
 
@@ -345,7 +351,10 @@ class ClientColumnProcessor {
         for (int i = 0; i < levelSectionCount; i++) {
             int y = minSectionY + i;
             if (!seen.contains(y)) {
-                out.add(new VoxelColumnData.SectionData(y, new LevelChunkSection(factory), null, null));
+                // brightSky is set ONLY for the whole-column clear in a sky dimension —
+                // below/among-band fills on a non-empty resync must stay dark.
+                out.add(new VoxelColumnData.SectionData(y, new LevelChunkSection(factory), null,
+                        brightSky ? new DataLayer(FULL_BRIGHT_SKY) : null));
             }
         }
         return out.toArray(new VoxelColumnData.SectionData[0]);
