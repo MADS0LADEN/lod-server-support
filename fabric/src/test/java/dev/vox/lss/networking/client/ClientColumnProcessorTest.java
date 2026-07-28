@@ -349,6 +349,101 @@ class ClientColumnProcessorTest {
         }
     }
 
+    // ---- M1 (2026-07-28 review round): sky fill runs BEFORE the resync air-fill ----
+    // The v0.8.0 order ran the air-fill first on resyncs, covering every section-Y so the
+    // sky pass early-returned — every re-served column (dirty edit, warm-rejoin re-serve,
+    // ingest retry) dispatched dark above-band air, regressing the black-boundary-faces
+    // fix on second serves. These pins compose the two passes through the REAL drain,
+    // which no test did before (the gap that let the wrong order ship).
+
+    private final List<VoxelColumnData> captured = new ArrayList<>();
+    private final ClientColumnProcessor.ColumnDispatcher capturingDispatcher =
+            (d, cx, cz, data) -> captured.add(data);
+
+    /** One real (empty, lightless) section at the given sectionY (the wire byte IS the Y). */
+    private static byte[] sectionWireAtY(int sectionY) {
+        var buf = new FriendlyByteBuf(Unpooled.buffer());
+        try {
+            buf.writeVarInt(1);
+            buf.writeByte(sectionY);
+            new LevelChunkSection(FACTORY).write(buf);
+            buf.writeBoolean(false);
+            buf.writeBoolean(false);
+            return drainToArray(buf);
+        } finally {
+            buf.release();
+        }
+    }
+
+    private java.util.Map<Integer, VoxelColumnData.SectionData> drainWithSkyAndCapture(
+            byte[] wire, boolean resync) {
+        processor.offer(new VoxelColumnS2CPayload(0, 0, dim, 1L, wire), resync);
+        processor.drainColumnQueue(dim, LEVEL_SECTIONS, MIN_SECTION_Y, true, FACTORY,
+                capturingDispatcher, processor.sessionEpochForTest());
+        assertEquals(1, captured.size(), "exactly one column dispatched");
+        var byY = new java.util.HashMap<Integer, VoxelColumnData.SectionData>();
+        for (var s : captured.get(0).sections()) byY.put(s.sectionY(), s);
+        return byY;
+    }
+
+    @Test
+    void resyncDeliveryKeepsImplicitSkyAboveTheServedBand() {
+        var byY = drainWithSkyAndCapture(sectionWireAtY(-2), true); // served mid-band
+        assertEquals(java.util.Set.of(-4, -3, -2, -1), byY.keySet(),
+                "resync air-fill still completes the column");
+        assertNotNull(byY.get(-1).skyLight(), "above-band fill must carry sky light — "
+                + "the v0.8.0 order dispatched it dark on every resync");
+        for (byte b : byY.get(-1).skyLight().getData()) {
+            assertEquals((byte) 0xFF, b, "above-band sky is full-bright");
+        }
+        assertNull(byY.get(-2).skyLight(), "the served section is untouched");
+        assertNull(byY.get(-3).skyLight(), "below-band resync fill stays dark air");
+        assertNull(byY.get(-4).skyLight(), "below-band resync fill stays dark air");
+        assertTrue(byY.get(-3).section().hasOnlyAir());
+    }
+
+    @Test
+    void skyFillWithoutResyncLeavesBelowBandAbsent() {
+        var byY = drainWithSkyAndCapture(sectionWireAtY(-2), false);
+        assertEquals(java.util.Set.of(-2, -1), byY.keySet(),
+                "a first serve fills only above the band — below-band Ys stay absent");
+    }
+
+    @Test
+    void resyncClearInSkyDimensionAirFillsAllSections() {
+        var byY = drainWithSkyAndCapture(sectionWire(0, 0), true);
+        assertEquals(java.util.Set.of(-4, -3, -2, -1), byY.keySet(),
+                "an authoritative clear air-fills the whole column");
+        for (var s : byY.values()) {
+            assertNull(s.skyLight(), "clear fill is dark (pre-clear-bright pin)");
+        }
+    }
+
+    @Test
+    void resyncClearInDarkDimensionStaysDarkAir() {
+        processor.offer(new VoxelColumnS2CPayload(0, 0, dim, 1L, sectionWire(0, 0)), true);
+        processor.drainColumnQueue(dim, LEVEL_SECTIONS, MIN_SECTION_Y, false, FACTORY,
+                capturingDispatcher, processor.sessionEpochForTest());
+        assertEquals(1, captured.size());
+        assertEquals(LEVEL_SECTIONS, captured.get(0).sections().length);
+        for (var s : captured.get(0).sections()) {
+            assertNull(s.skyLight(), "no sky light in a dark dimension");
+        }
+    }
+
+    @Test
+    void skyThenAirFillUnitCompositionMatchesTheDrainOrder() {
+        var present = new VoxelColumnData.SectionData[]{
+                new VoxelColumnData.SectionData(-2, new LevelChunkSection(FACTORY), null, null)};
+        var sky = ClientColumnProcessor.withImplicitSkyAbove(present, LEVEL_SECTIONS, MIN_SECTION_Y, FACTORY);
+        var full = ClientColumnProcessor.withAirFilledAbsentSections(sky, LEVEL_SECTIONS, MIN_SECTION_Y, FACTORY);
+        assertEquals(4, full.length);
+        var byY = new java.util.HashMap<Integer, VoxelColumnData.SectionData>();
+        for (var s : full) byY.put(s.sectionY(), s);
+        assertNotNull(byY.get(-1).skyLight(), "unit order pin: sky first, air-fill second");
+        assertNull(byY.get(-3).skyLight(), "air-fill below the band is dark");
+    }
+
     @Test
     void resyncColumnAirFillsAbsentSectionsButFirstServeDoesNot() {
         var dim = ResourceKey.create(Registries.DIMENSION, Identifier.parse("lss_test:processor"));

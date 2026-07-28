@@ -103,8 +103,10 @@ class SectionLightDefaultsTest {
     }
 
     /**
-     * Decodes wire bytes into the exact consumer-facing records, mirroring
-     * {@code ClientColumnProcessor.drainColumnQueue} statement-for-statement: a false
+     * Decodes wire bytes into the exact consumer-facing records, mirroring the DECODE
+     * loop of {@code ClientColumnProcessor.drainColumnQueue} statement-for-statement
+     * (not its post-decode fill passes — sky-above runs before the resync air-fill
+     * there, and neither is modeled here): a false
      * presence flag leaves the {@link VoxelColumnData.SectionData} DataLayer NULL — never
      * a zeroed array, never a dimension-derived default.
      */

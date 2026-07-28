@@ -239,14 +239,6 @@ class ClientColumnProcessor {
                     sb.append(']');
                     ClientTraceLog.event("col_light", sb.toString());
                 }
-                if (queued.resync()) {
-                    // The client already held data here; the server sends the current column
-                    // (which OMITS air sections) authoritatively. Fill every absent section-Y
-                    // with an all-air section so the consumer overwrites terrain the server
-                    // cleared (WorldEdit clears, fully-emptied 0-section columns). Only on
-                    // resync — a first serve had nothing, so absent == air == no-op.
-                    sections = withAirFilledAbsentSections(sections, levelSectionCount, minSectionY, factory);
-                }
                 if (hasSkyLight) {
                     // Implicit-sky fill (2026-07-27, black-boundary-faces fix): vanilla
                     // stores sky layers only up to heightmap+1 — everything above is
@@ -257,7 +249,25 @@ class ClientColumnProcessor {
                     // reads light 0 and shades those faces black. Mirror vanilla's rule
                     // client-side: every absent section ABOVE the column's top served
                     // section becomes explicit all-air with full-bright sky.
+                    // MUST run BEFORE the resync air-fill: this pass derives the column's
+                    // top from the SERVED sections, and after an air-fill every section-Y
+                    // is present so it finds nothing above the top. The shipped v0.8.0
+                    // order ran it second, which silently disabled it on every resync
+                    // delivery — re-served columns went dark above the terrain (M1 of the
+                    // 2026-07-28 review round).
                     sections = withImplicitSkyAbove(sections, levelSectionCount, minSectionY, factory);
+                }
+                if (queued.resync()) {
+                    // The client already held data here; the server sends the current column
+                    // (which OMITS air sections) authoritatively. Fill every absent section-Y
+                    // with an all-air section so the consumer overwrites terrain the server
+                    // cleared (WorldEdit clears, fully-emptied 0-section columns). Only on
+                    // resync — a first serve had nothing, so absent == air == no-op. Runs
+                    // AFTER the sky fill, so the Ys still absent here are below/among the
+                    // served band, where unserved air is dark (correct for normal terrain;
+                    // the serializer's band rule already approximates floating-island
+                    // below-band sky air away, unchanged by this ordering).
+                    sections = withAirFilledAbsentSections(sections, levelSectionCount, minSectionY, factory);
                 }
                 var columnData = new VoxelColumnData(sections, payload.columnTimestamp());
                 dispatcher.dispatch(payload.dimension(),
@@ -301,9 +311,10 @@ class ClientColumnProcessor {
      * Append an all-air section with FULL-BRIGHT sky light for every absent section-Y
      * ABOVE the column's top served section (up to the level top). Sky-lit dimensions
      * only — the caller gates on {@code hasSkyLight}; below/among the served band nothing
-     * changes (unserved air there is dark air, which is correct). Resync's air-fill runs
-     * FIRST, so on resyncs the above-band sections it created with dark light are
-     * re-created here bright; order matters.
+     * changes (unserved air there is dark air). MUST run before the resync air-fill —
+     * {@code top} is derived from the sections present, so it is only the honest served
+     * top while no synthetic fill has run; every Y above it is absent by definition
+     * (which is also why this is a plain append with no per-Y presence check).
      */
     static VoxelColumnData.SectionData[] withImplicitSkyAbove(
             VoxelColumnData.SectionData[] present, int levelSectionCount, int minSectionY,
@@ -315,16 +326,11 @@ class ClientColumnProcessor {
         if (top >= levelTop) return present;
         var out = new java.util.ArrayList<VoxelColumnData.SectionData>(
                 present.length + (levelTop - top));
-        var byY = new java.util.HashMap<Integer, VoxelColumnData.SectionData>();
-        for (var s : present) byY.put(s.sectionY(), s);
         out.addAll(java.util.Arrays.asList(present));
         for (int y = top + 1; y <= levelTop; y++) {
-            var existing = byY.get(y);
-            if (existing != null) continue;
             out.add(new VoxelColumnData.SectionData(y, new LevelChunkSection(factory),
                     null, new DataLayer(FULL_BRIGHT_SKY)));
         }
-        // replace any resync-filled DARK air sections above the served band with bright ones
         return out.toArray(new VoxelColumnData.SectionData[0]);
     }
 
