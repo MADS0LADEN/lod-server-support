@@ -38,6 +38,14 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
 
     // Per-cycle state (processing thread only), set by routeAll for the duration of a cycle
     private long cycleNow;
+    // Drain-order rotation (M4, 2026-07-28 review round; processing thread only): advances
+    // once per cycle so no player is permanently first against the GLOBAL disk-headroom
+    // gate. The snapshot map's iteration order is identical every tick (UUID hash buckets),
+    // so without rotation, under pool saturation (routine with background-priority reads
+    // parked behind vanilla loads) the first player absorbed every freed slot and later
+    // players got no disk reads — and no generation, since the disk miss is the trigger —
+    // until the first converged. Mirrors the lifecycle pass's probe-budget rotation.
+    private int routeRotation;
 
     IncomingRequestRouter(OffThreadProcessor<PS> processor,
                           Map<UUID, PS> players,
@@ -56,7 +64,15 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
 
     void routeAll(TickSnapshot snapshot, long cycleNow) {
         this.cycleNow = cycleNow;
-        for (var entry : snapshot.playerDimensions().entrySet()) {
+        var entries = new java.util.ArrayList<>(snapshot.playerDimensions().entrySet());
+        int size = entries.size();
+        // Rotation advances once per cycle with players present, whatever their backlogs
+        // hold. Within-cycle relative order is unchanged; dedup group leadership moves
+        // with whoever drains first, which is order-agnostic (a disconnecting leader's
+        // group unwinds, attached players re-declare — counted superseded, self-heals).
+        int start = size == 0 ? 0 : Math.floorMod(this.routeRotation++, size);
+        for (int i = 0; i < size; i++) {
+            var entry = entries.get((start + i) % size);
             var state = this.players.get(entry.getKey());
             if (state == null) continue;
             if (!state.supportsVoxelColumns()) continue;
