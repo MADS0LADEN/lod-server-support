@@ -4,6 +4,7 @@ import dev.vox.lss.common.Brand;
 import dev.vox.lss.common.HandshakeGate;
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.LSSLogger;
+import dev.vox.lss.common.LogThrottle;
 import net.minecraft.server.level.ServerPlayer;
 import org.bukkit.craftbukkit.CraftServer;
 import org.bukkit.craftbukkit.entity.CraftPlayer;
@@ -219,6 +220,14 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
      * messenger — and later messages must still dispatch. Unknown channels are ignored.
      * Errors deliberately propagate (only Exception is contained).
      */
+    /** Contained hostile-frame ERROR rate limit. Any authenticated client can spam malformed
+     *  frames at packet rate on these channels, and an unthrottled stack trace per frame is a
+     *  log-flood vector (Fabric self-limits — a bad codec decode kicks the client; Plugin
+     *  Messaging has no equivalent). First frame logs immediately with the stack; later ones
+     *  aggregate into a suppressed count released at most once per interval. Package-visible
+     *  and swappable so the glue tests' one-ERROR-row containment pins stay deterministic. */
+    static volatile LogThrottle hostileFrameLog = new LogThrottle(60_000);
+
     static void dispatchPluginMessage(String channel, String playerName, byte[] message,
                                       PluginMessageHandler handshakeHandler,
                                       PluginMessageHandler chunkRequestHandler) {
@@ -228,7 +237,12 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                 case LSSConstants.CHANNEL_CHUNK_REQUEST -> chunkRequestHandler.handle(message);
             }
         } catch (Exception e) {
-            LSSLogger.error("Error handling plugin message on channel " + channel + " from " + playerName, e);
+            long released = hostileFrameLog.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+            if (released > 0) {
+                String suffix = released > 1 ? " (+" + (released - 1) + " more suppressed)" : "";
+                LSSLogger.error("Error handling plugin message on channel " + channel
+                        + " from " + playerName + suffix, e);
+            }
         }
     }
 
