@@ -799,4 +799,107 @@ class NbtSectionSerializerTest {
         assertArrayEquals(sky, d.skyLight());
         assertMatchesGolden("uniform-15-sky", wire);
     }
+
+    // ---- Headless serve path (2026-07-29): the disk path writes containers + histogram
+    // counts without constructing LevelChunkSection. These pin it against the real thing.
+
+    /**
+     * The strongest count-semantics pin: for randomized sections (air mixes, fluids,
+     * waterlogged states — the fluidCount cases, multi-palette, single-entry), the
+     * headless wire bytes must equal an envelope assembled around the REAL
+     * {@code new LevelChunkSection(...).write(buf)} — ctor recount and all. A drift in
+     * {@link NbtSectionSerializer#countNonEmptyAndFluid}'s BlockCounter mirroring (the
+     * fluid-inside-non-air nesting, the single-entry fast path) fails here before the
+     * goldens ever see it.
+     */
+    @Test
+    void headlessWriteMatchesLevelChunkSectionWriteForRandomizedSections() {
+        var statePool = List.of(
+                Blocks.AIR.defaultBlockState(),
+                Blocks.STONE.defaultBlockState(),
+                Blocks.WATER.defaultBlockState(),
+                Blocks.LAVA.defaultBlockState(),
+                Blocks.SEAGRASS.defaultBlockState(),
+                Blocks.OAK_STAIRS.defaultBlockState()
+                        .setValue(BlockStateProperties.WATERLOGGED, true),
+                Blocks.CAVE_AIR.defaultBlockState(),
+                Blocks.DEEPSLATE.defaultBlockState());
+        var rng = new java.util.Random(20260729L);
+        for (int round = 0; round < 24; round++) {
+            var sec = new LevelChunkSection(FACTORY);
+            // Vary density: sparse rounds keep big air counts, dense rounds force wide palettes
+            int placements = switch (round % 4) {
+                case 0 -> 1;                        // single non-air cell
+                case 1 -> 64;
+                case 2 -> 2048;
+                default -> 4096;                    // full section
+            };
+            for (int i = 0; i < placements; i++) {
+                int cell = rng.nextInt(4096);
+                sec.setBlockState(cell & 15, (cell >> 8) & 15, (cell >> 4) & 15,
+                        statePool.get(rng.nextInt(statePool.size())));
+            }
+
+            byte[] actual = PaperNbtSectionSerializer.serializeChunkNbt(
+                    chunkNbt("minecraft:full", sectionNbtFor(4, sec)), REGISTRY_ACCESS);
+
+            // Expected: identical envelope, but the section body written by the real
+            // counting ctor + LevelChunkSection.write. Round-trip the SAME NBT through the
+            // factory codec so palette order matches what the headless path parsed.
+            var roundTripped = FACTORY.blockStatesContainerCodec()
+                    .parse(NbtOps.INSTANCE, sectionNbtFor(4, sec).getCompound("block_states").orElseThrow())
+                    .getOrThrow();
+            var biomesRT = FACTORY.biomeContainerCodec()
+                    .parse(NbtOps.INSTANCE, sectionNbtFor(4, sec).getCompound("biomes").orElseThrow())
+                    .getOrThrow();
+            var real = new LevelChunkSection(roundTripped,
+                    (net.minecraft.world.level.chunk.PalettedContainer<net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome>>) biomesRT);
+            var expectedBuf = new FriendlyByteBuf(Unpooled.buffer());
+            try {
+                expectedBuf.writeVarInt(1);
+                expectedBuf.writeByte(4);
+                real.write(expectedBuf);
+                expectedBuf.writeBoolean(false);
+                expectedBuf.writeBoolean(false);
+                byte[] expected = new byte[expectedBuf.readableBytes()];
+                expectedBuf.readBytes(expected);
+                if (real.hasOnlyAir()) {
+                    // all-air with no light: the headless path serves a CLEAR (empty array)
+                    assertEquals(0, actual.length, "round " + round);
+                } else {
+                    assertArrayEquals(expected, actual, "round " + round);
+                }
+            } finally {
+                expectedBuf.release();
+            }
+        }
+    }
+
+    /** Section NBT for an arbitrary prepared section (the {@link #sectionNbt} sibling). */
+    private CompoundTag sectionNbtFor(int y, LevelChunkSection sec) {
+        var s = new CompoundTag();
+        s.putInt("Y", y);
+        s.put("block_states", FACTORY.blockStatesContainerCodec()
+                .encodeStart(NbtOps.INSTANCE, sec.getStates()).getOrThrow());
+        s.put("biomes", FACTORY.biomeContainerCodec()
+                .encodeStart(NbtOps.INSTANCE, sec.getBiomes()).getOrThrow());
+        return s;
+    }
+
+    /** The exact pre-size must never fall back to the copy path — a mismatch means
+     *  {@code getSerializedSize} drifted from {@code write} and the zero-copy steal died. */
+    @Test
+    void exactPreSizingNeverFallsBackAcrossTheCorpusShapes() {
+        long before = PaperNbtSectionSerializer.SIZE_MISMATCH_FALLBACKS.get();
+        byte[] sky = new byte[2048];
+        Arrays.fill(sky, (byte) 0xFF);
+        PaperNbtSectionSerializer.serializeChunkNbt(chunkNbt("minecraft:full",
+                sectionNbt(-4, true, true, light(7, (byte) 5), sky),
+                sectionNbt(0, true, false, null, null),
+                sectionNbt(4, false, true, light(0, (byte) 1), null)), REGISTRY_ACCESS);
+        PaperNbtSectionSerializer.serializeChunkNbt(chunkNbt("minecraft:full",
+                sectionNbt(2, true, true, null, null)), REGISTRY_ACCESS);
+        assertEquals(before, PaperNbtSectionSerializer.SIZE_MISMATCH_FALLBACKS.get(),
+                "exact sizing fell back to the copy path — getSerializedSize drifted from write");
+    }
 }

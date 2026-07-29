@@ -9,27 +9,43 @@ import net.minecraft.core.RegistryAccess;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtOps;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.VarInt;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
 import net.minecraft.world.level.chunk.PalettedContainerRO;
+import net.minecraft.world.level.chunk.Strategy;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Reads chunk NBT from disk and serializes sections into MC-native wire format.
  * Used by {@link PaperChunkDiskReader} for async disk reads.
+ *
+ * <p>Headless serve path (2026-07-29 profile — mirrors the Fabric twin exactly): the
+ * UNMASKED path never constructs a {@link LevelChunkSection}. The two wire count headers
+ * come from {@link #countNonEmptyAndFluid}'s palette histogram instead of the ctor's
+ * per-cell recount (on Paper the ctor is even costlier — Moonrise's recalc also builds
+ * per-state coordinate lists the wire never needs), and the containers write themselves.
+ * Palette-entry block-state decode goes through {@link PaperMemoizedNbtCodec}. The MASKED
+ * path still constructs real sections: mask semantics rely on the counting ctor for the
+ * masked headers (see PaperXrayMaskFilter).
  */
 final class PaperNbtSectionSerializer {
     private PaperNbtSectionSerializer() {}
 
     private static final byte[] EMPTY = new byte[0];
+    private static final byte[] ZERO_NIBBLES = new byte[2048];
 
     /** Test seam: the region-file NBT read — the only NMS call in the Paper disk-read path.
      *  Production wires {@link ChunkMap#read}; tests inject empty / failing / timing-out
@@ -74,6 +90,18 @@ final class PaperNbtSectionSerializer {
     private static final dev.vox.lss.common.LogThrottle PARSE_WARN_THROTTLE =
             new dev.vox.lss.common.LogThrottle(60_000);
 
+    /** A parsed section, headless — see the Fabric twin. */
+    record ParsedSection(int sectionY,
+                         PalettedContainer<BlockState> states,
+                         PalettedContainerRO<Holder<Biome>> biomes,
+                         int nonEmptyCount, int fluidCount,
+                         byte[] blockLight, byte[] skyLight,
+                         boolean litByBlock, boolean litBySky) {}
+
+    /** Sizing-exactness telemetry — see the Fabric twin. Tests pin 0. */
+    static final AtomicLong SIZE_MISMATCH_FALLBACKS = new AtomicLong();
+    private static final AtomicBoolean SIZE_MISMATCH_WARNED = new AtomicBoolean();
+
     /**
      * Serialize a chunk's NBT (as read from a region file) into MC-native wire format.
      * Returns {@code null} if the chunk is not FULL or has no sections, an empty array if every
@@ -89,7 +117,8 @@ final class PaperNbtSectionSerializer {
      */
     // LevelChunkSection.write(buf) is @Deprecated on Paper (an anti-xray overload was added),
     // but the 1-arg form is the canonical vanilla serialization and is byte-identical to the
-    // Fabric path. The wire format must match Fabric exactly, so keep this call (do not migrate).
+    // Fabric path. The wire format must match Fabric exactly, so the MASKED branch keeps this
+    // call (do not migrate); the headless branch writes the identical shape by construction.
     @SuppressWarnings("deprecation")
     static byte[] serializeChunkNbt(CompoundTag chunkNbt, RegistryAccess registryAccess,
                                     PaperXrayMaskManager.MaskEntry maskEntry,
@@ -98,7 +127,10 @@ final class PaperNbtSectionSerializer {
         if (statusStr == null || ChunkStatus.byName(statusStr) != ChunkStatus.FULL) return null;
 
         var factory = factoryFor(registryAccess);
-        var blockStateCodec = factory.blockStatesContainerCodec();
+        // Block-state container codec is LSS-built: vanilla's exact codecRW arguments
+        // (fuzz + goldens pin equivalence) with only the ELEMENT codec swapped for the
+        // palette-entry memo. Biomes keep the factory codec — see the Fabric twin.
+        var blockStateCodec = BlockCodecHolder.CODEC;
         var biomeCodec = factory.biomeContainerCodec();
 
         var sectionsTag = chunkNbt.getList("sections");
@@ -107,7 +139,6 @@ final class PaperNbtSectionSerializer {
         var sectionsList = sectionsTag.orElseThrow();
 
         // First pass: parse sections and check if any are non-empty
-        record ParsedSection(int sectionY, LevelChunkSection section, byte[] blockLight, byte[] skyLight) {}
         var parsed = new java.util.ArrayList<ParsedSection>(sectionsList.size());
 
         int[] unparseable = {0};
@@ -124,7 +155,7 @@ final class PaperNbtSectionSerializer {
             var result = parseSection(sectionTag, sectionY, blockStateCodec, biomeCodec,
                     factory, blockLightData, skyLightData, unparseable);
             if (result != null) {
-                parsed.add(new ParsedSection(sectionY, result, blockLightData, skyLightData));
+                parsed.add(result);
             }
         }
         if (unparseable[0] > 0) {
@@ -140,66 +171,100 @@ final class PaperNbtSectionSerializer {
         // long-standing unconditional serve.
         int minContent = Integer.MAX_VALUE, maxContent = Integer.MIN_VALUE;
         for (var p : parsed) {
-            if (!p.section().hasOnlyAir()) {
+            if (p.nonEmptyCount() != 0) {
                 minContent = Math.min(minContent, p.sectionY());
                 maxContent = Math.max(maxContent, p.sectionY());
             }
         }
         final boolean noContent = minContent == Integer.MAX_VALUE;
         final int lo = minContent - 1, hi = maxContent + 1;
-        parsed.removeIf(p -> p.section().hasOnlyAir()
-                && !(p.blockLight().length == 2048 && hasNonZeroNibble(p.blockLight()))
+        parsed.removeIf(p -> p.nonEmptyCount() == 0
+                && !p.litByBlock()
                 && (noContent || p.sectionY() < lo || p.sectionY() > hi));
 
         if (parsed.isEmpty()) return new byte[0];
 
+        // Masked path — see the Fabric twin: real sections, the same choke point the live
+        // path masks in; mask headers can only be recomputed by the counting ctor, never
+        // adjusted. Counter attribution at COMPLETION time is diag-only cosmetics.
+        LevelChunkSection[] maskedSections = null;
         if (maskEntry != null) {
-            // Parsed sections are throwaway — mask in place, inside the same choke point
-            // the live path masks in, so disk and live serves stay byte-identical. The
-            // counter attributes to whatever manager is current at COMPLETION time (a read
-            // straddling a service restart credits the successor) — diag-only cosmetics;
-            // the mask itself always comes from the immutable submit-time entry.
+            maskedSections = new LevelChunkSection[parsed.size()];
             int[] replacedCells = new int[1];
             for (int i = 0; i < parsed.size(); i++) {
                 var p = parsed.get(i);
-                var masked = PaperXrayMaskFilter.mask(p.section(), p.sectionY(),
+                // Paper's (Moonrise) ctor takes the RW container — unpack always returns
+                // one, so the instanceof matches for parsed AND default biomes (the
+                // pre-headless code had the same shape).
+                var section = p.biomes() instanceof PalettedContainer<Holder<Biome>> biomeContainer
+                        ? new LevelChunkSection(p.states(), biomeContainer)
+                        : new LevelChunkSection(p.states(), factory.createForBiomes());
+                var masked = PaperXrayMaskFilter.mask(section, p.sectionY(),
                         maskEntry.mask(), maskEntry.kind(), factory, replacedCells);
-                if (masked != p.section()) {
-                    parsed.set(i, new ParsedSection(p.sectionY(), masked, p.blockLight(), p.skyLight()));
-                    // Count only when cells were actually hidden — see the Fabric twin.
-                    if (replacedCells[0] > 0) {
-                        var manager = PaperXrayMaskManager.current();
-                        if (manager != null) manager.countMaskedSection();
-                    }
+                maskedSections[i] = masked;
+                // Count only when cells were actually hidden — see the Fabric twin.
+                if (masked != section && replacedCells[0] > 0) {
+                    var manager = PaperXrayMaskManager.current();
+                    if (manager != null) manager.countMaskedSection();
                 }
             }
         }
 
-        // Second pass: serialize to wire format
-        var buf = new FriendlyByteBuf(Unpooled.buffer(parsed.size() * 1024));
+        // Second pass: serialize to wire format, into an EXACTLY-sized buffer — see the
+        // Fabric twin (zero netty growth; the backing array IS the payload on the exact
+        // path; a mismatch falls back to the copy, never to wrong bytes).
+        int size = VarInt.getByteSize(parsed.size());
+        for (int i = 0; i < parsed.size(); i++) {
+            var p = parsed.get(i);
+            size += 1 // sectionY byte
+                    + (maskedSections != null
+                            ? maskedSections[i].getSerializedSize()
+                            : 4 + p.states().getSerializedSize() + p.biomes().getSerializedSize())
+                    + 1 + (p.litByBlock() ? 2048 : 0)
+                    + 1 + (p.litBySky() ? 2048 : 0);
+        }
+
+        var buf = new FriendlyByteBuf(Unpooled.buffer(size));
         try {
             buf.writeVarInt(parsed.size());
-            for (var p : parsed) {
-                buf.writeByte(p.sectionY);
-                p.section.write(buf);
+            for (int i = 0; i < parsed.size(); i++) {
+                var p = parsed.get(i);
+                buf.writeByte(p.sectionY());
+                if (maskedSections != null) {
+                    maskedSections[i].write(buf);
+                } else {
+                    // Headless section write — exactly LevelChunkSection.write's shape:
+                    // the two count shorts, then the two containers.
+                    buf.writeShort(p.nonEmptyCount());
+                    buf.writeShort(p.fluidCount());
+                    p.states().write(buf);
+                    p.biomes().write(buf);
+                }
 
                 // All-zero layers are skipped to match the live serializer exactly (mirrors
                 // Fabric's NbtSectionSerializer): "absent" means all-zero on the wire, and
                 // vanilla saves the light engine's allocated-but-zeroed arrays, which would
                 // otherwise make disk serves byte-diverge from live serves of identical content.
-                boolean hasBlockLight = p.blockLight.length == 2048 && hasNonZeroNibble(p.blockLight);
-                buf.writeBoolean(hasBlockLight);
-                if (hasBlockLight) {
-                    buf.writeBytes(p.blockLight);
+                buf.writeBoolean(p.litByBlock());
+                if (p.litByBlock()) {
+                    buf.writeBytes(p.blockLight());
                 }
 
-                boolean hasSkyLight = p.skyLight.length == 2048 && hasNonZeroNibble(p.skyLight);
-                buf.writeBoolean(hasSkyLight);
-                if (hasSkyLight) {
-                    buf.writeBytes(p.skyLight);
+                buf.writeBoolean(p.litBySky());
+                if (p.litBySky()) {
+                    buf.writeBytes(p.skyLight());
                 }
             }
 
+            if (buf.writerIndex() == size && buf.arrayOffset() == 0 && buf.array().length == size) {
+                return buf.array();
+            }
+            SIZE_MISMATCH_FALLBACKS.incrementAndGet();
+            if (SIZE_MISMATCH_WARNED.compareAndSet(false, true)) {
+                LSSLogger.warn("Exact column pre-size mismatched written bytes (expected "
+                        + size + ", wrote " + buf.writerIndex()
+                        + ") — falling back to a copy; bytes are unaffected");
+            }
             byte[] result = new byte[buf.readableBytes()];
             buf.readBytes(result);
             return result;
@@ -209,10 +274,10 @@ final class PaperNbtSectionSerializer {
     }
 
     /**
-     * Parse a section NBT tag into a LevelChunkSection.
+     * Parse a section NBT tag into a headless {@link ParsedSection}.
      * Returns null if the section has no block states or only air (and no block light).
      */
-    private static LevelChunkSection parseSection(
+    private static ParsedSection parseSection(
             CompoundTag sectionTag, int sectionY,
             Codec<PalettedContainer<BlockState>> blockStateCodec,
             Codec<PalettedContainerRO<Holder<Biome>>> biomeCodec,
@@ -221,10 +286,12 @@ final class PaperNbtSectionSerializer {
 
         var blockStatesOpt = sectionTag.getCompound("block_states");
         PalettedContainer<BlockState> blockStates;
+        boolean knownAir = false;
         if (blockStatesOpt.isEmpty()) {
             // Vanilla's light-only cap entries (heightmap+1) carry SkyLight but no
             // block_states — exactly the boundary layers the fix serves.
             blockStates = factory.createForBlockStates();
+            knownAir = true;
         } else {
             var blockStatesResult = blockStateCodec.parse(NbtOps.INSTANCE, blockStatesOpt.get());
             // Vanilla-lenient (resultOrPartial) — see the Fabric twin: a recoverable
@@ -244,38 +311,90 @@ final class PaperNbtSectionSerializer {
             }
         }
 
-        PalettedContainerRO<Holder<Biome>> biomes;
+        PalettedContainerRO<Holder<Biome>> biomes = null;
         var optBiomes = sectionTag.getCompound("biomes");
         if (optBiomes.isPresent()) {
             var biomesResult = biomeCodec.parse(NbtOps.INSTANCE, optBiomes.get());
             biomes = biomesResult.result().orElse(null);
-        } else {
-            biomes = null;
+        }
+        if (biomes == null) {
+            biomes = factory.createForBiomes();
         }
 
-        LevelChunkSection section;
-        if (biomes instanceof PalettedContainer<Holder<Biome>> biomeContainer) {
-            section = new LevelChunkSection(blockStates, biomeContainer);
-        } else {
-            section = new LevelChunkSection(blockStates, factory.createForBiomes());
+        int counts = knownAir ? 0 : countNonEmptyAndFluid(blockStates);
+        int nonEmpty = counts >>> 16, fluid = counts & 0xFFFF;
+
+        boolean litByBlock = blockLightData.length == 2048 && hasNonZeroNibble(blockLightData);
+        boolean litBySky = skyLightData.length == 2048 && hasNonZeroNibble(skyLightData);
+
+        if (nonEmpty == 0 && !litByBlock && !litBySky) {
+            return null;
         }
 
-        if (section.hasOnlyAir()) {
-            boolean litByBlock = blockLightData.length == 2048 && hasNonZeroNibble(blockLightData);
-            boolean litBySky = skyLightData.length == 2048 && hasNonZeroNibble(skyLightData);
-            if (!litByBlock && !litBySky) {
-                return null;
+        return new ParsedSection(sectionY, blockStates, biomes, nonEmpty, fluid,
+                blockLightData, skyLightData, litByBlock, litBySky);
+    }
+
+    /**
+     * The two wire count headers, packed {@code (nonEmpty << 16) | fluid} — see the Fabric
+     * twin (BlockCounter semantics minus the ticking counts; histogram instead of the
+     * per-cell recount). {@code states.data} is public on Paper (Moonrise patch); the
+     * container is thread-confined (freshly parsed on this reader thread).
+     */
+    static int countNonEmptyAndFluid(PalettedContainer<BlockState> states) {
+        var data = states.data;
+        var palette = data.palette();
+        var storage = data.storage();
+        int n = palette.getSize();
+        int nonEmpty = 0, fluid = 0;
+        if (n == 1) {
+            var s = palette.valueFor(0);
+            if (!s.isAir()) {
+                int c = storage.getSize();
+                nonEmpty = c;
+                if (!s.getFluidState().isEmpty()) fluid = c;
             }
+        } else if (n <= 4096) {
+            int[] hist = new int[n];
+            storage.getAll(id -> hist[id]++);
+            for (int i = 0; i < n; i++) {
+                int c = hist[i];
+                if (c == 0) continue;
+                var s = palette.valueFor(i);
+                if (!s.isAir()) {
+                    nonEmpty += c;
+                    if (!s.getFluidState().isEmpty()) fluid += c;
+                }
+            }
+        } else {
+            // Global palette (getSize() is registry-sized): rare on disk — count through
+            // vanilla's own path rather than allocating a registry-sized histogram.
+            int[] acc = new int[2];
+            states.count((state, c) -> {
+                if (!state.isAir()) {
+                    acc[0] += c;
+                    if (!state.getFluidState().isEmpty()) acc[1] += c;
+                }
+            });
+            nonEmpty = acc[0];
+            fluid = acc[1];
         }
-
-        return section;
+        return (nonEmpty << 16) | fluid;
     }
 
     private static boolean hasNonZeroNibble(byte[] light) {
-        for (byte b : light) {
-            if (b != 0) return true;
-        }
-        return false;
+        // Intrinsified vectorized mismatch — see the Fabric twin. Callers guarantee 2048.
+        return !java.util.Arrays.equals(light, ZERO_NIBBLES);
+    }
+
+    // Static (unlike factoryMemo): the block registry is bootstrap-frozen, so the memoized
+    // element codec and its cache live for the JVM. Arguments mirror
+    // PalettedContainerFactory.create's codecRW call exactly (fuzz + goldens pin it).
+    private static final class BlockCodecHolder {
+        static final Codec<PalettedContainer<BlockState>> CODEC = PalettedContainer.codecRW(
+                new PaperMemoizedNbtCodec<>(BlockState.CODEC, 1 << 16),
+                Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY),
+                Blocks.AIR.defaultBlockState());
     }
 
     // PalettedContainerFactory.create builds two strategies + codecs per call — measurable
