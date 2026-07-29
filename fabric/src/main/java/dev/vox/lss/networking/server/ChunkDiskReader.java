@@ -49,9 +49,18 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
     // foreground path with the adaptive throttle engaged. Never cleared — no flapping.
     private volatile boolean backgroundIncompatible = false;
 
+    private final boolean useNbtTranscode;
+
+    /** Convenience for tests/gametests: production defaults for the serialize path
+     *  (transcode ON — the {@code useNbtTranscode} default). */
     public ChunkDiskReader(int threadCount, boolean useBackgroundReadPriority) {
+        this(threadCount, useBackgroundReadPriority, true);
+    }
+
+    public ChunkDiskReader(int threadCount, boolean useBackgroundReadPriority, boolean useNbtTranscode) {
         super(threadCount);
         this.useBackgroundReadPriority = useBackgroundReadPriority;
+        this.useNbtTranscode = useNbtTranscode;
     }
 
     public void submitReadDirect(UUID playerUuid, String dimension, ServerLevel level,
@@ -73,7 +82,7 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
         int maxSectionY = level.getMaxSectionY();
         submitRead(playerUuid, chunkX, chunkZ, dimension, submissionOrder,
                 () -> NbtSectionSerializer.readAndSerializeSections(read, registryAccess, chunkX, chunkZ,
-                        maskEntry, minSectionY, maxSectionY));
+                        maskEntry, minSectionY, maxSectionY, this.useNbtTranscode));
     }
 
     /**

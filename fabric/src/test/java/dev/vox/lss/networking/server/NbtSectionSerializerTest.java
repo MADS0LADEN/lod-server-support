@@ -1046,6 +1046,176 @@ class NbtSectionSerializerTest {
         return s;
     }
 
+    // ---- Round-2 transcode equivalence (2026-07-29): the transcoder and the object path
+    // may never disagree on a byte — these drive BOTH flag values through the full
+    // serialize and compare, across every palette tier and the fallback rungs.
+
+    /**
+     * The transcode equivalence fuzz: randomized sections spanning every palette tier
+     * (single, 4-bit linear, 5-8-bit hashmap, >256 Global fallback) and biome width
+     * (single through 3-bit linear, >8 global fallback) must serialize byte-identically
+     * with {@code useNbtTranscode} true and false.
+     */
+    @Test
+    void transcodeAndObjectPathsMatchForRandomizedSections() {
+        var narrowPool = List.of(
+                Blocks.AIR.defaultBlockState(),
+                Blocks.STONE.defaultBlockState(),
+                Blocks.WATER.defaultBlockState(),
+                Blocks.LAVA.defaultBlockState(),
+                Blocks.SEAGRASS.defaultBlockState(),
+                Blocks.OAK_STAIRS.defaultBlockState()
+                        .setValue(BlockStateProperties.WATERLOGGED, true),
+                Blocks.CAVE_AIR.defaultBlockState(),
+                Blocks.DEEPSLATE.defaultBlockState());
+        var widePool = new ArrayList<net.minecraft.world.level.block.state.BlockState>();
+        for (var block : List.of(Blocks.OAK_STAIRS, Blocks.SPRUCE_STAIRS, Blocks.BIRCH_STAIRS,
+                Blocks.JUNGLE_STAIRS)) {
+            widePool.addAll(block.getStateDefinition().getPossibleStates());
+        }
+        var biomeRegistry = REGISTRY_ACCESS.lookupOrThrow(Registries.BIOME);
+        var allBiomes = List.of(Biomes.PLAINS, Biomes.DESERT, Biomes.JUNGLE, Biomes.SNOWY_TAIGA,
+                Biomes.SWAMP, Biomes.TAIGA, Biomes.SAVANNA, Biomes.BADLANDS, Biomes.BEACH,
+                Biomes.RIVER);
+        var rng = new java.util.Random(20260730L);
+        for (int round = 0; round < 32; round++) {
+            var pool = round % 8 < 6 ? narrowPool : widePool;
+            int placements = switch (round % 4) {
+                case 0 -> 1;
+                case 1 -> 64;
+                case 2 -> 2048;
+                default -> 4096;
+            };
+            var states = FACTORY.createForBlockStates();
+            for (int i = 0; i < placements; i++) {
+                int cell = rng.nextInt(4096);
+                states.set(cell & 15, (cell >> 8) & 15, (cell >> 4) & 15,
+                        pool.get(rng.nextInt(pool.size())));
+            }
+            var biomes = FACTORY.createForBiomes();
+            int biomeWidth = 1 + round % 10;
+            for (int q = 0; q < 64; q++) {
+                biomes.set(q & 3, (q >> 4) & 3, (q >> 2) & 3,
+                        biomeRegistry.getOrThrow(allBiomes.get(rng.nextInt(biomeWidth))));
+            }
+            var chunk = chunkNbt("minecraft:full", sectionFrom(4, states, biomes));
+            byte[] transcoded = NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS,
+                    null, Integer.MIN_VALUE, Integer.MAX_VALUE, true);
+            byte[] object = NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS,
+                    null, Integer.MIN_VALUE, Integer.MAX_VALUE, false);
+            assertArrayEquals(object, transcoded, "round " + round);
+        }
+    }
+
+    @Test
+    void renamedPaletteEntryTranscodesIdenticallyToTheObjectPath() {
+        // The air-substitution rung the transcoder handles ITSELF (no fallback): unknown
+        // entries resolve to air meta through the memo's hardError rung, in place; the
+        // bytes must equal the object path's orElsePartial substitution exactly.
+        var sec = new LevelChunkSection(FACTORY);
+        sec.setBlockState(0, 0, 0, Blocks.STONE.defaultBlockState());
+        sec.setBlockState(1, 0, 0, Blocks.DIRT.defaultBlockState());
+        var s = sectionNbtFor(1, sec);
+        var palette = s.getCompound("block_states").orElseThrow().getList("palette").orElseThrow();
+        boolean renamed = false;
+        for (var e : palette) {
+            var pe = (CompoundTag) e;
+            if ("minecraft:dirt".equals(pe.getStringOr("Name", ""))) {
+                pe.putString("Name", "lss:renamed_away");
+                renamed = true;
+            }
+        }
+        assertTrue(renamed, "premise: the dirt palette entry was renamed");
+        var chunk = chunkNbt("minecraft:full", s);
+        byte[] transcoded = NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS,
+                null, Integer.MIN_VALUE, Integer.MAX_VALUE, true);
+        byte[] object = NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS,
+                null, Integer.MIN_VALUE, Integer.MAX_VALUE, false);
+        assertArrayEquals(object, transcoded);
+        assertTrue(transcoded.length > 0, "the substituted section still serves");
+    }
+
+    @Test
+    void dataLengthMismatchCondemnsTheColumnOnBothPaths() {
+        // SimpleBitStorage's exact-length rule: a 2-entry palette needs exactly 256
+        // longs; 255 is structural corruption with no partial — the whole column is an
+        // authoritative miss on the object path, and the transcoder's fallback rung must
+        // land on the same outcome, never silently re-derive.
+        var states = FACTORY.createForBlockStates();
+        states.set(0, 0, 0, Blocks.STONE.defaultBlockState());
+        var s = sectionFrom(0, states, FACTORY.createForBiomes());
+        var bs = s.getCompound("block_states").orElseThrow();
+        long[] data = bs.getLongArray("data").orElseThrow();
+        bs.putLongArray("data", Arrays.copyOf(data, data.length - 1));
+        var chunk = chunkNbt("minecraft:full", s, sectionNbt(2, true, true, null, null));
+        assertNull(NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS,
+                null, Integer.MIN_VALUE, Integer.MAX_VALUE, true));
+        assertNull(NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS,
+                null, Integer.MIN_VALUE, Integer.MAX_VALUE, false));
+    }
+
+    @Test
+    void strayDataOnASingleEntryPaletteIsIgnoredOnBothPaths() {
+        // ZeroBitStorage: a 1-entry palette ignores any data tag on disk (the bits-0
+        // branch never reads it) — zero longs reach the wire on both paths.
+        var states = FACTORY.createForBlockStates();
+        for (int y = 0; y < 16; y++)
+            for (int z = 0; z < 16; z++)
+                for (int x = 0; x < 16; x++)
+                    states.set(x, y, z, Blocks.STONE.defaultBlockState());
+        var s = sectionFrom(0, states, FACTORY.createForBiomes());
+        var bs = s.getCompound("block_states").orElseThrow();
+        assertTrue(bs.getLongArray("data").isEmpty(), "premise: a single palette packs no data");
+        bs.putLongArray("data", new long[]{-1L, 123L});
+        var chunk = chunkNbt("minecraft:full", s);
+        byte[] transcoded = NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS,
+                null, Integer.MIN_VALUE, Integer.MAX_VALUE, true);
+        byte[] object = NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS,
+                null, Integer.MIN_VALUE, Integer.MAX_VALUE, false);
+        assertArrayEquals(object, transcoded);
+        assertEquals(Blocks.STONE.defaultBlockState(),
+                decode(transcoded).get(0).section().getBlockState(5, 5, 5));
+    }
+
+    @Test
+    void maskedColumnMixesTranscodedAndFallbackSectionsByteIdentically() {
+        // Under a mask, sections split by the pre-gate: ore-bearing below the cutoff go
+        // to the object fallback and get masked; ore-free or above-cutoff sections
+        // transcode (mask() provably no-ops on them). The mixed column must byte-match
+        // the all-object path, the hidden ore must be gone, and the above-cutoff ore
+        // must stay real (the height-gate pin).
+        var ore = FACTORY.createForBlockStates();
+        var clean = FACTORY.createForBlockStates();
+        var high = FACTORY.createForBlockStates();
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) {
+                ore.set(x, 0, z, Blocks.STONE.defaultBlockState());
+                clean.set(x, 0, z, Blocks.STONE.defaultBlockState());
+                high.set(x, 0, z, Blocks.STONE.defaultBlockState());
+            }
+        }
+        ore.set(3, 0, 3, Blocks.DIAMOND_ORE.defaultBlockState());
+        high.set(1, 0, 1, Blocks.DIAMOND_ORE.defaultBlockState());
+        var entry = new XrayMaskManager.MaskEntry(
+                XrayMaskFilter.MaskSet.resolve(List.of("diamond_ore"), 32),
+                dev.vox.lss.common.XrayMaskPolicy.FallbackKind.OVERWORLD, "test");
+        var chunk = chunkNbt("minecraft:full",
+                sectionFrom(0, ore, FACTORY.createForBiomes()),
+                sectionFrom(1, clean, FACTORY.createForBiomes()),
+                sectionFrom(4, high, FACTORY.createForBiomes()));
+        byte[] transcoded = NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS,
+                entry, Integer.MIN_VALUE, Integer.MAX_VALUE, true);
+        byte[] object = NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS,
+                entry, Integer.MIN_VALUE, Integer.MAX_VALUE, false);
+        assertArrayEquals(object, transcoded, "mixed masked column must byte-match the object path");
+        var sections = decode(transcoded);
+        assertEquals(3, sections.size());
+        assertEquals(Blocks.STONE.defaultBlockState(), sections.get(0).section().getBlockState(3, 0, 3),
+                "the below-cutoff ore is masked to the dominant state");
+        assertEquals(Blocks.DIAMOND_ORE.defaultBlockState(), sections.get(2).section().getBlockState(1, 0, 1),
+                "the above-cutoff ore stays real (height gate)");
+    }
+
     /** The exact pre-size must never fall back to the copy path — a mismatch means
      *  {@code getSerializedSize} drifted from {@code write} and the zero-copy steal died. */
     @Test

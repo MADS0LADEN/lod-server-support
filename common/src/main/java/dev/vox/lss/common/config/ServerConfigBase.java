@@ -58,6 +58,18 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public boolean useBackgroundReadPriority = true;
     /**
+     * When true (default), disk-read column serving transcodes region NBT straight into
+     * wire bytes — palette ids and bit-storage longs copied verbatim off the NBT — instead
+     * of decoding every section into PalettedContainer objects and re-serializing them
+     * (docs/planning/nbt-transcode-design.md). Byte-identical output (golden corpus +
+     * live/disk parity gates); exotic shapes (>256-entry block palettes, >8-entry biome
+     * palettes, malformed data, x-ray-mask-needing sections) fall back per section to the
+     * object path automatically. Set false to force EVERY section through the object path
+     * (the pre-round-2 behavior) as a rollback. No clamp: a boolean has no out-of-range
+     * value.
+     */
+    public boolean useNbtTranscode = true;
+    /**
      * When true (default), clients running the legacy protocol-16 mod (v0.6.x) get a
      * translated LOD session through the v16 compat shim (docs/planning/v16-compat-design.md)
      * instead of the silent version-mismatch no-session. Inert for current-protocol clients;

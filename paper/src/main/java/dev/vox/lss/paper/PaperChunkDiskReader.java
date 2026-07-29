@@ -24,9 +24,18 @@ public class PaperChunkDiskReader extends AbstractChunkDiskReader {
 
     private final boolean useBackgroundReadPriority;
 
+    private final boolean useNbtTranscode;
+
+    /** Convenience for tests: production defaults for the serialize path
+     *  (transcode ON — the {@code useNbtTranscode} default). */
     public PaperChunkDiskReader(int threadCount, boolean useBackgroundReadPriority) {
+        this(threadCount, useBackgroundReadPriority, true);
+    }
+
+    public PaperChunkDiskReader(int threadCount, boolean useBackgroundReadPriority, boolean useNbtTranscode) {
         super(threadCount);
         this.useBackgroundReadPriority = useBackgroundReadPriority;
+        this.useNbtTranscode = useNbtTranscode;
     }
 
     void setReadOverride(PaperNbtSectionSerializer.ChunkNbtRead read) {
@@ -53,7 +62,7 @@ public class PaperChunkDiskReader extends AbstractChunkDiskReader {
         int maxSectionY = level.getMaxSectionY();
         submitRead(playerUuid, chunkX, chunkZ, dimension, submissionOrder,
                 () -> PaperNbtSectionSerializer.readAndSerializeSections(read, registryAccess, chunkX, chunkZ,
-                        maskEntry, minSectionY, maxSectionY));
+                        maskEntry, minSectionY, maxSectionY, this.useNbtTranscode));
     }
 
     /**

@@ -255,6 +255,14 @@ class ConfigValidationTest {
                 "background read priority must default on");
     }
 
+    /** Disk serves transcode NBT straight to wire bytes out of the box; false is the
+     *  documented rollback to the per-section object path (round 2, 2026-07-29). */
+    @Test
+    void nbtTranscodeDefaultsOn() {
+        assertTrue(serverConfig().useNbtTranscode,
+                "NBT transcode must default on");
+    }
+
     // --- LSSClientConfig ---
 
     private LSSClientConfig clientConfig() {

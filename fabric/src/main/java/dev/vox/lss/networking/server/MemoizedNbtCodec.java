@@ -10,6 +10,7 @@ import net.minecraft.nbt.Tag;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.ToLongFunction;
 
 /**
  * Decode-memoizing codec wrapper for the disk-read serve path (2026-07-29 profile:
@@ -24,6 +25,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * container codec's leniency wrapper and the caller's {@code resultOrPartial} warn run
  * per parse, above this cache, so a cached error behaves exactly like a fresh one.
  *
+ * <p>Round 2 extends each cached entry with the NBT->wire transcoder's per-entry meta
+ * ({@link Cached#globalId()}/{@link Cached#isAir()}/{@link Cached#hasFluid()}), resolved
+ * from the value vanilla's {@code orElsePartial} leniency would put in the container: the
+ * decoded value, its partial, or the codec default on a hard (no-partial) failure — whose
+ * message rides {@link Cached#hardError()} so the transcoder can mirror the section-level
+ * substitution warn. {@link #resolve} is the transcoder's palette-id resolver; the codec
+ * {@link #decode} path shares the same cache and decode-once semantics.
+ *
  * <p>Thread-safe (ConcurrentHashMap; used from the LSS reader pool). Insertions stop at
  * {@code cap} — pathological modded worlds with unbounded distinct palette entries keep
  * decoding through the delegate rather than growing the map (warned once).
@@ -31,14 +40,87 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p>Textual twin of Paper's {@code PaperMemoizedNbtCodec} — keep in lockstep.
  */
 final class MemoizedNbtCodec<A> implements Codec<A> {
+
+    /**
+     * One decoded palette entry: the codec-path result plus the transcoder's resolved
+     * meta, packed {@code (globalId << 2) | (hasFluid << 1) | isAir} of the value the
+     * container would hold after vanilla's element leniency. {@code hardError} is the
+     * no-partial failure message (null for clean/partial decodes) — the transcoder
+     * substitutes the default and mirrors the object path's throttled warn off it.
+     */
+    record Cached<A>(DataResult<Pair<A, Tag>> result, long meta, String hardError) {
+        int globalId() {
+            return (int) (this.meta >>> 2);
+        }
+
+        boolean isAir() {
+            return (this.meta & 1L) != 0;
+        }
+
+        boolean hasFluid() {
+            return (this.meta & 2L) != 0;
+        }
+    }
+
+    /** Packs the transcoder meta; the twins' construction sites feed it identically. */
+    static long packMeta(int globalId, boolean isAir, boolean hasFluid) {
+        return ((long) globalId << 2) | (hasFluid ? 2L : 0L) | (isAir ? 1L : 0L);
+    }
+
     private final Codec<A> delegate;
     private final int cap;
-    private final ConcurrentHashMap<Tag, DataResult<Pair<A, Tag>>> memo = new ConcurrentHashMap<>();
+    private final ToLongFunction<A> metaFn;
+    private final long defaultMeta;
+    private final ConcurrentHashMap<Tag, Cached<A>> memo = new ConcurrentHashMap<>();
     private final AtomicBoolean capWarned = new AtomicBoolean();
 
-    MemoizedNbtCodec(Codec<A> delegate, int cap) {
+    /**
+     * @param defaultValue the container codec's element default (the {@code codecRW}
+     *     argument — air for block states): a hard entry failure resolves to ITS meta,
+     *     exactly what {@code orElsePartial} substitutes into the container.
+     * @param metaFn derives the packed transcoder meta from a decoded value
+     */
+    MemoizedNbtCodec(Codec<A> delegate, int cap, A defaultValue, ToLongFunction<A> metaFn) {
         this.delegate = delegate;
         this.cap = cap;
+        this.metaFn = metaFn;
+        this.defaultMeta = metaFn.applyAsLong(defaultValue);
+    }
+
+    /** The transcoder's palette-entry resolver — same cache, same decode-once semantics
+     *  as the codec path. Never returns null. */
+    Cached<A> resolve(Tag tag) {
+        var hit = this.memo.get(tag);
+        return hit != null ? hit : decodeAndCache(tag);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Cached<A> decodeAndCache(Tag tag) {
+        var fresh = (DataResult<Pair<A, Tag>>) (DataResult<?>) this.delegate.decode(NbtOps.INSTANCE, tag);
+        if (this.memo.size() < this.cap) {
+            Tag key = tag.copy();
+            // Normalize the remainder to the cached key so the entry doesn't pin the
+            // first caller's whole chunk NBT alive (map() applies to partials too).
+            var cached = toCached(fresh.map(pair -> Pair.of(pair.getFirst(), key)));
+            this.memo.put(key, cached);
+            return cached;
+        }
+        if (this.capWarned.compareAndSet(false, true)) {
+            LSSLogger.warn("Palette decode memo reached its cap (" + this.cap
+                    + " distinct entries) — further entries decode uncached");
+        }
+        return toCached(fresh);
+    }
+
+    private Cached<A> toCached(DataResult<Pair<A, Tag>> result) {
+        String[] err = new String[1];
+        var value = result.resultOrPartial(msg -> err[0] = msg).map(Pair::getFirst);
+        // A partial (value present, err set) is what orElsePartial turns into a clean
+        // success — its message never reaches the section warn, so hardError stays null.
+        return value.isPresent()
+                ? new Cached<>(result, this.metaFn.applyAsLong(value.get()), null)
+                : new Cached<>(result, this.defaultMeta,
+                        err[0] == null ? "unrecoverable palette entry" : err[0]);
     }
 
     @Override
@@ -48,25 +130,7 @@ final class MemoizedNbtCodec<A> implements Codec<A> {
         if (ops != NbtOps.INSTANCE || !(input instanceof Tag tag)) {
             return this.delegate.decode(ops, input);
         }
-        var hit = this.memo.get(tag);
-        if (hit == null) {
-            var fresh = this.delegate.decode(ops, input);
-            if (this.memo.size() < this.cap) {
-                Tag key = tag.copy();
-                // Normalize the remainder to the cached key so the entry doesn't pin the
-                // first caller's whole chunk NBT alive (map() applies to partials too).
-                hit = ((DataResult<Pair<A, Tag>>) (DataResult<?>) fresh)
-                        .map(pair -> Pair.of(pair.getFirst(), key));
-                this.memo.put(key, hit);
-            } else {
-                if (this.capWarned.compareAndSet(false, true)) {
-                    LSSLogger.warn("Palette decode memo reached its cap (" + this.cap
-                            + " distinct entries) — further entries decode uncached");
-                }
-                hit = (DataResult<Pair<A, Tag>>) (DataResult<?>) fresh;
-            }
-        }
-        return (DataResult<Pair<A, T>>) (DataResult<?>) hit;
+        return (DataResult<Pair<A, T>>) (DataResult<?>) resolve(tag).result();
     }
 
     @Override

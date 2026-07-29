@@ -103,6 +103,13 @@ final class PaperXrayMaskFilter {
             return sid >= 0 && sid < this.hiddenByStateId.length && this.hiddenByStateId[sid];
         }
 
+        /** Id-level twin of {@link #contains} for the transcoder's palette pre-gate —
+         *  the descriptor pass holds global state ids, not {@code BlockState} objects.
+         *  Same array, same answer: the two can never disagree. */
+        boolean containsId(int stateId) {
+            return stateId >= 0 && stateId < this.hiddenByStateId.length && this.hiddenByStateId[stateId];
+        }
+
         /** True when no block id resolved — masking no-ops rather than serving a false sense of cover. */
         boolean isEmpty() {
             return this.resolvedBlocks == 0;
