@@ -107,7 +107,7 @@ class PaperConfigLoadTest {
         assertTrue(c.enabled);
         assertEquals(20_971_520, c.bytesPerSecondLimitPerPlayer);
         assertEquals(5, c.diskReaderThreads);
-        assertEquals(4000, c.sendQueueLimitPerPlayer);
+        assertEquals(1024, c.sendQueueLimitPerPlayer);
         assertEquals(104_857_600, c.bytesPerSecondLimitGlobal);
         assertTrue(c.enableChunkGeneration);
         assertEquals(32, c.generationConcurrencyLimitGlobal);

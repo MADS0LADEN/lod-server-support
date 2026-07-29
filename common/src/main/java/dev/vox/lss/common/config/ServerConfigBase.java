@@ -17,7 +17,19 @@ public abstract class ServerConfigBase extends JsonConfig {
     public int lodDistanceChunks = 256;
     public int bytesPerSecondLimitPerPlayer = 20_971_520;
     public int diskReaderThreads = 5;
-    public int sendQueueLimitPerPlayer = 4000;
+    /**
+     * Per-player send-queue cap. The default is the wire batch cap: under v17 replace
+     * semantics a player's backlog is at most ONE wire batch, and a payload only enqueues
+     * for an admitted backlog position, so enqueued payloads per player structurally
+     * cannot exceed MAX_BATCH_CHUNK_REQUESTS — at this default the router's queue gate is
+     * unreachable for any legal client (compliant v17 clients declare WANT_SET_BUDGET=800,
+     * the v16 shim's synthetic want-set caps at the same 800) and the queue bounds
+     * worst-case buffered-payload RAM at ~one batch per player. Deliberately still config:
+     * ops can shrink it (the gated regime measured harmless — same throughput/CPU,
+     * exactly-once reads; docs/planning/disk-read-profile-2026-07-29.md) or raise it for
+     * future multi-batch shapes.
+     */
+    public int sendQueueLimitPerPlayer = LSSConstants.MAX_BATCH_CHUNK_REQUESTS;
     public int bytesPerSecondLimitGlobal = 104_857_600;
     public boolean enableChunkGeneration = true;
     public int generationConcurrencyLimitGlobal = 32;
