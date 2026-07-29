@@ -42,6 +42,13 @@ dependencies {
     include project(':common')
     compileOnly "maven.modrinth:sodium:mc26.2-0.9.1-beta.3-fabric"
     compileOnly "maven.modrinth:modmenu:20.0.0-beta.4"
+    // Benchmark A/B arm: -Pbenchmark.c2me=true puts C2ME on the dev runtime (Loom remaps the
+    // same Modrinth version test-server.sh installs), so the disk-read profile can measure the
+    // chunk-IO-overhaul fallback path (adaptive read throttle) against the vanilla IOWorker
+    // background-priority path. Runtime-only: release jars and normal builds are unaffected.
+    if ((findProperty('benchmark.c2me') ?: 'false').toString() == 'true') {
+        localRuntime "maven.modrinth:c2me-fabric:nvOkOiyi"
+    }
 }
 
 test {
