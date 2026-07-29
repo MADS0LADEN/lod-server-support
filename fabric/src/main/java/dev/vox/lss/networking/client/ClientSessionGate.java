@@ -126,6 +126,10 @@ final class ClientSessionGate {
         if (!hasConsumers) return;
 
         try {
+            // Mark-before-send: the wire's sourceless-column arming keys on the LAST version
+            // this client announced (V16ClientWire.markAnnouncedVersion), and the mark must be
+            // visible to the netty thread before any reply can arrive (wire causality).
+            V16ClientWire.markAnnouncedVersion(LSSConstants.PROTOCOL_VERSION);
             this.handshakeSender.accept(LSSConstants.PROTOCOL_VERSION);
             // Arm the discovery fallback only after the v18 handshake actually went out. On a
             // send throw (vanilla / no-LSS server) there is nothing to re-discover, so leave it
@@ -152,6 +156,9 @@ final class ClientSessionGate {
                 + " ticks — retrying handshake as protocol " + LSSConstants.V16_COMPAT_PROTOCOL_VERSION
                 + " (legacy-server discovery)");
         try {
+            // Mark-before-send: only this announce enables the wire's sourceless-column
+            // arming for the v16 reply that follows (see V16ClientWire).
+            V16ClientWire.markAnnouncedVersion(LSSConstants.V16_COMPAT_PROTOCOL_VERSION);
             this.handshakeSender.accept(LSSConstants.V16_COMPAT_PROTOCOL_VERSION);
         } catch (Exception e) {
             LSSLogger.debug("v16 fallback handshake send failed: " + e.getMessage());
@@ -192,6 +199,11 @@ final class ClientSessionGate {
                     + "(a raced discovery reply, or a server plugin reload prompting us to "
                     + "re-attach) — re-announcing v18.");
             try {
+                // Mark-before-send: re-asserting v18 also retires any leftover v16 announce
+                // (a raced discovery earlier this connection), so a LATER unsolicited v16
+                // frame — e.g. a second /reload prompt — can never arm sourceless decode
+                // against the re-established v18 stream.
+                V16ClientWire.markAnnouncedVersion(LSSConstants.PROTOCOL_VERSION);
                 this.handshakeSender.accept(LSSConstants.PROTOCOL_VERSION);
             } catch (Exception e) {
                 LSSLogger.debug("v18 re-assert handshake send failed: " + e.getMessage());

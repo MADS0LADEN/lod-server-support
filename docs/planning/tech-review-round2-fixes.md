@@ -201,7 +201,11 @@ The adversarial plan review verified every claim and required these changes:
    load+save fires dirty; the DataVersion-gate alternative was REJECTED (it would turn
    every upgraded-world LOD disc into a generation storm). Biomes stay deliberately
    lenient (whole-container plains fallback). "Healed by reconnect" was overstated:
-   gen-disabled parks re-park on reconnect; the heal is vanilla load+save.
+   gen-disabled parks re-park on reconnect; the heal is vanilla load+save. (Review note:
+   that heal story is FABRIC-shaped — the save mixin fires dirty on any re-save. On
+   Paper a DFU-upgrade re-save fires no default `updateEvents` entry, so the
+   air-substituted residual realistically persists until a player edit touches the
+   chunk. Same class as the documented Paper walk-in-generation revival gap.)
 2. **R2-2:** advance the refill clock by CONSUMED time
    (`lastRefillNanos += refill * NANOS_PER_SECOND / allocation`), not conditionally —
    the conditional variant still truncates up to ~49% at threshold allocations. Name and
@@ -305,3 +309,98 @@ Runtime AntiXray config-reload re-adoption (R2-7 covers only the transient-null 
 Fabric-side /reload analogues (none exist); benchmark exporter throughput source;
 `recordSendCycle` count-at-send semantics (pinned intent — documented instead);
 backports to support lines.
+
+## Post-implementation review round (3 agents, 2026-07-28)
+
+Verdicts: every R2 fix judged correct (some with nits); no CRITICAL. One MAJOR and a
+set of MINOR/NITs, all triaged below. Fixes landed in the follow-up commit(s) on this
+branch.
+
+### MAJOR — fixed (two layers)
+
+**The R2-3 prompt could poison a modern client's column decode (Folia window).**
+`SessionConfigS2CPayload`'s decoder armed `V16ClientWire.columnSourceless` on ANY
+version-16 frame, and the prompt is exactly that — on Folia the prompt (sent from a
+region thread) can interleave the pump's re-registration and land BETWEEN live v18
+columns: every column frame after it misreads the source byte until the v18 config
+reply → trailing bytes → decoder kick of a healthy client. The decoder comment ("we
+only ever RECEIVE this by having announced 16 ourselves") was falsified by R2-3 and
+the design doc's "bounded by the rate limit" claim did not hold (the sweep reset the
+limit on every dimension change).
+
+- **Client root fix**: arming is now ANNOUNCE-GATED — `V16ClientWire.markAnnouncedVersion`
+  is written (main thread, volatile, mark-before-send) at every handshake send in
+  `ClientSessionGate`; `observeSessionConfigVersion` arms only when the client itself
+  last announced 16 (the discovery fallback — the only flow where a v16 config preludes
+  a genuine source-less stream). The guard's v18 re-assert retires a raced-discovery
+  announce, so no later unsolicited v16 frame can ever arm. Pinned:
+  `unsolicitedV16SessionConfigDoesNotArmTheSourcelessFlag` (decode-level, with a live
+  v18 column behind the prompt), `discoveryFallbackAnnounceEnablesSourcelessArming` +
+  `downgradeGuardReassertRetiresTheV16Announce` (gate-level, through production sends).
+- **Server hardening**: `removePlayer` now STAMPS `reattachPromptAt` instead of clearing
+  it — the 60 s interval doubles as a post-removal grace, so the Folia remove→register
+  window cannot prompt at all (and a dimension hop EXTENDS the bound instead of
+  resetting it — the review's finding 2). Quit entries are pruned by a size-bounded
+  sweep (`REATTACH_PROMPT_MAP_BOUND`); a genuine /reload orphan hits the fresh
+  service's empty map and still prompts immediately. Pinned:
+  `removalStampsThePromptGraceSoTheRemoveRegisterWindowNeverPrompts`.
+
+### MINORs/NITs — fixed
+
+- Burst-cap floor (`PlayerBandwidthTracker`): `max(1, alloc/4)` — an allocation under 4
+  B/s (reachable via the global split) had cap 0 and starved forever; pinned by
+  `tinyAllocationsBelowTheBurstDivisorStillAdmitASend` (reds the unfloored code).
+- Range-accessor inclusivity: new Tier-2 pin `worldSectionRangeAccessorsAreInclusive`
+  (`getMaxSectionY - getMinSectionY + 1 == getSectionsCount`) — nothing else reds if a
+  future MC version flips the accessor to exclusive (the 1.20-era `getMaxSection()` was).
+- Amendment 5 was NOT actually implemented: `PaperDiskReaderEnvelopeTest` still used a
+  bare level mock (Mockito [0,0] range — its Y=0 fixtures survived by luck). Now stubs
+  the real [-4, 19].
+- `CommandGameTests` exporter/formatter assertion was tautological post-R2-9 (both sides
+  read TickDiagnostics) with a message claiming independence — now also checks the
+  per-player state's session counter (the genuinely independent site) and says so.
+- `XrayMaskManager`: Mode.OFF no longer pays the ≤100-probe transient window (cached
+  no-mask up front, no engine probe); the 100-probe latch now warns once (inside the
+  computeIfAbsent mapping) saying WHY the fallback cached.
+- The v16 prune-on-dispatch accepted-residual comment (planned in R2-11, never shipped)
+  now sits on `V16CompatManager.onColumnSent`.
+- Comment honesty: the VERSION_MISMATCH "pinned" claim softened on both platforms (only
+  the NO_CONSUMER shape is pinned); `completeAsyncLoad`'s javadoc no longer conflates
+  the vanish flavors R2-8 split; Paper `serializeChunkNbt` javadoc mirrors the Fabric
+  twin's R2-1/R2-5 contract; `PaperWorldHandler`'s warn names the list ITEM type;
+  CLAUDE.md A1-entry key names (`dirty.marked_total`/`dirty.broadcast_positions`) and
+  date corrected; `debtInjected` accumulates (`addAndGet`) so a re-entered gametest
+  step can't mask its original failure.
+
+### Accepted (documented, not fixed)
+
+- **Bisect break** (finding 4): commits 1268df9..a336571 carry a structurally red Tier-2
+  fairness test (re-derived only in 1210c00). Local-only branch; not worth a rebase.
+- **Prompt payload arg-order unpinned** (finding 8): the Tier-1 test injects a recording
+  sender, so `sendReattachPromptPayload` → `sendSessionConfigV16` field order ships
+  covered only by the v16 wire tests of the payload itself.
+- **Per-player diag `rate=`** (finding 12): session-scoped numerator over service-scoped
+  uptime — same class as R2-9 but a per-row fix needs per-state uptime; residual noted.
+- **R2-6 call-site gate transitively pinned** (finding 17): a call-site revert to
+  count-on-swap would stay green; the filter's `replacedCellsOut` contract is the pin.
+- **Condemned-column re-parse churn** (finding 18): a permanently-unparseable column
+  re-parses+warns ~1 Hz until generation resolves; bounded by the 60 s log throttle.
+- **Release-note line to carry** (finding 18): the R2-5 height-cap byte change (dropping
+  the out-of-range light-only max+1 entry) can leave a resync client `up_to_date` on
+  changed canonical bytes until the next edit/rejoin — one-time, self-healing.
+
+### Additions after the two focused reports (R2-1/2/5 and R2-3/4/6/7 agents)
+
+Both reports independently confirmed the sweep's MAJOR (same mechanism, same Folia
+window) and every per-fix verdict; their unique items, landed:
+
+- `outOfRangeGarbageNeverCondemnsAndTheMinSideAlsoGates` (both twins): pins amendment
+  5's gate-before-parse ordering (out-of-range garbage neither condemns nor serves) and
+  the previously-untested min−1 side.
+- `onJoinTearsDownASurvivingManagerBeforeResetting`: the R2-11 defensive branch was
+  executed but unasserted — now pins the report→disconnect→save teardown events.
+- `SharedBandwidthLimiter` class doc names the same-tick N-player overshoot bound
+  (allocation snapshotted once per tick; one payload per player, all carried as debt).
+- `readAndSerializeSections` javadoc (Paper) includes the unparseable→null disposition;
+  the R2-1 heal-story note above gains the Paper-shaped caveat (DFU re-saves fire no
+  default updateEvents entry — the residual persists until a player edit).

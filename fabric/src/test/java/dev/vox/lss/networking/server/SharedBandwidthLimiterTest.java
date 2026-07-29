@@ -187,4 +187,23 @@ class SharedBandwidthLimiterTest {
         assertTrue(sendable,
                 "a sub-truncation-threshold allocation must accumulate to a send within 2s, not starve");
     }
+
+    @Test
+    void tinyAllocationsBelowTheBurstDivisorStillAdmitASend() {
+        // The unfloored burst cap: at allocations under BURST_DIVISOR (4) bytes/s —
+        // reachable via the global split with many active players — alloc/4 == 0 pinned
+        // tokens <= 0 forever, starving the player. The floor of 1 keeps the presence
+        // gate reachable: one token admits one payload, then the debt meters as usual.
+        long[] clock = {0};
+        var tracker = new PlayerBandwidthTracker(() -> clock[0]);
+        final long allocation = 2; // burst cap would be 2/4 == 0 without the floor
+
+        boolean sendable = false;
+        for (int poll = 0; poll < 40 && !sendable; poll++) { // 2 simulated seconds
+            clock[0] += 50_000_000L;
+            sendable = tracker.canSend(allocation);
+        }
+        assertTrue(sendable,
+                "a 2 B/s allocation must admit a send via the burst-cap floor of 1, not starve");
+    }
 }

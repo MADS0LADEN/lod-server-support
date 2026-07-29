@@ -15,6 +15,9 @@ import java.util.function.LongSupplier;
  * gate would deadlock payloads above the refill — but the debt then stalls ALL players'
  * allocations for debt/cap seconds until the refill pays it down. That shared stall is a
  * deliberate fairness change: correct global-cap enforcement over per-player isolation.
+ * Instantaneous bound: the allocation is snapshotted once per tick, so N players can each
+ * land one oversized payload in the tick the debt is incurred — the overshoot is one
+ * payload PER PLAYER, all carried as debt and paid back before anything else ships.
  *
  * <p><b>Thread safety:</b> This class is <b>not</b> thread-safe. All methods must be called
  * from the server tick thread only. Calling from multiple threads will silently corrupt

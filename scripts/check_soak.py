@@ -505,7 +505,7 @@ def law_A1(ps, cs, pc, cc, window):
     retained entry later resolved or was superseded inside the window. It stays a pure
     diagnostic counter.
 
-    LATENT FALSE POSITIVES (documented 2026-07-29, never yet seen live — the A5 latents'
+    LATENT FALSE POSITIVES (documented 2026-07-28, never yet seen live — the A5 latents'
     A1 siblings; see CLAUDE.md's flake catalog): (1) a client transport send that THROWS
     still counts requested_total (count-at-send is pinned — LodRequestManagerTest
     "a failed batch still counts as attempted") with no RHS term — a permanent imbalance

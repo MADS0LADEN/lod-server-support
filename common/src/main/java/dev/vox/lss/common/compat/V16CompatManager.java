@@ -157,7 +157,15 @@ public final class V16CompatManager {
     }
 
     /** Column send seam (MAIN/PUMP, after a successful wire send): the position is
-     *  satisfied-by-data — prune it. Load-bearing (design §4.4). No-op for v18 players. */
+     *  satisfied-by-data — prune it. Load-bearing (design §4.4). No-op for v18 players.
+     *
+     *  <p>Accepted residual (R2-11): pruning keys on SEND success, not client receipt. A
+     *  post-send loss (client decode failure, consumer rejection) is invisible here — the
+     *  synthetic want-set has already dropped the position, so the shim never re-declares
+     *  it. Unlike v18 (where the client's own next scan re-declares any hole), the heal is
+     *  the legacy client's OWN re-request logic (v0.6.2 retries unanswered positions), so
+     *  the hole is bounded by one legacy retry cycle, not permanent. Moving the prune to an
+     *  ack would need a receipt the v16 wire doesn't carry. */
     public void onColumnSent(UUID uuid, long packed) {
         var session = this.sessions.get(uuid);
         if (session != null) session.prune(packed);

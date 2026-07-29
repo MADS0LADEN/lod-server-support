@@ -43,7 +43,9 @@ final class PaperNbtSectionSerializer {
      * Read chunk NBT from disk, verify FULL status, and serialize sections
      * into MC-native wire format. {@code maskEntry} (nullable) is the dimension's x-ray
      * mask, captured by the caller at submit time.
-     * Returns the serialized byte array, or null if the chunk is missing/not FULL/empty.
+     * Returns the serialized byte array, or null if the chunk is missing/not FULL/empty —
+     * or carries a truly-unparseable in-range section (R2-1: the whole column resolves as
+     * an authoritative miss rather than serving with a silent hole).
      */
     static byte[] readAndSerializeSections(ChunkNbtRead read, RegistryAccess registryAccess,
                                             int cx, int cz,
@@ -76,6 +78,14 @@ final class PaperNbtSectionSerializer {
      * Serialize a chunk's NBT (as read from a region file) into MC-native wire format.
      * Returns {@code null} if the chunk is not FULL or has no sections, an empty array if every
      * section is empty, or the serialized section bytes. Package-visible for testing.
+     *
+     * <p>R2-1/R2-5 semantics (mirrors the Fabric twin): a renamed-block section parses via
+     * {@code resultOrPartial} with air substitution (throttled warn); a truly-unparseable
+     * IN-RANGE section returns {@code null} for the WHOLE column — an authoritative miss the
+     * caller escalates to generation, never a partial serve and never a throw. Entries
+     * outside {@code [minSectionY, maxSectionY]} are dropped BEFORE parse and can neither
+     * serve nor condemn the column (vanilla saves light-only entries at blockRange±1; the
+     * range-free overload above stays unbounded for the corpus goldens).
      */
     // LevelChunkSection.write(buf) is @Deprecated on Paper (an anti-xray overload was added),
     // but the 1-arg form is the canonical vanilla serialization and is byte-identical to the

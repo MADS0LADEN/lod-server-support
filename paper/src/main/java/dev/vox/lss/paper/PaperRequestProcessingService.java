@@ -379,7 +379,18 @@ public class PaperRequestProcessingService {
         this.players.remove(uuid);
         this.regionProbeResults.remove(uuid);
         this.heldForProbe.remove(uuid);
-        this.reattachPromptAt.remove(uuid); // quits enqueue a remove unconditionally
+        // STAMP, don't clear: a removal (dimension change on Folia, quit) makes the very
+        // next state==null batch the EXPECTED remove→register race, not an orphan — the
+        // prompt interval doubles as a post-removal grace, so the Folia window can never
+        // fire a spurious prompt at a healthy mid-stream client, and a dimension hop
+        // extends the 60 s bound instead of resetting it. Quit entries are pruned by the
+        // size-bounded sweep below; a genuine orphan (plugin /reload) hits a FRESH map —
+        // the service instance died with the reload — and still prompts immediately.
+        this.reattachPromptAt.put(uuid, System.nanoTime() / 1_000_000L);
+        if (this.reattachPromptAt.size() > REATTACH_PROMPT_MAP_BOUND) {
+            long cutoff = System.nanoTime() / 1_000_000L - REATTACH_PROMPT_INTERVAL_MS;
+            this.reattachPromptAt.values().removeIf(stamp -> stamp < cutoff);
+        }
         this.offThreadProcessor.notifyPlayerRemoved(uuid);
         cleanupPlayerServices(uuid);
         // Resets the v16 want-set + arms the ingress grace. Identity survives (dropped only
@@ -394,8 +405,14 @@ public class PaperRequestProcessingService {
             this.generationService.removePlayer(uuid);
     }
 
-    /** Minimum interval between re-attach prompts per player (see maybeSendReattachPrompt). */
+    /** Minimum interval between re-attach prompts per player — also the post-removal grace
+     *  (removePlayer stamps the map; see maybeSendReattachPrompt). */
     static final long REATTACH_PROMPT_INTERVAL_MS = 60_000;
+
+    /** Prompt-stamp map size that triggers a stale-entry sweep (quit players' entries have
+     *  no per-UUID removal anymore — removals stamp instead). Generous: the map only grows
+     *  via removals and prompts, one Long per UUID. */
+    static final int REATTACH_PROMPT_MAP_BOUND = 256;
 
     /** Test seam: the re-attach prompt send (production: the v16-dialect SessionConfig —
      *  see maybeSendReattachPrompt for why that dialect specifically). */
@@ -413,8 +430,9 @@ public class PaperRequestProcessingService {
                 this.config.generationConcurrencyLimitPerPlayer,
                 this.config.enableChunkGeneration);
     }
-    // Per-UUID last-prompt stamps (millis). Concurrent: batches arrive on region threads on
-    // Folia. Swept in removePlayer (quits enqueue a remove unconditionally).
+    // Per-UUID last-prompt/last-removal stamps (millis). Concurrent: batches arrive on
+    // region threads on Folia. removePlayer STAMPS entries (the post-removal grace) and
+    // size-bounded-sweeps stale ones.
     private final java.util.concurrent.ConcurrentHashMap<UUID, Long> reattachPromptAt =
             new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -435,10 +453,12 @@ public class PaperRequestProcessingService {
      * harmlessly and stays broken-until-rejoin, exactly today's behavior; the v18 4-field
      * shape would buffer-underflow its decoder and hard-kick it.
      *
-     * <p>Rate-limited per UUID (60 s). On Folia a dimension-change remove→register window
-     * can fire one spurious prompt mid-session — bounded by the limit and coinciding with
-     * the client's own dimension reset. Sent directly from the message-handler thread
-     * (netty is any-thread safe — the v16 overflow valve precedent above).
+     * <p>Rate-limited per UUID (60 s), and removePlayer STAMPS the same map, so the Folia
+     * dimension-change remove→register window sits inside a post-removal grace and cannot
+     * fire a spurious prompt at a healthy mid-stream client (the client-side backstop:
+     * V16ClientWire's announce gate keeps even a delivered stray prompt from flipping
+     * column decode). Sent directly from the message-handler thread (netty is any-thread
+     * safe — the v16 overflow valve precedent above).
      */
     private void maybeSendReattachPrompt(ServerPlayer player) {
         var uuid = player.getUUID();

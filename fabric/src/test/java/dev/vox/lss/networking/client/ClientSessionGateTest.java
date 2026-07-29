@@ -473,7 +473,9 @@ class ClientSessionGateTest {
 
     @Test
     void onJoinClearsTheStaticSourcelessDecodeFlag() {
-        V16ClientWire.observeSessionConfigVersion(V16); // a prior v16 session left it armed
+        // A prior v16 session left it armed (announce-then-observe, the genuine flow).
+        V16ClientWire.markAnnouncedVersion(V16);
+        V16ClientWire.observeSessionConfigVersion(V16);
         assertTrue(V16ClientWire.isColumnSourceless());
 
         gate.onJoin(true, false, true, true);
@@ -485,7 +487,28 @@ class ClientSessionGateTest {
     }
 
     @Test
+    void onJoinTearsDownASurvivingManagerBeforeResetting() {
+        // The defensive branch (R2-11): Fabric's lifecycle sends DISCONNECT before the
+        // next JOIN, but if a manager ever survives to onJoin, dropping it without the
+        // full teardown would silently lose its session's cache save. Assert the events,
+        // not just the null-out — a regression to a bare drop stays green otherwise.
+        gate.onSessionConfig(config(V, true), true, true);
+        assertNotNull(gate.getRequestManager(), "premise: a live manager exists");
+        // An undispatched column makes the teardown's report leg observable (the report
+        // fires per queued column, so an empty queue would legitimately skip it).
+        processor.offer(new VoxelColumnS2CPayload(3, -4, dim("overworld"), 1L, new byte[0]), false);
+        events.clear();
+
+        gate.onJoin(true, false, true, true);
+
+        assertEquals(List.of("report", "disconnect", "save"), events,
+                "a surviving manager gets the full teardown (report -> disconnect -> save)");
+        assertNull(gate.getRequestManager(), "the survivor is dropped after teardown");
+    }
+
+    @Test
     void onDisconnectClearsTheStaticSourcelessDecodeFlag() {
+        V16ClientWire.markAnnouncedVersion(V16);
         V16ClientWire.observeSessionConfigVersion(V16);
         assertTrue(V16ClientWire.isColumnSourceless());
 
@@ -493,6 +516,53 @@ class ClientSessionGateTest {
 
         assertFalse(V16ClientWire.isColumnSourceless(),
                 "DISCONNECT must clear the source-less flag so no v16 decode state survives the session");
+    }
+
+    // ---- The announce gate on sourceless arming (the R2-3 prompt hazard's root fix): only
+    // the gate's own v16 discovery announce enables arming, and the downgrade guard's v18
+    // re-assert retires it — pinned through the gate's production send paths, not by calling
+    // markAnnouncedVersion directly.
+
+    @Test
+    void discoveryFallbackAnnounceEnablesSourcelessArming() {
+        gate.onJoin(true, false, true, true); // v18 announce — arming disabled
+        V16ClientWire.observeSessionConfigVersion(V16);
+        assertFalse(V16ClientWire.isColumnSourceless(),
+                "after the JOIN v18 announce, a v16 config (e.g. an unsolicited re-attach "
+                        + "prompt) must NOT arm sourceless decode");
+
+        for (int i = 0; i < ClientSessionGate.V16_DISCOVERY_DELAY_TICKS; i++) {
+            gate.tickV16Discovery(); // fires the v16 fallback announce on the last tick
+        }
+        assertEquals(List.of(V, V16), handshakeVersions,
+                "premise: the discovery fallback announced v16");
+
+        V16ClientWire.observeSessionConfigVersion(V16);
+        assertTrue(V16ClientWire.isColumnSourceless(),
+                "after the client's own v16 announce, the genuine v16 reply arms decode");
+    }
+
+    @Test
+    void downgradeGuardReassertRetiresTheV16Announce() {
+        // Raced discovery: v18 session established, but the client HAS announced 16 earlier
+        // this connection. The guard's v18 re-assert must retire that announce so a LATER
+        // unsolicited v16 frame (a second /reload prompt) cannot arm against the live stream.
+        gate.onJoin(true, false, true, true);
+        for (int i = 0; i < ClientSessionGate.V16_DISCOVERY_DELAY_TICKS; i++) {
+            gate.tickV16Discovery();
+        }
+        gate.onSessionConfig(config(V, true), true, true); // slow v18 reply lands first
+        handshakeVersions.clear();
+
+        // The v16 reply to the raced announce hits the downgrade guard → v18 re-assert.
+        gate.onSessionConfig(SessionConfigS2CPayload.v16Legacy(true, 64, 200, 7, true), true, true);
+        assertEquals(List.of(V), handshakeVersions,
+                "premise: the guard re-announced v18");
+
+        V16ClientWire.observeSessionConfigVersion(V16);
+        assertFalse(V16ClientWire.isColumnSourceless(),
+                "after the guard's v18 re-assert, a later unsolicited v16 config must not "
+                        + "arm sourceless decode against the re-established v18 stream");
     }
 
     @Test

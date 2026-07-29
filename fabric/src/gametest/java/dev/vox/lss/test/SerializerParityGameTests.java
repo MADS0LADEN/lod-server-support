@@ -76,6 +76,28 @@ public class SerializerParityGameTests {
     private static final int END_VOID_DISK_CZ = 8;
 
     /**
+     * R2-5's production range gate feeds {@code level.getMinSectionY()}/{@code getMaxSectionY()}
+     * into the NBT serializers as an INCLUSIVE [min, max]. Nothing else would red if a future MC
+     * version flipped the max accessor to exclusive (the 1.20-era {@code getMaxSection()} WAS
+     * exclusive — a live hazard given this project's backport habit): the gate would silently
+     * drop every chunk's top section on the disk path only. Pin the inclusivity against the
+     * live section array — {@code getSectionsCount()} is what the live serializer iterates,
+     * with sectionY = minSectionY + index.
+     */
+    @GameTest(structure = "fabric-gametest-api-v1:empty")
+    public void worldSectionRangeAccessorsAreInclusive(GameTestHelper helper) {
+        ServerLevel level = helper.getLevel();
+        int min = level.getMinSectionY();
+        int max = level.getMaxSectionY();
+        int count = level.getSectionsCount();
+        helper.assertTrue(max - min + 1 == count,
+                "getMaxSectionY must stay INCLUSIVE: min=" + min + " max=" + max
+                        + " sectionsCount=" + count
+                        + " — if this reds, the R2-5 disk range gate is dropping top sections");
+        helper.succeed();
+    }
+
+    /**
      * A column served from disk must be byte-identical to the same column served live after the
      * chunk loads back from that disk state. The chunk is generated, given a torch that is placed
      * and removed (leaving the light engine's allocated-but-all-zero BlockLight array in the

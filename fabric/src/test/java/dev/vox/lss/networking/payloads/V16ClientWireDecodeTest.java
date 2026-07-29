@@ -32,6 +32,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>{@code V16ClientWire.columnSourceless} is a process-global static, so every test resets
  * it before and after — a leaked {@code true} would misalign an unrelated suite's VoxelColumn
  * decode (it would skip the source byte).
+ *
+ * <p>Arming is announce-gated: a v16 config arms the flag only when this client itself last
+ * announced 16 ({@code markAnnouncedVersion} — the discovery fallback always precedes a
+ * genuine v16 reply), so tests that model a real v16 session mark the announce first, and
+ * {@link #unsolicitedV16SessionConfigDoesNotArmTheSourcelessFlag} pins the inverse — the
+ * Paper /reload re-attach prompt (an unsolicited v16 frame on a live v18 session) must not
+ * flip column decode mid-stream.
  */
 class V16ClientWireDecodeTest {
 
@@ -67,6 +74,8 @@ class V16ClientWireDecodeTest {
 
     @Test
     void v16SessionConfigDecodesTheSixFieldLayoutAndArmsTheSourcelessFlag() {
+        // A genuine v16 reply is always preceded by this client's own discovery fallback.
+        V16ClientWire.markAnnouncedVersion(16);
         byte[] frame = ref(b -> {
             b.writeVarInt(16);     // version — the legacy client hard-gates on this
             b.writeBoolean(true);  // enabled
@@ -92,6 +101,7 @@ class V16ClientWireDecodeTest {
     @Test
     void v18SessionConfigDecodesTheFourFieldLayoutAndDisarmsTheFlag() {
         // Arm it first so the disarm is observable, not just a default.
+        V16ClientWire.markAnnouncedVersion(16);
         V16ClientWire.observeSessionConfigVersion(16);
         assertTrue(V16ClientWire.isColumnSourceless());
 
@@ -117,6 +127,7 @@ class V16ClientWireDecodeTest {
     void foreignVersionSessionConfigDrainsAndLeavesTheFlagClear() {
         // A v15-shaped config (10 trailing fields the codec cannot parse): the version VarInt is
         // read, the rest drained, and — version != 16 — the source-less flag stays clear.
+        V16ClientWire.markAnnouncedVersion(16);
         V16ClientWire.observeSessionConfigVersion(16); // prove it gets cleared, not merely defaulted
         byte[] frame = ref(b -> {
             b.writeVarInt(15);
@@ -135,6 +146,7 @@ class V16ClientWireDecodeTest {
 
     @Test
     void voxelColumnDecodeSkipsTheSourceByteWhenTheFlagIsArmed() {
+        V16ClientWire.markAnnouncedVersion(16);
         V16ClientWire.observeSessionConfigVersion(16); // arm: this is a v16 session
         byte[] sections = {9, 8, 7};
         // A legacy source-LESS frame — exactly what asV16() encodes.
@@ -182,8 +194,10 @@ class V16ClientWireDecodeTest {
 
     @Test
     void frameOrderSessionConfigThenColumnDecodesTheWholeLegacyExchange() {
-        // The load-bearing sequence, in the netty thread's frame order: a v16 SessionConfig
-        // arms the flag, and the source-less column that follows decodes correctly off it.
+        // The load-bearing sequence, in the netty thread's frame order: the client announced
+        // 16 (discovery fallback), then a v16 SessionConfig arms the flag, and the
+        // source-less column that follows decodes correctly off it.
+        V16ClientWire.markAnnouncedVersion(16);
         byte[] cfgFrame = ref(b -> {
             b.writeVarInt(16);
             b.writeBoolean(true);
@@ -212,7 +226,8 @@ class V16ClientWireDecodeTest {
     }
 
     @Test
-    void resetClearsTheSourcelessFlag() {
+    void resetClearsTheSourcelessFlagAndTheAnnounceBit() {
+        V16ClientWire.markAnnouncedVersion(16);
         V16ClientWire.observeSessionConfigVersion(16);
         assertTrue(V16ClientWire.isColumnSourceless());
 
@@ -220,5 +235,54 @@ class V16ClientWireDecodeTest {
 
         assertFalse(V16ClientWire.isColumnSourceless(),
                 "a connection boundary (JOIN/DISCONNECT) must leave no v16 decode state behind");
+        V16ClientWire.observeSessionConfigVersion(16);
+        assertFalse(V16ClientWire.isColumnSourceless(),
+                "reset must also clear the announce bit — a v16 frame on the NEXT connection "
+                        + "cannot arm off a stale announce from this one");
+    }
+
+    // ---- The unsolicited v16 frame: the Paper /reload re-attach prompt (R2-3) ----
+
+    @Test
+    void unsolicitedV16SessionConfigDoesNotArmTheSourcelessFlag() {
+        // A v18 client (last announce: 18) with a live column stream receives a v16-dialect
+        // SessionConfig it never asked for — the Paper /reload re-attach prompt. The frame
+        // itself is self-describing and must decode (the session gate's downgrade guard
+        // answers it); but it must NOT arm source-less column decode: on Folia the prompt
+        // can land mid-stream between live v18 columns, and an armed flag there misreads
+        // every subsequent source byte until the v18 config reply — a decoder kick of a
+        // healthy client.
+        V16ClientWire.markAnnouncedVersion(LSSConstants.PROTOCOL_VERSION);
+        byte[] promptFrame = ref(b -> {
+            b.writeVarInt(16);
+            b.writeBoolean(true);
+            b.writeVarInt(64);
+            b.writeVarInt(200);
+            b.writeVarInt(7);
+            b.writeBoolean(true);
+        });
+
+        var prompt = decode(SessionConfigS2CPayload.CODEC, promptFrame);
+
+        assertEquals(16, prompt.protocolVersion());
+        assertTrue(prompt.v16Wire(), "the prompt frame itself decodes fine (self-describing)");
+        assertFalse(V16ClientWire.isColumnSourceless(),
+                "an unsolicited v16 config must not flip column decode out from under a "
+                        + "live v18 stream");
+
+        // The live v18 column right behind the prompt still decodes with its source byte.
+        byte[] sections = {6, 6, 6};
+        byte[] v18Frame = ref(b -> {
+            b.writeInt(2);
+            b.writeInt(3);
+            b.writeUtf("minecraft:overworld");
+            b.writeLong(11L);
+            b.writeByte(LSSConstants.COLUMN_SOURCE_GENERATION);
+            b.writeByteArray(sections);
+        });
+        var col = decode(VoxelColumnS2CPayload.CODEC, v18Frame);
+        assertEquals(LSSConstants.COLUMN_SOURCE_GENERATION, col.source(),
+                "the in-flight v18 column behind the prompt reads its source byte verbatim");
+        assertArrayEquals(sections, col.decompressedSections());
     }
 }

@@ -78,9 +78,12 @@ public record SessionConfigS2CPayload(
                             // Client v16 backward compat: an old server's 6-field layout — the
                             // two concurrency-cap VarInts sit between lodDistance and
                             // generationEnabled (the exact mirror of the v16Legacy ENCODE
-                            // above). The gate accepts version 16 only when
-                            // enableV16ServerCompat is on; we only ever RECEIVE this by having
-                            // announced 16 ourselves, so a v18-only client never reaches here.
+                            // above). A v18 client CAN receive this without having announced
+                            // 16: a Paper /reload re-attach prompt speaks the v16 dialect
+                            // (this branch is per-frame self-describing, so the decode is
+                            // safe); the session gate's downgrade guard answers it, and the
+                            // sourceless-column arming above stays inert unless this client
+                            // itself last announced 16 (V16ClientWire.markAnnouncedVersion).
                             boolean enabled = buf.readBoolean();
                             int lodDist = buf.readVarInt();
                             int syncCap = buf.readVarInt();

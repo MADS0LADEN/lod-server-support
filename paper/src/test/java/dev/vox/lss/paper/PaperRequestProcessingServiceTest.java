@@ -340,6 +340,37 @@ class PaperRequestProcessingServiceTest {
         assertEquals(1, prompted.size(), "a mid-handshake state never prompts");
     }
 
+    @Test
+    void removalStampsThePromptGraceSoTheRemoveRegisterWindowNeverPrompts() {
+        // The Folia dimension-change shape: removePlayer → (a 1 Hz batch races the gap) →
+        // registerPlayer. removePlayer STAMPS the prompt rate-limit map, so the racing
+        // state==null batch is the EXPECTED remove→register window, not an orphan — a
+        // healthy mid-stream client must never be prompted (a prompt is a v16-dialect
+        // config: at best a redundant re-handshake + manager rebuild, and pre-fix it could
+        // land between live columns). A genuine /reload orphan is unaffected: the reload
+        // rebuilds the service, so its map is fresh and prompts immediately.
+        var level = level(Level.OVERWORLD);
+        var batch = batchOf(new long[]{PositionUtil.packPosition(1, 1)}, new long[]{-1L});
+        var prompted = new ArrayList<UUID>();
+        service.reattachPromptSender = p -> prompted.add(p.getUUID());
+
+        var uuid = UUID.randomUUID();
+        var player = playerIn(uuid, level);
+        service.registerPlayer(player, 1);
+        service.removePlayer(uuid);
+
+        service.handleBatchRequest(player, batch); // races in before the re-registration
+        assertTrue(prompted.isEmpty(),
+                "a state==null batch inside the post-removal grace must not prompt");
+
+        // A dimension hop EXTENDS the bound (the old sweep RESET it): a second removal
+        // re-stamps, and the window stays closed.
+        service.registerPlayer(player, 1);
+        service.removePlayer(uuid);
+        service.handleBatchRequest(player, batch);
+        assertTrue(prompted.isEmpty(), "re-removal re-arms the grace, never resets it open");
+    }
+
     // ---- PP-003: re-handshake reuses the state ----
 
     @Test

@@ -216,7 +216,11 @@ public class TwoPlayerGameTests {
                 // the per-player halving) so the flushes above are accounted for.
                 long inject = limiter.getPerPlayerAllocation(2) * 2 + payloadBytes;
                 limiter.recordSend((int) inject);
-                debtInjected.set(inject);
+                // Accumulate, don't overwrite: an assert-throw below re-enters this step-0
+                // block next tick and records a SECOND injection — the final accounting
+                // identity must include every one, or the original failure gets masked by
+                // a permanently-unsatisfiable identity.
+                debtInjected.addAndGet(inject);
                 helper.assertTrue(limiter.getPerPlayerAllocation(2) == 0,
                         "shared-bucket debt must zero every player's allocation");
                 long beforeZeroRound = busy.getTotalBytesSent();

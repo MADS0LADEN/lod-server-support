@@ -74,6 +74,12 @@ class PaperDiskReaderEnvelopeTest {
         reader.registerPlayer(uuid);
         level = mock(ServerLevel.class);
         when(level.registryAccess()).thenReturn(REGISTRY_ACCESS);
+        // Explicit world section range (R2-5 amendment 5): the submit path passes
+        // level.getMinSectionY()/getMaxSectionY() into the range-gated serialize, and the
+        // Mockito default [0,0] only kept these fixtures alive because their lone section
+        // sits at Y=0 — a future fixture at any other Y would be silently range-dropped.
+        when(level.getMinSectionY()).thenReturn(-4);
+        when(level.getMaxSectionY()).thenReturn(19);
     }
 
     @AfterEach

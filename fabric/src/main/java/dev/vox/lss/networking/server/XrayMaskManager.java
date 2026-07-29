@@ -101,6 +101,14 @@ public final class XrayMaskManager {
     MaskEntry entryFor(String dimension, Supplier<EngineView> view) {
         var cached = this.byDimension.get(dimension);
         if (cached != null) return cached.orElse(null);
+        if (this.mode == XrayMaskPolicy.Mode.OFF) {
+            // OFF can never mask, so it needs no engine probe at all — cache the no-mask
+            // outcome up front instead of paying the transient-null re-probe window (up
+            // to TRANSIENT_PROBE_LATCH reflective probes) for a dimension whose answer
+            // is fixed by config.
+            return this.byDimension.computeIfAbsent(dimension, d -> Optional.empty())
+                    .orElse(null);
+        }
         EngineView v = view.get();
         if (v instanceof EngineView.Unreadable u && u.transientNull()
                 && this.transientProbes.merge(dimension, 1, Integer::sum) < TRANSIENT_PROBE_LATCH) {
@@ -109,7 +117,17 @@ public final class XrayMaskManager {
             return evaluate(dimension, v, true);
         }
         return this.byDimension
-                .computeIfAbsent(dimension, d -> Optional.ofNullable(evaluate(d, v, false)))
+                .computeIfAbsent(dimension, d -> {
+                    if (v instanceof EngineView.Unreadable u && u.transientNull()) {
+                        // The latch tripped: the engine never resolved. Say WHY the
+                        // fallback caches (the info line below only names the source) —
+                        // once, guaranteed by the computeIfAbsent mapping.
+                        LSSLogger.warn("AntiXray engine stayed unreadable (transient) for "
+                                + d + " after " + TRANSIENT_PROBE_LATCH + " probes — caching "
+                                + "the LSS-config fallback mask for this session");
+                    }
+                    return Optional.ofNullable(evaluate(d, v, false));
+                })
                 .orElse(null);
     }
 

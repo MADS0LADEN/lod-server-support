@@ -172,8 +172,10 @@ public class PaperChunkGenerationService {
      * ran anyway. The reads are region-legal and tear-free off-pump (getChunkNow is a
      * concurrent-map lookup; light reads clone SWMR state; PalettedContainer.write is
      * synchronized). Package-visible so tests can drive the completion exactly as the
-     * Moonrise consumer would. A null {@code chunk} is the failure outcome (permanent:
-     * NOT_GENERATED downstream — a failed load/vanished chunk must not be hammered).
+     * Moonrise consumer would. A null {@code chunk} from Moonrise is the PERMANENT failure
+     * outcome (NOT_GENERATED downstream — a failed load must not be hammered); a chunk that
+     * VANISHES between delivery and extraction is the separate TRANSIENT flavor (R2-8:
+     * {@code ExtractionOutcome.chunkVanished} → silent drop, healed by re-declaration).
      */
     void completeAsyncLoad(PendingGenerationKey key, ServerLevel level, ChunkAccess chunk,
                            int cx, int cz, long token) {

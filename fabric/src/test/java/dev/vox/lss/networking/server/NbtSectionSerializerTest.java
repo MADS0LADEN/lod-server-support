@@ -35,6 +35,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -555,6 +556,33 @@ class NbtSectionSerializerTest {
         byte[] unranged = NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS);
         assertEquals(List.of(4, 5), decode(unranged).stream().map(DecodedSection::y).toList(),
                 "the range-free path (tests/corpus goldens) is unchanged");
+    }
+
+    @Test
+    void outOfRangeGarbageNeverCondemnsAndTheMinSideAlsoGates() {
+        // Amendment 5's ordering rule, pinned: the range gate runs BEFORE parse, so an
+        // out-of-range entry with unparseable block_states (bitrot beyond the world
+        // range) neither condemns the column — it would have been dropped anyway — nor
+        // serves. Same garbage shape as the condemn test, placed at maxSection+1; and
+        // the min−1 side gates symmetrically (only the max side was pinned before).
+        var garbage = new CompoundTag();
+        garbage.putInt("Y", 5); // beyond max=4
+        var badStates = new CompoundTag();
+        badStates.putInt("palette", 7); // not even a list — no partial recoverable
+        garbage.put("block_states", badStates);
+
+        var belowMin = new CompoundTag(); // light-only entry at minSection-1
+        belowMin.putInt("Y", -1);
+        belowMin.putByteArray("SkyLight", light(0, (byte) 15));
+
+        var chunk = chunkNbt("minecraft:full",
+                belowMin, sectionNbt(4, true, true, null, light(0, (byte) 15)), garbage);
+
+        byte[] ranged = NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS, null, 0, 4);
+        assertNotNull(ranged,
+                "out-of-range garbage must not condemn a column the gate drops it from");
+        assertEquals(List.of(4), decode(ranged).stream().map(DecodedSection::y).toList(),
+                "both sides gate: min-1 and max+1 dropped, the in-range section serves");
     }
 
     // ---- Golden wire-byte corpus (cross-module parity) ----

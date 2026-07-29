@@ -99,10 +99,16 @@ public class PaperWorldHandler {
                 // Warn-once per event class (R2-11): a configured updateEvents entry whose
                 // discovered extractor returns a shape submitFromObject doesn't recognize
                 // silently marked NOTHING, forever — an admin's custom entry deserves one
-                // loud line, not permanent silent no-op.
+                // loud line, not permanent silent no-op. For a list, name the ITEM type —
+                // the list shape itself is recognized, its elements weren't (marked==false
+                // with a list implies non-empty and zero recognized items).
+                String shape = switch (result) {
+                    case null -> "null";
+                    case List<?> list -> "a List of " + list.get(0).getClass().getName();
+                    default -> result.getClass().getName();
+                };
                 LSSLogger.warn("updateEvents entry " + event.getClass().getName()
-                        + " resolves, but its extracted value ("
-                        + (result == null ? "null" : result.getClass().getName())
+                        + " resolves, but its extracted value (" + shape
                         + ") is not a recognized position shape — this event marks nothing");
             }
         } catch (Exception e) {

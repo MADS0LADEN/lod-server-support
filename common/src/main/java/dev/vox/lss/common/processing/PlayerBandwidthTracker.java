@@ -54,7 +54,11 @@ public class PlayerBandwidthTracker {
                 // remainder must accumulate or threshold allocations under-refill by up
                 // to ~49% and sub-threshold ones (tiny per-player splits) starve forever.
                 this.lastRefillNanos += refill * LSSConstants.NANOS_PER_SECOND / allocationBytes;
-                long burstCap = allocationBytes / BURST_DIVISOR;
+                // Floor of 1: at allocations under BURST_DIVISOR bytes/s (reachable via the
+                // global split with many active players) an unfloored cap is 0, pinning
+                // tokens <= 0 and starving the player forever — the presence gate needs a
+                // reachable positive token to ever admit its one payload.
+                long burstCap = Math.max(1, allocationBytes / BURST_DIVISOR);
                 this.availableTokens = Math.min(this.availableTokens + refill, burstCap);
             }
         }
