@@ -1,6 +1,8 @@
 package dev.vox.lss.networking.client;
 
+import dev.vox.lss.common.PositionUtil;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
@@ -462,5 +464,177 @@ class ColumnCacheStoreTest {
 
         assertTrue(ColumnCacheStore.load("test-clear-all-1", dimA).isEmpty());
         assertTrue(ColumnCacheStore.load("test-clear-all-2", dimB).isEmpty());
+    }
+
+    // ---- merge-on-save (F2): the persisted cache is history, not a sliding disc ----
+
+    private static Long2LongOpenHashMap mapOf(long... pairs) {
+        var m = new Long2LongOpenHashMap();
+        m.defaultReturnValue(-1L);
+        for (int i = 0; i < pairs.length; i += 2) m.put(pairs[i], pairs[i + 1]);
+        return m;
+    }
+
+    @Test
+    void mergeSavePreservesFileOnlyEntriesAndMemoryWins() {
+        var dim = testDimension("merge_basic");
+        final String server = "test-merge-basic";
+        try {
+            // Previous session's disc: p1 (later walked away from) and p2.
+            ColumnCacheStore.save(server, dim, mapOf(100L, 1000L, 200L, 2000L));
+            // This session's pruned map: p2 re-served fresher, p3 new. p1 fell to the
+            // movement prune — a plain overwrite would erase it from disk.
+            ColumnCacheStore.mergeSave(server, dim, mapOf(200L, 2500L, 300L, 3000L),
+                    new LongOpenHashSet(), 0, 0);
+
+            var loaded = ColumnCacheStore.load(server, dim);
+            assertEquals(1000L, loaded.get(100L), "a range-pruned entry survives on disk");
+            assertEquals(2500L, loaded.get(200L), "memory wins for common keys");
+            assertEquals(3000L, loaded.get(300L), "new entries land");
+        } finally {
+            ColumnCacheStore.clearForServer(server);
+        }
+    }
+
+    @Test
+    void mergeSaveAppliesHonestyRemovalsWithoutTouchingReReceivedEntries() {
+        var dim = testDimension("merge_removals");
+        final String server = "test-merge-removals";
+        try {
+            ColumnCacheStore.save(server, dim, mapOf(100L, 1000L, 200L, 2000L));
+            // p1 was deliberately unstamped (ingest failure); p2 was ALSO unstamped once but
+            // re-received since — the overlay must win over its own stale removal record.
+            var removals = new LongOpenHashSet();
+            removals.add(100L);
+            removals.add(200L);
+            ColumnCacheStore.mergeSave(server, dim, mapOf(200L, 2500L), removals, 0, 0);
+
+            var loaded = ColumnCacheStore.load(server, dim);
+            assertEquals(-1L, loaded.get(100L), "a deliberate unstamp deletes the file entry — no resurrection");
+            assertEquals(2500L, loaded.get(200L), "a position re-received after its removal survives via the overlay");
+        } finally {
+            ColumnCacheStore.clearForServer(server);
+        }
+    }
+
+    @Test
+    void removalsOnlyMergeSaveDeletesTheEmptiedFile() {
+        var dim = testDimension("merge_empty");
+        final String server = "test-merge-empty";
+        try {
+            ColumnCacheStore.save(server, dim, mapOf(100L, 1000L));
+            // A session that ended with an EMPTY map but a recorded removal (all loaded
+            // entries ingest-rejected then pruned) must still delete the dishonest stamp —
+            // the old !isEmptyMap() save guard skipped this entirely.
+            var removals = new LongOpenHashSet();
+            removals.add(100L);
+            ColumnCacheStore.mergeSaveAsync(server, dim, mapOf(), removals, 0, 0);
+            ColumnCacheStore.flushPendingIo();
+
+            assertTrue(ColumnCacheStore.load(server, dim).isEmpty(),
+                    "a removals-only merge that empties the cache deletes the file");
+        } finally {
+            ColumnCacheStore.clearForServer(server);
+        }
+    }
+
+    @Test
+    void mergeSaveEvictsFarthestFirstWhenOverTheCap() {
+        var dim = testDimension("merge_evict");
+        final String server = "test-merge-evict";
+        int oldCap = ColumnCacheStore.mergeEvictionCap;
+        try {
+            long near1 = PositionUtil.packPosition(1, 0);
+            long near2 = PositionUtil.packPosition(0, 1);
+            long near3 = PositionUtil.packPosition(1, 1);
+            long mid = PositionUtil.packPosition(2, 0);
+            long far1 = PositionUtil.packPosition(10, 0);
+            long far2 = PositionUtil.packPosition(0, 20);
+            ColumnCacheStore.save(server, dim, mapOf(mid, 4L, far1, 5L, far2, 6L));
+            ColumnCacheStore.mergeEvictionCap = 4;
+            ColumnCacheStore.mergeSave(server, dim, mapOf(near1, 1L, near2, 2L, near3, 3L),
+                    new LongOpenHashSet(), 0, 0);
+
+            var loaded = ColumnCacheStore.load(server, dim);
+            assertEquals(4, loaded.size(), "capped at the eviction threshold");
+            assertEquals(1L, loaded.get(near1));
+            assertEquals(2L, loaded.get(near2));
+            assertEquals(3L, loaded.get(near3));
+            assertEquals(4L, loaded.get(mid), "the nearest file entry survives");
+            assertEquals(-1L, loaded.get(far1), "farthest history evicted first");
+            assertEquals(-1L, loaded.get(far2), "farthest history evicted first");
+        } finally {
+            ColumnCacheStore.mergeEvictionCap = oldCap;
+            ColumnCacheStore.clearForServer(server);
+        }
+    }
+
+    @Test
+    void mergeSaveDegradesToOverwriteOnACorruptExistingFile() throws IOException {
+        var dim = testDimension("merge_corrupt");
+        final String server = "test-merge-corrupt";
+        try {
+            var file = getCacheFile(server, dim);
+            Files.createDirectories(file.getParent());
+            Files.write(file, new byte[]{1, 2, 3}); // truncated garbage — load() discards it
+            ColumnCacheStore.mergeSave(server, dim, mapOf(100L, 1000L), new LongOpenHashSet(), 0, 0);
+
+            var loaded = ColumnCacheStore.load(server, dim);
+            assertEquals(1000L, loaded.get(100L),
+                    "a corrupt existing file degrades the merge to a plain overwrite — never a failed save");
+        } finally {
+            ColumnCacheStore.clearForServer(server);
+        }
+    }
+
+    @Test
+    void bareDotsServerAddressSanitizesToAPlainSegment() {
+        // The embedded case is neutralized by separator substitution (pinned above in
+        // hostileServerAddressCannotEscapeCacheDir); a name that is ENTIRELY dots used to
+        // survive as a path-walking segment — "..'' resolved one level above the cache dir.
+        assertEquals("_", ColumnCacheStore.sanitizeForFilePath(".."));
+        assertEquals("_", ColumnCacheStore.sanitizeForFilePath("."));
+        assertEquals("_", ColumnCacheStore.sanitizeForFilePath("..."));
+        assertEquals("_", ColumnCacheStore.sanitizeForFilePath(""));
+        assertEquals("a..b", ColumnCacheStore.sanitizeForFilePath("a..b"),
+                "embedded dots stay — they cannot walk inside a single segment");
+    }
+
+    @Test
+    void burstOfRemoveAsyncCoalescesIntoOneRewrite() {
+        var dim = testDimension("coalesce");
+        final String server = "test-coalesce";
+        var gate = new java.util.concurrent.CountDownLatch(1);
+        try {
+            ColumnCacheStore.save(server, dim,
+                    mapOf(PositionUtil.packPosition(1, 1), 100L,
+                            PositionUtil.packPosition(2, 2), 200L,
+                            PositionUtil.packPosition(3, 3), 300L));
+            // Hold the FIFO IO thread so both removals queue into one pending set — the
+            // cross-dimension ingest-failure path can emit dozens in one tick, and each used
+            // to pay a whole-file load+rewrite by itself.
+            ColumnCacheStore.runIoAsyncForTest(() -> {
+                try {
+                    gate.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            int before = ColumnCacheStore.SAVE_WRITES_FOR_TEST.get();
+            ColumnCacheStore.removeAsync(server, dim, PositionUtil.packPosition(1, 1));
+            ColumnCacheStore.removeAsync(server, dim, PositionUtil.packPosition(2, 2));
+            gate.countDown();
+            ColumnCacheStore.flushPendingIo();
+
+            assertEquals(before + 1, ColumnCacheStore.SAVE_WRITES_FOR_TEST.get(),
+                    "a burst of removals pays ONE load+rewrite, not one per position");
+            var loaded = ColumnCacheStore.load(server, dim);
+            assertEquals(-1L, loaded.get(PositionUtil.packPosition(1, 1)));
+            assertEquals(-1L, loaded.get(PositionUtil.packPosition(2, 2)));
+            assertEquals(300L, loaded.get(PositionUtil.packPosition(3, 3)));
+        } finally {
+            gate.countDown();
+            ColumnCacheStore.clearForServer(server);
+        }
     }
 }

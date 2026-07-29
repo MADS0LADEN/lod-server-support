@@ -548,4 +548,29 @@ class ColumnTimestampCacheTest {
                 "an over-cap miss map clears wholesale — a miss is always cheaper to lose than a stamp");
         assertEquals(1L, c.get(OW, 100L), "the within-cap stamp survives");
     }
+
+    @Test
+    void loadSweepsOrphanedOldTmpFilesButKeepsFreshOnes(@TempDir Path dir) throws IOException {
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 100L, now);
+        cache.save(dir);
+
+        // A process killed mid-write (kill -9, OOM, power loss) leaves its unique-named tmp
+        // behind: the IOException cleanup never ran and no later save reuses the name — a
+        // multi-MB orphan per crash, unbounded across the server's life without this sweep.
+        Path orphan = dir.resolve("lss-timestamps.bin.tmp.deadbeef");
+        Files.write(orphan, new byte[]{1, 2, 3});
+        Files.setLastModifiedTime(orphan, java.nio.file.attribute.FileTime.fromMillis(
+                System.currentTimeMillis() - 2 * 60 * 60 * 1000L)); // 2 h old — past the 1 h floor
+        // A FRESH tmp may be a /reload predecessor's final save still being written — must survive.
+        Path fresh = dir.resolve("lss-timestamps.bin.tmp.cafebabe");
+        Files.write(fresh, new byte[]{4, 5, 6});
+
+        var reloaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
+        reloaded.load(dir);
+
+        assertFalse(Files.exists(orphan), "an old orphaned tmp is swept at load");
+        assertTrue(Files.exists(fresh), "a fresh tmp (possible in-flight /reload writer) survives the sweep");
+        assertEquals(100L, reloaded.get(LSSConstants.DIM_STR_OVERWORLD, 1L),
+                "the sweep does not disturb the load itself");
+    }
 }

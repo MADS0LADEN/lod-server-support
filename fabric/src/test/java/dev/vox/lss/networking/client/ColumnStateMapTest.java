@@ -576,12 +576,22 @@ class ColumnStateMapTest {
         var dim = ResourceKey.create(Registries.DIMENSION, Identifier.parse("lss_test:park_persist"));
         final String server = "test-park-persist";
         try {
+            // A PREVIOUS session's save left a stamp for POS on disk. Merge-on-save preserves
+            // file-only entries, so without the honesty-removal pass the old stamp would
+            // resurrect the parked position's claim.
+            var prior = new it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap();
+            prior.defaultReturnValue(-1L);
+            prior.put(POS, 4000L);
+            ColumnCacheStore.save(server, dim, prior);
+
             parkViaIngestFailures(POS);
             assertEquals(-1L, map.timestampFor(POS), "park holds no stamp");
             assertFalse(map.mapForSave().containsKey(POS),
                     "a parked position must not persist a fabricated stamp (the permanent-hole bug)");
 
-            ColumnCacheStore.save(server, dim, map.mapForSave()); // the disconnect saveCache path
+            // The disconnect saveCache path: merge-save with the session's honesty removals.
+            ColumnCacheStore.mergeSave(server, dim, map.mapForSave(),
+                    map.persistentRemovalsForSave(), 10, -3);
 
             var next = new ColumnStateMap(); // fresh session
             next.loadFrom(ColumnCacheStore.load(server, dim));
@@ -595,6 +605,43 @@ class ColumnStateMapTest {
         } finally {
             ColumnCacheStore.clearForServer(server);
         }
+    }
+
+    // ---- persistent removals (F2): deliberate deletes must reach the file ----
+
+    @Test
+    void honestyRemovalsAreRecordedAndSurviveThePrune() {
+        map.onReceived(POS, 5000L);
+        map.onIngestFailed(POS); // lost content: deliberate unstamp
+        assertTrue(map.persistentRemovalsForSave().contains(POS),
+                "an ingest-failure unstamp is recorded for the merge-save's removal pass");
+        assertTrue(map.hasPersistentRemovals());
+
+        // The player walks far away: the range prune drops the working state, but the
+        // removal record must survive to the next save — pruning it would resurrect the
+        // deleted stamp from the file for any position walked away from before saving.
+        map.pruneOutOfRange(1000, 1000, 4);
+        assertTrue(map.persistentRemovalsForSave().contains(POS),
+                "persistentRemovals is deliberately NOT range-pruned");
+
+        map.clear(); // session teardown
+        assertFalse(map.hasPersistentRemovals(), "removals die with the session state");
+    }
+
+    @Test
+    void legacyZeroPurgesRecordPersistentRemovals() {
+        var loaded = new Long2LongOpenHashMap();
+        loaded.put(POS, 0L);
+        long pos2 = PositionUtil.packPosition(11, -3);
+        loaded.put(pos2, 0L);
+        map.loadFrom(loaded);
+
+        map.onUpToDate(POS);      // park-time purge of the legacy 0-stamp
+        map.onNotGenerated(pos2); // its onNotGenerated twin
+        assertTrue(map.persistentRemovalsForSave().contains(POS),
+                "the onUpToDate legacy-0 purge must reach the file or it resurrects every session");
+        assertTrue(map.persistentRemovalsForSave().contains(pos2),
+                "the onNotGenerated legacy-0 purge must reach the file or it resurrects every session");
     }
 
     @Test

@@ -305,11 +305,47 @@ public class ColumnTimestampCache {
         }
     }
 
+    /** Orphaned-tmp sweep age floor (tests stage older/fresher mtimes directly). */
+    private static final long ORPHAN_TMP_MAX_AGE_MILLIS = 60 * 60 * 1000L;
+
+    /**
+     * Deletes stale save tmp files ({@code lss-timestamps.bin.tmp.<hex>}). The unique tmp
+     * names protect the /reload writer-overlap window, but they lose the fixed-name
+     * writers' self-overwrite property: a process killed mid-write (kill -9, OOM-kill,
+     * power loss) orphans its multi-MB tmp forever — the IOException cleanup never ran and
+     * no later save reuses the name. The age guard keeps the /reload overlap safe: an old
+     * instance's final save may still be writing its FRESH tmp while the new instance
+     * loads, and an in-progress write keeps refreshing its mtime.
+     */
+    private static void sweepOrphanedTempFiles(Path dataDir) {
+        if (!Files.isDirectory(dataDir)) return;
+        long cutoffMillis = System.currentTimeMillis() - ORPHAN_TMP_MAX_AGE_MILLIS;
+        // ".tmp*" (not ".tmp.*"): also catches a legacy fixed-name "lss-timestamps.bin.tmp"
+        // orphan from pre-unique-name versions; the main file has no ".tmp" and never matches.
+        try (var stream = Files.newDirectoryStream(dataDir, FILE_NAME + ".tmp*")) {
+            for (Path tmp : stream) {
+                try {
+                    if (Files.getLastModifiedTime(tmp).toMillis() < cutoffMillis) {
+                        Files.deleteIfExists(tmp);
+                        LSSLogger.info("Deleted orphaned timestamp cache temp file " + tmp);
+                    }
+                } catch (IOException e) {
+                    LSSLogger.warn("Failed to sweep timestamp cache temp file " + tmp, e);
+                }
+            }
+        } catch (IOException e) {
+            LSSLogger.warn("Failed to sweep timestamp cache temp files in " + dataDir, e);
+        }
+    }
+
     /**
      * Loads the cache from {@code <dataDir>/lss-timestamps.bin}.
      * Existing entries are preserved (loaded entries are added/overwritten).
      */
     public void load(Path dataDir) {
+        // Before the missing-file early return: orphans next to a missing/corrupt main
+        // file must still be swept.
+        sweepOrphanedTempFiles(dataDir);
         var file = dataDir.resolve(FILE_NAME);
         if (!Files.exists(file)) return;
 

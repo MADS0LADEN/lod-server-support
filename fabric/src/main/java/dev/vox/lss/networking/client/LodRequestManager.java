@@ -585,8 +585,29 @@ public class LodRequestManager {
     }
 
     public void saveCache() {
-        if (this.serverAddress != null && this.lastDimension != null && !this.columns.isEmptyMap()) {
-            ColumnCacheStore.saveAsync(this.serverAddress, this.lastDimension, this.columns.mapForSave());
+        if (this.serverAddress == null || this.lastDimension == null) return;
+        // Abandoned load window: failures buffered while this dimension's cache load was
+        // still in flight were never re-applied (tickCacheGatePhase won't run for it again —
+        // this save precedes a dimension change or disconnect). Their in-memory apply was
+        // absorbed pre-load, so the FILE still holds the stale ts>0 stamps — and merge-on-
+        // save would now preserve them forever (the old overwrite truncated them away by
+        // accident). Unstamp them through the coalesced removal path; a legitimate re-serve
+        // lost this way costs one honest re-request on the next visit.
+        if (this.pendingCacheLoad != null && !this.failuresDuringCacheLoad.isEmpty()) {
+            for (long failed : this.failuresDuringCacheLoad) {
+                ColumnCacheStore.removeAsync(this.serverAddress, this.lastDimension, failed);
+            }
+            this.failuresDuringCacheLoad.clear();
+        }
+        // Merge-on-save: the movement prune bounds the in-memory map to a disc around the
+        // player, so a plain overwrite truncated the persisted cache to that disc (ghost
+        // terrain + full re-download on revisit — see ColumnCacheStore.mergeSaveAsync).
+        // A session whose map ended EMPTY but which deliberately unstamped positions must
+        // still save: skipping would resurrect the dishonest stamps from the file.
+        if (!this.columns.isEmptyMap() || this.columns.hasPersistentRemovals()) {
+            ColumnCacheStore.mergeSaveAsync(this.serverAddress, this.lastDimension,
+                    this.columns.mapForSave(), this.columns.persistentRemovalsForSave(),
+                    this.lastChunkX, this.lastChunkZ);
         }
     }
 

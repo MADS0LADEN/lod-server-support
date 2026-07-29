@@ -23,8 +23,20 @@ import static org.junit.jupiter.api.Assertions.*;
 class OffThreadProcessorMailboxTest {
 
     private static final class TestState extends AbstractPlayerRequestState<Object> {
+        // One-shot: fail the bulk dirty-clear apply — the phase-1 cycle-failure anchor for
+        // the lossless-retry pin (phase-2 deliveries and phase-3 outcomes are individually
+        // contained now, so phase 1 is the remaining shape that fails a whole take).
+        volatile boolean throwOnNextBulkClearDiskReadDone;
+
         TestState(UUID uuid) { super(uuid, 4, 4); }
         @Override public String getPlayerName() { return "test"; }
+        @Override public void clearDiskReadDone(long[] positions) {
+            if (throwOnNextBulkClearDiskReadDone) {
+                throwOnNextBulkClearDiskReadDone = false;
+                throw new RuntimeException("injected phase-1 apply failure");
+            }
+            super.clearDiskReadDone(positions);
+        }
         /** Seeds one want-set batch carrying a single request (the pre-v17 per-request
          *  enqueue has no equivalent — each declaration REPLACES the backlog). Every call
          *  site here is separated from the next by a routing cycle, so nothing is superseded. */
@@ -39,7 +51,10 @@ class OffThreadProcessorMailboxTest {
 
     private static class TestProcessor extends OffThreadProcessor<TestState> {
         TestProcessor(Map<UUID, TestState> players) {
-            super(players, new StubDiskReader(), false, null, 1, 0);  // memo off (ttl=0): kills only the memo — the pacing rules are ttl-independent
+            this(players, new StubDiskReader());
+        }
+        TestProcessor(Map<UUID, TestState> players, AbstractChunkDiskReader reader) {
+            super(players, reader, false, null, 1, 0);  // memo off (ttl=0): kills only the memo — the pacing rules are ttl-independent
         }
         @Override
         protected boolean submitDiskRead(UUID playerUuid, String dimension, int cx, int cz, long order) {
@@ -188,38 +203,41 @@ class OffThreadProcessorMailboxTest {
         var uuid = UUID.randomUUID();
         var state = new TestState(uuid);
         state.markHandshakeComplete();
+        state.setCapabilities(LSSConstants.CAPABILITY_VOXEL_COLUMNS);
         var players = new ConcurrentHashMap<UUID, TestState>();
         players.put(uuid, state);
 
-        // buildAndEnqueueColumnPayload throws on its first call, succeeds after. The first
-        // cycle that processes the generation-success outcome therefore throws mid-cycle; the
-        // outcome must be re-queued and delivered on a later cycle, not silently dropped.
-        var throwsLeft = new java.util.concurrent.atomic.AtomicInteger(1);
+        // The cycle must throw BEFORE the generation outcome is consumed: a throw inside
+        // the outcome's OWN processing is a contained transient drop (pinned by
+        // midListOutcomeFailureDoesNotReplayConsumedOutcomes — replaying a consumed
+        // outcome can un-taint), and phase-2 deliveries are likewise contained per-result.
+        // So this pin fails PHASE 1 (the dirty-clear apply throws once): the whole take
+        // fails un-applied, and the not-yet-consumed phase-3 generation outcome must be
+        // re-queued and delivered by a later cycle, not lost with the failed take.
+        state.throwOnNextBulkClearDiskReadDone = true;
         var delivered = java.util.concurrent.ConcurrentHashMap.<Long>newKeySet();
         var proc = new TestProcessor(players) {
             @Override
             protected boolean buildAndEnqueueColumnPayload(TestState s, int cx, int cz, String dim,
                                                            long ts, long order, byte[] bytes, int est,
                                                            byte source) {
-                if (throwsLeft.getAndDecrement() > 0) {
-                    throw new RuntimeException("injected cycle failure");
-                }
-                delivered.add(PositionUtil.packPosition(cx, cz)); // only a retry ever reaches here
+                delivered.add(PositionUtil.packPosition(cx, cz));
                 return true;
             }
         };
         try {
             proc.start();
+            proc.clearDiskReadDone(uuid, new long[]{PositionUtil.packPosition(1, 1)});
             var column = new LoadedColumnData(4, 2, new byte[]{1, 2, 3}, 3);
             proc.postSnapshot(snapshot(uuid), new ArrayList<>(List.of(
                     new TickSnapshot.GenerationReadyData(uuid, 4, 2, DIM, column, 123L, 1L))));
 
             long deadline = System.nanoTime() + 5_000_000_000L;
-            while (delivered.isEmpty() && System.nanoTime() < deadline) {
+            while (!delivered.contains(PositionUtil.packPosition(4, 2)) && System.nanoTime() < deadline) {
                 proc.postSnapshot(snapshot(uuid), List.of()); // keep the loop cycling for the retry
                 Thread.sleep(10);
             }
-            assertEquals(Set.of(PositionUtil.packPosition(4, 2)), delivered,
+            assertTrue(delivered.contains(PositionUtil.packPosition(4, 2)),
                     "the generation outcome dropped by the throwing cycle must be retried, not lost");
         } finally {
             proc.shutdown();

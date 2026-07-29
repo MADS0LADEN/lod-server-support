@@ -61,6 +61,13 @@ class LSSPaperPluginGlueTest {
         Bootstrap.bootStrap();
     }
 
+    @org.junit.jupiter.api.BeforeEach
+    void resetHostileFrameThrottle() {
+        // The containment pins each assert exactly one ERROR row; the production throttle
+        // (60 s window, JVM-wide) would suppress whichever containment test runs second.
+        LSSPaperPlugin.hostileFrameLog = new dev.vox.lss.common.LogThrottle(60_000);
+    }
+
     // ---- frame + recorder plumbing ----
 
     private static byte[] frame(Consumer<FriendlyByteBuf> ops) {
@@ -317,6 +324,25 @@ class LSSPaperPluginGlueTest {
                     chunkHandler);
             assertEquals(1, decoded.size(), "subsequent messages still dispatch after a contained failure");
             assertEquals(PositionUtil.packPosition(-3, 9), decoded.get(0).packedPositions()[0]);
+        }
+    }
+
+    @Test
+    void hostileFrameFloodIsThrottledToOneLogPerWindow() {
+        // A griefer can spam malformed frames at packet rate; each used to emit a full
+        // stack-trace ERROR (log-disk fill, drowning real diagnostics). The throttle keeps
+        // containment (every frame caught, channel healthy) while logging once per window.
+        byte[] garbage = {(byte) 0xFF};
+        try (var capture = new LssLogCapture()) {
+            for (int i = 0; i < 5; i++) {
+                LSSPaperPlugin.dispatchPluginMessage(
+                        LSSConstants.CHANNEL_HANDSHAKE, "Griefer", garbage,
+                        data -> { throw new IllegalStateException("injected hostile-frame failure"); },
+                        data -> { throw new AssertionError("handshake frame must not reach the chunk-request handler"); });
+            }
+            var errors = capture.rows().stream().filter(r -> r.level() == Level.ERROR).toList();
+            assertEquals(1, errors.size(),
+                    "a malformed-frame flood logs once per throttle window, not once per frame");
         }
     }
 

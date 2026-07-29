@@ -147,7 +147,18 @@ public class ChunkGenerationService {
                 // Timeout is TRANSIENT: the outcome drops silently server-side and the client's
                 // re-declaration retries — never NOT_GENERATED, which is session-permanent.
                 addFailures(ready, gen, true);
-                gen.level.getChunkSource().removeTicketWithRadius(LSS_GEN_TICKET, gen.pos, 0);
+                // Ticket release is DEFERRED, mirroring removePlayer: a stall that outlasts
+                // the timeout replays the bunched admission histogram as bunched timeouts —
+                // many corridor-scattered tickets crossing timeoutTicks within a few ticks —
+                // and releasing them inline is the mass-removal shape DeferredTicketReleases
+                // exists to stagger (C2ME's consolidateSchedules froze 60 s on it). A
+                // re-declared miss that re-admits before the drain cancels the release and
+                // reuses the still-held ticket. (The completion path's release stays inline:
+                // one ticket per completed chunk, event-paced.)
+                var level = gen.level;
+                var pos = gen.pos;
+                this.deferredReleases.defer(entry.getKey(),
+                        () -> level.getChunkSource().removeTicketWithRadius(LSS_GEN_TICKET, pos, 0));
                 iter.remove();
                 this.totalTimeouts++;
                 continue;
