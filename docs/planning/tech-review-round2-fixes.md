@@ -404,3 +404,36 @@ window) and every per-fix verdict; their unique items, landed:
 - `readAndSerializeSections` javadoc (Paper) includes the unparseable→null disposition;
   the R2-1 heal-story note above gains the Paper-shaped caveat (DFU re-saves fire no
   default updateEvents entry — the residual persists until a player edit).
+
+## Live /reload smoke (the amendment-3 REQUIRED-once gate) — 2026-07-29
+
+Rig: real Paper test server re-ported to :25565, console driven through a FIFO, the
+Fabric soak client as the live v18 client. Three rounds:
+
+1. Round 1 died to environment (the client was zombie-killed pre-reload — the ad-hoc rig
+   skipped the soak harness's mob gamerules; peaceful set thereafter) and to syntax
+   (Paper's `/reload confirm` is vanilla's datapack reload — the plugin reload is
+   `bukkit:reload confirm`; the FIFO console needs a durable holder, a finite `sleep`
+   holder EOFs the server's stdin when it expires and kills the console permanently).
+2. Rounds 2–5 all showed zero prompts for a subtler rig reason, diagnosed via the
+   client-side soak JSONL + `lsslod stats` bracketing + a Tier-3 re-run: the round-1
+   death PERSISTED in the world's playerdata, so every subsequent client JOINED DEAD —
+   handshake and SessionConfig fire during join, but a dead player never scans, so
+   zero declarations arrived (`requests=0` even pre-reload, cold cache included). A
+   dead-on-join client is indistinguishable from a converged one at the counters.
+   Wiping the dead .dat fixed the baseline instantly.
+3. **Round 6 (alive player, cold cache — PASS, the full heal chain observed live):**
+   healthy pre-reload baseline (requests=17,576, 168.8 MB served) → `bukkit:reload
+   confirm` → ONE re-attach prompt on the next 1 Hz declaration → the client's
+   downgrade guard re-announced v18 (`REANNOUNCE=1`) → deferred re-registration
+   (`REGISTRATIONS=2`) → fresh v18 config (`CONFIGS=3`: initial + prompt + reply) →
+   the NEW service serving the re-attached session (requests=12,782, 73.6 MB, 15 s
+   window). Zero client send errors, zero decoder kicks — the v16-dialect prompt
+   landed mid-column-stream on the established v18 session and the ANNOUNCE GATE kept
+   column decode inert, exactly the review-round fix's contract, observed live.
+
+The **declaration-triggered heal residual** stands by protocol design (not by live
+observation — round 2's apparent case was the dead-player artifact): a client whose
+want-set has converged sends nothing, so a /reload while it is converged and
+stationary leaves it orphaned (no dirty subscription) until movement mints new
+declarations or it rejoins. Documented at `maybeSendReattachPrompt`.

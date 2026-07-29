@@ -459,6 +459,16 @@ public class PaperRequestProcessingService {
      * V16ClientWire's announce gate keeps even a delivered stray prompt from flipping
      * column decode). Sent directly from the message-handler thread (netty is any-thread
      * safe — the v16 overflow valve precedent above).
+     *
+     * <p><b>The heal is DECLARATION-triggered</b> (live-smoke finding, 2026-07-29): a
+     * client whose want-set had CONVERGED before the /reload sends nothing — silence at
+     * convergence is the v17 protocol — so it stays orphaned, invisibly, until movement
+     * mints new rings (its next declaration prompts and heals within a scan) or it
+     * rejoins. Until then it also has no dirty-broadcast subscription (the fresh service
+     * has no state for it), so post-reload edits don't reach it. Accepted residual: the
+     * un-orphaned failure mode (pre-fix: orphaned FOREVER even while declaring) is fixed;
+     * the converged-and-stationary corner heals on the first movement, and a converged
+     * client's LOD is complete by definition — only edit staleness is at risk.
      */
     private void maybeSendReattachPrompt(ServerPlayer player) {
         var uuid = player.getUUID();
