@@ -386,13 +386,14 @@ public final class BenchmarkMetricsExporter {
                 LSSClientNetworking.getColumnsReceived(),
                 LSSClientNetworking.getBytesReceived(),
                 LSSClientNetworking.getColumnsDropped(),
-                LSSClientNetworking.getQueuedColumnCount());
+                LSSClientNetworking.getQueuedColumnCount(),
+                LSSClientNetworking.getQueuedColumnBytes());
     }
 
     /** Schema-owning overload (test seam — the public method binds the live static reads). */
     static Map<String, Object> buildClientSnapshot(LodRequestManager manager, boolean serverEnabled,
                                                    long receivedColumns, long receivedBytes,
-                                                   long dropped, int queued) {
+                                                   long dropped, int queued, long queuedBytes) {
         var result = new LinkedHashMap<String, Object>();
         result.put("server_enabled", serverEnabled);
         result.put("received_columns", receivedColumns);
@@ -400,7 +401,11 @@ public final class BenchmarkMetricsExporter {
         result.put("dropped", dropped);
         // The decode/ingest queue (ClientColumnProcessor) — unrelated to the request loop, which
         // no longer queues anything (the want-set is scanned and sent in the same tick).
+        // Both halt-gate inputs are exported: LodRequestManager.haltedByBackpressure binds on
+        // COUNT or BYTES, so a stalled scan with queued=0 is only explainable with the byte
+        // gauge visible (the 2026-07-29 early-stop diagnosis needed exactly this field).
         result.put("queued", queued);
+        result.put("queued_bytes", queuedBytes);
 
         result.put("dimension", manager != null ? manager.getCurrentDimensionId() : "none");
         result.put("effective_lod", manager != null ? manager.getEffectiveLodDistanceChunks() : 0);

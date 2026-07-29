@@ -14,6 +14,7 @@ effective_lod=int
 ingest_failures=long
 probes.7:-3=long
 queued=int
+queued_bytes=long
 received_bytes=long
 received_columns=long
 requested_total=long
