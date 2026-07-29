@@ -308,16 +308,28 @@ class PaperRequestProcessingServiceTest {
     // ---- PP-002: unregistered / pre-handshake batch requests are silent no-ops ----
 
     @Test
-    void batchRequestWithoutRegistrationOrHandshakeIsSilentlyDropped() {
+    void unregisteredBatchSendsRateLimitedReattachPromptMidHandshakeDoesNot() {
+        // R2-3: after a plugin /reload the fresh service has an empty player map while
+        // every connected LSS client keeps declaring at 1 Hz — proof of an orphaned
+        // session (vanilla clients never speak the channel; a live client cannot declare
+        // before its deferred-reply registration ran). The service prompts a re-attach
+        // (the v16-dialect config — a modern client's downgrade guard answers with a
+        // fresh handshake; a genuine v16 client parses it harmlessly), rate-limited.
         var level = level(Level.OVERWORLD);
         var batch = batchOf(new long[]{PositionUtil.packPosition(1, 1)}, new long[]{-1L});
+        var prompted = new ArrayList<UUID>();
+        service.reattachPromptSender = p -> prompted.add(p.getUUID());
 
-        // state == null: the post-/reload shape (client still sends, plugin map is fresh)
         var stranger = playerIn(UUID.randomUUID(), level);
-        assertDoesNotThrow(() -> service.handleBatchRequest(stranger, batch));
-        assertTrue(players.isEmpty());
+        service.handleBatchRequest(stranger, batch);
+        service.handleBatchRequest(stranger, batch); // 1 Hz re-declaration inside the window
+        assertEquals(1, prompted.size(), "one prompt per rate-limit window, not one per batch");
+        assertEquals(stranger.getUUID(), prompted.get(0));
+        assertTrue(players.isEmpty(), "the prompt never registers anything itself");
 
-        // state present but handshake never completed: also dropped, no queue growth
+        // state present but handshake never completed: a HEALTHY client whose deferred
+        // reply is in flight — the batch is dropped and NO prompt fires (state == null
+        // strictly; prompting here would race the real registration).
         var uuid = UUID.randomUUID();
         var p = playerIn(uuid, level);
         var bare = new PaperPlayerRequestState(p, 4, 4);
@@ -325,6 +337,7 @@ class PaperRequestProcessingServiceTest {
         service.handleBatchRequest(p, batch);
         assertEquals(0, bare.getTotalRequestsReceived());
         assertNull(bare.peekIncomingBatch(), "no batch is offered before the handshake completes");
+        assertEquals(1, prompted.size(), "a mid-handshake state never prompts");
     }
 
     // ---- PP-003: re-handshake reuses the state ----

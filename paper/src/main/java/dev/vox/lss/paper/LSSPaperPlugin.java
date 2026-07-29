@@ -329,6 +329,11 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
 
         if (!decision.sendSessionConfig()) {
             // See HandshakeGate.Outcome.VERSION_MISMATCH: replying would kick the player.
+            // An EXISTING registration deliberately survives this rung (and NO_CONSUMER):
+            // only a hostile/buggy client re-handshakes cross-capability on a live
+            // connection, and a stray duplicate frame must not kill a working stream —
+            // pinned by ServiceLifecycleGameTests. Accepted residual: such a client keeps
+            // receiving columns it just disclaimed, bounded to its own connection.
             LSSLogger.warn("Player " + playerName
                     + " has incompatible " + Brand.shortName() + " protocol version " + handshake.protocolVersion()
                     + " (server: " + LSSConstants.PROTOCOL_VERSION + "), skipping LOD distribution");

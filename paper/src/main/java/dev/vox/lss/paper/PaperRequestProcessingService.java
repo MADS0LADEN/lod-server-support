@@ -379,6 +379,7 @@ public class PaperRequestProcessingService {
         this.players.remove(uuid);
         this.regionProbeResults.remove(uuid);
         this.heldForProbe.remove(uuid);
+        this.reattachPromptAt.remove(uuid); // quits enqueue a remove unconditionally
         this.offThreadProcessor.notifyPlayerRemoved(uuid);
         cleanupPlayerServices(uuid);
         // Resets the v16 want-set + arms the ingress grace. Identity survives (dropped only
@@ -391,6 +392,67 @@ public class PaperRequestProcessingService {
         this.diskReader.removePlayerResults(uuid);
         if (this.generationService != null)
             this.generationService.removePlayer(uuid);
+    }
+
+    /** Minimum interval between re-attach prompts per player (see maybeSendReattachPrompt). */
+    static final long REATTACH_PROMPT_INTERVAL_MS = 60_000;
+
+    /** Test seam: the re-attach prompt send (production: the v16-dialect SessionConfig —
+     *  see maybeSendReattachPrompt for why that dialect specifically). */
+    @FunctionalInterface
+    interface ReattachPromptSender {
+        void send(ServerPlayer player);
+    }
+
+    ReattachPromptSender reattachPromptSender = this::sendReattachPromptPayload;
+
+    private void sendReattachPromptPayload(ServerPlayer player) {
+        PaperPayloadHandler.sendSessionConfigV16(player.getBukkitEntity(),
+                this.config.enabled, this.config.lodDistanceChunks,
+                LSSConstants.SYNC_ON_LOAD_SLOT_CAP,
+                this.config.generationConcurrencyLimitPerPlayer,
+                this.config.enableChunkGeneration);
+    }
+    // Per-UUID last-prompt stamps (millis). Concurrent: batches arrive on region threads on
+    // Folia. Swept in removePlayer (quits enqueue a remove unconditionally).
+    private final java.util.concurrent.ConcurrentHashMap<UUID, Long> reattachPromptAt =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * /reload re-attach prompt (R2-3). A successfully-DECODED batch from a player with NO
+     * state is proof of an orphaned LSS session: vanilla clients never speak the channel,
+     * a live client cannot declare before its deferred-reply registration ran, and after a
+     * plugin reload the fresh service has an empty player map while every connected LSS
+     * client keeps declaring its want-set at 1 Hz forever — silently dropped here until
+     * the player manually rejoined.
+     *
+     * <p>The prompt is the V16-DIALECT 6-field SessionConfig, deliberately: a modern
+     * client's downgrade guard treats an unexpected v16 config on an established v18
+     * session as a raced discovery and RE-ANNOUNCES a v18 handshake — which re-registers
+     * it through the normal deferred path. That is the heal, and it ships with zero
+     * client-side changes. A genuine v16 client (whose post-reload batches also land here
+     * — the fresh compat manager has no session for it) parses the 6-field shape
+     * harmlessly and stays broken-until-rejoin, exactly today's behavior; the v18 4-field
+     * shape would buffer-underflow its decoder and hard-kick it.
+     *
+     * <p>Rate-limited per UUID (60 s). On Folia a dimension-change remove→register window
+     * can fire one spurious prompt mid-session — bounded by the limit and coinciding with
+     * the client's own dimension reset. Sent directly from the message-handler thread
+     * (netty is any-thread safe — the v16 overflow valve precedent above).
+     */
+    private void maybeSendReattachPrompt(ServerPlayer player) {
+        var uuid = player.getUUID();
+        long now = System.nanoTime() / 1_000_000L;
+        boolean[] fire = {false};
+        this.reattachPromptAt.compute(uuid, (k, prev) -> {
+            if (prev != null && now - prev < REATTACH_PROMPT_INTERVAL_MS) return prev;
+            fire[0] = true;
+            return now;
+        });
+        if (!fire[0]) return;
+        LSSLogger.info("Re-attach prompt for " + player.getName().getString()
+                + " — declared a want-set with no registered session (plugin reloaded?)");
+        this.reattachPromptSender.send(player);
     }
 
     public void handleBatchRequest(ServerPlayer player, PaperPayloadHandler.DecodedBatchChunkRequest batch) {
@@ -423,7 +485,13 @@ public class PaperRequestProcessingService {
         }
 
         var state = this.players.get(player.getUUID());
-        if (state == null || !state.hasCompletedHandshake()) return;
+        if (state == null) {
+            // STRICTLY state == null: a registered-but-mid-handshake state (the guard
+            // below) is a healthy client whose own deferred reply is in flight.
+            maybeSendReattachPrompt(player);
+            return;
+        }
+        if (!state.hasCompletedHandshake()) return;
 
         var accepted = new ArrayList<IncomingRequest>(batch.count());
         for (int i = 0; i < batch.count(); i++) {

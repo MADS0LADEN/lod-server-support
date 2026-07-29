@@ -100,6 +100,12 @@ public class LSSServerNetworking {
 
         if (!decision.sendSessionConfig()) {
             // See HandshakeGate.Outcome.VERSION_MISMATCH: replying would kick the player.
+            // An EXISTING registration deliberately survives this rung (and NO_CONSUMER
+            // below): only a hostile/buggy client re-handshakes cross-capability on a
+            // live connection, and a stray duplicate frame must not kill a working
+            // stream — pinned by ServiceLifecycleGameTests (zero-mutation / keeps-
+            // registration). Accepted residual: such a client keeps receiving columns
+            // it just disclaimed, bounded to its own consenting connection.
             LSSLogger.warn("Player " + player.getName().getString()
                     + " has incompatible " + Brand.shortName() + " protocol version " + payload.protocolVersion()
                     + " (server: " + LSSConstants.PROTOCOL_VERSION + "), skipping LOD distribution");

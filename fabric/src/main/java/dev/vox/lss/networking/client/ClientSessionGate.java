@@ -103,6 +103,12 @@ final class ClientSessionGate {
      */
     void onJoin(boolean receiveServerLods, boolean localIntegratedServer, boolean hasConsumers,
                 boolean enableV16ServerCompat) {
+        // Defensive: under Fabric's lifecycle DISCONNECT always precedes the next JOIN,
+        // but if a manager ever survived to here, dropping it without teardown would lose
+        // its cache save. Self-sufficiency over the lifecycle assumption.
+        if (this.requestManager != null) {
+            teardownManager(this.requestManager);
+        }
         this.serverEnabled = false;
         this.sessionConfigReceived = false;
         this.serverLodDistance = 0;
@@ -174,14 +180,17 @@ final class ClientSessionGate {
 
         // Downgrade guard. A v16 config arriving once a v18 session already exists on this
         // connection is never a real legacy server (a server is one dialect or the other) — it
-        // is the reply to a discovery fallback that raced a slow v18 SessionConfig (a healthy
-        // v18 server briefly stalled past V16_DISCOVERY_DELAY_TICKS). Do NOT downgrade the
-        // working v18 session; re-announce v18 so the server sheds the spurious compat session
-        // it just opened and restores full (generation-capable) v18 egress. Bounded: the reply
+        // is either the reply to a discovery fallback that raced a slow v18 SessionConfig, or
+        // a Paper server's RE-ATTACH PROMPT after a plugin /reload orphaned this session
+        // (the server deliberately prompts in the v16 dialect: this guard's re-announce IS
+        // the re-registration heal, and the 6-field shape is the one every dialect of client
+        // parses safely). Do NOT downgrade the working v18 session; re-announce v18 so the
+        // server (re-)registers us and sheds any spurious compat session. Bounded: the reply
         // to this is a v18 config, which never re-enters this branch, so no handshake ping-pong.
         if (v16 && this.sessionConfigReceived && !this.isV16Server) {
-            LSSLogger.warn("Ignoring a late protocol-16 session config: a v18 session is already "
-                    + "established (a discovery fallback raced a slow v18 reply). Re-announcing v18.");
+            LSSLogger.info("Late protocol-16 session config on an established v18 session "
+                    + "(a raced discovery reply, or a server plugin reload prompting us to "
+                    + "re-attach) — re-announcing v18.");
             try {
                 this.handshakeSender.accept(LSSConstants.PROTOCOL_VERSION);
             } catch (Exception e) {
