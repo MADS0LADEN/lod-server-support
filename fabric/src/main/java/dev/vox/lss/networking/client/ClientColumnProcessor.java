@@ -378,6 +378,8 @@ class ClientColumnProcessor {
             return buf.readVarInt() == 0;
         } catch (RuntimeException e) {
             return false;
+        } finally {
+            buf.release(); // heap wrapper — GC-safe either way, but leak detectors flag it
         }
     }
 

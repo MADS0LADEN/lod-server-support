@@ -100,12 +100,17 @@ public final class SectionSerializer {
                 if (maskEntry != null) {
                     // Masking INSIDE the choke point: probe, generation, and the
                     // DirtyContentFilter hash all see identical masked bytes by construction.
+                    int[] replacedCells = new int[1];
                     var masked = XrayMaskFilter.mask(section, info.sectionY,
-                            maskEntry.mask(), maskEntry.kind(), maskFactory);
+                            maskEntry.mask(), maskEntry.kind(), maskFactory, replacedCells);
                     if (masked != section) {
                         section = masked;
-                        var manager = XrayMaskManager.current();
-                        if (manager != null) manager.countMaskedSection();
+                        // Count only when cells were actually hidden — a stale-palette
+                        // rebuild (mined-out ore still listed) swaps for the prune only.
+                        if (replacedCells[0] > 0) {
+                            var manager = XrayMaskManager.current();
+                            if (manager != null) manager.countMaskedSection();
+                        }
                     }
                 }
 

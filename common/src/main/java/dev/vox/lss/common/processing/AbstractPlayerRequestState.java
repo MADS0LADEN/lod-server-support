@@ -71,7 +71,7 @@ public abstract class AbstractPlayerRequestState<T> {
     private long departureGraceNanos = LSSConstants.SEND_DEPARTURE_GRACE_MILLIS * 1_000_000L;
     private java.util.function.LongSupplier departureClock = System::nanoTime;
     private long departedSweepMarkNanos; // main thread only (flushSendQueue)
-    private final PlayerBandwidthTracker bandwidth = new PlayerBandwidthTracker();
+    private final PlayerBandwidthTracker bandwidth;
     private final AtomicLong totalRequestsReceived = new AtomicLong();
     // Single-writer (main thread) — volatile for cross-thread visibility to processing thread
     private volatile int sendQueueSizeSnapshot = 0;
@@ -133,9 +133,17 @@ public abstract class AbstractPlayerRequestState<T> {
     private volatile int heldGenSlots = 0;
 
     protected AbstractPlayerRequestState(UUID playerUuid, int syncConcurrency, int genConcurrency) {
+        this(playerUuid, syncConcurrency, genConcurrency, System::nanoTime);
+    }
+
+    /** Clock-injected flavor (tests): drives the bandwidth tracker's refills off a fake
+     *  clock so gametests' accelerated tick rates can't starve wall-time refills. */
+    protected AbstractPlayerRequestState(UUID playerUuid, int syncConcurrency, int genConcurrency,
+                                         java.util.function.LongSupplier nanoClock) {
         this.playerUuid = playerUuid;
         this.syncSlotCap = syncConcurrency;
         this.genSlotCap = genConcurrency;
+        this.bandwidth = new PlayerBandwidthTracker(nanoClock);
     }
 
     // ---- Handshake / Capability ----

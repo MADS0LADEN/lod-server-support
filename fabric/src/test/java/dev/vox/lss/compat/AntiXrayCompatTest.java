@@ -152,7 +152,9 @@ class AntiXrayCompatTest {
         var probe = AntiXrayCompat.buildEngineProbe(true, name -> {
             throw new ClassNotFoundException(name);
         });
-        assertInstanceOf(AntiXrayCompat.EngineView.Unreadable.class, probe.probe(null));
+        var view = assertInstanceOf(AntiXrayCompat.EngineView.Unreadable.class, probe.probe(null));
+        assertFalse(view.transientNull(),
+                "a resolution failure is TERMINAL unreadable — never the retryable flavor");
     }
 
     @Test
@@ -165,9 +167,12 @@ class AntiXrayCompatTest {
                 "the Disabled controller means that world is anti-xray-off");
 
         me.drex.antixray.common.util.Util.stagedController = null;
-        assertInstanceOf(AntiXrayCompat.EngineView.Unreadable.class, probe.probe(null),
+        var nullView = assertInstanceOf(AntiXrayCompat.EngineView.Unreadable.class, probe.probe(null),
                 "no controller is NOT evidence the world is anti-xray-off — fail safe "
                         + "(LSS-keys masking), and without latching");
+        assertTrue(nullView.transientNull(),
+                "the null-controller rung is the ONE retryable unreadable flavor — the "
+                        + "manager's re-probe window (R2-7) keys on it");
 
         var diamond = net.minecraft.world.level.block.Blocks.DIAMOND_ORE.defaultBlockState();
         var iron = net.minecraft.world.level.block.Blocks.IRON_ORE.defaultBlockState();

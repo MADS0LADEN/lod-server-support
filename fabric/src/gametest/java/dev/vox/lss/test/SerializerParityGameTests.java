@@ -76,6 +76,28 @@ public class SerializerParityGameTests {
     private static final int END_VOID_DISK_CZ = 8;
 
     /**
+     * R2-5's production range gate feeds {@code level.getMinSectionY()}/{@code getMaxSectionY()}
+     * into the NBT serializers as an INCLUSIVE [min, max]. Nothing else would red if a future MC
+     * version flipped the max accessor to exclusive (the 1.20-era {@code getMaxSection()} WAS
+     * exclusive — a live hazard given this project's backport habit): the gate would silently
+     * drop every chunk's top section on the disk path only. Pin the inclusivity against the
+     * live section array — {@code getSectionsCount()} is what the live serializer iterates,
+     * with sectionY = minSectionY + index.
+     */
+    @GameTest(structure = "fabric-gametest-api-v1:empty")
+    public void worldSectionRangeAccessorsAreInclusive(GameTestHelper helper) {
+        ServerLevel level = helper.getLevel();
+        int min = level.getMinSectionY();
+        int max = level.getMaxSectionY();
+        int count = level.getSectionsCount();
+        helper.assertTrue(max - min + 1 == count,
+                "getMaxSectionY must stay INCLUSIVE: min=" + min + " max=" + max
+                        + " sectionsCount=" + count
+                        + " — if this reds, the R2-5 disk range gate is dropping top sections");
+        helper.succeed();
+    }
+
+    /**
      * A column served from disk must be byte-identical to the same column served live after the
      * chunk loads back from that disk state. The chunk is generated, given a torch that is placed
      * and removed (leaving the light engine's allocated-but-all-zero BlockLight array in the
@@ -441,9 +463,15 @@ public class SerializerParityGameTests {
         helper.assertTrue(!seededFilter.contentChanged(endLevel, chunk, dim),
                 "all-air save after an all-air serve seed must stay quiet");
 
-        endLevel.setBlock(new BlockPos(cx * 16 + 8, 80, cz * 16 + 8), Blocks.END_STONE.defaultBlockState(), 3);
+        var built = new BlockPos(cx * 16 + 8, 80, cz * 16 + 8);
+        endLevel.setBlock(built, Blocks.END_STONE.defaultBlockState(), 3);
         helper.assertTrue(filter.contentChanged(endLevel, chunk, dim),
                 "air-to-built transition must mark dirty (the sentinel must not swallow it)");
+        // Revert the built block: the gametest world persists across dev-box runs and the
+        // batch grid slot (hence the salt) is DETERMINISTIC, so each run used to leave one
+        // more END_STONE down the SAME walk path — the 8-column budget above exhausted
+        // after ~8 local runs and the premise failed permanently until the world was wiped.
+        endLevel.setBlock(built, Blocks.AIR.defaultBlockState(), 3);
         helper.succeed();
     }
 

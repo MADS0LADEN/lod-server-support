@@ -110,6 +110,7 @@ class PaperCommandsTest {
         when(service.getBandwidthLimiter()).thenReturn(new SharedBandwidthLimiter(1024));
         when(service.getV16CompatManager()).thenReturn(new V16CompatManager());
         when(service.getTickDiagnostics()).thenReturn("tick");
+        when(service.getTickDiag()).thenReturn(new dev.vox.lss.common.processing.TickDiagnostics());
         when(service.getPlayers()).thenReturn(Map.of());
         // getGenerationService() returns null (generation disabled) — the path that must not NPE
 
@@ -137,6 +138,7 @@ class PaperCommandsTest {
         when(service.getBandwidthLimiter()).thenReturn(new SharedBandwidthLimiter(1024));
         when(service.getV16CompatManager()).thenReturn(new V16CompatManager());
         when(service.getTickDiagnostics()).thenReturn("tick");
+        when(service.getTickDiag()).thenReturn(new dev.vox.lss.common.processing.TickDiagnostics());
         when(service.getPlayers()).thenReturn(Map.of());
         var config = new PaperConfig();
         config.enabled = false;

@@ -156,6 +156,34 @@ class XrayMaskFilterTest {
     }
 
     @Test
+    void stalePaletteRebuildsForThePruneButReportsZeroReplacedCells() {
+        // Live containers never prune: a mined-out section keeps listing its ore in the
+        // palette forever, so the maybeHas pre-gate fires with ZERO hidden cells present.
+        // The rebuild must still run (shipping the stale palette is the section-resolution
+        // ore-presence oracle the rebuild exists to prune) but must report zero replaced
+        // cells so masked_sections doesn't count a no-op — the counter's runaway meaning
+        // depends on it (R2-6).
+        var section = newSection();
+        fillAll(section, Blocks.STONE.defaultBlockState());
+        section.setBlockState(3, 3, 3, Blocks.DIAMOND_ORE.defaultBlockState());
+        section.setBlockState(3, 3, 3, Blocks.STONE.defaultBlockState()); // mined out — palette keeps the ore
+
+        int[] replaced = new int[1];
+        var masked = XrayMaskFilter.mask(section, 0, defaultMask(), FallbackKind.OVERWORLD, FACTORY, replaced);
+
+        assertNotSame(section, masked, "the stale-palette section still rebuilds (palette prune)");
+        assertEquals(0, replaced[0], "zero cells were hidden — masked_sections must not count this");
+        assertEquals(4096, countCells(masked, s -> s.is(Blocks.STONE)), "content is untouched");
+
+        // Contrast: a real ore section reports its hidden-cell count.
+        var withOre = newSection();
+        fillAll(withOre, Blocks.STONE.defaultBlockState());
+        int ores = sprinkle(withOre, Blocks.DIAMOND_ORE.defaultBlockState(), 11, 0);
+        XrayMaskFilter.mask(withOre, 0, defaultMask(), FallbackKind.OVERWORLD, FACTORY, replaced);
+        assertEquals(ores, replaced[0], "a genuinely ore-bearing section reports its replaced cells");
+    }
+
+    @Test
     void sectionAtOrAboveCutoffReturnsTheSameInstance() {
         var section = newSection();
         fillAll(section, Blocks.STONE.defaultBlockState());

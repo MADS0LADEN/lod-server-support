@@ -18,6 +18,14 @@ public class PlayerRequestState extends AbstractPlayerRequestState<CustomPacketP
         this.lastDimension = player.level().dimension();
     }
 
+    /** Clock-injected flavor — see {@link AbstractPlayerRequestState}. */
+    public PlayerRequestState(ServerPlayer player, int syncConcurrency, int genConcurrency,
+                              java.util.function.LongSupplier nanoClock) {
+        super(player.getUUID(), syncConcurrency, genConcurrency, nanoClock);
+        this.player = player;
+        this.lastDimension = player.level().dimension();
+    }
+
     /** Test seam: a state with no live {@link ServerPlayer}, for payload-queue assertions in
      *  unit tests. Player-derived accessors (name, dimension) must not be called on it. */
     PlayerRequestState(UUID playerUuid, int syncConcurrency, int genConcurrency) {

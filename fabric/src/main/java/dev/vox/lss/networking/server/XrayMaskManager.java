@@ -41,7 +41,13 @@ public final class XrayMaskManager {
     private final XrayMaskPolicy.Mode mode;
     private final ServerConfigBase config;
     private final ConcurrentHashMap<String, Optional<MaskEntry>> byDimension = new ConcurrentHashMap<>();
+    // Consecutive transient-null probe counts per dimension (see entryFor's retry window).
+    private final ConcurrentHashMap<String, Integer> transientProbes = new ConcurrentHashMap<>();
     private final AtomicLong maskedSections = new AtomicLong();
+
+    /** Transient-null probes tolerated per dimension before latching to the fallback —
+     *  bounds the per-serve re-probing when the engine never becomes readable. */
+    static final int TRANSIENT_PROBE_LATCH = 100;
     // The LSS-keys fallback tier, resolved at most once (memoized) so its unknown-id
     // warnings stay once-per-service — and never resolved at all under pure engine adoption.
     private volatile XrayMaskFilter.MaskSet fallbackMask;
@@ -82,10 +88,46 @@ public final class XrayMaskManager {
                 () -> AntiXrayCompat.engineForLevel(level));
     }
 
-    /** The cache + decision core, level-free for Tier 1 ({@code view} runs at most once per dimension). */
+    /**
+     * The cache + decision core, level-free for Tier 1. A TERMINAL probe outcome caches
+     * per dimension for the service lifetime; a TRANSIENT-null one (the engine exists but
+     * is "not yet known to AntiXray" — the probe deliberately does not latch on it) is
+     * served as the uncached fallback and RE-PROBED on the next serve, up to
+     * {@link #TRANSIENT_PROBE_LATCH} attempts. Caching it (the pre-R2-7 behavior) locked
+     * the dimension to the LSS-keys fallback for the whole session off one early null,
+     * defeating the probe's own transient-null intent. Fail direction unchanged: masking
+     * stays ON with some list throughout.
+     */
     MaskEntry entryFor(String dimension, Supplier<EngineView> view) {
+        var cached = this.byDimension.get(dimension);
+        if (cached != null) return cached.orElse(null);
+        if (this.mode == XrayMaskPolicy.Mode.OFF) {
+            // OFF can never mask, so it needs no engine probe at all — cache the no-mask
+            // outcome up front instead of paying the transient-null re-probe window (up
+            // to TRANSIENT_PROBE_LATCH reflective probes) for a dimension whose answer
+            // is fixed by config.
+            return this.byDimension.computeIfAbsent(dimension, d -> Optional.empty())
+                    .orElse(null);
+        }
+        EngineView v = view.get();
+        if (v instanceof EngineView.Unreadable u && u.transientNull()
+                && this.transientProbes.merge(dimension, 1, Integer::sum) < TRANSIENT_PROBE_LATCH) {
+            // Quiet: this serves every read until the engine resolves — the "masking
+            // active" info line would spam once per serve during the window.
+            return evaluate(dimension, v, true);
+        }
         return this.byDimension
-                .computeIfAbsent(dimension, d -> Optional.ofNullable(evaluate(d, view.get())))
+                .computeIfAbsent(dimension, d -> {
+                    if (v instanceof EngineView.Unreadable u && u.transientNull()) {
+                        // The latch tripped: the engine never resolved. Say WHY the
+                        // fallback caches (the info line below only names the source) —
+                        // once, guaranteed by the computeIfAbsent mapping.
+                        LSSLogger.warn("AntiXray engine stayed unreadable (transient) for "
+                                + d + " after " + TRANSIENT_PROBE_LATCH + " probes — caching "
+                                + "the LSS-config fallback mask for this session");
+                    }
+                    return Optional.ofNullable(evaluate(d, v, false));
+                })
                 .orElse(null);
     }
 
@@ -118,7 +160,7 @@ public final class XrayMaskManager {
         return "Xray: active=" + label + ", masked_sections=" + this.maskedSections.get();
     }
 
-    private MaskEntry evaluate(String dimension, EngineView view) {
+    private MaskEntry evaluate(String dimension, EngineView view, boolean quiet) {
         if (this.mode == XrayMaskPolicy.Mode.OFF) return null;
         boolean engineActiveForWorld = view instanceof EngineView.Active
                 || view instanceof EngineView.Unreadable
@@ -147,15 +189,19 @@ public final class XrayMaskManager {
             mask = XrayMaskFilter.MaskSet.resolve(
                     this.config.xrayHiddenBlocks, noise.maxBlockHeight());
             source = "antixray-mod+lss-list";
-            LSSLogger.info("AntiXray engine mode 2/3 detected for " + dimension
-                    + " — its obfuscation list includes replacement terrain, so LOD masking "
-                    + "uses the LSS xrayHiddenBlocks list at the engine's height instead");
+            if (!quiet) {
+                LSSLogger.info("AntiXray engine mode 2/3 detected for " + dimension
+                        + " — its obfuscation list includes replacement terrain, so LOD masking "
+                        + "uses the LSS xrayHiddenBlocks list at the engine's height instead");
+            }
         } else {
             mask = fallbackMask();
             source = "config";
         }
-        LSSLogger.info("LOD x-ray masking active for " + dimension + " (source=" + source
-                + ", maxY=" + mask.maxBlockHeight() + ")");
+        if (!quiet) {
+            LSSLogger.info("LOD x-ray masking active for " + dimension + " (source=" + source
+                    + ", maxY=" + mask.maxBlockHeight() + ")");
+        }
         return new MaskEntry(mask, FallbackKind.fromDimension(dimension), source);
     }
 

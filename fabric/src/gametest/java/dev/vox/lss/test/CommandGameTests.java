@@ -272,6 +272,8 @@ public class CommandGameTests {
                     config.sendQueueLimitPerPlayer,
                     service.getUptimeSeconds(), service.getTickDiagnostics(),
                     service.getWindowBandwidthRate(),
+                    service.getTickDiag().getTotalSectionsSent(),
+                    service.getTickDiag().getTotalBytesSent(),
                     service.getOffThreadProcessor().getDiagnostics(), service.getDiskReader(),
                     service.getBandwidthLimiter(),
                     genService != null ? genService.getDiagnostics() : null,
@@ -284,10 +286,17 @@ public class CommandGameTests {
             long inMemory = ((Number) serviceMap.get("in_memory")).longValue();
             long requests = ((Number) serviceMap.get("requests_received")).longValue();
 
-            helper.assertTrue(columnsSent == 2 && data.totalSent() == 2,
-                    "columns_sent must agree across BOTH independent counting sites "
-                            + "(flush diagnostics vs per-player bandwidth sum): exporter="
-                            + columnsSent + " formatter=" + data.totalSent());
+            // Post-R2-9 the exporter and the formatter's Throughput line BOTH read the
+            // service-scoped TickDiagnostics total (deliberate — the per-state sum dies on
+            // dimension change), so exporter==formatter holds by construction. The genuinely
+            // independent counting site is the per-player state's session counter — same
+            // ground truth here (one player, no dimension change).
+            helper.assertTrue(columnsSent == 2 && data.totalSent() == 2
+                            && state.getTotalSectionsSent() == 2,
+                    "columns_sent must match ground truth at the service-scoped total "
+                            + "(exporter=" + columnsSent + " formatter=" + data.totalSent()
+                            + ") and at the independent per-state session counter (state="
+                            + state.getTotalSectionsSent() + ")");
             helper.assertTrue(upToDate == 1 && data.cumUtd() == 1,
                     "up_to_date must agree: exporter=" + upToDate + " formatter=" + data.cumUtd());
             helper.assertTrue(inMemory == 2 && data.cumInMem() == 2,

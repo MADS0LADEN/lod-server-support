@@ -126,14 +126,19 @@ public class TwoPlayerGameTests {
     }
 
     /**
-     * SP-062: bandwidth fairness with one busy and one idle handshaked player, composed
-     * exactly as the service composes it (one shared allocation per round, both players
-     * flushed against it). Pins: the idle player never spends; each round's busy spend is
-     * bounded by the 250 ms burst window of its fair share (alloc/4 + one payload
-     * overshoot); a send that empties the global bucket yields an observable zero-token
-     * round (sampled sub-millisecond, before any refill) in which nothing flushes; and the
-     * bucket recovers on later ticks. Bounds, never exact splits — refills are wall-time
-     * driven and the loop only ever waits on tick-spaced counter observations.
+     * SP-062, re-derived for debt-carrying buckets (R2-2): bandwidth fairness with one busy
+     * and one idle handshaked player, composed exactly as the service composes it (one
+     * shared allocation per round, both players flushed against it). Pins: the idle player
+     * never spends; each round's busy spend is bounded by the 250 ms burst window of its
+     * fair share (alloc/4 + one payload overshoot); the busy player's CUMULATIVE spend
+     * stays within the global cap over the sampled window — the enforcement itself, which
+     * the old forgiven-overdraft buckets violated by ~3x with payloads above the per-tick
+     * refill (and whose free overshoot is what the pre-R2-2 flavor of this test relied on
+     * to "exhaust" the bucket); a debt-driven zero-allocation state (one oversized send
+     * taking the SHARED bucket negative — the unit-pinned fairness change, composed here)
+     * flushes nothing while it lasts; and the bucket recovers on later ticks. Bounds,
+     * never exact splits — refills are wall-time driven and the loop only ever waits on
+     * tick-spaced counter observations.
      */
     @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 600)
     public void bandwidthFairnessBoundsBusySpendAndIdleDilutionRecovers(GameTestHelper helper) {
@@ -143,13 +148,21 @@ public class TwoPlayerGameTests {
         var idleMock = placeMockServerPlayer(helper);
         long globalCap = 65536;
         int payloadBytes = 8192;
-        var limiter = new SharedBandwidthLimiter(globalCap);
-        var busy = new PlayerRequestState(busyMock, 200, 16);
-        var idle = new PlayerRequestState(idleMock, 200, 16);
+        // FAKE nano-clock, advanced 50 ms per succeedWhen pass: refills are wall-clock
+        // driven while gametest ticks run ACCELERATED (hundreds of retries per wall
+        // second), so real-clock refills starve and any debt outlives the tick budget.
+        // The injected clock (the R2-2 seam) makes every refill deterministic per round.
+        long[] clock = {0};
+        var limiter = new SharedBandwidthLimiter(globalCap, () -> clock[0]);
+        var busy = new PlayerRequestState(busyMock, 200, 16, () -> clock[0]);
+        var idle = new PlayerRequestState(idleMock, 200, 16, () -> clock[0]);
         busy.markHandshakeComplete();
         idle.markHandshakeComplete();
         var filler = new SessionConfigS2CPayload(LSSConstants.PROTOCOL_VERSION, true, 1, true);
-        for (int i = 0; i < 40; i++) {
+        // 60 > fairnessRounds: a stalled tick makes one round's wall-clock refill cover a
+        // whole burst window (one payload per round, worst case), so a 40-payload queue
+        // could drain to empty during the fairness window and strand the recovery phase.
+        for (int i = 0; i < 60; i++) {
             busy.addReadyPayload(new QueuedPayload<>(filler, payloadBytes, i,
                     PositionUtil.packPosition(1_020_000 + i, 99)));
         }
@@ -158,12 +171,15 @@ public class TwoPlayerGameTests {
         var rounds = new AtomicInteger();
         var busyAtZero = new AtomicLong(-1);
 
+        final int fairnessRounds = 40; // ~2 s of tick-rounds for the cumulative-cap window
+        var windowStartNanos = new AtomicLong(-1);
+        var debtInjected = new AtomicLong();
         helper.succeedWhen(() -> {
+            clock[0] += 50_000_000L; // one nominal tick of fake time per pass
             helper.assertTrue(helper.getTick() >= 2,
                     "waiting one tick so token buckets have elapsed time to refill from");
             if (step.get() == 0) {
-                helper.assertTrue(rounds.incrementAndGet() < 100,
-                        "the busy backlog must exhaust the global bucket within 100 tick-rounds");
+                windowStartNanos.compareAndSet(-1, clock[0]);
                 long alloc = limiter.getPerPlayerAllocation(2);
                 long busyBefore = busy.getTotalBytesSent();
                 long idleBefore = idle.getTotalBytesSent();
@@ -176,27 +192,58 @@ public class TwoPlayerGameTests {
                         "per-round busy spend must stay within the burst window of its fair "
                                 + "share (alloc/4 + one payload overshoot): alloc=" + alloc
                                 + " spent=" + busyDelta);
-                // Sub-millisecond re-sample: no refill can run, so a send that emptied the
-                // global bucket reads as a true zero-token state.
-                if (limiter.getPerPlayerAllocation(2) == 0) {
-                    long beforeZeroRound = busy.getTotalBytesSent();
-                    busy.flushSendQueue(0, limiter, diag, p -> {});
-                    helper.assertTrue(busy.getTotalBytesSent() == beforeZeroRound,
-                            "a zero-token round must flush nothing");
-                    busyAtZero.set(busy.getTotalBytesSent());
-                    step.set(1);
+                if (rounds.incrementAndGet() < fairnessRounds) {
+                    helper.assertTrue(false, "round " + rounds.get() + " running");
                 }
-                helper.assertTrue(false, "round " + rounds.get() + " done, bucket not yet exhausted");
+                // The enforcement pin (R2-2): cumulative busy spend over the sampled window
+                // stays within the GLOBAL cap (x1.3 wall-time slack + one payload). The old
+                // forgiven-overdraft buckets shipped one payload per round here — ~8 KB per
+                // 50 ms round = ~160 KB/s against a 64 KB/s cap — a ~2.5x violation this
+                // bound reds.
+                long elapsedNanos = Math.max(1, clock[0] - windowStartNanos.get());
+                long capBudget = globalCap * elapsedNanos / 1_000_000_000L;
+                helper.assertTrue(busy.getTotalBytesSent() <= capBudget * 13 / 10 + payloadBytes,
+                        "cumulative busy spend must respect the global cap: spent="
+                                + busy.getTotalBytesSent() + " capBudget=" + capBudget);
+                // Debt-driven zero-allocation state (the unit-pinned shared-bucket fairness
+                // change, composed here): one oversized send takes the shared bucket
+                // negative; sampled sub-millisecond, no refill can run, so it reads as a
+                // true zero-token state in which nothing flushes.
+                // Sized to leave ~ONE payload of net debt: refills are WALL-CLOCK driven
+                // while gametest ticks run accelerated, so a large debt (e.g. 2x cap =
+                // ~2 wall-seconds of refill) can outlive the whole tick budget. Re-sample
+                // sub-millisecond (the refill's <1ms skip guard makes it exact, +-1 from
+                // the per-player halving) so the flushes above are accounted for.
+                long inject = limiter.getPerPlayerAllocation(2) * 2 + payloadBytes;
+                limiter.recordSend((int) inject);
+                // Accumulate, don't overwrite: an assert-throw below re-enters this step-0
+                // block next tick and records a SECOND injection — the final accounting
+                // identity must include every one, or the original failure gets masked by
+                // a permanently-unsatisfiable identity.
+                debtInjected.addAndGet(inject);
+                helper.assertTrue(limiter.getPerPlayerAllocation(2) == 0,
+                        "shared-bucket debt must zero every player's allocation");
+                long beforeZeroRound = busy.getTotalBytesSent();
+                busy.flushSendQueue(0, limiter, diag, p -> {});
+                helper.assertTrue(busy.getTotalBytesSent() == beforeZeroRound,
+                        "a zero-token round must flush nothing");
+                helper.assertTrue(busy.getSendQueueSize() > 0,
+                        "premise: payloads must remain queued for the recovery phase");
+                busyAtZero.set(busy.getTotalBytesSent());
+                step.set(1);
             }
-            // Recovery: later ticks refill the global bucket and sends resume.
+            // Recovery: later ticks pay the debt down and refill past zero; sends resume.
             long alloc = limiter.getPerPlayerAllocation(2);
             busy.flushSendQueue(alloc, limiter, diag, p -> {});
+
             helper.assertTrue(busy.getTotalBytesSent() > busyAtZero.get(),
-                    "waiting for the refilled bucket to admit a post-exhaustion send");
+                    "waiting for the debt-paid bucket to admit a post-exhaustion send");
             helper.assertTrue(idle.getTotalBytesSent() == 0,
                     "the idle player must end the test having spent nothing");
-            helper.assertTrue(limiter.getTotalBytesSent() == busy.getTotalBytesSent(),
-                    "global accounting identity: every counted byte must be the busy player's");
+            helper.assertTrue(limiter.getTotalBytesSent()
+                            == busy.getTotalBytesSent() + debtInjected.get(),
+                    "global accounting identity: every counted byte is the busy player's "
+                            + "plus the injected debt");
             playerList.remove(busyMock);
             playerList.remove(idleMock);
         });

@@ -16,6 +16,7 @@ import org.bukkit.plugin.Plugin;
 
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.Optional;
 
 /**
@@ -27,6 +28,9 @@ public class PaperWorldHandler {
     private final Plugin plugin;
     private final DirtyColumnTracker dirtyTracker;
     private final Listener dummyListener = new Listener() {};
+    // Event classes already warned about unrecognized extraction shapes (event threads —
+    // concurrent set; bounded by the configured updateEvents list).
+    private final java.util.Set<Class<?>> unrecognizedWarned = ConcurrentHashMap.newKeySet();
 
     /**
      * Per-class extractor cache. Keyed by the runtime {@link Class} object via ClassValue
@@ -82,12 +86,30 @@ public class PaperWorldHandler {
 
         try {
             Object result = method.invoke(event);
+            boolean marked;
             if (result instanceof List<?> list) {
+                marked = list.isEmpty(); // an empty block list is a legitimate no-op fire
                 for (Object item : list) {
-                    submitFromObject(item);
+                    marked |= submitFromObject(item);
                 }
             } else {
-                submitFromObject(result);
+                marked = submitFromObject(result);
+            }
+            if (!marked && this.unrecognizedWarned.add(event.getClass())) {
+                // Warn-once per event class (R2-11): a configured updateEvents entry whose
+                // discovered extractor returns a shape submitFromObject doesn't recognize
+                // silently marked NOTHING, forever — an admin's custom entry deserves one
+                // loud line, not permanent silent no-op. For a list, name the ITEM type —
+                // the list shape itself is recognized, its elements weren't (marked==false
+                // with a list implies non-empty and zero recognized items).
+                String shape = switch (result) {
+                    case null -> "null";
+                    case List<?> list -> "a List of " + list.get(0).getClass().getName();
+                    default -> result.getClass().getName();
+                };
+                LSSLogger.warn("updateEvents entry " + event.getClass().getName()
+                        + " resolves, but its extracted value (" + shape
+                        + ") is not a recognized position shape — this event marks nothing");
             }
         } catch (Exception e) {
             LSSLogger.debug("Failed to extract position from " + event.getClass().getName(), e);
@@ -125,7 +147,8 @@ public class PaperWorldHandler {
         dirtyTracker.markDirty(dimension, blockX >> 4, blockZ >> 4);
     }
 
-    private void submitFromObject(Object obj) {
+    /** @return true when the shape was recognized and marked (see the warn-once caller). */
+    private boolean submitFromObject(Object obj) {
         if (obj instanceof Block block) {
             dirtyTracker.markDirty(block.getWorld().getKey().toString(), block.getX() >> 4, block.getZ() >> 4);
         } else if (obj instanceof BlockState state) {
@@ -136,7 +159,10 @@ public class PaperWorldHandler {
             }
         } else if (obj instanceof Chunk chunk) {
             dirtyTracker.markDirty(chunk.getWorld().getKey().toString(), chunk.getX(), chunk.getZ());
+        } else {
+            return false;
         }
+        return true;
     }
 
     /**

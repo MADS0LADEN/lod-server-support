@@ -98,6 +98,11 @@ public class PaperChunkGenerationService {
     // the counter is exact. Exposed in getDiagnostics()/getNullChunkFailures() for operators.
     private final AtomicBoolean nullChunkWarned = new AtomicBoolean(false);
     private final AtomicLong nullChunkFailures = new AtomicLong(0);
+    // Vanished-in-the-completion-window (transient) — SEPARATE from the Moonrise-null
+    // flavor (R2-8): the two regress independently and a shared latch/counter let either
+    // suppress the other's warning and made the diag unable to distinguish them.
+    private final AtomicBoolean vanishedWarned = new AtomicBoolean(false);
+    private final AtomicLong vanishedFailures = new AtomicLong(0);
 
     public PaperChunkGenerationService(PaperConfig config, Plugin plugin) {
         this.maxConcurrent = config.generationConcurrencyLimitGlobal;
@@ -167,8 +172,10 @@ public class PaperChunkGenerationService {
      * ran anyway. The reads are region-legal and tear-free off-pump (getChunkNow is a
      * concurrent-map lookup; light reads clone SWMR state; PalettedContainer.write is
      * synchronized). Package-visible so tests can drive the completion exactly as the
-     * Moonrise consumer would. A null {@code chunk} is the failure outcome (permanent:
-     * NOT_GENERATED downstream — a failed load/vanished chunk must not be hammered).
+     * Moonrise consumer would. A null {@code chunk} from Moonrise is the PERMANENT failure
+     * outcome (NOT_GENERATED downstream — a failed load must not be hammered); a chunk that
+     * VANISHES between delivery and extraction is the separate TRANSIENT flavor (R2-8:
+     * {@code ExtractionOutcome.chunkVanished} → silent drop, healed by re-declaration).
      */
     void completeAsyncLoad(PendingGenerationKey key, ServerLevel level, ChunkAccess chunk,
                            int cx, int cz, long token) {
@@ -186,7 +193,7 @@ public class PaperChunkGenerationService {
         Error rethrow = null;
         if (chunk != null) {
             try {
-                extracted = extractColumnData(level, cx, cz);
+                extracted = extractColumnData(level, chunk, cx, cz);
             } catch (Error e) {
                 // Books first (mirrors the Fabric twin): the failure hop below must still be
                 // scheduled or every callback's generation slot leaks until disconnect.
@@ -227,29 +234,33 @@ public class PaperChunkGenerationService {
      * Errors propagate to {@link #completeAsyncLoad}, which schedules the failure outcome
      * before rethrowing.
      *
-     * <p>{@code chunkVanished} marks the ONE transient flavor: the re-fetch missed because
-     * the chunk unloaded in the completion window. An extraction exception stays permanent
-     * (a corrupt chunk must not be hammered), as does Moonrise's null chunk.
+     * <p>Serializes the chunk Moonrise DELIVERED (R2-8): the old re-fetch via
+     * {@code getChunkNow} re-opened the completion-window unload race this
+     * completion-thread extraction exists to close — the delivered reference cannot
+     * vanish. The instanceof guard is LOAD-BEARING, not decorative: a
+     * ChunkStatus.FULL schedule should always deliver a {@code LevelChunk}, but there is
+     * no contract pin for that, so any other shape falls back to the re-fetch, whose miss
+     * stays the ONE transient flavor ({@code chunkVanished}). An extraction exception
+     * stays permanent (a corrupt chunk must not be hammered), as does Moonrise's null.
      */
-    ExtractionOutcome extractColumnData(ServerLevel level, int cx, int cz) {
+    ExtractionOutcome extractColumnData(ServerLevel level, ChunkAccess delivered, int cx, int cz) {
         try {
-            LevelChunk nmsChunk = level.getChunkSource().getChunkNow(cx, cz);
+            LevelChunk nmsChunk = delivered instanceof LevelChunk lc ? lc
+                    : level.getChunkSource().getChunkNow(cx, cz);
             if (nmsChunk == null) {
-                // The re-fetch missed (the chunk unloaded in the same-thread window this
-                // completion-thread extraction exists to close). TRANSIENT: the chunk was
-                // generated, it simply unloaded before we could read it, so the next
-                // want-set declaration re-resolves it. Answering the session-permanent
-                // NOT_GENERATED here would blank the column until reconnect — and on Paper
-                // walk-in generation does not mark dirty by default, so the dirty-broadcast
-                // revival never fires. (Harmless before v17, when NOT_GENERATED re-opened
-                // the position client-side; the v17 permanence inverted that contract.)
-                // Shares the warn-once latch and counter with the null-completion path so a
-                // regression that reintroduces the unload race at scale can't WARN-storm.
-                if (this.nullChunkWarned.compareAndSet(false, true)) {
-                    LSSLogger.warn("Chunk at " + cx + "," + cz + " was null after async load completed"
-                            + " — further null-chunk failures are logged silently (counted)");
+                // The fallback re-fetch missed (non-LevelChunk delivery + unload in the
+                // window). TRANSIENT: the chunk was generated, it simply unloaded before we
+                // could read it, so the next want-set declaration re-resolves it. Answering
+                // the session-permanent NOT_GENERATED here would blank the column until
+                // reconnect — and on Paper walk-in generation does not mark dirty by
+                // default, so the dirty-broadcast revival never fires. Separate counter +
+                // warn latch from the Moonrise-null flavor (R2-8): the two regress
+                // independently and a shared latch let either suppress the other's warning.
+                if (this.vanishedWarned.compareAndSet(false, true)) {
+                    LSSLogger.warn("Chunk at " + cx + "," + cz + " vanished in the completion window"
+                            + " — further vanished-chunk failures are logged silently (counted)");
                 }
-                this.nullChunkFailures.incrementAndGet();
+                this.vanishedFailures.incrementAndGet();
                 return new ExtractionOutcome(null, true);
             }
             return new ExtractionOutcome(PaperSectionSerializer.serializeColumn(level, nmsChunk, cx, cz), false);
@@ -382,15 +393,16 @@ public class PaperChunkGenerationService {
     }
 
     public String getDiagnostics() {
-        return String.format("submitted=%d, completed=%d, active=%d, timeouts=%d, removed=%d, null_failures=%d",
+        return String.format("submitted=%d, completed=%d, active=%d, timeouts=%d, removed=%d, null_failures=%d, vanished=%d",
                 totalSubmitted, totalCompleted, active.size(), totalTimeouts, totalRemovedInFlight,
-                nullChunkFailures.get());
+                nullChunkFailures.get(), vanishedFailures.get());
     }
 
     public long getTotalSubmitted() { return this.totalSubmitted; }
 
     /** Null-chunk (permanent-failure) completions — warn-once logged, counted here. */
     public long getNullChunkFailures() { return this.nullChunkFailures.get(); }
+    public long getVanishedFailures() { return this.vanishedFailures.get(); }
 
     public long getTotalCompleted() { return this.totalCompleted; }
 

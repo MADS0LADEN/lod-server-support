@@ -2,6 +2,7 @@ package dev.vox.lss.paper;
 
 import com.mojang.serialization.Codec;
 import dev.vox.lss.common.LSSConstants;
+import dev.vox.lss.common.LSSLogger;
 import io.netty.buffer.Unpooled;
 import net.minecraft.core.Holder;
 import net.minecraft.core.RegistryAccess;
@@ -42,15 +43,18 @@ final class PaperNbtSectionSerializer {
      * Read chunk NBT from disk, verify FULL status, and serialize sections
      * into MC-native wire format. {@code maskEntry} (nullable) is the dimension's x-ray
      * mask, captured by the caller at submit time.
-     * Returns the serialized byte array, or null if the chunk is missing/not FULL/empty.
+     * Returns the serialized byte array, or null if the chunk is missing/not FULL/empty —
+     * or carries a truly-unparseable in-range section (R2-1: the whole column resolves as
+     * an authoritative miss rather than serving with a silent hole).
      */
     static byte[] readAndSerializeSections(ChunkNbtRead read, RegistryAccess registryAccess,
                                             int cx, int cz,
-                                            PaperXrayMaskManager.MaskEntry maskEntry) throws Exception {
+                                            PaperXrayMaskManager.MaskEntry maskEntry,
+                                            int minSectionY, int maxSectionY) throws Exception {
         var future = read.read(cx, cz);
         var optionalTag = future.get(LSSConstants.DISK_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         if (optionalTag.isEmpty()) return null;
-        return serializeChunkNbt(optionalTag.get(), registryAccess, maskEntry);
+        return serializeChunkNbt(optionalTag.get(), registryAccess, maskEntry, minSectionY, maxSectionY);
     }
 
     /** Unmasked flavor — the shape the pre-masking tests and corpus pin. */
@@ -58,17 +62,38 @@ final class PaperNbtSectionSerializer {
         return serializeChunkNbt(chunkNbt, registryAccess, null);
     }
 
+    /** Range-free flavor (tests + corpus — the committed goldens serialize out-of-world
+     *  Y values and must keep doing so; only the production path gates). */
+    static byte[] serializeChunkNbt(CompoundTag chunkNbt, RegistryAccess registryAccess,
+                                    PaperXrayMaskManager.MaskEntry maskEntry) {
+        return serializeChunkNbt(chunkNbt, registryAccess, maskEntry,
+                Integer.MIN_VALUE, Integer.MAX_VALUE);
+    }
+
+    // Unparseable-section warns are throttled — see the Fabric twin's rationale.
+    private static final dev.vox.lss.common.LogThrottle PARSE_WARN_THROTTLE =
+            new dev.vox.lss.common.LogThrottle(60_000);
+
     /**
      * Serialize a chunk's NBT (as read from a region file) into MC-native wire format.
      * Returns {@code null} if the chunk is not FULL or has no sections, an empty array if every
      * section is empty, or the serialized section bytes. Package-visible for testing.
+     *
+     * <p>R2-1/R2-5 semantics (mirrors the Fabric twin): a renamed-block section parses via
+     * {@code resultOrPartial} with air substitution (throttled warn); a truly-unparseable
+     * IN-RANGE section returns {@code null} for the WHOLE column — an authoritative miss the
+     * caller escalates to generation, never a partial serve and never a throw. Entries
+     * outside {@code [minSectionY, maxSectionY]} are dropped BEFORE parse and can neither
+     * serve nor condemn the column (vanilla saves light-only entries at blockRange±1; the
+     * range-free overload above stays unbounded for the corpus goldens).
      */
     // LevelChunkSection.write(buf) is @Deprecated on Paper (an anti-xray overload was added),
     // but the 1-arg form is the canonical vanilla serialization and is byte-identical to the
     // Fabric path. The wire format must match Fabric exactly, so keep this call (do not migrate).
     @SuppressWarnings("deprecation")
     static byte[] serializeChunkNbt(CompoundTag chunkNbt, RegistryAccess registryAccess,
-                                    PaperXrayMaskManager.MaskEntry maskEntry) {
+                                    PaperXrayMaskManager.MaskEntry maskEntry,
+                                    int minSectionY, int maxSectionY) {
         var statusStr = chunkNbt.getStringOr("Status", null);
         if (statusStr == null || ChunkStatus.byName(statusStr) != ChunkStatus.FULL) return null;
 
@@ -85,18 +110,28 @@ final class PaperNbtSectionSerializer {
         record ParsedSection(int sectionY, LevelChunkSection section, byte[] blockLight, byte[] skyLight) {}
         var parsed = new java.util.ArrayList<ParsedSection>(sectionsList.size());
 
+        int[] unparseable = {0};
         for (var sectionElement : sectionsList) {
             var sectionTag = (CompoundTag) sectionElement;
             int sectionY = sectionTag.getIntOr("Y", Integer.MIN_VALUE);
             if (sectionY == Integer.MIN_VALUE) continue;
+            // Range gate BEFORE parse: an out-of-range garbage entry must not count as
+            // unparseable and condemn a column it would have been dropped from anyway.
+            if (sectionY < minSectionY || sectionY > maxSectionY) continue;
 
             byte[] blockLightData = sectionTag.getByteArray("BlockLight").orElse(EMPTY);
             byte[] skyLightData = sectionTag.getByteArray("SkyLight").orElse(EMPTY);
             var result = parseSection(sectionTag, sectionY, blockStateCodec, biomeCodec,
-                    factory, blockLightData, skyLightData);
+                    factory, blockLightData, skyLightData, unparseable);
             if (result != null) {
                 parsed.add(new ParsedSection(sectionY, result, blockLightData, skyLightData));
             }
+        }
+        if (unparseable[0] > 0) {
+            // Authoritative miss (null) — see the Fabric twin: a truly-unparseable section
+            // makes the whole column unservable; the miss escalates to a generation ticket
+            // that loads the chunk through the real DataFixer pipeline.
+            return null;
         }
 
         // Boundary-light band (2026-07-27, black-boundary-faces fix — see the Fabric twin):
@@ -124,14 +159,18 @@ final class PaperNbtSectionSerializer {
             // counter attributes to whatever manager is current at COMPLETION time (a read
             // straddling a service restart credits the successor) — diag-only cosmetics;
             // the mask itself always comes from the immutable submit-time entry.
+            int[] replacedCells = new int[1];
             for (int i = 0; i < parsed.size(); i++) {
                 var p = parsed.get(i);
                 var masked = PaperXrayMaskFilter.mask(p.section(), p.sectionY(),
-                        maskEntry.mask(), maskEntry.kind(), factory);
+                        maskEntry.mask(), maskEntry.kind(), factory, replacedCells);
                 if (masked != p.section()) {
                     parsed.set(i, new ParsedSection(p.sectionY(), masked, p.blockLight(), p.skyLight()));
-                    var manager = PaperXrayMaskManager.current();
-                    if (manager != null) manager.countMaskedSection();
+                    // Count only when cells were actually hidden — see the Fabric twin.
+                    if (replacedCells[0] > 0) {
+                        var manager = PaperXrayMaskManager.current();
+                        if (manager != null) manager.countMaskedSection();
+                    }
                 }
             }
         }
@@ -178,7 +217,7 @@ final class PaperNbtSectionSerializer {
             Codec<PalettedContainer<BlockState>> blockStateCodec,
             Codec<PalettedContainerRO<Holder<Biome>>> biomeCodec,
             PalettedContainerFactory factory,
-            byte[] blockLightData, byte[] skyLightData) {
+            byte[] blockLightData, byte[] skyLightData, int[] unparseable) {
 
         var blockStatesOpt = sectionTag.getCompound("block_states");
         PalettedContainer<BlockState> blockStates;
@@ -188,8 +227,21 @@ final class PaperNbtSectionSerializer {
             blockStates = factory.createForBlockStates();
         } else {
             var blockStatesResult = blockStateCodec.parse(NbtOps.INSTANCE, blockStatesOpt.get());
-            blockStates = blockStatesResult.result().orElse(null);
-            if (blockStates == null) return null;
+            // Vanilla-lenient (resultOrPartial) — see the Fabric twin: a recoverable
+            // palette error (pre-DFU block rename) substitutes air and KEEPS the section;
+            // only a no-partial parse counts unparseable.
+            blockStates = blockStatesResult.resultOrPartial(err -> {
+                long released = PARSE_WARN_THROTTLE.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+                if (released > 0) {
+                    String suffix = released > 1 ? " (+" + (released - 1) + " more suppressed)" : "";
+                    LSSLogger.warn("Section block_states parse error (Y=" + sectionY + "): "
+                            + err + suffix);
+                }
+            }).orElse(null);
+            if (blockStates == null) {
+                unparseable[0]++;
+                return null;
+            }
         }
 
         PalettedContainerRO<Holder<Biome>> biomes;

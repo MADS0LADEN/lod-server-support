@@ -379,6 +379,18 @@ public class PaperRequestProcessingService {
         this.players.remove(uuid);
         this.regionProbeResults.remove(uuid);
         this.heldForProbe.remove(uuid);
+        // STAMP, don't clear: a removal (dimension change on Folia, quit) makes the very
+        // next state==null batch the EXPECTED remove→register race, not an orphan — the
+        // prompt interval doubles as a post-removal grace, so the Folia window can never
+        // fire a spurious prompt at a healthy mid-stream client, and a dimension hop
+        // extends the 60 s bound instead of resetting it. Quit entries are pruned by the
+        // size-bounded sweep below; a genuine orphan (plugin /reload) hits a FRESH map —
+        // the service instance died with the reload — and still prompts immediately.
+        this.reattachPromptAt.put(uuid, System.nanoTime() / 1_000_000L);
+        if (this.reattachPromptAt.size() > REATTACH_PROMPT_MAP_BOUND) {
+            long cutoff = System.nanoTime() / 1_000_000L - REATTACH_PROMPT_INTERVAL_MS;
+            this.reattachPromptAt.values().removeIf(stamp -> stamp < cutoff);
+        }
         this.offThreadProcessor.notifyPlayerRemoved(uuid);
         cleanupPlayerServices(uuid);
         // Resets the v16 want-set + arms the ingress grace. Identity survives (dropped only
@@ -391,6 +403,86 @@ public class PaperRequestProcessingService {
         this.diskReader.removePlayerResults(uuid);
         if (this.generationService != null)
             this.generationService.removePlayer(uuid);
+    }
+
+    /** Minimum interval between re-attach prompts per player — also the post-removal grace
+     *  (removePlayer stamps the map; see maybeSendReattachPrompt). */
+    static final long REATTACH_PROMPT_INTERVAL_MS = 60_000;
+
+    /** Prompt-stamp map size that triggers a stale-entry sweep (quit players' entries have
+     *  no per-UUID removal anymore — removals stamp instead). Generous: the map only grows
+     *  via removals and prompts, one Long per UUID. */
+    static final int REATTACH_PROMPT_MAP_BOUND = 256;
+
+    /** Test seam: the re-attach prompt send (production: the v16-dialect SessionConfig —
+     *  see maybeSendReattachPrompt for why that dialect specifically). */
+    @FunctionalInterface
+    interface ReattachPromptSender {
+        void send(ServerPlayer player);
+    }
+
+    ReattachPromptSender reattachPromptSender = this::sendReattachPromptPayload;
+
+    private void sendReattachPromptPayload(ServerPlayer player) {
+        PaperPayloadHandler.sendSessionConfigV16(player.getBukkitEntity(),
+                this.config.enabled, this.config.lodDistanceChunks,
+                LSSConstants.SYNC_ON_LOAD_SLOT_CAP,
+                this.config.generationConcurrencyLimitPerPlayer,
+                this.config.enableChunkGeneration);
+    }
+    // Per-UUID last-prompt/last-removal stamps (millis). Concurrent: batches arrive on
+    // region threads on Folia. removePlayer STAMPS entries (the post-removal grace) and
+    // size-bounded-sweeps stale ones.
+    private final java.util.concurrent.ConcurrentHashMap<UUID, Long> reattachPromptAt =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * /reload re-attach prompt (R2-3). A successfully-DECODED batch from a player with NO
+     * state is proof of an orphaned LSS session: vanilla clients never speak the channel,
+     * a live client cannot declare before its deferred-reply registration ran, and after a
+     * plugin reload the fresh service has an empty player map while every connected LSS
+     * client keeps declaring its want-set at 1 Hz forever — silently dropped here until
+     * the player manually rejoined.
+     *
+     * <p>The prompt is the V16-DIALECT 6-field SessionConfig, deliberately: a modern
+     * client's downgrade guard treats an unexpected v16 config on an established v18
+     * session as a raced discovery and RE-ANNOUNCES a v18 handshake — which re-registers
+     * it through the normal deferred path. That is the heal, and it ships with zero
+     * client-side changes. A genuine v16 client (whose post-reload batches also land here
+     * — the fresh compat manager has no session for it) parses the 6-field shape
+     * harmlessly and stays broken-until-rejoin, exactly today's behavior; the v18 4-field
+     * shape would buffer-underflow its decoder and hard-kick it.
+     *
+     * <p>Rate-limited per UUID (60 s), and removePlayer STAMPS the same map, so the Folia
+     * dimension-change remove→register window sits inside a post-removal grace and cannot
+     * fire a spurious prompt at a healthy mid-stream client (the client-side backstop:
+     * V16ClientWire's announce gate keeps even a delivered stray prompt from flipping
+     * column decode). Sent directly from the message-handler thread (netty is any-thread
+     * safe — the v16 overflow valve precedent above).
+     *
+     * <p><b>The heal is DECLARATION-triggered</b> (live-smoke finding, 2026-07-29): a
+     * client whose want-set had CONVERGED before the /reload sends nothing — silence at
+     * convergence is the v17 protocol — so it stays orphaned, invisibly, until movement
+     * mints new rings (its next declaration prompts and heals within a scan) or it
+     * rejoins. Until then it also has no dirty-broadcast subscription (the fresh service
+     * has no state for it), so post-reload edits don't reach it. Accepted residual: the
+     * un-orphaned failure mode (pre-fix: orphaned FOREVER even while declaring) is fixed;
+     * the converged-and-stationary corner heals on the first movement, and a converged
+     * client's LOD is complete by definition — only edit staleness is at risk.
+     */
+    private void maybeSendReattachPrompt(ServerPlayer player) {
+        var uuid = player.getUUID();
+        long now = System.nanoTime() / 1_000_000L;
+        boolean[] fire = {false};
+        this.reattachPromptAt.compute(uuid, (k, prev) -> {
+            if (prev != null && now - prev < REATTACH_PROMPT_INTERVAL_MS) return prev;
+            fire[0] = true;
+            return now;
+        });
+        if (!fire[0]) return;
+        LSSLogger.info("Re-attach prompt for " + player.getName().getString()
+                + " — declared a want-set with no registered session (plugin reloaded?)");
+        this.reattachPromptSender.send(player);
     }
 
     public void handleBatchRequest(ServerPlayer player, PaperPayloadHandler.DecodedBatchChunkRequest batch) {
@@ -423,7 +515,13 @@ public class PaperRequestProcessingService {
         }
 
         var state = this.players.get(player.getUUID());
-        if (state == null || !state.hasCompletedHandshake()) return;
+        if (state == null) {
+            // STRICTLY state == null: a registered-but-mid-handshake state (the guard
+            // below) is a healthy client whose own deferred reply is in flight.
+            maybeSendReattachPrompt(player);
+            return;
+        }
+        if (!state.hasCompletedHandshake()) return;
 
         var accepted = new ArrayList<IncomingRequest>(batch.count());
         for (int i = 0; i < batch.count(); i++) {
@@ -534,7 +632,6 @@ public class PaperRequestProcessingService {
             var state = states.get((start + i) % playerCount);
             if (!state.hasCompletedHandshake())
                 continue;
-            activeCount++;
             this.diag.updateQueuePeak(state.getSendQueueSize());
 
             boolean removed = false;
@@ -553,6 +650,8 @@ public class PaperRequestProcessingService {
 
             if (removed)
                 continue;
+            // Counted AFTER the removal check (R2-11) — see the Fabric twin.
+            activeCount++;
 
             if (state.checkDimensionChange()) {
                 // A dimension change abandons all in-flight work. Reuse the (well-tested)

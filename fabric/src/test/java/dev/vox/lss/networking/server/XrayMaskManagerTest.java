@@ -35,7 +35,7 @@ class XrayMaskManagerTest {
 
     private static final EngineView ABSENT = new EngineView.Absent();
     private static final EngineView DISABLED = new EngineView.Disabled();
-    private static final EngineView UNREADABLE = new EngineView.Unreadable();
+    private static final EngineView UNREADABLE = new EngineView.Unreadable(false);
 
     private static EngineView active(int maxY) {
         return new EngineView.Active(List.of(
@@ -103,6 +103,45 @@ class XrayMaskManagerTest {
         assertEquals(64, entry.mask().maxBlockHeight(), "the LSS xrayMaxBlockHeight default");
         assertTrue(entry.mask().contains(Blocks.DIAMOND_ORE.defaultBlockState()));
         assertTrue(entry.mask().contains(Blocks.IRON_ORE.defaultBlockState()));
+    }
+
+    @Test
+    void transientNullProbeIsNotCachedAndAdoptsOnceTheEngineResolves() {
+        // R2-7: the probe deliberately does not latch on a null controller ("not yet
+        // known to AntiXray"), but the manager's per-dimension cache used to lock the
+        // dimension to the LSS-keys fallback off ONE early null for the whole session.
+        // A transient-null outcome now serves the fallback UNCACHED and re-probes.
+        var manager = new XrayMaskManager(config("auto"));
+        var probes = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.function.Supplier<EngineView> view = () ->
+                probes.incrementAndGet() < 3 ? new EngineView.Unreadable(true) : active(256);
+
+        var early = manager.entryFor("minecraft:overworld", view);
+        assertNotNull(early, "the transient window still masks (fail-safe), with LSS keys");
+        assertEquals("config", early.sourceLabel());
+
+        manager.entryFor("minecraft:overworld", view); // still transient
+        var adopted = manager.entryFor("minecraft:overworld", view); // engine resolved
+        assertEquals(3, probes.get(), "each serve during the window re-probes");
+        assertEquals("antixray-mod", adopted.sourceLabel(),
+                "the engine is adopted once readable — one early null no longer locks the session");
+        manager.entryFor("minecraft:overworld", view);
+        assertEquals(3, probes.get(), "the terminal outcome caches; no further probing");
+    }
+
+    @Test
+    void transientNullProbesLatchToTheFallbackAfterTheBound() {
+        var manager = new XrayMaskManager(config("auto"));
+        var probes = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.function.Supplier<EngineView> view = () -> {
+            probes.incrementAndGet();
+            return new EngineView.Unreadable(true);
+        };
+        for (int i = 0; i < XrayMaskManager.TRANSIENT_PROBE_LATCH + 10; i++) {
+            assertNotNull(manager.entryFor("minecraft:overworld", view), "always masking");
+        }
+        assertEquals(XrayMaskManager.TRANSIENT_PROBE_LATCH, probes.get(),
+                "an engine that never becomes readable stops being probed at the bound");
     }
 
     @Test

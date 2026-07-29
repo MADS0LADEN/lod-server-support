@@ -35,6 +35,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -454,12 +455,11 @@ class NbtSectionSerializerTest {
 
     @Test
     void malformedBlockStates_codecParseError_sectionSkippedSiblingsServe() {
-        // block_states PRESENT but unparseable (unknown block id — a world touched by a
-        // newer or modded version): the codec returns a DataResult error and parseSection
-        // resolves it via result().orElse(null), never getOrThrow, so only that section is
-        // skipped and its siblings still serve. There is deliberately NO counter for these
-        // silent partials — pinned so a refactor to getOrThrow (whole chunk lost) or a
-        // surprise counter fails loudly here.
+        // block_states PRESENT with an unknown block id: under resultOrPartial the codec
+        // recovers a PARTIAL (the unknown entry substitutes air), so this single-entry
+        // palette parses to an all-air section, which the air/no-light gate then drops —
+        // the sibling serves and nothing is condemned. (Pre-round-2 this took the strict
+        // result() drop; the observable outcome for THIS shape is identical.)
         var malformed = new CompoundTag();
         malformed.putInt("Y", 1);
         var badStates = new CompoundTag();
@@ -477,6 +477,112 @@ class NbtSectionSerializerTest {
         assertEquals(1, sections.size(), "malformed-block_states section skipped, sibling serves");
         assertEquals(2, sections.get(0).y());
         assertEquals(Blocks.STONE.defaultBlockState(), sections.get(0).section().getBlockState(0, 0, 0));
+    }
+
+    @Test
+    void renamedBlockPaletteEntry_sectionKeptWithAirSubstitution() {
+        // The vanilla-upgrade case (R2-1): this path reads RAW region NBT — no DataFixer
+        // runs — so an unvisited chunk from an older version carries renamed block ids in
+        // its palettes. resultOrPartial keeps the section exactly like vanilla's own
+        // lenient load: unknown entries' cells substitute air, known cells keep their
+        // states. The strict result() used to drop the WHOLE section silently (missing
+        // surface terrain across every old chunk of an upgraded world).
+        var sec = new LevelChunkSection(FACTORY);
+        sec.setBlockState(0, 0, 0, Blocks.STONE.defaultBlockState());
+        sec.setBlockState(1, 0, 0, Blocks.DIRT.defaultBlockState());
+        var s = new CompoundTag();
+        s.putInt("Y", 1);
+        s.put("block_states", FACTORY.blockStatesContainerCodec()
+                .encodeStart(NbtOps.INSTANCE, sec.getStates()).getOrThrow());
+        var palette = s.getCompound("block_states").orElseThrow().getList("palette").orElseThrow();
+        boolean renamed = false;
+        for (var e : palette) {
+            var pe = (CompoundTag) e;
+            if ("minecraft:dirt".equals(pe.getStringOr("Name", ""))) {
+                pe.putString("Name", "lss:renamed_away");
+                renamed = true;
+            }
+        }
+        assertTrue(renamed, "premise: the dirt palette entry was renamed");
+
+        byte[] wire = NbtSectionSerializer.serializeChunkNbt(
+                chunkNbt("minecraft:full", s), REGISTRY_ACCESS);
+        var sections = decode(wire);
+        assertEquals(1, sections.size(), "the renamed-palette section is KEPT, not dropped");
+        assertEquals(Blocks.STONE.defaultBlockState(), sections.get(0).section().getBlockState(0, 0, 0),
+                "known palette entries keep their states");
+        assertEquals(Blocks.AIR.defaultBlockState(), sections.get(0).section().getBlockState(1, 0, 0),
+                "the unknown entry's cells substitute air (vanilla's own leniency)");
+    }
+
+    @Test
+    void trulyUnparseableSection_condemnsTheColumnAsAuthoritativeMiss() {
+        // No partial exists (structural corruption, not a rename): serving the siblings
+        // would stamp a column with a silently missing section — a persistent hole no
+        // re-declaration heals (the stamp answers up_to_date). The column resolves null
+        // (authoritative miss): memoized, and gen-enabled servers escalate to a
+        // generation ticket that loads the chunk through the REAL DataFixer pipeline.
+        // The old code served the siblings — and an all-fail column was even served as a
+        // cache-wiping authoritative 0-section CLEAR.
+        var bad = new CompoundTag();
+        bad.putInt("Y", 1);
+        var badStates = new CompoundTag();
+        badStates.putInt("palette", 7); // not even a list — no partial recoverable
+        bad.put("block_states", badStates);
+
+        assertNull(NbtSectionSerializer.serializeChunkNbt(
+                chunkNbt("minecraft:full", bad, sectionNbt(2, true, true, null, null)),
+                REGISTRY_ACCESS),
+                "a truly-unparseable section condemns the whole column, not just itself");
+    }
+
+    @Test
+    void outOfWorldSections_droppedOnTheRangedProductionPath() {
+        // Vanilla saves light-only entries one section beyond the block range; the live
+        // path can never emit them (it iterates chunk.getSections()), so serving them
+        // from disk broke live/disk byte parity at height-cap builds and shipped
+        // out-of-world sectionY to consumers. The ranged (production) path drops them
+        // BEFORE parsing; the range-free test/corpus path is unchanged.
+        var capEntry = new CompoundTag(); // vanilla's light-only cap entry at maxSection+1
+        capEntry.putInt("Y", 5);
+        capEntry.putByteArray("SkyLight", light(0, (byte) 15));
+        var chunk = chunkNbt("minecraft:full",
+                sectionNbt(4, true, true, null, light(0, (byte) 15)), capEntry);
+
+        byte[] ranged = NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS, null, 0, 4);
+        assertEquals(List.of(4), decode(ranged).stream().map(DecodedSection::y).toList(),
+                "the out-of-range cap entry is dropped on the ranged path");
+
+        byte[] unranged = NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS);
+        assertEquals(List.of(4, 5), decode(unranged).stream().map(DecodedSection::y).toList(),
+                "the range-free path (tests/corpus goldens) is unchanged");
+    }
+
+    @Test
+    void outOfRangeGarbageNeverCondemnsAndTheMinSideAlsoGates() {
+        // Amendment 5's ordering rule, pinned: the range gate runs BEFORE parse, so an
+        // out-of-range entry with unparseable block_states (bitrot beyond the world
+        // range) neither condemns the column — it would have been dropped anyway — nor
+        // serves. Same garbage shape as the condemn test, placed at maxSection+1; and
+        // the min−1 side gates symmetrically (only the max side was pinned before).
+        var garbage = new CompoundTag();
+        garbage.putInt("Y", 5); // beyond max=4
+        var badStates = new CompoundTag();
+        badStates.putInt("palette", 7); // not even a list — no partial recoverable
+        garbage.put("block_states", badStates);
+
+        var belowMin = new CompoundTag(); // light-only entry at minSection-1
+        belowMin.putInt("Y", -1);
+        belowMin.putByteArray("SkyLight", light(0, (byte) 15));
+
+        var chunk = chunkNbt("minecraft:full",
+                belowMin, sectionNbt(4, true, true, null, light(0, (byte) 15)), garbage);
+
+        byte[] ranged = NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS, null, 0, 4);
+        assertNotNull(ranged,
+                "out-of-range garbage must not condemn a column the gate drops it from");
+        assertEquals(List.of(4), decode(ranged).stream().map(DecodedSection::y).toList(),
+                "both sides gate: min-1 and max+1 dropped, the in-range section serves");
     }
 
     // ---- Golden wire-byte corpus (cross-module parity) ----

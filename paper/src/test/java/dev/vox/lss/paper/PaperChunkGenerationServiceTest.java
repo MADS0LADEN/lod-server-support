@@ -113,7 +113,9 @@ class PaperChunkGenerationServiceTest {
         return level;
     }
 
-    /** NMS ChunkAccess stand-in — completeAsyncLoad only null-checks it, never calls methods. */
+    /** NMS ChunkAccess stand-in. NOT a LevelChunk, deliberately: a delivery of this shape
+     *  routes extraction through the FALLBACK re-fetch (getChunkNow), keeping that rung
+     *  covered — the piggyback fan-out test pins the primary delivered-chunk path (R2-8). */
     private static ChunkAccess nmsChunk() {
         return mock(ChunkAccess.class);
     }
@@ -128,7 +130,7 @@ class PaperChunkGenerationServiceTest {
         // null_failures is 0 in every case here: the failure tests fire onChunkReady(null)
         // directly, which books removed-in-flight — the null_failures counter is incremented
         // only by completeAsyncLoad/extractColumnData's chunk-vanished paths, not exercised here.
-        return String.format("submitted=%d, completed=%d, active=%d, timeouts=%d, removed=%d, null_failures=0",
+        return String.format("submitted=%d, completed=%d, active=%d, timeouts=%d, removed=%d, null_failures=0, vanished=0",
                 submitted, completed, active, timeouts, removed);
     }
 
@@ -300,12 +302,15 @@ class PaperChunkGenerationServiceTest {
         // re-opened the position client-side; v17's permanence inverted that contract.)
         assertTrue(ready.get(0).transientFailure(),
                 "a chunk that unloaded in the completion window must never answer NOT_GENERATED");
-        // This test uniquely drives the extractColumnData chunk-vanished branch, so it is the
-        // one place null_failures is nonzero (the generic diag() helper asserts null_failures=0).
-        assertEquals("submitted=1, completed=0, active=0, timeouts=0, removed=1, null_failures=1",
+        // This test uniquely drives the extractColumnData chunk-vanished branch (the
+        // delivered mock is not a LevelChunk, so the FALLBACK re-fetch runs and misses) —
+        // the one place the vanished counter is nonzero. Split from null_failures (R2-8):
+        // the Moonrise-null and vanished flavors regress independently.
+        assertEquals("submitted=1, completed=0, active=0, timeouts=0, removed=1, null_failures=0, vanished=1",
                 svc.getDiagnostics(),
-                "not completed — counted as removed-in-flight (books balance) and null_failures=1");
-        assertEquals(1L, svc.getNullChunkFailures(), "the vanished-chunk failure is counted");
+                "not completed — counted as removed-in-flight (books balance) and vanished=1");
+        assertEquals(0L, svc.getNullChunkFailures(), "the Moonrise-null counter stays untouched");
+        assertEquals(1L, svc.getVanishedFailures(), "the vanished-chunk failure is counted");
         assertTrue(svc.submitGeneration(a, level, 5, 4, 2L));
     }
 
@@ -376,8 +381,10 @@ class PaperChunkGenerationServiceTest {
         var lightEngine = mock(LevelLightEngine.class);
         when(lightEngine.getLayerListener(any())).thenReturn(mock(LayerLightEventListener.class));
 
+        // R2-8 race pin: the re-fetch would MISS (getChunkNow mock-defaults to null) —
+        // serializing the DELIVERED chunk must succeed anyway. The old re-fetch path
+        // triaged this exact shape as a transient vanish.
         var chunkSource = mock(ServerChunkCache.class);
-        when(chunkSource.getChunkNow(6, -9)).thenReturn(nmsChunk);
 
         var level = overworldLevel();
         when(level.getChunkSource()).thenReturn(chunkSource);
@@ -385,7 +392,7 @@ class PaperChunkGenerationServiceTest {
 
         assertTrue(svc.submitGeneration(a, level, 6, -9, 100L));
         assertTrue(svc.submitGeneration(b, level, 6, -9, 200L));
-        svc.completeAsyncLoad(svc.launches.get(0).key(), level, nmsChunk(), 6, -9, svc.launches.get(0).token());
+        svc.completeAsyncLoad(svc.launches.get(0).key(), level, nmsChunk, 6, -9, svc.launches.get(0).token());
 
         var ready = svc.tick();
         assertEquals(2, ready.size());

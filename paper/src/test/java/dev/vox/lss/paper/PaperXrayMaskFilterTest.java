@@ -142,6 +142,31 @@ class PaperXrayMaskFilterTest {
     }
 
     @Test
+    void stalePaletteRebuildsForThePruneButReportsZeroReplacedCells() {
+        // See the Fabric twin (R2-6): a mined-out section's stale palette entry still
+        // triggers the rebuild (the prune is the point) but reports zero replaced cells
+        // so masked_sections doesn't count a no-op.
+        var section = newSection();
+        fillAll(section, Blocks.STONE.defaultBlockState());
+        section.setBlockState(3, 3, 3, Blocks.DIAMOND_ORE.defaultBlockState());
+        section.setBlockState(3, 3, 3, Blocks.STONE.defaultBlockState()); // mined out
+
+        int[] replaced = new int[1];
+        var masked = PaperXrayMaskFilter.mask(section, 0, defaultMask(), FallbackKind.OVERWORLD,
+                FACTORY, replaced);
+
+        assertNotSame(section, masked, "the stale-palette section still rebuilds (palette prune)");
+        assertEquals(0, replaced[0], "zero cells were hidden — masked_sections must not count this");
+        assertEquals(4096, countCells(masked, s -> s.is(Blocks.STONE)), "content is untouched");
+
+        var withOre = newSection();
+        fillAll(withOre, Blocks.STONE.defaultBlockState());
+        int ores = sprinkle(withOre, Blocks.DIAMOND_ORE.defaultBlockState(), 11, 0);
+        PaperXrayMaskFilter.mask(withOre, 0, defaultMask(), FallbackKind.OVERWORLD, FACTORY, replaced);
+        assertEquals(ores, replaced[0], "a genuinely ore-bearing section reports its replaced cells");
+    }
+
+    @Test
     void straddlingSectionMasksOnlyBelowTheCutoff() {
         var section = newSection();
         fillAll(section, Blocks.STONE.defaultBlockState());

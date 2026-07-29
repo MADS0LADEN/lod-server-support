@@ -72,7 +72,12 @@ public class TickDiagnostics {
         int oldestIdx = ringCount < WINDOW_TICKS ? 0 : ringPos;
         long elapsedNanos = nanosRing[newestIdx] - nanosRing[oldestIdx];
         if (elapsedNanos <= 0) return 0;
-        return windowByteSum * LSSConstants.NANOS_PER_SECOND / elapsedNanos;
+        // N samples span N-1 intervals: the oldest bucket's bytes flushed during the tick
+        // ENDING at its own stamp — before the measured span began — so it is excluded
+        // from the numerator (including it inflated the rate ~N/(N-1): +100% at
+        // ringCount 2, ~+1% at the full window).
+        long spanBytes = windowByteSum - byteRing[oldestIdx];
+        return spanBytes * LSSConstants.NANOS_PER_SECOND / elapsedNanos;
     }
 
     public void recordSectionSent(int estimatedBytes) {
