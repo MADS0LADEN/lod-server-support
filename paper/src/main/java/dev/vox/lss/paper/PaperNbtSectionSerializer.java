@@ -149,14 +149,18 @@ final class PaperNbtSectionSerializer {
             // counter attributes to whatever manager is current at COMPLETION time (a read
             // straddling a service restart credits the successor) — diag-only cosmetics;
             // the mask itself always comes from the immutable submit-time entry.
+            int[] replacedCells = new int[1];
             for (int i = 0; i < parsed.size(); i++) {
                 var p = parsed.get(i);
                 var masked = PaperXrayMaskFilter.mask(p.section(), p.sectionY(),
-                        maskEntry.mask(), maskEntry.kind(), factory);
+                        maskEntry.mask(), maskEntry.kind(), factory, replacedCells);
                 if (masked != p.section()) {
                     parsed.set(i, new ParsedSection(p.sectionY(), masked, p.blockLight(), p.skyLight()));
-                    var manager = PaperXrayMaskManager.current();
-                    if (manager != null) manager.countMaskedSection();
+                    // Count only when cells were actually hidden — see the Fabric twin.
+                    if (replacedCells[0] > 0) {
+                        var manager = PaperXrayMaskManager.current();
+                        if (manager != null) manager.countMaskedSection();
+                    }
                 }
             }
         }

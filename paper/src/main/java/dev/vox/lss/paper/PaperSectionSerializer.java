@@ -99,12 +99,16 @@ final class PaperSectionSerializer {
                 if (maskEntry != null) {
                     // Masking INSIDE the choke point: probe, generation, and every consumer
                     // see identical masked bytes by construction.
+                    int[] replacedCells = new int[1];
                     var masked = PaperXrayMaskFilter.mask(section, info.sectionY,
-                            maskEntry.mask(), maskEntry.kind(), maskFactory);
+                            maskEntry.mask(), maskEntry.kind(), maskFactory, replacedCells);
                     if (masked != section) {
                         section = masked;
-                        var manager = PaperXrayMaskManager.current();
-                        if (manager != null) manager.countMaskedSection();
+                        // Count only when cells were actually hidden — see the Fabric twin.
+                        if (replacedCells[0] > 0) {
+                            var manager = PaperXrayMaskManager.current();
+                            if (manager != null) manager.countMaskedSection();
+                        }
                     }
                 }
 

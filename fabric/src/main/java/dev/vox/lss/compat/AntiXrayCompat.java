@@ -156,12 +156,16 @@ public final class AntiXrayCompat {
         record Disabled() implements EngineView {}
         record Active(List<BlockState> hiddenStates, int maxBlockHeight) implements EngineView {}
         record ReplacementNoise(int maxBlockHeight) implements EngineView {}
-        record Unreadable() implements EngineView {}
+        /** {@code transientNull}: the null-controller rung only — "not yet known to
+         *  AntiXray", the one unreadable flavor callers may retry (the manager's R2-7
+         *  re-probe window rides this; every other rung is terminal for the session). */
+        record Unreadable(boolean transientNull) implements EngineView {}
     }
 
     private static final EngineView ABSENT = new EngineView.Absent();
     private static final EngineView DISABLED = new EngineView.Disabled();
-    private static final EngineView UNREADABLE = new EngineView.Unreadable();
+    private static final EngineView UNREADABLE = new EngineView.Unreadable(false);
+    private static final EngineView UNREADABLE_TRANSIENT = new EngineView.Unreadable(true);
 
     /** Resolves the classes the probe reflects over — test seam for {@link #buildEngineProbe}. */
     @FunctionalInterface
@@ -251,8 +255,9 @@ public final class AntiXrayCompat {
                     // "Not yet known to AntiXray" is not evidence the world is anti-xray-off:
                     // on a leak-prevention feature every unresolvable shape fails SAFE
                     // (LSS-keys masking), and this one skips the latch — a transient null
-                    // must not disable engine adoption for the whole session.
-                    return UNREADABLE;
+                    // must not disable engine adoption for the whole session. The TRANSIENT
+                    // flavor tells the manager it may re-probe instead of caching.
+                    return UNREADABLE_TRANSIENT;
                 }
                 if (handles.disabledClass.isInstance(controller)) {
                     return DISABLED;

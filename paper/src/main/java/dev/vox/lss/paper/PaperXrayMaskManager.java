@@ -102,7 +102,11 @@ final class PaperXrayMaskManager {
         });
     }
 
-    /** The cache + decision core, level-free for Tier 1 ({@code view} runs at most once per dimension). */
+    /** The cache + decision core, level-free for Tier 1 ({@code view} runs at most once per
+     *  dimension). Unlike the Fabric twin (R2-7's transient-null re-probe window), caching
+     *  every outcome permanently is CORRECT here: Paper's engine view is a direct
+     *  {@code paperConfig()} read with no not-yet-initialized rung — every outcome is
+     *  terminal for the service lifetime. */
     MaskEntry entryFor(String dimension, Supplier<EngineConfig> view) {
         return this.byDimension
                 .computeIfAbsent(dimension, d -> Optional.ofNullable(evaluate(d, view.get())))

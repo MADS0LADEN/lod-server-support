@@ -172,14 +172,20 @@ final class NbtSectionSerializer {
             // counter attributes to whatever manager is current at COMPLETION time (a read
             // straddling a service restart credits the successor) — diag-only cosmetics;
             // the mask itself always comes from the immutable submit-time entry.
+            int[] replacedCells = new int[1];
             for (int i = 0; i < parsed.size(); i++) {
                 var p = parsed.get(i);
                 var masked = XrayMaskFilter.mask(p.section(), p.sectionY(),
-                        maskEntry.mask(), maskEntry.kind(), factory);
+                        maskEntry.mask(), maskEntry.kind(), factory, replacedCells);
                 if (masked != p.section()) {
                     parsed.set(i, new ParsedSection(p.sectionY(), masked, p.blockLight(), p.skyLight()));
-                    var manager = XrayMaskManager.current();
-                    if (manager != null) manager.countMaskedSection();
+                    // Count only when cells were actually hidden: a stale-palette rebuild
+                    // (mined-out section still listing its ore) swaps the section for the
+                    // palette prune but masks nothing.
+                    if (replacedCells[0] > 0) {
+                        var manager = XrayMaskManager.current();
+                        if (manager != null) manager.countMaskedSection();
+                    }
                 }
             }
         }

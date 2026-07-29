@@ -133,8 +133,19 @@ final class PaperXrayMaskFilter {
      */
     static LevelChunkSection mask(LevelChunkSection section, int sectionY, MaskSet mask, FallbackKind kind,
                                           PalettedContainerFactory factory) {
+        return mask(section, sectionY, mask, kind, factory, new int[1]);
+    }
+
+    /**
+     * As above, reporting how many cells were actually REPLACED in {@code replacedCellsOut[0]}
+     * — see the Fabric twin: stale-palette rebuilds (mined-out ore still listed) must still
+     * prune but must not count toward {@code masked_sections}.
+     */
+    static LevelChunkSection mask(LevelChunkSection section, int sectionY, MaskSet mask, FallbackKind kind,
+                                          PalettedContainerFactory factory, int[] replacedCellsOut) {
         if (!needsMasking(section, sectionY, mask)) return section;
-        PalettedContainer<BlockState> masked = maskedStates(section.getStates(), sectionY, mask, kind, factory);
+        PalettedContainer<BlockState> masked = maskedStates(section.getStates(), sectionY, mask, kind, factory,
+                replacedCellsOut);
         var biomes = section.getBiomes();
         if (!(biomes instanceof PalettedContainer<Holder<Biome>> biomeContainer)) {
             // Unreachable on live sections and codecRO-parsed sections alike (both yield the
@@ -151,7 +162,8 @@ final class PaperXrayMaskFilter {
      *  source's entry-0 seed that {@code recreate()} would smuggle in. */
     private static PalettedContainer<BlockState> maskedStates(PalettedContainer<BlockState> states,
                                                               int sectionY, MaskSet mask, FallbackKind kind,
-                                                              PalettedContainerFactory factory) {
+                                                              PalettedContainerFactory factory,
+                                                              int[] replacedCellsOut) {
         BlockState replacement = chooseReplacement(states, sectionY, mask, kind);
         PalettedContainer<BlockState> fresh =
                 new PalettedContainer<>(replacement, factory.blockStatesStrategy());
@@ -159,14 +171,18 @@ final class PaperXrayMaskFilter {
         // A section STRADDLING the cutoff keeps cells at/above it real — vanilla packets
         // already reveal them, masking would only mismatch near terrain.
         int yLimit = Math.min(16, mask.maxBlockHeight - bottomY);
+        int replaced = 0;
         for (int y = 0; y < 16; y++) {
             for (int z = 0; z < 16; z++) {
                 for (int x = 0; x < 16; x++) {
                     BlockState state = states.get(x, y, z);
-                    fresh.set(x, y, z, y < yLimit && mask.contains(state) ? replacement : state);
+                    boolean hide = y < yLimit && mask.contains(state);
+                    if (hide) replaced++;
+                    fresh.set(x, y, z, hide ? replacement : state);
                 }
             }
         }
+        replacedCellsOut[0] = replaced;
         return fresh;
     }
 
