@@ -272,6 +272,8 @@ public class CommandGameTests {
                     config.sendQueueLimitPerPlayer,
                     service.getUptimeSeconds(), service.getTickDiagnostics(),
                     service.getWindowBandwidthRate(),
+                    service.getTickDiag().getTotalSectionsSent(),
+                    service.getTickDiag().getTotalBytesSent(),
                     service.getOffThreadProcessor().getDiagnostics(), service.getDiskReader(),
                     service.getBandwidthLimiter(),
                     genService != null ? genService.getDiagnostics() : null,

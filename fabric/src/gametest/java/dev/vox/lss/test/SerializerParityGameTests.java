@@ -441,9 +441,15 @@ public class SerializerParityGameTests {
         helper.assertTrue(!seededFilter.contentChanged(endLevel, chunk, dim),
                 "all-air save after an all-air serve seed must stay quiet");
 
-        endLevel.setBlock(new BlockPos(cx * 16 + 8, 80, cz * 16 + 8), Blocks.END_STONE.defaultBlockState(), 3);
+        var built = new BlockPos(cx * 16 + 8, 80, cz * 16 + 8);
+        endLevel.setBlock(built, Blocks.END_STONE.defaultBlockState(), 3);
         helper.assertTrue(filter.contentChanged(endLevel, chunk, dim),
                 "air-to-built transition must mark dirty (the sentinel must not swallow it)");
+        // Revert the built block: the gametest world persists across dev-box runs and the
+        // batch grid slot (hence the salt) is DETERMINISTIC, so each run used to leave one
+        // more END_STONE down the SAME walk path — the 8-column budget above exhausted
+        // after ~8 local runs and the premise failed permanently until the world was wiped.
+        endLevel.setBlock(built, Blocks.AIR.defaultBlockState(), 3);
         helper.succeed();
     }
 

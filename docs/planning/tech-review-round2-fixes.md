@@ -282,6 +282,23 @@ concurrent builds): fresh-backfill, bandwidth-throttle (R2-2's law-B2 gate),
 dirty-broadcast, warm-rejoin. Manual: none required to land (the /reload flow is
 unit-pinned; a live test-server /reload smoke is a nice-to-have noted in the PR).
 
+## Implementation notes (discovered during validation)
+
+- **The SP-062 bandwidth-fairness gametest relied on the R2-2 bug.** Its "exhaust the
+  global bucket within 100 rounds" premise was powered by the forgiven overdraft (one
+  free payload per round); under debt-carrying the bucket reaches honest equilibrium and
+  never exhausts. Re-derived: the test now pins the ENFORCEMENT (cumulative busy spend
+  within the global cap over the sampled window — reds the pre-fix buckets ~2.5x) plus a
+  debt-driven zero-allocation state and recovery. Second discovery en route: gametest
+  ticks run ACCELERATED (hundreds of retries per wall second) while refills are
+  wall-clock driven, so no real-clock debt can recover inside a tick budget — the R2-2
+  clock seam is now threaded through `AbstractPlayerRequestState`/`PlayerRequestState`
+  and the test drives a fake nano-clock (50 ms per pass), making it fully deterministic.
+- **The End-void sentinel gametest self-poisoned its persistent world**: deterministic
+  batch-grid salt + one END_STONE placed per run down the same 8-column walk = permanent
+  premise failure after ~8 local runs (today's unusually busy day exhausted it). The test
+  now reverts its built block before succeeding; the accumulated world was wiped once.
+
 ## Out of scope
 
 Runtime AntiXray config-reload re-adoption (R2-7 covers only the transient-null flavor);

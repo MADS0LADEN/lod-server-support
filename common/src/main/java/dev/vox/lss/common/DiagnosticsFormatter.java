@@ -173,16 +173,19 @@ public final class DiagnosticsFormatter {
     public static DiagData collectDiagData(boolean enabled, int lodDistanceChunks,
                                            long bwPerPlayer, long bwGlobal, int sendQueueLimitPerPlayer,
                                            long uptimeSec, String tickDiagnostics, long windowBandwidthRate,
+                                           long serviceTotalSent, long serviceTotalBytes,
                                            ProcessingDiagnostics diag, AbstractChunkDiskReader diskReader,
                                            SharedBandwidthLimiter bwLimiter,
                                            String generationDiagnosticsOrNull,
                                            Collection<? extends AbstractPlayerRequestState<?>> states) {
-        long totalSent = 0;
-        long totalBytes = 0;
+        // The Throughput totals are SERVICE-scoped (TickDiagnostics — they exist to survive
+        // per-player state teardown): summing the live states' counters here (the pre-R2-9
+        // shape) collapsed after every dimension change/rejoin while uptime kept the service
+        // lifetime, rendering an arithmetically-wrong rate — and disagreed with the same
+        // command's Bandwidth line. The per-player lines below keep the per-state counters:
+        // session-scoped is the honest scope for a player row.
         var players = new ArrayList<PlayerDiag>();
         for (var state : states) {
-            totalSent += state.getTotalSectionsSent();
-            totalBytes += state.getTotalBytesSent();
             players.add(new PlayerDiag(
                     state.getPlayerName(),
                     state.getSendQueueSize(), sendQueueLimitPerPlayer,
@@ -194,7 +197,7 @@ public final class DiagnosticsFormatter {
         return new DiagData(
                 enabled, lodDistanceChunks,
                 bwPerPlayer, bwGlobal,
-                uptimeSec, totalSent, totalBytes,
+                uptimeSec, serviceTotalSent, serviceTotalBytes,
                 diag.getTotalInMemory(), diag.getTotalUpToDate(), diag.getTotalGenDrained(),
                 diag.getTotalReResolved(), diag.getTotalGraceSkipped(),
                 diskReader != null ? diskReader.getDiag().getSuccessfulReadCount() : 0,

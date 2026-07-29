@@ -280,7 +280,6 @@ public class RequestProcessingService {
         for (int i = 0; i < playerCount; i++) {
             var state = states.get((start + i) % playerCount);
             if (!state.hasCompletedHandshake()) continue;
-            activeCount++;
             this.diag.updateQueuePeak(state.getSendQueueSize());
 
             boolean removed = false;
@@ -297,6 +296,10 @@ public class RequestProcessingService {
             }
 
             if (removed) continue;
+            // Counted AFTER the removal check (R2-11): a disconnecting player must not
+            // dilute getPerPlayerAllocation for its final tick. Idle-but-connected
+            // players DO count — the pinned SP-062 dilution.
+            activeCount++;
 
             if (state.checkDimensionChange()) {
                 // A dimension change abandons all in-flight work. Reuse the (well-tested)

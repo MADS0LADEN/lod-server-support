@@ -24,9 +24,11 @@ import java.util.Map;
  * harmless, a missed update is not. Paper needs no twin: its dirty detection is
  * Bukkit-event-driven (block changes), not save-driven.
  *
- * <p>All callers run on the main server thread (ChunkMap.save call sites are main-thread-only
- * in 26.1.2 — verified through saveChunkIfNeeded/scheduleUnload/saveAllChunks roots); the
- * synchronization is cheap insurance against future call sites, not a present need.
+ * <p>All callers run on the main server thread (ChunkMap.save call sites were verified
+ * main-thread-only through the saveChunkIfNeeded/scheduleUnload/saveAllChunks roots on the
+ * 26.1 line and the hook shape is unchanged on 26.2; chunk-IO-overhaul mods that move saves
+ * off-thread are the known gap — see the C2ME entry in CLAUDE.md); the synchronization is
+ * cheap insurance against those, not a vanilla need.
  */
 public class DirtyContentFilter {
     /** Per-dimension cap; on overflow the map is cleared (chunks re-mark dirty once — self-heals).

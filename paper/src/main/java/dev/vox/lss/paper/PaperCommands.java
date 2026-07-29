@@ -80,6 +80,7 @@ public class PaperCommands implements CommandExecutor, TabCompleter {
                 config.bytesPerSecondLimitPerPlayer, config.bytesPerSecondLimitGlobal,
                 config.sendQueueLimitPerPlayer,
                 service.getUptimeSeconds(), service.getTickDiagnostics(), service.getWindowBandwidthRate(),
+                service.getTickDiag().getTotalSectionsSent(), service.getTickDiag().getTotalBytesSent(),
                 service.getOffThreadProcessor().getDiagnostics(), service.getDiskReader(),
                 service.getBandwidthLimiter(),
                 genService != null ? genService.getDiagnostics() : null,

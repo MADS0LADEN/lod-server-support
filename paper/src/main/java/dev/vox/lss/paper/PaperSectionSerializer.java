@@ -17,8 +17,10 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
  *
  * <p>Thread contract: called concurrently from chunk-load completion threads (the owning
  * region thread on Folia, the main thread on Paper — {@code completeAsyncLoad}) and from the
- * pump's loaded-chunk probes (on Folia the global region thread reading chunks other regions
- * own). All state is method-local, so the class must stay stateless/reentrant; the MC reads
+ * pump's loaded-chunk probes (on Folia probing moved to the chunk's OWNING region thread via
+ * the EntityScheduler hold-release — the pump no longer reads foreign-region palettes, but
+ * the audit still covers completion threads vs region ticks). All state is method-local, so
+ * the class must stay stateless/reentrant; the MC reads
  * are legal and tear-free off-thread — getChunkNow is a concurrent-map lookup, light
  * listeners clone SWMR state, PalettedContainer.write is synchronized (audited for the Folia
  * port, spec §3/§5).

@@ -40,7 +40,10 @@ public final class AntiXrayCompat {
      * two read raw on the section write path today (both null-safe by AntiXray's own
      * {@code packetInfo != null} guard); PALETTE_ENTRIES + PRESET_VALUES are bound as
      * future-proofing — their current readers either check {@code isBound()} or bind their
-     * own inner values, which win over ours.
+     * own inner values, which win over ours. CAVEAT for the next AntiXray version bump:
+     * binding a value of NULL makes {@code isBound()} TRUE-with-null — a future reader
+     * that guards with isBound() and then dereferences would NPE instead of taking its
+     * benign skip path. Verified safe against 1.4.16 only; re-check on upgrade.
      */
     static final String[] BOUND_FIELDS = {
             "PACKET_INFO", "CHUNK_SECTION_INDEX", "PALETTE_ENTRIES", "PRESET_VALUES"};

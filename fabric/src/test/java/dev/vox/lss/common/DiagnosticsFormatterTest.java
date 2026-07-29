@@ -247,6 +247,7 @@ class DiagnosticsFormatterTest {
                 true, 8,
                 1024, 2048, 100,
                 5, "tick", 256,
+                0, 0,
                 new ProcessingDiagnostics(), null,
                 new SharedBandwidthLimiter(4096),
                 null,
@@ -291,14 +292,16 @@ class DiagnosticsFormatterTest {
                 true, 16,
                 111, 222, 333,
                 10, "tick-string", 444,
+                999, 9999, // service-scoped totals — deliberately NOT the state sums (150/1500)
                 pd, reader,
                 limiter,
                 "gen-running",
                 List.of(new StubState("A", true, 100, 1000, 1, 0, 4, 10),
                         new StubState("B", false, 50, 500, 0, 2, 6, 20)));
 
-        assertEquals(150, data.totalSent(), "totalSent sums every state's sections");
-        assertEquals(1500, data.totalBytes(), "totalBytes sums every state's bytes");
+        assertEquals(999, data.totalSent(), "totalSent is the SERVICE-scoped total (survives "
+                + "state teardown on dimension change/rejoin — R2-9), never the per-state sum");
+        assertEquals(9999, data.totalBytes(), "totalBytes likewise service-scoped");
         assertEquals(2, data.cumInMem());
         assertEquals(1, data.cumUtd());
         assertEquals(1, data.cumGen());

@@ -503,7 +503,20 @@ def law_A1(ps, cs, pc, cc, window):
     queue_full is NOT a term: a send-queue-full break RETAINS its entries with no
     disposition at all, and backlog == 0 at both quiescent endpoints guarantees each
     retained entry later resolved or was superseded inside the window. It stays a pure
-    diagnostic counter."""
+    diagnostic counter.
+
+    LATENT FALSE POSITIVES (documented 2026-07-29, never yet seen live — the A5 latents'
+    A1 siblings; see CLAUDE.md's flake catalog): (1) a client transport send that THROWS
+    still counts requested_total (count-at-send is pinned — LodRequestManagerTest
+    "a failed batch still counts as attempted") with no RHS term — a permanent imbalance
+    of the batch size if it lands inside an evaluated window; (2) a server batch-frame
+    send failure loses up to MAX_BATCH_RESPONSES dispositions the same way (the client
+    re-declares, but the re-declared INSTANCE balances its own answer, never the lost
+    one); (3) a declaration landing in the post-/reload unregistered window before the
+    re-attach prompt heals it (Paper only). All three triggers are dying-connection or
+    boundary shapes the quiescent-pair windowing excludes, which is why none has fired —
+    an A1 red whose imbalance matches one batch/frame is one of these, not conservation
+    rot."""
     d_req = delta(pc, cc, "requested_total")
     d_resp = sum(delta(pc, cc, f"responses.{k}")
                  for k in ("columns", "up_to_date", "not_generated"))

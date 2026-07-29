@@ -57,15 +57,19 @@ class TickDiagnosticsTest {
 
         // The implementation's span is bracketed by our measured timestamps:
         // nanos(s1) in [before, afterFirst], nanos(s2) in [beforeSecond, after].
-        long windowBytes = 100_000L + 300_000L;
+        // The OLDEST sample's bytes are excluded from the numerator (R2-11): N samples
+        // span N-1 intervals, and sample 1's bytes flushed during the tick ENDING at its
+        // own stamp — before the measured span began. Including them inflated the rate by
+        // ~N/(N-1) (+100% at exactly two samples, this test's shape).
+        long spanBytes = 300_000L;
         long minElapsed = Math.max(1, beforeSecond - afterFirst);
         long maxElapsed = after - before;
-        long lowerBound = windowBytes * LSSConstants.NANOS_PER_SECOND / maxElapsed;
-        long upperBound = windowBytes * LSSConstants.NANOS_PER_SECOND / minElapsed;
+        long lowerBound = spanBytes * LSSConstants.NANOS_PER_SECOND / maxElapsed;
+        long upperBound = spanBytes * LSSConstants.NANOS_PER_SECOND / minElapsed;
 
         assertTrue(rate > 0, "two byte-bearing samples must produce a positive rate");
         assertTrue(rate >= lowerBound && rate <= upperBound,
-                "rate must be windowed bytes over the sample span: rate=" + rate
+                "rate must be span bytes (oldest sample excluded) over the sample span: rate=" + rate
                         + " expected in [" + lowerBound + ", " + upperBound + "]");
     }
 

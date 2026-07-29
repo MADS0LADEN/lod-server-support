@@ -602,7 +602,6 @@ public class PaperRequestProcessingService {
             var state = states.get((start + i) % playerCount);
             if (!state.hasCompletedHandshake())
                 continue;
-            activeCount++;
             this.diag.updateQueuePeak(state.getSendQueueSize());
 
             boolean removed = false;
@@ -621,6 +620,8 @@ public class PaperRequestProcessingService {
 
             if (removed)
                 continue;
+            // Counted AFTER the removal check (R2-11) — see the Fabric twin.
+            activeCount++;
 
             if (state.checkDimensionChange()) {
                 // A dimension change abandons all in-flight work. Reuse the (well-tested)
