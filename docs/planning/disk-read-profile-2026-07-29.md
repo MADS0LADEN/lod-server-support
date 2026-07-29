@@ -90,7 +90,32 @@ Allocation (sampled weight, ~28 GB per ~62 s window in BOTH arms ≈ 450 MB/s ch
 `Pair`/HashMap nodes ~1-2 GB — the classic DFU-decode signature. GC keeps up easily
 (sub-15 ms pauses, <1% of wall time), so this is CPU cost, not pause risk.
 
-### Optimization leads (not acted on)
+### Optimization round 1 — IMPLEMENTED and validated (commit 1576f73, matrix `20260729-optimized`)
+
+Three of the leads below landed the same day (memoized palette decode, headless section
+write with histogram counts, exact-size zero-copy buffers — both platforms, wire bytes
+byte-identical, all goldens/parity/Tier-2 gates green). Validation matrix under identical
+conditions vs baseline `20260729-152424`:
+
+- **Serializer-band CPU (the target) roughly halved**: whole-recording exec samples
+  -23-30% per vanilla run; the recount band 22.6% → 10.1% (residual = the honest
+  histogram pass); `Identifier`/blockstate entry decode samples -78% (memo hit rate);
+  netty grow-copies eliminated (zero size-mismatch fallbacks across all runs). The LSS
+  reader pool is no longer the top thread — vanilla server-thread ticking now leads.
+- **Sampled allocation -28%** (~28.4 → ~20.3 GB per active window).
+- **Idle-corrected CPU-s/1k cols: vanilla 1.87 → 1.78 (-5%), c2me 1.71 → 1.59 (-7%)** —
+  the whole-JVM number moves less than the band numbers because it includes vanilla
+  ticking (which varied +30% absolute between matrices, eating much of the gain on this
+  box) plus GC/JIT threads the exec sampler doesn't attribute. Throughput unchanged
+  (bandwidth-bound by design).
+- **What's left, measured**: the container-level codec plumbing barely moved (485 → 446
+  samples — RecordCodecBuilder/ListCodec/NbtOps traversal + the boxed LONG_STREAM
+  data-array decode, a per-section fixed cost the element memo cannot reach) and the raw
+  NBT tag load (~15%). Killing those is exactly the already-designed Tier 2 NBT→wire
+  transcode (agents' report: staged plan, per-section fallback ladder, additive goldens
+  — est. 3-5 days, on the order of a further 25-35% of server CPU).
+
+### Optimization leads (round-1 source material; transcode Tier 2 still open)
 
 1. **Skip or cheapen `recalcBlockCounts` on the disk path.** The section ctor recounts
    4096 cells into a fastutil histogram per section purely so `write()` can emit
