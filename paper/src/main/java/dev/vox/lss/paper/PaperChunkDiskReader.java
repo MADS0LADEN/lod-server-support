@@ -49,8 +49,11 @@ public class PaperChunkDiskReader extends AbstractChunkDiskReader {
         // The mask entry is captured at submit time (the level is in hand here); the read
         // itself runs on the reader pool where only the dimension string survives.
         var maskEntry = PaperXrayMaskManager.entryForActive(level);
+        int minSectionY = level.getMinSectionY();
+        int maxSectionY = level.getMaxSectionY();
         submitRead(playerUuid, chunkX, chunkZ, dimension, submissionOrder,
-                () -> PaperNbtSectionSerializer.readAndSerializeSections(read, registryAccess, chunkX, chunkZ, maskEntry));
+                () -> PaperNbtSectionSerializer.readAndSerializeSections(read, registryAccess, chunkX, chunkZ,
+                        maskEntry, minSectionY, maxSectionY));
     }
 
     /**
