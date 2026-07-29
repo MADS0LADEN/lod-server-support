@@ -320,7 +320,9 @@ public class ColumnTimestampCache {
     private static void sweepOrphanedTempFiles(Path dataDir) {
         if (!Files.isDirectory(dataDir)) return;
         long cutoffMillis = System.currentTimeMillis() - ORPHAN_TMP_MAX_AGE_MILLIS;
-        try (var stream = Files.newDirectoryStream(dataDir, FILE_NAME + ".tmp.*")) {
+        // ".tmp*" (not ".tmp.*"): also catches a legacy fixed-name "lss-timestamps.bin.tmp"
+        // orphan from pre-unique-name versions; the main file has no ".tmp" and never matches.
+        try (var stream = Files.newDirectoryStream(dataDir, FILE_NAME + ".tmp*")) {
             for (Path tmp : stream) {
                 try {
                     if (Files.getLastModifiedTime(tmp).toMillis() < cutoffMillis) {

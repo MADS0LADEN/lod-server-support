@@ -36,6 +36,10 @@ class OffThreadProcessorDiskResultTest {
     private static final long COLUMN_TS = 1_700_000_000L;
 
     private static final class TestState extends AbstractPlayerRequestState<Object> {
+        // One-shot: fail the BULK dirty-clear apply (the long[] overload only — the catch
+        // paths' single-position clear stays live) to exercise the late-drain requeue.
+        volatile boolean throwOnNextBulkClearDiskReadDone;
+
         TestState(UUID uuid, int syncCap, int genCap) {
             super(uuid, syncCap, genCap);
             // Damping off: these rigs calibrate the gate pins against instant-outward
@@ -43,6 +47,13 @@ class OffThreadProcessorDiskResultTest {
             setFrontierDampingForTest(0, System::nanoTime);
         }
         @Override public String getPlayerName() { return "test"; }
+        @Override public void clearDiskReadDone(long[] positions) {
+            if (throwOnNextBulkClearDiskReadDone) {
+                throwOnNextBulkClearDiskReadDone = false;
+                throw new RuntimeException("injected dirty-clear apply failure");
+            }
+            super.clearDiskReadDone(positions);
+        }
         /** Seeds one want-set batch carrying a single request (the pre-v17 per-request
          *  enqueue has no equivalent — each declaration REPLACES the backlog). Every call
          *  site here is separated from the next by a routing cycle, so nothing is superseded. */
@@ -619,6 +630,146 @@ class OffThreadProcessorDiskResultTest {
         var data = new LoadedColumnData(cx, cz, bytes,
                 bytes.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES);
         return new TickSnapshot.GenerationReadyData(uuid, cx, cz, DIM, data, COLUMN_TS, order);
+    }
+
+    @Test
+    void lateDrainFailureRequeuesTheLateEventsForTheNextCycle() throws Exception {
+        // A throw INSIDE the late drain's apply must not lose the taken events: they are
+        // re-queued (idempotent — re-clearing a cleared bit is a no-op) and the next
+        // cycle's phase-1 apply lands them.
+        var rig = new Rig(false);
+        try {
+            rig.state.markDiskReadDone(3, 3);
+            long packed = PositionUtil.packPosition(3, 3);
+            rig.state.throwOnNextBulkClearDiskReadDone = true; // one-shot
+            rig.proc.beforeRouteAction.set(() ->
+                    rig.proc.clearDiskReadDone(rig.uuid, new long[]{packed}));
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+
+            long deadline = System.nanoTime() + 5_000_000_000L;
+            while (rig.state.hasDiskReadDone(3, 3) && System.nanoTime() < deadline) {
+                rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of()); // drive the retry
+                Thread.sleep(10);
+            }
+            assertFalse(rig.state.hasDiskReadDone(3, 3),
+                    "a late clear taken by a failed drain must be re-queued and applied, not lost");
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
+    @Test
+    void taintedOutcomeFailureInTheCatchDoesNotResurrectTheStamp() throws Exception {
+        // The F5 taint variant: a stale-tainted generation outcome whose payload build
+        // throws is dropped by the per-outcome catch. The consumed taint must NOT be
+        // resurrected by any replay — nothing stamped, nothing marked served, and the
+        // re-declaration re-resolves.
+        var rig = new Rig(true);
+        try {
+            var ticket = escalateToGenTicket(rig, 5, 5);
+            long packed = PositionUtil.packPosition(5, 5);
+            // An edit invalidation overtakes the in-flight generation (taints it). Applied
+            // by applyEvents in the same take as the outcome — phase 1 precedes phase 3.
+            rig.proc.invalidateTimestamps(DIM, new long[]{packed});
+            rig.proc.throwOnPayloadBuildForPacked = packed;
+            long supersededBefore = rig.proc.getDiagnostics().getTotalSuperseded();
+            byte[] bytes = {1, 2};
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), new ArrayList<>(List.of(
+                    new TickSnapshot.GenerationReadyData(rig.uuid, 5, 5, DIM,
+                            new LoadedColumnData(5, 5, bytes,
+                                    bytes.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES),
+                            COLUMN_TS, ticket.submissionOrder()))));
+            waitFor(() -> rig.proc.getDiagnostics().getTotalSuperseded() == supersededBefore + 1,
+                    "the tainted outcome's contained failure books as a transient drop");
+
+            assertFalse(rig.state.hasDiskReadDone(5, 5), "nothing marked served");
+            assertEquals(0, rig.proc.getHarnessInternals().tscacheSizePerDimension().getOrDefault(DIM, 0),
+                    "nothing stamped — a replay that un-taints would re-stamp pre-edit terrain");
+            assertTrue(rig.proc.enqueuedColumns.isEmpty(), "nothing delivered");
+
+            // Recovery: the re-declaration re-resolves from disk (no false up_to_date).
+            rig.proc.throwOnPayloadBuildForPacked = Long.MIN_VALUE;
+            rig.state.enqueue(new IncomingRequest(5, 5, -1L));
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+            waitFor(() -> rig.proc.diskSubmits.stream().filter(s -> s.cx() == 5 && s.cz() == 5).count() == 2,
+                    "the re-declaration re-reads instead of drawing a stale answer");
+            assertTrue(rig.proc.enqueuedColumns.isEmpty(), "still no replayed delivery");
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
+    @Test
+    void interruptedIdleWaitFlushesPendingInvalidationsBeforeExit() throws Exception {
+        // The F4 WIRING pin (the helper alone is pinned above): interrupting the
+        // processing thread in its idle mailbox wait with no snapshot posted must flush
+        // queued invalidations on the way out — a bare return persists pre-edit stamps
+        // through shutdown's final save.
+        var rig = new Rig(false);
+        try {
+            long packed = PositionUtil.packPosition(2, 2);
+            rig.state.enqueue(new IncomingRequest(2, 2, -1L));
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+            waitFor(() -> rig.proc.diskSubmits.size() == 1, "disk submit");
+            rig.inject(allAirResult(rig.uuid, 2, 2, DIM, COLUMN_TS, 1L));
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+            drainUntil(rig.proc, received(rig.uuid, LSSConstants.RESPONSE_UP_TO_DATE, packed));
+            waitFor(() -> rig.proc.getHarnessInternals().tscacheSizePerDimension()
+                    .getOrDefault(DIM, 0) == 1, "cache stamped by the all-air serve");
+
+            var thread = rig.proc.processingThreadForTest();
+            waitFor(() -> thread.getState() == Thread.State.TIMED_WAITING,
+                    "processing thread idle in the mailbox wait");
+            rig.proc.invalidateTimestamps(DIM, new long[]{packed}); // queued, never posted
+            thread.interrupt();
+            thread.join(2_000);
+            assertFalse(thread.isAlive(), "the interrupted idle wait exits");
+            assertEquals(0, rig.proc.getHarnessInternals().tscacheSizePerDimension().getOrDefault(DIM, 0),
+                    "the wait-site catch must flush queued invalidations before exiting");
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
+    @Test
+    void phase2DeliveryFailureIsContainedAndClearsTheDoneBit() throws Exception {
+        // The phase-2 twin of the per-outcome containment: deliverDiskResult marks the
+        // done-bit BEFORE the payload build, so a build throw used to fail the cycle and
+        // leave an orphaned bit that answers a ts>0 re-ask up_to_date with nothing in the
+        // pipeline. Contained: bit cleared, superseded, the drain continues to the next
+        // result, and the re-declaration heals.
+        var rig = new Rig(false);
+        try {
+            rig.state.offerIncomingBatch(new IncomingBatch(new IncomingRequest[]{
+                    new IncomingRequest(9, 9, -1L), new IncomingRequest(10, 10, -1L)}));
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+            waitFor(() -> rig.proc.diskSubmits.size() == 2, "both disk submits");
+
+            rig.proc.throwOnPayloadBuildForPacked = PositionUtil.packPosition(9, 9);
+            long supersededBefore = rig.proc.getDiagnostics().getTotalSuperseded();
+            rig.inject(dataResult(rig.uuid, 9, 9, DIM, new byte[]{1, 2, 3}, COLUMN_TS, 1L));
+            rig.inject(dataResult(rig.uuid, 10, 10, DIM, new byte[]{4, 5, 6}, COLUMN_TS, 2L));
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+
+            waitFor(() -> rig.proc.enqueuedColumns.stream().anyMatch(c -> c.cx() == 10),
+                    "the delivery after the throwing one still lands — the cycle survived");
+            assertEquals(0, rig.proc.enqueuedColumns.stream().filter(c -> c.cx() == 9).count(),
+                    "the failed delivery is dropped, not delivered");
+            assertFalse(rig.state.hasDiskReadDone(9, 9),
+                    "the failed delivery's done-bit is cleared — a ts>0 re-ask must re-resolve, "
+                            + "not draw up_to_date off an orphaned bit");
+            assertTrue(rig.state.hasDiskReadDone(10, 10), "the surviving delivery marks served");
+            assertEquals(supersededBefore + 1, rig.proc.getDiagnostics().getTotalSuperseded(),
+                    "the contained failure books as a standard transient drop");
+
+            rig.proc.throwOnPayloadBuildForPacked = Long.MIN_VALUE;
+            rig.state.enqueue(new IncomingRequest(9, 9, -1L));
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+            waitFor(() -> rig.proc.diskSubmits.stream().filter(s -> s.cx() == 9).count() == 2,
+                    "the re-declaration re-reads");
+        } finally {
+            rig.proc.shutdown();
+        }
     }
 
     @Test

@@ -393,6 +393,9 @@ public class GenerationLifecycleGameTests {
             // Timeout releases are DEFERRED (staggered ≤4/tick, the mass-removal C2ME freeze
             // guard — see DeferredTicketReleases); one pending release drains at the top of
             // the next tick. The pin's spirit is unchanged: the ticket must not leak.
+            helper.assertTrue(lssTicketCount(tickets, cx, cz) == 1,
+                    "the timeout tick must DEFER the release, not remove inline — a mass-"
+                            + "timeout wave releasing inline is the C2ME 60s-freeze shape");
             gen.tick();
             helper.assertTrue(lssTicketCount(tickets, cx, cz) == 0,
                     "timeout must release the generation ticket (or the never-loading chunk's "

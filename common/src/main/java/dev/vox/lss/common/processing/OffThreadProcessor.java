@@ -868,28 +868,42 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
             handleDiskNotFound(playerUuid, state, packed, cx, cz, pending, dimension,
                     result.authoritativeMiss() && !staleAgainstEdit);
         } else {
-            if (!staleAgainstEdit) {
-                state.markDiskReadDone(cx, cz);
-            }
-            boolean allAir = result.sectionBytes() == null;
-            boolean sent = !allAir
-                    && buildAndEnqueueColumnPayload(state, cx, cz, result.dimension(),
-                            result.columnTimestamp(), submissionOrder,
-                            result.sectionBytes(), result.estimatedBytes(),
-                            LSSConstants.COLUMN_SOURCE_DISK);
-            if (!sent) {
-                // All-air chunk (no visible sections): a resync client (claimsData) may hold
-                // stale content here, so send an authoritative clearing 0-section column; a
-                // client with nothing (first serve) gets a cheap up_to_date. An enqueue
-                // REJECTION (oversized column / oversized dimension id) is NOT all-air: the
-                // server knows real content exists, so a clear would erase the client's
-                // stale-but-real terrain and seal the fabricated air — the terminal answer is
-                // up_to_date so the client keeps what it has.
-                boolean claimsData = pending != null && pending.claimsData();
-                if (!(allAir && claimsData && sendEmptiedColumn(state, cx, cz, result.dimension(),
-                        result.columnTimestamp(), submissionOrder, LSSConstants.COLUMN_SOURCE_DISK))) {
-                    this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state));
+            try {
+                if (!staleAgainstEdit) {
+                    state.markDiskReadDone(cx, cz);
                 }
+                boolean allAir = result.sectionBytes() == null;
+                boolean sent = !allAir
+                        && buildAndEnqueueColumnPayload(state, cx, cz, result.dimension(),
+                                result.columnTimestamp(), submissionOrder,
+                                result.sectionBytes(), result.estimatedBytes(),
+                                LSSConstants.COLUMN_SOURCE_DISK);
+                if (!sent) {
+                    // All-air chunk (no visible sections): a resync client (claimsData) may hold
+                    // stale content here, so send an authoritative clearing 0-section column; a
+                    // client with nothing (first serve) gets a cheap up_to_date. An enqueue
+                    // REJECTION (oversized column / oversized dimension id) is NOT all-air: the
+                    // server knows real content exists, so a clear would erase the client's
+                    // stale-but-real terrain and seal the fabricated air — the terminal answer is
+                    // up_to_date so the client keeps what it has.
+                    boolean claimsData = pending != null && pending.claimsData();
+                    if (!(allAir && claimsData && sendEmptiedColumn(state, cx, cz, result.dimension(),
+                            result.columnTimestamp(), submissionOrder, LSSConstants.COLUMN_SOURCE_DISK))) {
+                        this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state));
+                    }
+                }
+            } catch (Throwable t) {
+                // Per-delivery containment — the phase-2 twin of processGenerationReady's
+                // catch: the done-bit was marked BEFORE the payload build, so a build throw
+                // (encode, OOM) would otherwise fail the cycle and leave an orphaned bit
+                // that answers a ts>0 re-ask up_to_date with nothing in the pipeline. Clear
+                // it (idempotent; the only bit reachable here is the one this try set — a
+                // live pending blocked every other setter) and drop as a standard transient
+                // (superseded, re-declared next scan). Other recipients of this dedup group
+                // still get their deliveries.
+                LSSLogger.error("Failed to deliver disk result for chunk " + cx + ", " + cz, t);
+                state.clearDiskReadDone(packed);
+                this.ctx.diagnostics().addSuperseded(1);
             }
         }
         this.ctx.diagnostics().incrementDiskDrained();
@@ -1241,6 +1255,11 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     public record HarnessInternals(int dedupGroups, int mailboxDepth, long tscacheEvictions,
                                    Map<String, Integer> tscacheSizePerDimension) {}
 
+    /** Test seam: the processing thread, for interrupt-driven exit-path wiring pins. */
+    Thread processingThreadForTest() {
+        return this.processingThread;
+    }
+
     public void shutdown() {
         this.postSnapshot(TickSnapshot.shutdownSentinel(), List.of());
         try {
@@ -1261,6 +1280,12 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
         if (this.processingThread.isAlive()) {
             LSSLogger.warn("Skipping final timestamp cache save — processing thread still running");
         } else if (this.dataDir != null) {
+            // The thread may have died OUTSIDE the flush-covered exits (uncaught throwable in
+            // the take/requeue machinery, or long before this shutdown), leaving queued
+            // invalidations stranded in the pending buffer — persisted un-applied they answer
+            // false up_to_date across the restart. Single ownership of the cache has passed
+            // to this thread (join confirmed dead), so apply them here before snapshotting.
+            flushPendingInvalidationsOnExit();
             // This snapshot supersedes anything still in the coalescing slot; discarding
             // lets a queued-but-not-started drain no-op instead of spending part of the
             // SHUTDOWN_JOIN_MS window writing a stale full file first. (A drain already

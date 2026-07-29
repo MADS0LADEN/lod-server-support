@@ -23,8 +23,20 @@ import static org.junit.jupiter.api.Assertions.*;
 class OffThreadProcessorMailboxTest {
 
     private static final class TestState extends AbstractPlayerRequestState<Object> {
+        // One-shot: fail the bulk dirty-clear apply — the phase-1 cycle-failure anchor for
+        // the lossless-retry pin (phase-2 deliveries and phase-3 outcomes are individually
+        // contained now, so phase 1 is the remaining shape that fails a whole take).
+        volatile boolean throwOnNextBulkClearDiskReadDone;
+
         TestState(UUID uuid) { super(uuid, 4, 4); }
         @Override public String getPlayerName() { return "test"; }
+        @Override public void clearDiskReadDone(long[] positions) {
+            if (throwOnNextBulkClearDiskReadDone) {
+                throwOnNextBulkClearDiskReadDone = false;
+                throw new RuntimeException("injected phase-1 apply failure");
+            }
+            super.clearDiskReadDone(positions);
+        }
         /** Seeds one want-set batch carrying a single request (the pre-v17 per-request
          *  enqueue has no equivalent — each declaration REPLACES the backlog). Every call
          *  site here is separated from the next by a routing cycle, so nothing is superseded. */
@@ -196,45 +208,29 @@ class OffThreadProcessorMailboxTest {
         players.put(uuid, state);
 
         // The cycle must throw BEFORE the generation outcome is consumed: a throw inside
-        // the outcome's OWN processing is a contained transient drop under per-outcome
-        // containment (pinned by midListOutcomeFailureDoesNotReplayConsumedOutcomes in
-        // OffThreadProcessorDiskResultTest — replaying a consumed outcome can un-taint).
-        // So this pin makes a PHASE-2 disk delivery throw once; the not-yet-consumed
-        // phase-3 generation outcome in the same take must be re-queued and delivered by
-        // a later cycle, not lost with the failed take.
-        var reader = new StubDiskReader();
-        reader.registerPlayer(uuid);
-        var submitted = new java.util.concurrent.atomic.AtomicBoolean();
-        var throwsLeft = new java.util.concurrent.atomic.AtomicInteger(1);
+        // the outcome's OWN processing is a contained transient drop (pinned by
+        // midListOutcomeFailureDoesNotReplayConsumedOutcomes — replaying a consumed
+        // outcome can un-taint), and phase-2 deliveries are likewise contained per-result.
+        // So this pin fails PHASE 1 (the dirty-clear apply throws once): the whole take
+        // fails un-applied, and the not-yet-consumed phase-3 generation outcome must be
+        // re-queued and delivered by a later cycle, not lost with the failed take.
+        state.throwOnNextBulkClearDiskReadDone = true;
         var delivered = java.util.concurrent.ConcurrentHashMap.<Long>newKeySet();
-        var proc = new TestProcessor(players, reader) {
-            @Override
-            protected boolean submitDiskRead(UUID p, String dim, int cx, int cz, long order) {
-                submitted.set(true);
-                return true;
-            }
+        var proc = new TestProcessor(players) {
             @Override
             protected boolean buildAndEnqueueColumnPayload(TestState s, int cx, int cz, String dim,
                                                            long ts, long order, byte[] bytes, int est,
                                                            byte source) {
-                if (cx == 9 && cz == 9 && throwsLeft.getAndDecrement() > 0) {
-                    throw new RuntimeException("injected phase-2 cycle failure");
-                }
                 delivered.add(PositionUtil.packPosition(cx, cz));
                 return true;
             }
         };
         try {
             proc.start();
-            state.enqueue(new IncomingRequest(9, 9, -1L));
-            proc.postSnapshot(snapshot(uuid), List.of());
-            waitFor(submitted::get, "disk submit for the phase-2 thrower");
-
-            reader.getPlayerQueue(uuid).add(new ChunkReadResult(uuid, 9, 9, new byte[]{1, 2, 3},
-                    DIM, 3 + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES, 123L, false, false, false, 1L));
+            proc.clearDiskReadDone(uuid, new long[]{PositionUtil.packPosition(1, 1)});
             var column = new LoadedColumnData(4, 2, new byte[]{1, 2, 3}, 3);
             proc.postSnapshot(snapshot(uuid), new ArrayList<>(List.of(
-                    new TickSnapshot.GenerationReadyData(uuid, 4, 2, DIM, column, 123L, 2L))));
+                    new TickSnapshot.GenerationReadyData(uuid, 4, 2, DIM, column, 123L, 1L))));
 
             long deadline = System.nanoTime() + 5_000_000_000L;
             while (!delivered.contains(PositionUtil.packPosition(4, 2)) && System.nanoTime() < deadline) {

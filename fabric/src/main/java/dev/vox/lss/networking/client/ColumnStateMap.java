@@ -33,8 +33,9 @@ class ColumnStateMap {
     // Positions whose delivery was lost after being stamped (ingest failure) and that must be
     // re-reachable by a later scan. The name is historical: through v16 the rate-limit bounce
     // was the other writer, but v17 retired the bounce, so onIngestFailed is now the only one.
-    // The mark's live job is hasRetries() -> the scanner's confirmed-ring reset, without which
-    // an unstamped position inside an already-confirmed ring is never rescanned.
+    // The mark's live job is hasActionableRetries() -> the scanner's confirmed-ring reset,
+    // without which an unstamped position inside an already-confirmed ring is never rescanned
+    // (marks under the vanilla-view exclusion are parked — see hasActionableRetries).
     private final LongOpenHashSet retry = new LongOpenHashSet();
     // Positions confirmed current (data or up-to-date) in this session; cleared on
     // reconnect/dimension change so cached-but-stale positions get revalidated.
@@ -62,7 +63,9 @@ class ColumnStateMap {
     // cache path preserves file entries the movement prune dropped from memory, so without
     // this record a deliberate removal would be resurrected from the file and answer a false
     // up_to_date next session — the delivery-honesty hole re-opened from disk. Accumulates
-    // for the session (tiny: ingest failures cap at 3/position, purges are one-time);
+    // for the session, ≤ one entry per DISTINCT failed/purged position: normally a handful,
+    // but a permanently-rejecting consumer (incompatible mod) during hours of travel is one
+    // entry per visited position — memory-growth-only, saves are teardown-frequency.
     // NOT pruned by distance — pruning it would resurrect any removal whose position the
     // player walked away from before the next save.
     private final LongOpenHashSet persistentRemovals = new LongOpenHashSet();

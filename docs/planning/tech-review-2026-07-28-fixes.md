@@ -364,6 +364,63 @@ comment it so it isn't rediscovered); F11 (key the pending-removal map on saniti
 honesty-removal sites were verified to be the complete set; the only production
 `saveAsync` caller is `saveCache`, so no dual-path save exists).
 
+## Implementation-review round (3 agents, post-implementation — all applied)
+
+Three adversarial reviewers (processor commit / cache commits / F3+F6+F10 + full-diff
+sweep) ran against the six implemented commits. **Every fix was verdicted as correctly
+closing its hole; no CRITICAL findings.** Actionable findings, all fixed in the follow-up
+commit:
+
+- **saveCache wiring pin (cache MAJOR)** — every merge-save pin drove the store layer, so
+  reverting `saveCache` to the old overwrite stayed green. Added
+  `saveCachePersistsThroughTheMergePathWithRemovalsAndHistory` (LodRequestManagerTest).
+- **Abandoned load-window failures became permanent staleness (cache MINOR)** — failures
+  buffered during a cache-load window were discarded at dimension change/disconnect;
+  merge-on-save preserved the stale file stamp the old overwrite happened to truncate.
+  `saveCache` now drains the buffer through the coalesced `removeAsync`; pinned by
+  `abandonedLoadWindowFailuresUnstampTheFileAtSaveCache`.
+- **shutdown's dead-thread branch now flushes pending invalidations (processor MINOR)** —
+  covers thread death by uncaught throwable and post-death enqueues; the F4 helper existed,
+  the call was one step short.
+- **Phase-2 containment twin (processor MINOR)** — `deliverDiskResult` marks the done-bit
+  before the payload build; a build throw failed the cycle and left an orphaned bit that
+  seals a ts>0 re-ask stale (same class as F5). Contained per-delivery; pinned by
+  `phase2DeliveryFailureIsContainedAndClearsTheDoneBit`. The mailbox lossless-retry pin was
+  re-anchored on a phase-1 throw (its phase-2 anchor became contained).
+- **F4 wiring pin (processor MINOR)** — added `processingThreadForTest()` and
+  `interruptedIdleWaitFlushesPendingInvalidationsBeforeExit` (real interrupt mid-wait).
+- **Dropped planned pins restored (sweep MINORs)** — F1 requeue
+  (`lateDrainFailureRequeuesTheLateEventsForTheNextCycle`), F5 taint variant
+  (`taintedOutcomeFailureInTheCatchDoesNotResurrectTheStamp`), F3 deferral-not-inline
+  (gametest now asserts the ticket is still held between the timeout tick and the drain
+  tick). The F2 prune-trim pin stays waived: fastutil capacity is unobservable without
+  reflection — same limitation as the M3 server twin.
+- **`saveAsync` demoted to package-private test-only** (sweep) — dead production API whose
+  overwrite semantics are exactly the F2 bug; a future caller now can't reach it.
+- Hygiene: F6 javadoc mis-attachment fixed (the throttle field had detached
+  `dispatchPluginMessage`'s contract doc); F8 glob widened to `.tmp*` (legacy fixed-name
+  orphan); honest `persistentRemovals` growth-bound comment; stale `hasRetries` reference
+  updated.
+
+Waived as documented residuals (no action): the intra-phase-4 residual window (F1, honest
+comment in place); pre-try preamble throws replaying outcomes (OOM-class, backstop flag
+retained); non-shutdown interrupts now surviving a pending snapshot (nothing else
+interrupts); the JVM-global `SAVE_WRITES_FOR_TEST` counter (tests run sequentially; noted
+for the flake catalog if parallelism ever lands); `removeAsync`'s `changed` detection
+skipping explicitly-stored `-1` entries (semantically identical to absent); the shared
+60 s hostile-frame throttle across channels/players (consistent with existing throttles);
+`persistentRemovals` unbounded under a permanently-rejecting consumer on a marathon flight
+(memory-growth-only, teardown-frequency saves).
+
+## Soak validation (post-implementation)
+
+fresh-backfill, warm-rejoin, dirty-broadcast, cold-restart-resync: **all PASS, 0
+violations, 0 warnings** (run 20260728T2238Z chain). Two earlier fresh-backfill A7 reds
+(25 and 40 `disk.errors`) carried the documented environmental signature exactly — every
+error a 10 s read timeout (`Failed to read chunk` count 0, A5 exact) — and were caused by
+six leftover `lss-multi-test` servers from the tri-release session loading the box; both
+disappeared once those were stopped. Not a code regression.
+
 ## Out of scope (explicit)
 
 - The `TwoPlayerGameTests` retry scaffolding stays (pin unweakened).

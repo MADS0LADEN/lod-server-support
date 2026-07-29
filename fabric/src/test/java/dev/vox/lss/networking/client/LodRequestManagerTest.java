@@ -635,6 +635,79 @@ class LodRequestManagerTest {
     }
 
     @Test
+    void saveCachePersistsThroughTheMergePathWithRemovalsAndHistory() {
+        // The WIRING pin for merge-on-save (the store-level semantics are pinned in
+        // ColumnCacheStoreTest): reverting saveCache to the old whole-file overwrite, or
+        // dropping the removals argument, must red HERE — no other test drives the
+        // production call path.
+        var mgr = new LodRequestManager();
+        final String server = "test-savewiring-" + System.nanoTime();
+        var dimA = dim("overworld");
+        mgr.onSessionConfig(config(64, true), server);
+        try {
+            // A previous session's save holds far history (outside any current disc) and a
+            // stamp this session will deliberately unstamp.
+            var prior = new Long2LongOpenHashMap();
+            long farPos = PositionUtil.packPosition(5000, 5000);
+            prior.put(farPos, 4000L);
+            prior.put(POS, 4000L);
+            ColumnCacheStore.save(server, dimA, prior);
+
+            mgr.setLastDimensionForTest(dimA);
+            long freshPos = PositionUtil.packPosition(11, -3);
+            mgr.onColumnReceived(freshPos, 6000L, dimA);
+            mgr.onColumnReceived(POS, 5000L, dimA);
+            mgr.onIngestFailure(dimA, POS); // deliberate unstamp -> persistentRemovals
+
+            mgr.saveCache(); // the production wiring under test
+            ColumnCacheStore.flushPendingIo();
+
+            var loaded = ColumnCacheStore.load(server, dimA);
+            assertEquals(4000L, loaded.get(farPos),
+                    "saveCache must go through the MERGE path — a plain overwrite truncates far history");
+            assertEquals(6000L, loaded.get(freshPos), "this session's fresh stamp lands");
+            assertFalse(loaded.containsKey(POS),
+                    "saveCache must pass the session's honesty removals — dropping the "
+                            + "removals argument resurrects the unstamp from the file");
+        } finally {
+            ColumnCacheStore.clearForServer(server);
+        }
+    }
+
+    @Test
+    void abandonedLoadWindowFailuresUnstampTheFileAtSaveCache() {
+        var mgr = new LodRequestManager();
+        final String server = "test-loadwindow-" + System.nanoTime();
+        var dimA = dim("overworld");
+        mgr.onSessionConfig(config(64, true), server);
+        try {
+            // The file holds a stale stamp from a prior session; this session's cache load
+            // is still in flight when the consumer rejects the column — the report is
+            // buffered (the in-memory apply is absorbed on the empty pre-load map)...
+            var prior = new Long2LongOpenHashMap();
+            prior.put(POS, 5000L);
+            ColumnCacheStore.save(server, dimA, prior);
+
+            mgr.setLastDimensionForTest(dimA);
+            mgr.setPendingCacheLoadForTest(new CompletableFuture<>()); // load never lands
+            mgr.onIngestFailure(dimA, POS);
+
+            // ...and the window is abandoned (dimension change / disconnect) before the
+            // load lands. saveCache must drain the buffered failure into a file unstamp:
+            // merge-on-save otherwise preserves the stale stamp FOREVER (the old overwrite
+            // happened to truncate it away by accident), and the client claims data no
+            // consumer holds — revalidated up_to_date every future visit.
+            mgr.saveCache();
+            ColumnCacheStore.flushPendingIo();
+
+            assertFalse(ColumnCacheStore.load(server, dimA).containsKey(POS),
+                    "an abandoned load window's buffered failure must still unstamp the file");
+        } finally {
+            ColumnCacheStore.clearForServer(server);
+        }
+    }
+
+    @Test
     void ingestFailureNeverDelaysTheScanCadence() {
         manager.setLastDimensionForTest(dim("overworld"));
         manager.onColumnReceived(POS, 5000L, dim("overworld"));

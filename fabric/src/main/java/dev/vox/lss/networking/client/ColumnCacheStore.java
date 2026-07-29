@@ -95,7 +95,11 @@ public class ColumnCacheStore {
         return CompletableFuture.supplyAsync(() -> load(serverAddress, dimension), IO_EXECUTOR);
     }
 
-    public static void saveAsync(String serverAddress, ResourceKey<Level> dimension, Long2LongOpenHashMap columns) {
+    /** Test-only queue-a-plain-save helper (FIFO/flush ordering tests). NOT for production:
+     *  a plain overwrite discards every file entry the movement prune dropped from memory —
+     *  the sliding-disc truncation F2 removed. Production saves go through
+     *  {@link #mergeSaveAsync}; keep this package-private so a caller can't drift back. */
+    static void saveAsync(String serverAddress, ResourceKey<Level> dimension, Long2LongOpenHashMap columns) {
         if (columns.isEmpty()) return;
         // Defensive copy so the caller can mutate the original freely
         var copy = new Long2LongOpenHashMap(columns);

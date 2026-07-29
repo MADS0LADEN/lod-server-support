@@ -213,13 +213,6 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
         void handle(byte[] message) throws Exception;
     }
 
-    /**
-     * Channel switch + exception containment for {@link #onPluginMessageReceived},
-     * extracted so hostile-frame containment is testable without a CraftPlayer: one
-     * malformed frame must be caught and logged — never propagate into Bukkit's
-     * messenger — and later messages must still dispatch. Unknown channels are ignored.
-     * Errors deliberately propagate (only Exception is contained).
-     */
     /** Contained hostile-frame ERROR rate limit. Any authenticated client can spam malformed
      *  frames at packet rate on these channels, and an unthrottled stack trace per frame is a
      *  log-flood vector (Fabric self-limits — a bad codec decode kicks the client; Plugin
@@ -228,6 +221,13 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
      *  and swappable so the glue tests' one-ERROR-row containment pins stay deterministic. */
     static volatile LogThrottle hostileFrameLog = new LogThrottle(60_000);
 
+    /**
+     * Channel switch + exception containment for {@link #onPluginMessageReceived},
+     * extracted so hostile-frame containment is testable without a CraftPlayer: one
+     * malformed frame must be caught and logged — never propagate into Bukkit's
+     * messenger — and later messages must still dispatch. Unknown channels are ignored.
+     * Errors deliberately propagate (only Exception is contained).
+     */
     static void dispatchPluginMessage(String channel, String playerName, byte[] message,
                                       PluginMessageHandler handshakeHandler,
                                       PluginMessageHandler chunkRequestHandler) {
