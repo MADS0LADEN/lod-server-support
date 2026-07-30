@@ -103,13 +103,14 @@ Server config is generated on first run:
 | `bytesPerSecondLimitGlobal` | `104857600` | Total pre-compression bandwidth cap (100 MB/s) |
 | `diskReaderThreads` | `5` | Thread pool size for async disk reads |
 | `useBackgroundReadPriority` | `true` | LOD disk reads yield to vanilla/gameplay chunk loading, so streaming distant terrain doesn't delay the chunks players are actively loading (Fabric: IOWorker BACKGROUND priority; Paper/Folia: Moonrise LOW priority). On Fabric servers running a chunk-IO-overhaul mod (e.g. C2ME) that replaces vanilla's IOWorker, LSS automatically switches to adaptive read throttling (self-restraint that still yields to gameplay), logging one warning. Set `false` to restore foreground reads with no read protection |
-| `sendQueueLimitPerPlayer` | `4000` | Max queued column payloads per player (each carries a full chunk column of sections) |
+| `sendQueueLimitPerPlayer` | `1024` | Max queued column payloads per player (each carries a full chunk column of sections; = the wire batch cap — existing saved configs keep their value) |
 | `generationConcurrencyLimitPerPlayer` | `16` | Max concurrently generating chunks per player — misses beyond it are retried automatically each second until a slot frees |
 | `enableChunkGeneration` | `true` | Generate missing chunks on demand for LOD data |
 | `generationConcurrencyLimitGlobal` | `32` | Max chunks generating server-wide at once |
 | `generationTimeoutSeconds` | `60` | Timeout for pending chunk generation |
 | `perDimensionTimestampCacheSizeMB` | `32` | Max timestamp cache size per dimension in MB (used for up-to-date checks on reconnect) |
 | `dirtyBroadcastIntervalSeconds` | `10` | Interval for pushing dirty column notifications to clients |
+| `useNbtTranscode` | `true` | Serve disk chunks by transcoding region NBT straight to wire bytes (skips object construction); `false` restores the object path as a rollback |
 | `missMemoTtlSeconds` | `30` | How long the server remembers "this chunk isn't generated yet" after a disk miss, so chunks waiting for generation don't re-check disk every second. Any serve, world edit, or finished generation forgets the entry immediately; `0` disables the memo (values are clamped to 0-60) |
 | `xrayObfuscation` | `"auto"` | Anti-xray masking for LOD data. `"auto"` masks hidden ores in served LOD columns whenever an anti-xray engine is detected — Paper's built-in anti-xray (per world) or the DrexHD AntiXray mod on Fabric — mirroring that engine's exact hidden-block list and height cutoff. `"on"` forces masking everywhere; `"off"` disables it (LOD data then carries real ore locations even on anti-xray servers) |
 | `xrayHiddenBlocks` | Paper's default ore list | Fallback hidden-block list, used only when no engine settings can be adopted (mode `"on"` with no engine, or a detection failure). Unknown ids are skipped with a warning |

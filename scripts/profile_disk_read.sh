@@ -26,7 +26,7 @@ die() { echo "[profile] ERROR: $*" >&2; exit 1; }
 
 # PROFILE_BW_PER_PLAYER: per-player bandwidth cap override (default 20 MiB/s) — the
 # low-cap backpressure experiment sets e.g. 2097152 to verify CPU scales with the cap.
-# PROFILE_SEND_QUEUE: sendQueueLimitPerPlayer override (default 4000) — set BELOW
+# PROFILE_SEND_QUEUE: sendQueueLimitPerPlayer override (default 1024) — set BELOW
 # WANT_SET_BUDGET (800) to force the router's sendQueueFull admission gate to engage
 # (single-player, the client's bounded want-set otherwise backpressures first).
 # PROFILE_NBT_TRANSCODE: useNbtTranscode override (default true) — set false for a

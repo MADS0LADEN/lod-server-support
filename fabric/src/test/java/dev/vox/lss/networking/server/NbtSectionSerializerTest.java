@@ -1107,6 +1107,107 @@ class NbtSectionSerializerTest {
         }
     }
 
+    /**
+     * The masked-drift pin (final review round, 2026-07-30): the transcoder's mask
+     * PRE-GATE mirrors {@code needsMasking} textually, so this fuzz drives randomized
+     * sections, hidden sets, section Ys (negative included), and cutoffs (mid-section
+     * and negative included) through BOTH flag values. If the mirror ever
+     * under-triggers — a mask-needing section transcoding verbatim, the ore-leak
+     * direction — the object path masks it and the byte compare reds. Over-triggering
+     * (needless fallback) stays byte-equal by design and is deliberately unpinned
+     * (perf-only).
+     */
+    @Test
+    void transcodeAndObjectPathsMatchUnderRandomizedMasks() {
+        var pool = List.of(
+                Blocks.AIR.defaultBlockState(),
+                Blocks.STONE.defaultBlockState(),
+                Blocks.DEEPSLATE.defaultBlockState(),
+                Blocks.DIAMOND_ORE.defaultBlockState(),
+                Blocks.DEEPSLATE_DIAMOND_ORE.defaultBlockState(),
+                Blocks.IRON_ORE.defaultBlockState(),
+                Blocks.WATER.defaultBlockState());
+        var hiddenChoices = List.of(
+                List.of("diamond_ore"),
+                List.of("deepslate_diamond_ore"),
+                List.of("diamond_ore", "deepslate_diamond_ore", "iron_ore"),
+                List.of("iron_ore"));
+        int[] cutoffs = {-16, -1, 0, 8, 16, 40, 64}; // mid-section and negative included
+        var rng = new java.util.Random(20260730L);
+        for (int round = 0; round < 48; round++) {
+            var entry = new XrayMaskManager.MaskEntry(
+                    XrayMaskFilter.MaskSet.resolve(
+                            hiddenChoices.get(rng.nextInt(hiddenChoices.size())),
+                            cutoffs[rng.nextInt(cutoffs.length)]),
+                    dev.vox.lss.common.XrayMaskPolicy.FallbackKind.OVERWORLD, "test");
+            var sectionList = new ArrayList<CompoundTag>();
+            int sectionCount = 1 + rng.nextInt(3);
+            int baseY = -4 + rng.nextInt(8);
+            for (int i = 0; i < sectionCount; i++) {
+                var states = FACTORY.createForBlockStates();
+                int placements = 1 + rng.nextInt(4096);
+                for (int p = 0; p < placements; p++) {
+                    int cell = rng.nextInt(4096);
+                    states.set(cell & 15, (cell >> 8) & 15, (cell >> 4) & 15,
+                            pool.get(rng.nextInt(pool.size())));
+                }
+                sectionList.add(sectionFrom(baseY + i, states, FACTORY.createForBiomes()));
+            }
+            var chunk = chunkNbt("minecraft:full", sectionList.toArray(new CompoundTag[0]));
+            byte[] transcoded = NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS,
+                    entry, Integer.MIN_VALUE, Integer.MAX_VALUE, true);
+            byte[] object = NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS,
+                    entry, Integer.MIN_VALUE, Integer.MAX_VALUE, false);
+            assertArrayEquals(object, transcoded, "round " + round);
+        }
+    }
+
+    /**
+     * Deterministic tiers the randomized fuzz statistically jumps over: exactly 100
+     * palette entries (the 7-bit hashmap tier) and exactly 256 (the 8-bit boundary,
+     * one short of the Global fallback) — air is placed as a pool member so the
+     * palette size is exact, not distinct-written-plus-maybe-stale-air. Each round
+     * also serves a single-entry NON-default biome palette (all-desert — common on
+     * real worlds, never produced by the fuzz's plains-heavy rounds) and a light-only
+     * AIR_SINGLE cap entry, byte-compared across both paths for the first time.
+     */
+    @Test
+    void deterministicPaletteTiersMatchAcrossBothPaths() {
+        var widePool = new ArrayList<net.minecraft.world.level.block.state.BlockState>();
+        for (var block : List.of(Blocks.OAK_STAIRS, Blocks.SPRUCE_STAIRS, Blocks.BIRCH_STAIRS,
+                Blocks.JUNGLE_STAIRS)) {
+            widePool.addAll(block.getStateDefinition().getPossibleStates());
+        }
+        var biomeRegistry = REGISTRY_ACCESS.lookupOrThrow(Registries.BIOME);
+        for (int paletteSize : new int[]{100, 256}) {
+            var tierPool = new ArrayList<net.minecraft.world.level.block.state.BlockState>();
+            tierPool.add(Blocks.AIR.defaultBlockState());
+            tierPool.addAll(widePool.subList(0, paletteSize - 1));
+            var states = FACTORY.createForBlockStates();
+            for (int cell = 0; cell < 4096; cell++) {
+                states.set(cell & 15, (cell >> 8) & 15, (cell >> 4) & 15,
+                        tierPool.get(cell % paletteSize));
+            }
+            var desert = FACTORY.createForBiomes();
+            for (int q = 0; q < 64; q++) {
+                desert.set(q & 3, (q >> 4) & 3, (q >> 2) & 3,
+                        biomeRegistry.getOrThrow(Biomes.DESERT));
+            }
+            byte[] sky = new byte[2048];
+            java.util.Arrays.fill(sky, (byte) 0xF0);
+            var lightOnly = new CompoundTag();
+            lightOnly.putInt("Y", 1);
+            lightOnly.putByteArray("SkyLight", sky);
+            var chunk = chunkNbt("minecraft:full",
+                    sectionFrom(0, states, desert), lightOnly);
+            byte[] transcoded = NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS,
+                    null, Integer.MIN_VALUE, Integer.MAX_VALUE, true);
+            byte[] object = NbtSectionSerializer.serializeChunkNbt(chunk, REGISTRY_ACCESS,
+                    null, Integer.MIN_VALUE, Integer.MAX_VALUE, false);
+            assertArrayEquals(object, transcoded, "palette size " + paletteSize);
+        }
+    }
+
     @Test
     void renamedPaletteEntryTranscodesIdenticallyToTheObjectPath() {
         // The air-substitution rung the transcoder handles ITSELF (no fallback): unknown

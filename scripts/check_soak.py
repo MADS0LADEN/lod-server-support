@@ -260,10 +260,12 @@ KNOWN_CLIENT_KEYS = {
     # effective_lod/rtt/ingest_failures are the round-2 client data-capture additions; like
     # probes they are presence-optional (older recordings predate them). request_queue left
     # with v17's drip-feed queue; rtt now measures last-declare->answer, not first-ask->answer.
+    # queued_bytes: the decode-queue byte gauge (disk-read profile round, presence-optional
+    # like the other late additions — older recordings predate it).
     "snapshot": {"event", "wallMs", "dimension", "received_columns", "received_bytes",
                  "dropped", "responses", "requested_total", "send_cycles", "columns",
-                 "scan", "tracker_in_flight", "queued", "server_enabled", "probes",
-                 "effective_lod", "rtt", "ingest_failures"},
+                 "scan", "tracker_in_flight", "queued", "queued_bytes", "server_enabled",
+                 "probes", "effective_lod", "rtt", "ingest_failures"},
     # One scripted client-side action (-Dlss.soak.clientActionAt); resets the request
     # metrics, so the loader treats it as a client segment boundary.
     "action": {"event", "wallMs", "action", "atSeconds"},
