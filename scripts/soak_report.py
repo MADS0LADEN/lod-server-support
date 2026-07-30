@@ -51,6 +51,12 @@ SERVER_CONCERNING = {
     "generation timeouts": "generation.timeouts",
     "gen removed in-flight": "generation.removed_in_flight",
     "send-queue full drops": "service.queue_full",
+    # LOD store: contained store failures (a hit that threw fell through to the NBT path —
+    # correct but worth eyeballing) and shed deposits (bounded batcher queue overflow /
+    # SQLITE_FULL — the store is derived data so nothing is lost forever, but persistent
+    # drops mean the batcher can't keep up or the disk is full).
+    "store errors": "store.errors",
+    "store deposit drops": "store.deposit_drops",
 }
 SERVER_MECHANISM = {
     "duplicate skips": "service.duplicate_skips",
@@ -73,6 +79,12 @@ SERVER_MECHANISM = {
     # re_resolved growth during backfill bursts.
     "grace-absorbed re-asks": "service.grace_skipped",
     "dirty re-saves suppressed": "dirty.suppressed_total",
+    # LOD store steady-state machinery: hits serve without chunk work, misses fall through
+    # to the NBT ladder, deposits populate the store at the delivery choke point.
+    "store hits": "store.hits",
+    "store misses": "store.misses",
+    "store deposits": "store.deposits",
+    "store memory-tier hits": "store.mem_hits",
 }
 CLIENT_CONCERNING = {
     "columns dropped": "dropped",
@@ -114,8 +126,15 @@ HIGH_WATER = {
     "disk pending": "disk.pending_hw",
     "generation active": "generation.active_hw",
     "mailbox depth": "mailbox_depth_hw",
+    # LOD store size gauges: snapshot-cadence point samples; the section takes the max
+    # across snapshots, which is the honest high water at 5 s resolution.
+    "store db bytes": "store.db_bytes",
+    "store wal bytes": "store.wal_bytes",
+    "store mem bytes": "store.mem_bytes",
 }
-DRAIN_GAUGES = ("disk.pending", "generation.active", "dirty.pending")
+# Local copy of check_soak.SERVER_DRAINS — keep in sync by hand (store.queue added with
+# the LOD-store counter family).
+DRAIN_GAUGES = ("disk.pending", "generation.active", "dirty.pending", "store.queue")
 DEFAULT_INTERVAL_MS = 5000
 CADENCE_GAP_FACTOR = 1.5
 MIN_TPS = 19.5

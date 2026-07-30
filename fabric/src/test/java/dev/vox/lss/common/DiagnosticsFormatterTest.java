@@ -251,6 +251,8 @@ class DiagnosticsFormatterTest {
                 new ProcessingDiagnostics(), null,
                 new SharedBandwidthLimiter(4096),
                 null,
+                dev.vox.lss.common.store.LodStoreMode.OFF,
+                new dev.vox.lss.common.store.LodStoreDiagnostics(),
                 List.of());
 
         assertEquals(0, data.diskCompleted());
@@ -296,6 +298,8 @@ class DiagnosticsFormatterTest {
                 pd, reader,
                 limiter,
                 "gen-running",
+                dev.vox.lss.common.store.LodStoreMode.OFF,
+                new dev.vox.lss.common.store.LodStoreDiagnostics(),
                 List.of(new StubState("A", true, 100, 1000, 1, 0, 4, 10),
                         new StubState("B", false, 50, 500, 0, 2, 6, 20)));
 
@@ -308,8 +312,9 @@ class DiagnosticsFormatterTest {
         assertEquals(4, data.cumReResolved());
         assertEquals(5, data.cumGraceSkipped());
         assertEquals(3, data.diskCompleted(), "wired from getDiag().getSuccessfulReadCount()");
-        assertEquals(reader.getDiagnostics() + ", memo_hits=0", data.diskReaderDiagnostics(),
-                "the DiskReader line carries the miss-memo hit counter (A5's virtual not-founds)");
+        assertEquals(reader.getDiagnostics() + ", memo_hits=0, store=off", data.diskReaderDiagnostics(),
+                "the DiskReader line carries the miss-memo hit counter (A5's virtual "
+                        + "not-founds) and the LOD-store token (a token, never a new line)");
         assertEquals("tick-string", data.tickDiagnostics());
         assertEquals(444, data.bwWindowRate());
         assertEquals(777, data.bwTotal(), "wired from the limiter's total, not the state sums");

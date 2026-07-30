@@ -154,6 +154,41 @@ def shorten(frame, width=90):
     return frame if len(frame) <= width else "…" + frame[-(width - 1):]
 
 
+# ---- LOD-store band attribution (plan §5 Phase 0 (b)) ----------------------------------
+#
+# Stack-PREFIX buckets, scanned leaf-first: each exec sample is attributed to the first
+# frame (from the leaf upward) that matches a band. Thread-group bucketing cannot separate
+# store hits from NBT reads (same reader pool); frame bands can. Order matters — a store
+# hit's stack is org.sqlite -> common.store -> reader pool, and must land in `store`, not
+# `lss-other`. The `serialize`/`nbt` split is what §0's work-elimination gate reads
+# ("NBT-parse + serialization bands ≈ 0 samples on warm-join"); `zip` covers the codec
+# decompress cost of store hits AND the deflate cost of deposits.
+BANDS = [
+    ("store", ("org.sqlite.", "dev.vox.lss.common.store.")),
+    ("zip", ("java.util.zip.", "com.github.luben.zstd.", "net.jpountz.lz4.")),
+    ("nbt", ("net.minecraft.nbt.",)),
+    ("serialize", ("dev.vox.lss.networking.server.NbtSectionSerializer",
+                   "dev.vox.lss.networking.server.SectionSerializer",
+                   "dev.vox.lss.networking.server.MemoizedNbtCodec",
+                   "dev.vox.lss.paper.PaperNbtSectionSerializer",
+                   "dev.vox.lss.paper.PaperSectionSerializer",
+                   "dev.vox.lss.paper.PaperMemoizedNbtCodec")),
+    ("lss-other", ("dev.vox.lss",)),
+]
+# Bands summed into the "LSS-attributable" aggregate for §0 metric 2 (per-column CPU).
+LSS_ATTRIBUTED_BANDS = ("store", "zip", "nbt", "serialize", "lss-other")
+
+
+def band_for_stack(stack):
+    """Leaf-first first-match band for one exec-sample stack (frames un-shortened)."""
+    for frame in stack:
+        for name, prefixes in BANDS:
+            for p in prefixes:
+                if frame.startswith(p):
+                    return name
+    return "unattributed"
+
+
 def analyze_jfr(run_dir, jfr_tool):
     jfr_file = os.path.join(run_dir, "server-benchmark.jfr")
     t_first, t_last = active_window(run_dir)

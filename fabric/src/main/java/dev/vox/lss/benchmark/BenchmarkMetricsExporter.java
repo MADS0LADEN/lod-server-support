@@ -327,6 +327,27 @@ public final class BenchmarkMetricsExporter {
         dedupMap.put("groups", internals.dedupGroups());
         result.put("dedup", dedupMap);
 
+        // LOD store (docs/planning/lod-store-implementation-plan.md): counters live on the
+        // processor unconditionally (all-zero while lodStore=off) so this group's shape is
+        // identical across the kill-switch A/B arms. `queue` (batcher depth) is a DRAIN
+        // gauge (must be 0 at quiescence endpoints); the byte fields are plain gauges.
+        var storeDiag = src.processor().getStoreDiagnostics();
+        var storeMap = new LinkedHashMap<String, Object>();
+        storeMap.put("hits", storeDiag.getHits());
+        storeMap.put("misses", storeDiag.getMisses());
+        storeMap.put("deposits", storeDiag.getDeposits());
+        storeMap.put("deposit_drops", storeDiag.getDepositDrops());
+        storeMap.put("errors", storeDiag.getErrors());
+        storeMap.put("mem_hits", storeDiag.getMemHits());
+        storeMap.put("mem_evictions", storeDiag.getMemEvictions());
+        storeMap.put("queue", storeDiag.getQueueDepth());
+        storeMap.put("mem_bytes", storeDiag.getMemBytes());
+        storeMap.put("db_bytes", storeDiag.getDbBytes());
+        storeMap.put("wal_bytes", storeDiag.getWalBytes());
+        storeMap.put("checkpoint_ms_max", storeDiag.getCheckpointMsMax());
+        storeMap.put("read_avg_us", storeDiag.getReadAvgMicros());
+        result.put("store", storeMap);
+
         // Wall-time per tick over the window since the last snapshot (a stalled server
         // reads >> 50). -1 when no sampler ticks were observed (sampler not wired).
         long nowNanos = System.nanoTime();
@@ -555,6 +576,23 @@ public final class BenchmarkMetricsExporter {
         var bandwidth = new LinkedHashMap<String, Object>();
         bandwidth.put("total_bytes_sent", service.getBandwidthLimiter().getTotalBytesSent());
         result.put("bandwidth", bandwidth);
+
+        // LOD store (second exporter site — the benchmark server.json; the warm-join gate
+        // reads hits/misses + disk.submitted from here). All-zero while lodStore=off.
+        var storeDiag = service.getOffThreadProcessor().getStoreDiagnostics();
+        var store = new LinkedHashMap<String, Object>();
+        store.put("hits", storeDiag.getHits());
+        store.put("misses", storeDiag.getMisses());
+        store.put("deposits", storeDiag.getDeposits());
+        store.put("deposit_drops", storeDiag.getDepositDrops());
+        store.put("errors", storeDiag.getErrors());
+        store.put("mem_hits", storeDiag.getMemHits());
+        store.put("mem_evictions", storeDiag.getMemEvictions());
+        store.put("mem_bytes", storeDiag.getMemBytes());
+        store.put("db_bytes", storeDiag.getDbBytes());
+        store.put("wal_bytes", storeDiag.getWalBytes());
+        store.put("read_avg_us", storeDiag.getReadAvgMicros());
+        result.put("store", store);
 
         // JVM
         var jvm = new LinkedHashMap<String, Object>();

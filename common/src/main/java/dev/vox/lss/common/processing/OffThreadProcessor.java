@@ -78,6 +78,12 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
 
     // Cross-player disk read deduplication (processing-thread-owned)
     private final DedupTracker dedupTracker = new DedupTracker();
+    // LOD-store counters (docs/planning/lod-store-implementation-plan.md). Exists
+    // unconditionally — zeros while lodStore=off — so the diagnostics/exporter schema is
+    // identical across the kill-switch A/B arms. AtomicLong-based: the store increments
+    // from reader-pool/batcher threads, unlike ProcessingDiagnostics' single-writer longs.
+    private final dev.vox.lss.common.store.LodStoreDiagnostics storeDiagnostics =
+            new dev.vox.lss.common.store.LodStoreDiagnostics();
     private final Path dataDir;
     private int evictionCounter;
     private int saveCounter;
@@ -1223,6 +1229,11 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
 
     public ProcessingDiagnostics getDiagnostics() {
         return this.ctx.diagnostics();
+    }
+
+    /** The LOD-store counter family (all-zero while {@code lodStore=off}). */
+    public dev.vox.lss.common.store.LodStoreDiagnostics getStoreDiagnostics() {
+        return this.storeDiagnostics;
     }
 
     /**

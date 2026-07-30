@@ -277,6 +277,8 @@ public class CommandGameTests {
                     service.getOffThreadProcessor().getDiagnostics(), service.getDiskReader(),
                     service.getBandwidthLimiter(),
                     genService != null ? genService.getDiagnostics() : null,
+                    dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore),
+                    service.getOffThreadProcessor().getStoreDiagnostics(),
                     service.getPlayers().values());
 
             @SuppressWarnings("unchecked")

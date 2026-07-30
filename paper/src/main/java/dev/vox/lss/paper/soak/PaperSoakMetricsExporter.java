@@ -273,6 +273,26 @@ public final class PaperSoakMetricsExporter {
         dedupMap.put("groups", internals.dedupGroups());
         result.put("dedup", dedupMap);
 
+        // LOD store — verbatim twin of the Fabric exporter's group (same keys, same
+        // order; the shared server-snapshot.contract pins parity). All-zero while
+        // lodStore=off.
+        var storeDiag = service.getOffThreadProcessor().getStoreDiagnostics();
+        var storeMap = new LinkedHashMap<String, Object>();
+        storeMap.put("hits", storeDiag.getHits());
+        storeMap.put("misses", storeDiag.getMisses());
+        storeMap.put("deposits", storeDiag.getDeposits());
+        storeMap.put("deposit_drops", storeDiag.getDepositDrops());
+        storeMap.put("errors", storeDiag.getErrors());
+        storeMap.put("mem_hits", storeDiag.getMemHits());
+        storeMap.put("mem_evictions", storeDiag.getMemEvictions());
+        storeMap.put("queue", storeDiag.getQueueDepth());
+        storeMap.put("mem_bytes", storeDiag.getMemBytes());
+        storeMap.put("db_bytes", storeDiag.getDbBytes());
+        storeMap.put("wal_bytes", storeDiag.getWalBytes());
+        storeMap.put("checkpoint_ms_max", storeDiag.getCheckpointMsMax());
+        storeMap.put("read_avg_us", storeDiag.getReadAvgMicros());
+        result.put("store", storeMap);
+
         // Wall-time per tick over the window since the last snapshot (a stalled server
         // reads >> 50). -1 when no sampler ticks were observed (sampler not wired).
         long nowNanos = System.nanoTime();

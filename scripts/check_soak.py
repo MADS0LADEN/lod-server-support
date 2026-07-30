@@ -146,9 +146,10 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     # X-ray masking cutoff (docs/planning/antixray-compat-design.md §3).
     "xrayMaxBlockHeight",
 })
-# X-ray masking tri-state ("auto"/"on"/"off") + hidden-block id list — the only non-bool
-# non-int server config keys; validated loosely (any string / any list of strings).
-SERVER_CONFIG_STRING_KEYS = frozenset({"xrayObfuscation"})
+# X-ray masking tri-state ("auto"/"on"/"off"), the LOD-store switch ("off"/"memory"/
+# "full" — scenarios A/B store gates against it), + hidden-block id list — the only
+# non-bool non-int server config keys; validated loosely (any string / list of strings).
+SERVER_CONFIG_STRING_KEYS = frozenset({"xrayObfuscation", "lodStore"})
 SERVER_CONFIG_STRING_LIST_KEYS = frozenset({"xrayHiddenBlocks"})
 SERVER_CONFIG_KEYS = (SERVER_CONFIG_BOOL_KEYS | SERVER_CONFIG_INT_KEYS
                       | SERVER_CONFIG_STRING_KEYS | SERVER_CONFIG_STRING_LIST_KEYS)
@@ -166,7 +167,9 @@ SERVER_MOVING = (
     "generation.completed",
 )
 # Quiescence: gauges that must be ZERO at both endpoints of the pair.
-SERVER_DRAINS = ("disk.pending", "generation.active", "dirty.pending")
+# store.queue (the LOD-store write-batcher depth) is a strict drain: deposits only happen
+# on serves, so a quiescent server has nothing left to batch and the queue must be empty.
+SERVER_DRAINS = ("disk.pending", "generation.active", "dirty.pending", "store.queue")
 PLAYER_DRAINS = ("held_sync", "held_gen", "send_queue", "backlog")
 # backlog (v17) is a strict drain: a want entry retained by a full slot / exhausted disk pool is
 # real outstanding work that no other gauge reports (held_sync/held_gen count ADMITTED work only).
@@ -225,6 +228,12 @@ SERVER_MONOTONIC = (
     # accounting landed); this counter is the observability subset, so no law reads it
     # directly.
     "service.grace_skipped",
+    # LOD store (docs/planning/lod-store-implementation-plan.md): monotonic counter half
+    # of the store family (all-zero while lodStore=off — the kill-switch A/B arm shape).
+    # The gauges (store.queue is a SERVER_DRAIN; mem_bytes/db_bytes/wal_bytes/
+    # checkpoint_ms_max/read_avg_us) are deliberately absent from this whitelist.
+    "store.hits", "store.misses", "store.deposits", "store.deposit_drops",
+    "store.errors", "store.mem_hits", "store.mem_evictions",
 )
 CLIENT_MONOTONIC = (
     "received_columns", "received_bytes", "dropped",
@@ -245,7 +254,7 @@ KNOWN_SERVER_KEYS = {
     # additions (sampled per tick by the driver); probe_hashes appears only when the server
     # JVM runs with -Dlss.soak.probes. All are observational — no law requires their presence.
     "snapshot": {"event", "wallMs", "tick", "service", "disk", "generation", "dirty",
-                 "bandwidth", "players", "dedup", "jvm", "tscache",
+                 "bandwidth", "players", "dedup", "jvm", "tscache", "store",
                  "mailbox_depth_hw", "mspt_avg_window", "probe_hashes"},
     # mapped appears only on Folia runs, only when true: the driver acknowledged a timeline
     # command Folia unregisters (save-all) as a deliberate no-op instead of executing it.
@@ -2340,6 +2349,10 @@ def _srv(wall=1000, seg=0, over=None):
                            "removed_in_flight": 0, "active": 0,
                            "order_gated": 0, "inversions": 0},
             "dirty": {"pending": 0, "broadcast_positions": 0, "suppressed_total": 0},
+            "store": {"hits": 0, "misses": 0, "deposits": 0, "deposit_drops": 0,
+                      "errors": 0, "mem_hits": 0, "mem_evictions": 0, "queue": 0,
+                      "mem_bytes": 0, "db_bytes": 0, "wal_bytes": 0,
+                      "checkpoint_ms_max": 0, "read_avg_us": 0},
             "bandwidth": {"total_bytes": 0}, "players": []}
     for k, v in (over or {}).items():
         _set_path(snap, k, v)
@@ -2499,6 +2512,15 @@ def selftest():
     hits("A6 suppressed_total decrement", law_A6_server([
         _srv(1000, over={"dirty.suppressed_total": 5}),
         _srv(6000, over={"dirty.suppressed_total": 4})]), "A6")
+    clean("A6 store counters growth", law_A6_server([
+        _srv(1000, over={"store.hits": 5, "store.deposits": 2}),
+        _srv(6000, over={"store.hits": 9, "store.deposits": 4})]))
+    hits("A6 store hits decrement", law_A6_server([
+        _srv(1000, over={"store.hits": 5}),
+        _srv(6000, over={"store.hits": 4})]), "A6")
+    hits("A6 store deposit_drops decrement", law_A6_server([
+        _srv(1000, over={"store.deposit_drops": 2}),
+        _srv(6000, over={"store.deposit_drops": 1})]), "A6")
 
     # --- A6 client: monotonic for the whole run (counters are run-cumulative; a
     # dimension/action boundary does NOT excuse a decrement) ---
@@ -2570,6 +2592,11 @@ def selftest():
     draining["players"] = [dict(quiet_player)]
     cases[0] += 1
     assert not server_pair_quiescent(q1, draining), "quiescence: nonzero drain must disqualify"
+    store_draining = _srv(6000, over={"store.queue": 1})
+    store_draining["players"] = [dict(quiet_player)]
+    cases[0] += 1
+    assert not server_pair_quiescent(q1, store_draining), \
+        "quiescence: a nonzero store batcher queue (undeposited serves) must disqualify"
     held = _srv(6000)
     held["players"] = [{"name": "p", "held_sync": 0, "held_gen": 1, "send_queue": 0,
                         "backlog": 0}]

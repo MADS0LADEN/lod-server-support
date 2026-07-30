@@ -77,6 +77,14 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public boolean enableV16Compat = true;
     /**
+     * The LOD store switch (docs/planning/lod-store-implementation-plan.md):
+     * "off" (default — no store; the kill switch every store gate A/Bs against),
+     * "memory" (bounded in-memory tier only), "full" (memory + SQLite disk store).
+     * Unknown values normalize to "off" — the SAFE value, deliberately unlike
+     * xrayObfuscation's normalize-to-auto: a typo must never enable a storage engine.
+     */
+    public String lodStore = "off";
+    /**
      * LOD x-ray masking (docs/planning/antixray-compat-design.md §3). "auto" (default)
      * masks iff an anti-xray engine is detected — Paper's built-in anti-xray config, or the
      * AntiXray mod on Fabric — adopting its per-world hidden list + max-block-height
@@ -139,6 +147,7 @@ public abstract class ServerConfigBase extends JsonConfig {
         generationConcurrencyLimitPerPlayer = Math.clamp(generationConcurrencyLimitPerPlayer, LSSConstants.MIN_CONCURRENCY_LIMIT, LSSConstants.MAX_CONCURRENCY_LIMIT);
         perDimensionTimestampCacheSizeMB = Math.clamp(perDimensionTimestampCacheSizeMB, LSSConstants.MIN_TIMESTAMP_CACHE_SIZE_MB, LSSConstants.MAX_TIMESTAMP_CACHE_SIZE_MB);
         missMemoTtlSeconds = Math.clamp(missMemoTtlSeconds, LSSConstants.MIN_MISS_MEMO_TTL_SECONDS, LSSConstants.MAX_MISS_MEMO_TTL_SECONDS);
+        lodStore = dev.vox.lss.common.store.LodStoreMode.normalize(lodStore).configValue();
         xrayObfuscation = XrayMaskPolicy.normalizeMode(xrayObfuscation);
         if (xrayHiddenBlocks == null) xrayHiddenBlocks = defaultXrayHiddenBlocks();
         xrayMaxBlockHeight = Math.clamp(xrayMaxBlockHeight, LSSConstants.MIN_XRAY_MAX_BLOCK_HEIGHT, LSSConstants.MAX_XRAY_MAX_BLOCK_HEIGHT);

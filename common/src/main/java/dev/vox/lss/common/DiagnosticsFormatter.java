@@ -169,7 +169,9 @@ public final class DiagnosticsFormatter {
     /** Collect the /lsslod diag data from common-typed sources, shared by both platforms.
      *  A null {@code diskReader} (reader not running) renders the DiskReader line as
      *  "disabled" and contributes zero completed reads — the command must answer in every
-     *  service state, never throw at the admin. */
+     *  service state, never throw at the admin. {@code storeMode}/{@code storeDiag} render
+     *  the LOD-store TOKEN on the DiskReader line (never a new line — the golden-order
+     *  tests pin the line list); a null {@code storeDiag} (bare test rigs) omits it. */
     public static DiagData collectDiagData(boolean enabled, int lodDistanceChunks,
                                            long bwPerPlayer, long bwGlobal, int sendQueueLimitPerPlayer,
                                            long uptimeSec, String tickDiagnostics, long windowBandwidthRate,
@@ -177,6 +179,8 @@ public final class DiagnosticsFormatter {
                                            ProcessingDiagnostics diag, AbstractChunkDiskReader diskReader,
                                            SharedBandwidthLimiter bwLimiter,
                                            String generationDiagnosticsOrNull,
+                                           dev.vox.lss.common.store.LodStoreMode storeMode,
+                                           dev.vox.lss.common.store.LodStoreDiagnostics storeDiag,
                                            Collection<? extends AbstractPlayerRequestState<?>> states) {
         // The Throughput totals are SERVICE-scoped (TickDiagnostics — they exist to survive
         // per-player state teardown): summing the live states' counters here (the pre-R2-9
@@ -204,9 +208,12 @@ public final class DiagnosticsFormatter {
                 tickDiagnostics,
                 // memo_hits: miss-memo rung hits (fresh memoized absence skipped the redundant
                 // re-read and escalated straight to generation) — law A5's virtual not-founds.
+                // The LOD-store state rides the same line as a token (store=off / store=<mode>
+                // h=... m=...) — a new LINE would break the golden-order pins.
                 diskReader != null
                         ? diskReader.getDiagnostics()
                                 + String.format(", memo_hits=%d", diag.getTotalMemoHits())
+                                + (storeDiag != null ? ", " + storeDiag.formatToken(storeMode) : "")
                         : "disabled",
                 generationDiagnosticsOrNull, generationDiagnosticsOrNull != null,
                 diag.getTotalGenOrderGated(), diag.getTotalGenCompletionInversions(),

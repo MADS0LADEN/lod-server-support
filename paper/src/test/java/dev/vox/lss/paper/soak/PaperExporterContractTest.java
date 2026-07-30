@@ -61,6 +61,10 @@ class PaperExporterContractTest {
 
         Fixture() {
             doReturn(this.diag).when(this.processor).getDiagnostics();
+            // The store counter family is unconditional on the real processor; the mock
+            // must supply it too or the exporter NPEs building the `store` group.
+            doReturn(new dev.vox.lss.common.store.LodStoreDiagnostics())
+                    .when(this.processor).getStoreDiagnostics();
             doReturn(new OffThreadProcessor.HarnessInternals(0, 2, 5L, Map.of(DIM, 1)))
                     .when(this.processor).getHarnessInternals();
             doReturn(this.diskDiag).when(this.diskReader).getDiag();

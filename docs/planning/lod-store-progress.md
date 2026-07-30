@@ -67,6 +67,61 @@ Planned sub-items (from plan §5):
 - real-world bytes/col measurement
 - .mca header-timestamp maintenance verification per platform (vanilla/Moonrise/C2ME)
 
+### Experiment results (LodStoreExperimentTool, 2026-07-30, benchmark world)
+
+Tool: `fabric/src/test/java/dev/vox/lss/networking/server/LodStoreExperimentTool.java`
+(gated on `-Plss.store.experiment.regionDir`); results in
+`profile-results/store-experiment/store-experiment.json`. Corpus: benchmark world
+overworld, 64 regions / 474 MB region data, 55,678 header entries, 45,589 FULL-servable
+columns (10,089 not-FULL excluded, 0 all-air, 0 unparseable). Wire bytes/col mean 33.8 KB
+(p50 33.0 KB, p99 54.7 KB) — matches plan §4's 33.0 KB. Production transcode serialize:
+63 µs/col mean warm.
+
+| codec | ratio | B/col | compress µs | decompress µs | decompress MB/s |
+|---|---|---|---|---|---|
+| deflate-1 | 5.90 | 5732 | 162 | 60 | 563 |
+| deflate-6 | 7.08 | 4776 | 574 | 63 | 534 |
+| zstd-1 | 6.33 | 5342 | 50 | 24 | 1388 |
+| lz4-fast | 3.98 | 8490 | 67 | 37 | 905 |
+
+SQLite arms (42,589 data + 3,000 skipped... all 45,589 rows inserted; point reads warm
+page cache, n=3000):
+
+| arm | file | overflow pages | read mean µs | read p95 µs |
+|---|---|---|---|---|
+| rowid-8k-deflate1 | 358 MB | 3,976 | 5.0 | 7.5 |
+| rowid-16k-deflate1 | 337 MB | 0 | 5.1 | 9.4 |
+| rowid-8k-uncompressed | 1.62 GB | 167,607 | 11.6 | 17.2 |
+| worowid-8k-deflate1 | 435 MB | 46,168 | 22.5 | 29.5 |
+| rowid-8k-deflate1 + mmap 1G | — | — | 5.5 | 9.3 |
+
+### Phase 0 decisions (made on the data above)
+
+1. **Codec: zstd-1**, contingent on the packaging spike (zstd-jni natives) — it dominates
+   deflate-1 on BOTH deciding metrics (24 vs 60 µs decompress, 5342 vs 5732 B/col) and
+   compresses 3× faster (deposit-side cost, protects the ≤10% cold-path gate).
+   **Fallback: deflate-1** (zero-dep JDK) if zstd packaging fails; the DB `meta` table
+   records the codec so a switch is drop-and-rebuild, never a migration. Uncompressed
+   rejected: total hit CPU is already ~30 µs at zstd (~40× under the NBT path), and 3.4×
+   region-dir disk (1.62 GB vs 474 MB here) is operationally worse than the accepted
+   "roughly doubles". deflate-6/lz4 rejected (compress cost / dominated on both metrics).
+2. **page_size=16384** — zero overflow chains at compressed blob sizes (8k had 3,976),
+   3% smaller file, equal read latency. (p99 blob ~15 KB still fits a 16k page.)
+3. **WITHOUT ROWID confirmed as the anti-pattern** (4.5× slower point reads, +29% size,
+   46k overflow pages) — rowid tables pinned, as plan §2 said.
+4. **mmap: OFF** (no measurable win over pread; SIGBUS risk not bought by anything).
+5. **Vanilla .mca header timestamps: MAINTAINED** (55,678/55,678 nonzero on this
+   vanilla-written world) — the §1 freshness mechanism is real on vanilla Fabric.
+   Moonrise/C2ME verification still pending (needs worlds written by those systems).
+
 ### Learnings
 
-(recorded as they happen)
+- **sqlite-jdbc under Fabric's Knot classloader: `DriverManager.getConnection` fails with
+  "No suitable driver"** (ServiceLoader registration invisible across the classloader
+  boundary). Use `org.sqlite.SQLiteDataSource` directly — the production store must do
+  the same on Fabric.
+- The benchmark world's regions live at `world/dimensions/minecraft/overworld/region`
+  (not `world/region`).
+- ~22% of the benchmark world's chunks are not-FULL (10,089/55,678) — spawn-prep and
+  gen-radius partials. The store only ever sees FULL columns (serializer returns null
+  otherwise), so backfill coverage math should use servable counts, not header counts.

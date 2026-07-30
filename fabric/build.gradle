@@ -38,6 +38,14 @@ dependencies {
     implementation "net.fabricmc:fabric-loader:${project.loader_version}"
     implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
     testImplementation "net.fabricmc:fabric-loader-junit:${project.loader_version}"
+    // LOD-store Phase 0 experiment deps (docs/planning/lod-store-implementation-plan.md):
+    // the codec/schema decision tool (LodStoreExperimentTool, gated on
+    // -Plss.store.experiment.regionDir) measures decompress throughput + SQLite page-shape
+    // arms on the real benchmark corpus. TEST classpath only — zero packaging risk; the
+    // shipping engine dependency is a separate, deliberate step (plan §3).
+    testImplementation "org.xerial:sqlite-jdbc:3.49.1.0"
+    testImplementation "com.github.luben:zstd-jni:1.5.7-3"
+    testImplementation "org.lz4:lz4-java:1.8.1"
     implementation project(':common')
     include project(':common')
     compileOnly "maven.modrinth:sodium:mc26.2-0.9.1-beta.3-fabric"
@@ -68,6 +76,15 @@ test {
     // task UP-TO-DATE locally and the contract never re-checks.
     inputs.dir("src/gametest/java").withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.file("src/gametest/resources/fabric.mod.json").withPathSensitivity(PathSensitivity.RELATIVE)
+    // LOD-store Phase 0 experiment pass-through (inert unless -Plss.store.experiment.regionDir
+    // is given; the tool test skips itself without it). Extra heap only when engaged.
+    ['lss.store.experiment.regionDir', 'lss.store.experiment.out',
+     'lss.store.experiment.maxColumns'].each { p ->
+        if (findProperty(p) != null) systemProperty p, findProperty(p).toString()
+    }
+    if (findProperty('lss.store.experiment.regionDir') != null) {
+        maxHeapSize = '3g'
+    }
 }
 
 fabricApi {
