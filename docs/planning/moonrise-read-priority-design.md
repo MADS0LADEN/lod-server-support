@@ -91,7 +91,8 @@ leaving only the misleading C2ME-flavored warning). Resolution failure is *latch
 never retried, never throws out.
 
 **Instance-scoped state (the AntiXray `buildCarrier` pattern):** resolution is a pure
-function `MoonriseReadCompat.build(boolean modLoaded, ClassLookup lookup)` returning an
+function `MoonriseReadCompat.build(boolean modLoaded, ClassLookup lookup, DriftWarn warn)`
+returning an
 instance that owns its own resolution result and warn-once state; the production
 static holder wraps exactly one instance built with the real loader check +
 `Class.forName`. Tier-1 tests construct fresh instances with injected lookups, so the

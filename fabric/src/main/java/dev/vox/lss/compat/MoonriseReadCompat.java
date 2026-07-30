@@ -172,9 +172,11 @@ public final class MoonriseReadCompat {
      * The per-read invoke, mirroring {@code PaperChunkDiskReader.moonriseReader} exactly:
      * the callback only completes our future (it may fire synchronously or on a Moonrise IO
      * thread — no chunk-system reentrancy); {@code err != null} completes exceptionally into
-     * the base's standard per-chunk error triage; {@code intendingToBlock = false} because we
-     * block on our own reader-pool thread and want no blocking-priority escalation quietly
-     * overriding LOW. The {@code Cancellable} return is ignored (Paper ignores it too).
+     * the base's standard per-chunk error triage; {@code intendingToBlock = false} matches
+     * Paper's call byte-for-byte (in 1.1.0's 7-arg overload the parameter is ignored — the
+     * body never reads it — so this is documentation of intent, not an active lever: we block
+     * on our own reader-pool thread and want no blocking-priority escalation overriding LOW).
+     * The {@code Cancellable} return is ignored (Paper ignores it too).
      *
      * <p>A synchronous throw from the invoke propagates RAW (checked shapes wrapped) — the
      * caller owns classification: linkage/adaptation errors latch its one-way incompatible

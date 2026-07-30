@@ -54,6 +54,10 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
     // One-way latch for the Moonrise rung, TYPED to the linkage/adaptation failure domain only
     // (WrongMethodTypeException / adaptation ClassCastException / LinkageError — deterministic
     // "the resolved handle doesn't fit" shapes where every future invoke would fail identically).
+    // The CCE rung is deliberately broader than pure handle adaptation: it also catches a cast
+    // failing synchronously INSIDE Moonrise's body (impossible on 1.1.0 — its mixin interfaces
+    // are applied to ServerLevel itself — but a future Moonrise could change that); accepted,
+    // because the degradation is fail-safe (warn once + the exact pre-bridge ladder).
     // Moonrise's own synchronous runtime throws (e.g. a read racing server shutdown hits
     // PrioritisedTask.queue()'s IllegalStateException) are per-chunk triage and must NOT latch —
     // on Paper the identical throw is per-read triage with no latch, and this rung mirrors Paper.

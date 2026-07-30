@@ -46,6 +46,27 @@ public final class MoonriseRegionFileIO {
         completeTag = null;
     }
 
+    // Decoy overloads mirroring the REAL 1.1.0 method set (5-param, and both 6-param
+    // shapes) — the matcher must select the 7-arg overload out of exactly this crowd, so a
+    // regression to "first method named loadDataAsync" or "require a unique name match"
+    // reds here instead of only on a live server.
+
+    public static Object loadDataAsync(ServerLevel level, int cx, int cz, RegionFileType type,
+                                       boolean intendingToBlock) {
+        throw new AssertionError("decoy overload — the bridge must match the 7-arg shape");
+    }
+
+    public static Object loadDataAsync(ServerLevel level, int cx, int cz, RegionFileType type,
+                                       boolean intendingToBlock, Priority priority) {
+        throw new AssertionError("decoy overload — the bridge must match the 7-arg shape");
+    }
+
+    public static Object loadDataAsync(ServerLevel level, int cx, int cz, RegionFileType type,
+                                       BiConsumer<CompoundTag, Throwable> onComplete,
+                                       boolean intendingToBlock) {
+        throw new AssertionError("decoy overload — the bridge must match the 7-arg shape");
+    }
+
     /** The exact overload the bridge matches; returns null where Moonrise returns a
      *  {@code Cancellable} (the bridge ignores it). */
     public static Object loadDataAsync(ServerLevel level, int cx, int cz, RegionFileType type,

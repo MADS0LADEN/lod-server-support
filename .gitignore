@@ -15,6 +15,10 @@ out/
 remappedSrc/
 test-server/
 libs/
+# ... but never inside source trees: shaded-package test stubs (e.g. Moonrise-Fabric's
+# ca/spottedleaf/moonrise/libs/...) legitimately contain a "libs" path segment.
+!**/src/**/libs/
+!**/src/**/libs/**
 logs/
 fabric/config/
 net/

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.invoke.WrongMethodTypeException;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -85,18 +86,29 @@ class ChunkDiskReaderTest {
     // ---- The Moonrise rung (reflective LOW-priority reads — live-only, so the ladder is
     // ---- pinned here; the bridge's own resolution ladder is pinned in MoonriseReadCompatTest).
 
-    /** Reader with injected Moonrise-bridge behavior + recording foreground seam. The
-     *  IOWorker accessor throws by default: with the Moonrise rung available it must never
-     *  be consulted. */
+    /** Reader with injected Moonrise-bridge behavior + recording foreground/accessor seams.
+     *  Accessor consults are COUNTED (never thrown from — {@code backgroundReaderOrFallback}'s
+     *  {@code catch (Throwable)} swallows resolver throws by design, so an AssertionError
+     *  there would be vacuous): tests that forbid the accessor assert the count stays 0. */
     private static final class MoonriseRigReader extends ChunkDiskReader {
         final AtomicReference<MoonriseReadCompat.LowPriorityRead> bridge = new AtomicReference<>();
         final AtomicInteger bridgeConsults = new AtomicInteger();
+        final AtomicInteger bridgeReads = new AtomicInteger();
         final AtomicInteger foregroundReads = new AtomicInteger();
         final AtomicInteger moonriseWarns = new AtomicInteger();
-        volatile boolean accessorAllowed = false;
+        final AtomicInteger accessorConsults = new AtomicInteger();
 
         MoonriseRigReader(boolean useBackgroundReadPriority) {
             super(1, useBackgroundReadPriority);
+        }
+
+        /** Install bridge behavior wrapped in the read counter — {@code bridgeReads} is the
+         *  pin proving the execution-time latch re-check short-circuits BEFORE the bridge. */
+        void setBridge(MoonriseReadCompat.LowPriorityRead behavior) {
+            bridge.set(behavior == null ? null : (level, cx, cz) -> {
+                bridgeReads.incrementAndGet();
+                return behavior.read(level, cx, cz);
+            });
         }
 
         @Override
@@ -115,9 +127,7 @@ class ChunkDiskReaderTest {
 
         @Override
         Handles resolveBackgroundHandles(ChunkMap chunkMap) {
-            if (!accessorAllowed) {
-                throw new AssertionError("the IOWorker accessor must not be consulted on this path");
-            }
+            accessorConsults.incrementAndGet();
             return new Handles(null, null); // a Moonrise-like server: nulled worker
         }
 
@@ -136,12 +146,14 @@ class ChunkDiskReaderTest {
     void moonriseRungIsChosenBeforeTheIOWorkerAccessorWithoutEngagingTheThrottle() throws Exception {
         var reader = new MoonriseRigReader(true);
         var served = new CompoundTag();
-        reader.bridge.set((level, cx, cz) ->
+        reader.setBridge((level, cx, cz) ->
                 CompletableFuture.completedFuture(Optional.of(served)));
         try {
             var read = reader.chooseReadPath(null, null);
-            assertSame(served, read.read(3, -4).get().orElseThrow(),
-                    "the Moonrise rung serves the read (accessor override proves it was never consulted)");
+            assertSame(served, read.read(3, -4).get(5, TimeUnit.SECONDS).orElseThrow(),
+                    "the Moonrise rung serves the read");
+            assertEquals(0, reader.accessorConsults.get(),
+                    "the IOWorker accessor is never consulted while the Moonrise rung is available");
             assertEquals(-1, reader.adaptiveThrottleLimitOrDisabled(),
                     "Moonrise LOW is the read protection — the adaptive throttle stays disengaged");
             assertFalse(reader.isMoonriseIncompatibleForTest());
@@ -156,14 +168,15 @@ class ChunkDiskReaderTest {
     @Test
     void configRollbackKeepsTheMoonriseRungFullyOff() throws Exception {
         var reader = new MoonriseRigReader(false);
-        reader.bridge.set((level, cx, cz) ->
+        reader.setBridge((level, cx, cz) ->
                 CompletableFuture.completedFuture(Optional.empty()));
         try {
             var read = reader.chooseReadPath(null, null);
-            assertTrue(read.read(0, 0).get().isEmpty());
+            assertTrue(read.read(0, 0).get(5, TimeUnit.SECONDS).isEmpty());
             assertEquals(0, reader.bridgeConsults.get(),
                     "useBackgroundReadPriority=false is a TRUE full rollback — the Moonrise rung"
                             + " sits under the flag, mirroring Paper");
+            assertEquals(0, reader.accessorConsults.get(), "full rollback skips the accessor too");
             assertEquals(1, reader.foregroundReads.get(), "the foreground path served the read");
             assertFalse(reader.getDiagnostics().contains("read_path="),
                     "no rung token when the flag is off");
@@ -175,15 +188,15 @@ class ChunkDiskReaderTest {
     @Test
     void nullBridgeFallsThroughToTheExistingLadderUnchanged() {
         var reader = new MoonriseRigReader(true);
-        reader.bridge.set(null);
-        reader.accessorAllowed = true;
+        reader.setBridge(null);
         try {
             assertFalse(reader.getDiagnostics().contains("read_path="),
                     "no Moonrise = no token — diagnostics goldens do not move");
             reader.chooseReadPath(null, null);
+            assertEquals(1, reader.accessorConsults.get(),
+                    "with a null bridge the ladder reaches the IOWorker accessor exactly as today");
             assertTrue(reader.isBackgroundIncompatibleForTest(),
-                    "with a null bridge the ladder reaches the IOWorker accessor exactly as today"
-                            + " (here simulating a nulled worker, which latches the C2ME-style fallback)");
+                    "the rig simulates a nulled worker, which latches the C2ME-style fallback");
             assertTrue(reader.adaptiveThrottleLimitOrDisabled() >= 0);
         } finally {
             reader.shutdown();
@@ -194,37 +207,61 @@ class ChunkDiskReaderTest {
      * The TYPED latch domain: a linkage/adaptation throw (the deterministic "this handle
      * doesn't fit" shape) latches the rung, warns once, and falls back INLINE — the
      * triggering read and any already-queued closures must not burst disk.errors (an A7
-     * always-fail in the soak checker).
+     * always-fail in the soak checker). All three typed shapes must latch: narrowing the
+     * catch (e.g. dropping LinkageError — the likely real-world drift shape, a
+     * NoSuchMethodError) would repeat-burst per-read errors with no latch.
      */
     @Test
-    void linkageDomainThrowLatchesWarnsOnceAndFallsBackInline() throws Exception {
+    void wrongMethodTypeThrowLatchesWarnsOnceAndFallsBackInline() throws Exception {
+        assertLatchDomainThrowLatches(new WrongMethodTypeException("resolved handle does not fit"));
+    }
+
+    @Test
+    void linkageErrorThrowLatchesWarnsOnceAndFallsBackInline() throws Exception {
+        assertLatchDomainThrowLatches(new NoSuchMethodError("Moonrise internals moved"));
+    }
+
+    @Test
+    void adaptationClassCastThrowLatchesWarnsOnceAndFallsBackInline() throws Exception {
+        assertLatchDomainThrowLatches(new ClassCastException("enum constant of a foreign class"));
+    }
+
+    private void assertLatchDomainThrowLatches(Throwable boom) throws Exception {
         var reader = new MoonriseRigReader(true);
-        reader.bridge.set((level, cx, cz) -> {
-            throw new WrongMethodTypeException("resolved handle does not fit");
+        reader.setBridge((level, cx, cz) -> {
+            if (boom instanceof RuntimeException re) throw re;
+            throw (Error) boom;
         });
         try {
             var read = reader.chooseReadPath(null, null);
 
             // Triggering read: latch + warn + inline foreground fallback, no error surfaced.
-            assertTrue(read.read(1, 2).get().isEmpty());
+            assertTrue(read.read(1, 2).get(5, TimeUnit.SECONDS).isEmpty());
             assertTrue(reader.isMoonriseIncompatibleForTest());
             assertEquals(1, reader.moonriseWarns.get());
             assertEquals(1, reader.foregroundReads.get());
+            assertEquals(1, reader.bridgeReads.get());
 
             // An in-flight closure bound BEFORE the latch, run after it: the execution-time
-            // re-check short-circuits to the foreground read without touching the bridge.
-            assertTrue(read.read(3, 4).get().isEmpty());
+            // re-check short-circuits to the foreground read WITHOUT touching the bridge —
+            // bridgeReads is the pin (without the re-check the typed catch would quietly
+            // reproduce the same observable fallback while re-invoking the bridge).
+            assertTrue(read.read(3, 4).get(5, TimeUnit.SECONDS).isEmpty());
             assertEquals(2, reader.foregroundReads.get());
+            assertEquals(1, reader.bridgeReads.get(),
+                    "a post-latch closure must not touch the bridge (execution-time re-check)");
+            // (The warn CAS itself is a concurrency-only belt — two pool threads racing the
+            // same latch-domain throw — unreachable single-threaded, so not pinned here.)
             assertEquals(1, reader.moonriseWarns.get(), "warns once across repeated reads");
 
             // The next submit's ladder skips the bridge entirely and degrades down the vanilla
             // ladder (on a real Moonrise server: nulled worker → C2ME-style latch + throttle —
             // exactly the pre-bridge behavior, reached automatically).
             int consultsBefore = reader.bridgeConsults.get();
-            reader.accessorAllowed = true;
             reader.chooseReadPath(null, null);
             assertEquals(consultsBefore, reader.bridgeConsults.get(),
                     "a latched rung is never re-consulted");
+            assertEquals(1, reader.accessorConsults.get(), "the vanilla ladder takes over");
             assertTrue(reader.isBackgroundIncompatibleForTest());
             assertTrue(reader.adaptiveThrottleLimitOrDisabled() >= 0);
             assertTrue(reader.getDiagnostics().contains("read_path=moonrise-incompatible"),
@@ -244,7 +281,7 @@ class ChunkDiskReaderTest {
     void moonriseRuntimeThrowIsPerChunkTriageAndDoesNotLatch() {
         var reader = new MoonriseRigReader(true);
         var boom = new IllegalStateException("Executor is retired");
-        reader.bridge.set((level, cx, cz) -> { throw boom; });
+        reader.setBridge((level, cx, cz) -> { throw boom; });
         try {
             var read = reader.chooseReadPath(null, null);
             var thrown = assertThrows(IllegalStateException.class, () -> read.read(0, 0),
@@ -258,6 +295,32 @@ class ChunkDiskReaderTest {
             reader.chooseReadPath(null, null);
             assertTrue(reader.bridgeConsults.get() > consultsBefore,
                     "an un-latched rung is consulted on the next submit");
+        } finally {
+            reader.shutdown();
+        }
+    }
+
+    /**
+     * An ASYNC failure — the bridge's future completing exceptionally, even with a
+     * linkage-SHAPED error — is per-chunk triage, never a latch: only a synchronous throw
+     * from the invoke itself is in the typed latch domain. (A plausible "hardening"
+     * regression would inspect the future's cause and latch on it — breaking the
+     * round-1-review contract that async errors are Paper-parity per-chunk containment.)
+     */
+    @Test
+    void asyncLinkageShapedFailureIsPerChunkTriageAndDoesNotLatch() {
+        var reader = new MoonriseRigReader(true);
+        reader.setBridge((level, cx, cz) ->
+                CompletableFuture.failedFuture(new NoClassDefFoundError("async shape")));
+        try {
+            var read = reader.chooseReadPath(null, null);
+            var future = read.read(0, 0);
+            var thrown = assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> future.get(5, TimeUnit.SECONDS));
+            assertTrue(thrown.getCause() instanceof NoClassDefFoundError);
+            assertFalse(reader.isMoonriseIncompatibleForTest(),
+                    "an exceptional future must NOT latch — only synchronous invoke throws are typed");
+            assertEquals(0, reader.moonriseWarns.get());
         } finally {
             reader.shutdown();
         }
