@@ -127,6 +127,12 @@ public final class SqliteLodStore implements LodStoreService {
     private volatile boolean serving;
     private final CountDownLatch sweepDone = new CountDownLatch(1);
 
+    // Sweep-drop fan-out: the tiered composition registers the MEMORY tier here, because
+    // a PERIODIC resweep that drops a stale SQLite row must also evict the memory tier's
+    // copy — the front tier answers first, so without this the resweep's staleness bound
+    // (Paper's unfired-event guarantee) silently would not hold for memory-resident rows.
+    private volatile java.util.function.BiConsumer<String, long[]> sweepDropListener;
+
     // The tombstone map (the memory tier's proven protocol, §threading above).
     private final ConcurrentHashMap<String, ConcurrentHashMap<Long, Long>> tombstones =
             new ConcurrentHashMap<>();
@@ -429,6 +435,27 @@ public final class SqliteLodStore implements LodStoreService {
         return this.sweepDone.await(timeoutMs, TimeUnit.MILLISECONDS);
     }
 
+    /** Registers the sweep-drop fan-out (called on the batcher thread with each swept
+     *  dimension's dropped positions; the tiered composition points this at the memory
+     *  tier's invalidate). Set before serving starts. */
+    public void setSweepDropListener(java.util.function.BiConsumer<String, long[]> listener) {
+        this.sweepDropListener = listener;
+    }
+
+    private void notifySweepDrops(String dimension, List<Long> positions) {
+        if (positions.isEmpty()) return;
+        this.diag.recordSweepDrops(positions.size());
+        var listener = this.sweepDropListener;
+        if (listener == null) return;
+        long[] packed = new long[positions.size()];
+        for (int i = 0; i < packed.length; i++) packed[i] = positions.get(i);
+        try {
+            listener.accept(dimension, packed);
+        } catch (Throwable t) {
+            this.diag.recordError();
+        }
+    }
+
     @Override
     public void shutdown() {
         if (!this.shutdown.compareAndSet(false, true)) return;
@@ -710,10 +737,11 @@ public final class SqliteLodStore implements LodStoreService {
                 regionDir = null;
             }
             if (regionDir == null || !Files.isDirectory(regionDir)) {
-                int dropped = dropDimensionRows(dimId);
-                if (dropped > 0) {
+                List<Long> dropped = dropDimensionRows(dimId);
+                notifySweepDrops(dimension, dropped);
+                if (!dropped.isEmpty()) {
                     LSSLogger.warn("LOD store: region directory for " + dimension
-                            + " is unresolvable — dropped its " + dropped
+                            + " is unresolvable — dropped its " + dropped.size()
                             + " stored rows (fail-safe)");
                 }
                 continue;
@@ -722,7 +750,8 @@ public final class SqliteLodStore implements LodStoreService {
             String fp = currentMaskFingerprint(dimension);
             String storedFp = storedMaskFingerprint(dimId);
             if (!fp.equals(storedFp)) {
-                int dropped = dropDimensionRows(dimId);
+                List<Long> dropped = dropDimensionRows(dimId);
+                notifySweepDrops(dimension, dropped);
                 try (PreparedStatement ps = this.writer.prepareStatement(
                         "UPDATE dims SET mask_fingerprint=? WHERE id=?")) {
                     ps.setString(1, fp);
@@ -730,9 +759,9 @@ public final class SqliteLodStore implements LodStoreService {
                     ps.executeUpdate();
                 }
                 this.writer.commit();
-                if (dropped > 0) {
+                if (!dropped.isEmpty()) {
                     LSSLogger.info("LOD store: x-ray mask changed for " + dimension
-                            + " — dropped " + dropped + " rows (rebuilds from serves)");
+                            + " — dropped " + dropped.size() + " rows (rebuilds from serves)");
                 }
                 continue; // fresh slate; mtimes recorded below next pass
             }
@@ -771,6 +800,7 @@ public final class SqliteLodStore implements LodStoreService {
                 while (rs.next()) seenMtimes.put(rs.getLong(1), rs.getLong(2));
             }
         }
+        List<Long> droppedPositions = new ArrayList<>();
         int droppedVanished = 0, droppedStale = 0, checkedRegions = 0;
         for (var entry : rowsByRegion.entrySet()) {
             long rpos = entry.getKey();
@@ -779,6 +809,7 @@ public final class SqliteLodStore implements LodStoreService {
             Path mca = regionDir.resolve("r." + rx + "." + rz + ".mca");
             if (!Files.exists(mca)) {
                 droppedVanished += deleteRows(dimId, entry.getValue());
+                droppedPositions.addAll(entry.getValue());
                 continue;
             }
             long mtime = Files.getLastModifiedTime(mca).toMillis();
@@ -789,6 +820,7 @@ public final class SqliteLodStore implements LodStoreService {
             if (headerStamps == null) {
                 // Unreadable header: fail-safe, drop the region's rows.
                 droppedVanished += deleteRows(dimId, entry.getValue());
+                droppedPositions.addAll(entry.getValue());
                 continue;
             }
             List<Long> stale = new ArrayList<>();
@@ -811,7 +843,9 @@ public final class SqliteLodStore implements LodStoreService {
                 }
             }
             droppedStale += deleteRows(dimId, stale);
+            droppedPositions.addAll(stale);
         }
+        notifySweepDrops(dimension, droppedPositions);
         if (droppedVanished + droppedStale > 0 || checkedRegions > 0) {
             LSSLogger.info("LOD store sweep [" + dimension + "]: " + checkedRegions
                     + " changed region(s), dropped " + droppedStale + " stale + "
@@ -858,12 +892,19 @@ public final class SqliteLodStore implements LodStoreService {
         return positions.size();
     }
 
-    private int dropDimensionRows(int dimId) throws SQLException {
-        try (Statement st = this.writer.createStatement()) {
-            int n = st.executeUpdate("DELETE FROM lods_" + dimId);
-            this.writer.commit();
-            return n;
+    /** Drops every row of a dimension, returning the dropped positions (the sweep-drop
+     *  fan-out needs them — the memory tier must evict its copies too). */
+    private List<Long> dropDimensionRows(int dimId) throws SQLException {
+        List<Long> positions = new ArrayList<>();
+        try (Statement st = this.writer.createStatement();
+             ResultSet rs = st.executeQuery("SELECT pos FROM lods_" + dimId)) {
+            while (rs.next()) positions.add(rs.getLong(1));
         }
+        try (Statement st = this.writer.createStatement()) {
+            st.executeUpdate("DELETE FROM lods_" + dimId);
+            this.writer.commit();
+        }
+        return positions;
     }
 
     /** Record current region mtimes for every dimension with rows (sweep end + shutdown). */

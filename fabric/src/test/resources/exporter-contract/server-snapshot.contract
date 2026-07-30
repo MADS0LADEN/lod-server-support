@@ -74,6 +74,7 @@ store.misses=long
 store.queue=long
 store.read_avg_us=long
 store.read_p95_us=long
+store.sweep_drops=long
 store.wal_bytes=long
 tscache.evictions=long
 tscache.size_per_dimension.minecraft:overworld=int

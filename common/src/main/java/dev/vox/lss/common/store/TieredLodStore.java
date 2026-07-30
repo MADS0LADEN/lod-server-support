@@ -22,6 +22,12 @@ public final class TieredLodStore implements LodStoreService {
         this.memory = memory;
         this.sqlite = sqlite;
         this.diag = diag;
+        // A periodic resweep that drops a stale SQLite row must evict the memory tier's
+        // copy too — the front tier answers first, so without this fan-out the sweep's
+        // staleness bound (Paper's unfired-event guarantee) would not hold for
+        // memory-resident rows. invalidate() is tombstone-stamped and thread-safe from
+        // the batcher thread.
+        sqlite.setSweepDropListener(memory::invalidate);
     }
 
     @Override

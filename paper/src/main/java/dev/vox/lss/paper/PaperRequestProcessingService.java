@@ -316,6 +316,14 @@ public class PaperRequestProcessingService {
             for (ServerLevel level : server.getAllLevels()) {
                 String dim = level.dimension().identifier().toString();
                 dimensions.add(dim);
+                // Paper 26.x uses the vanilla UNIFIED world layout (one world dir,
+                // dimensions/minecraft/<dim>/region — verified on disk against a live
+                // 26.2 Paper server), so the server worldRoot is the correct
+                // getStorageFolder root, same as Fabric. BACKPORT CAVEAT: the 1.21.x
+                // lines use Bukkit's legacy SPLIT world dirs (world_nether/DIM-1,
+                // world_the_end/DIM1) — a backport must re-root per level (e.g. via
+                // getWorld().getWorldFolder()) or the sweep fail-safe-drops every
+                // non-overworld dim's rows at each boot.
                 regionDirs.put(dim, net.minecraft.world.level.dimension.DimensionType
                         .getStorageFolder(level.dimension(), worldRoot)
                         .resolve("region").normalize());

@@ -286,6 +286,7 @@ public final class PaperSoakMetricsExporter {
         storeMap.put("errors", storeDiag.getErrors());
         storeMap.put("mem_hits", storeDiag.getMemHits());
         storeMap.put("mem_evictions", storeDiag.getMemEvictions());
+        storeMap.put("sweep_drops", storeDiag.getSweepDrops());
         storeMap.put("queue", storeDiag.getQueueDepth());
         storeMap.put("mem_bytes", storeDiag.getMemBytes());
         storeMap.put("db_bytes", storeDiag.getDbBytes());

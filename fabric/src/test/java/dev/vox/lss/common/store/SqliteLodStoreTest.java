@@ -477,6 +477,35 @@ class SqliteLodStoreTest {
             Thread.sleep(25);
         }
         assertTrue(dropped, "the periodic re-sweep must drop the offline-edited row in-session");
+        assertTrue(store.diagnostics().getSweepDrops() >= 1,
+                "sweep drops must be counted (store.sweep_drops — the resweep's only "
+                        + "live observable)");
+        store.shutdown();
+    }
+
+    /** The tiered-composition contract at this layer: a resweep drop must be REPORTED
+     *  (the memory tier in front would otherwise keep serving the stale copy). */
+    @Test
+    void periodicResweepReportsDroppedPositionsToTheListener() throws Exception {
+        long p = PositionUtil.packPosition(1, 8);
+        writeRegion(OW, 0, 0, Map.of(p, (int) (nowSec() - 1000)));
+        SqliteLodStore store = open(env(WIRE, List.of(OW, END), Map.of(),
+                this::regionDir, 1));
+        var reported = new java.util.concurrent.ConcurrentHashMap<String, long[]>();
+        store.setSweepDropListener(reported::put);
+        store.deposit(OW, p, bytes(30, 400), 100);
+        assertNotNull(awaitHit(store, OW, p));
+
+        writeRegion(OW, 0, 0, Map.of(p, (int) (nowSec() + 100)));
+        Files.setLastModifiedTime(regionDir(OW).resolve("r.0.0.mca"),
+                FileTime.fromMillis(System.currentTimeMillis() + 5000));
+        long[] positions = null;
+        for (int i = 0; i < 400 && positions == null; i++) {
+            positions = reported.get(OW);
+            Thread.sleep(25);
+        }
+        assertNotNull(positions, "the resweep must report its drops to the listener");
+        assertArrayEquals(new long[]{p}, positions);
         store.shutdown();
     }
 

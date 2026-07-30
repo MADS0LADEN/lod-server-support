@@ -32,6 +32,10 @@ public final class LodStoreDiagnostics {
     private final AtomicLong errors = new AtomicLong();
     private final AtomicLong memHits = new AtomicLong();
     private final AtomicLong memEvictions = new AtomicLong();
+    // Rows the freshness sweep dropped (stale header / vanished region / absent chunk /
+    // mask drift / unresolvable dim). The ONLY live observable that a sweep actually
+    // culled something — the Paper unfired-event soak gates on it moving.
+    private final AtomicLong sweepDrops = new AtomicLong();
     // Hit-read latency (store reads only — never fed by the NBT path). The ring holds the
     // most recent hit latencies so read_p95_us reflects CURRENT behavior (§0 metric 3
     // gates on hit p95); a whole-run percentile would bury a late regression under an
@@ -63,6 +67,7 @@ public final class LodStoreDiagnostics {
     public void recordError() { this.errors.incrementAndGet(); }
     public void recordMemHit() { this.memHits.incrementAndGet(); }
     public void recordMemEviction() { this.memEvictions.incrementAndGet(); }
+    public void recordSweepDrops(long rows) { this.sweepDrops.addAndGet(rows); }
 
     public void setQueueDepth(long depth) { this.queueDepth = depth; }
     public void setMemBytes(long bytes) { this.memBytes = bytes; }
@@ -80,6 +85,7 @@ public final class LodStoreDiagnostics {
     public long getErrors() { return this.errors.get(); }
     public long getMemHits() { return this.memHits.get(); }
     public long getMemEvictions() { return this.memEvictions.get(); }
+    public long getSweepDrops() { return this.sweepDrops.get(); }
     public long getQueueDepth() { return this.queueDepth; }
     public long getMemBytes() { return this.memBytes; }
     public long getDbBytes() { return this.dbBytes; }

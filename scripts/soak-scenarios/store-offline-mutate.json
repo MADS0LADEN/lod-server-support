@@ -1,0 +1,35 @@
+{
+  "snapshotIntervalSeconds": 5,
+  "joinTimeoutSeconds": 240,
+  "steps": [
+    {
+      "anchor": 1,
+      "at": 2,
+      "cmd": "gamerule randomTickSpeed 0"
+    },
+    {
+      "anchor": 1,
+      "at": 2,
+      "cmd": "gamerule doMobSpawning false"
+    },
+    {
+      "anchor": 1,
+      "at": 3,
+      "cmd": "gamerule doFireTick false"
+    },
+    {
+      "anchor": 1,
+      "at": 10,
+      "cmd": "setblock 328 -60 8 minecraft:glowstone"
+    },
+    {
+      "anchor": 1,
+      "at": 15,
+      "cmd": "save-all"
+    }
+  ],
+  "end": {
+    "anchor": 1,
+    "at": 45
+  }
+}

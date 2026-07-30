@@ -83,10 +83,15 @@ ANOMALY_OPT_INS = {
     "dirty-while-offline": frozenset({"saturated"}),
     "clearcache-mid-session": frozenset({"saturated"}),
     "store-second-join": frozenset({"saturated"}),
+    "store-second-join-full": frozenset({"saturated"}),
+    "store-offline-populate": frozenset({"saturated"}),
+    "store-offline-mutate": frozenset(),
+    "store-offline-verify": frozenset({"saturated"}),
     "dimension-rejoin-warm": frozenset({"saturated"}),
     # Paper/Folia (SOAK_PLATFORM=paper|folia): cold-cache disc resync from the base world, like
     # warm-rejoin run 1, so the same load-shaped opt-ins apply.
     "paper-dirty-falling-block": frozenset({"saturated"}),
+    "paper-store-unfired-event": frozenset({"saturated"}),
 }
 
 # Vacuous-pass floors: minimum number of client-laws windows (the quiescent pairs where
@@ -95,7 +100,7 @@ ANOMALY_OPT_INS = {
 # 27/17, dimension-trip 6/22/16, dirty-broadcast 16. New scenarios get a conservative 3
 # (their converged tails run 40+ s at 5 s snapshot cadence).
 # Scenarios allowed to finish with zero nonzero-delta client-law windows (no LSS traffic).
-TRAFFIC_FLOOR_EXEMPT = frozenset({"enabled-false"})
+TRAFFIC_FLOOR_EXEMPT = frozenset({"enabled-false", "store-offline-mutate"})
 
 MIN_CLIENT_WINDOWS = {
     "fresh-backfill": {(1, 0): 10},
@@ -117,8 +122,13 @@ MIN_CLIENT_WINDOWS = {
     # is a segment boundary, like a dimension change)
     "clearcache-mid-session": {(1, 0): 4, (1, 1): 4},
     "store-second-join": {(1, 0): 4, (1, 1): 4},
+    "store-second-join-full": {(1, 0): 4, (1, 1): 4},
+    "store-offline-populate": {(1, 0): 4},
+    "store-offline-mutate": {(1, 0): 3},
+    "store-offline-verify": {(1, 0): 4},
     "dimension-rejoin-warm": {(1, 0): 2, (1, 1): 5, (2, 0): 3, (2, 1): 3},
     "paper-dirty-falling-block": {(1, 0): 3},
+    "paper-store-unfired-event": {(1, 0): 4, (1, 1): 4},
 }
 
 # The exclusion circle the client scanner never requests inside: min(client render distance,
@@ -251,7 +261,7 @@ SERVER_MONOTONIC = (
     # checkpoint_ms_max/read_avg_us) are deliberately absent from this whitelist.
     "store.hits", "store.misses", "store.deposits", "store.deposit_drops",
     "store.deposit_skips",
-    "store.errors", "store.mem_hits", "store.mem_evictions",
+    "store.errors", "store.mem_hits", "store.mem_evictions", "store.sweep_drops",
 )
 CLIENT_MONOTONIC = (
     "received_columns", "received_bytes", "dropped",
@@ -1793,41 +1803,148 @@ def check_clearcache_mid_session(ctx):
                         {"wallMs": ctx.server_snaps[-1]["wallMs"]})
 
 
-@named_check("store-second-join", ["client.requested_total", "client.received_columns",
-                                   "server.store.hits", "server.store.deposits",
-                                   "server.store.errors", "server.disk.submitted"])
-def check_store_second_join(ctx):
-    """The Phase 1 LOD-store gate (lod-store-implementation-plan.md §5): the backfill leg
-    populates the memory tier through delivery-path deposits; the mid-session clearcache
-    forces the full ts<=0 re-declaration of the disc, and the re-serve wave must come
-    from the STORE — store.hits carries it, disk.submitted stays nearly still — with
-    byte-identical content (server probe hashes stable across the store-served leg) and
-    zero contained store failures. The loaded disc near the player resolves via the probe
-    rung on BOTH legs (never deposited, never store-served), so the floors are sized to
-    the disk-served annulus, not the whole disc."""
+def make_store_second_join(scenario):
+    """Factory: store-second-join (memory tier) and store-second-join-full (memory +
+    SQLite) share this check verbatim — the serving TIER is invisible to the gated
+    counters (store.hits counts either tier answering; mem-vs-sqlite attribution is
+    a soak_report lens, not a gate)."""
+    @named_check(scenario, ["client.requested_total", "client.received_columns",
+                                       "server.store.hits", "server.store.deposits",
+                                       "server.store.errors", "server.disk.submitted"])
+    def check(ctx):
+        """The Phase 1 LOD-store gate (lod-store-implementation-plan.md §5): the backfill leg
+        populates the memory tier through delivery-path deposits; the mid-session clearcache
+        forces the full ts<=0 re-declaration of the disc, and the re-serve wave must come
+        from the STORE — store.hits carries it, disk.submitted stays nearly still — with
+        byte-identical content (server probe hashes stable across the store-served leg) and
+        zero contained store failures. The loaded disc near the player resolves via the probe
+        rung on BOTH legs (never deposited, never store-served), so the floors are sized to
+        the disk-served annulus, not the whole disc."""
+        acts = [a for a in ctx.run_actions.get(1, []) if a["action"] == "clearcache"]
+        if len(acts) != 1:
+            yield Violation(scenario, "run1",
+                            "expected exactly one clearcache action row — client hook did not fire",
+                            {"actions": len(acts)})
+            return
+        snaps = ctx.runs.get(1)
+        if not snaps:
+            yield Violation(scenario, "run1", "no client snapshots in run 1", {})
+            return
+        segs = client_segments(snaps)
+        if len(segs) != 2:
+            yield Violation(scenario, "run1",
+                            "client series must split into two segments at the clearcache reset",
+                            {"segments": [s[1] for s in segs]})
+            return
+        pre_cli = snaps[segs[0][3]]
+        post_cli = snaps[segs[1][3]]
+        d_recv = post_cli["received_columns"] - pre_cli["received_columns"]
+        if d_recv < 500:
+            yield Violation(scenario, "post-action segment",
+                            "the clearcache re-download wave did not happen — nothing for the "
+                            "store to serve", {"expected": ">= 500", "actual": d_recv})
+            return
+        action_wall = acts[0]["wallMs"]
+        srv_pre = None
+        for s in ctx.server_snaps:
+            if s["wallMs"] <= action_wall:
+                srv_pre = s
+            else:
+                break
+        srv_final = ctx.server_snaps[-1] if ctx.server_snaps else None
+        if srv_pre is None or srv_final is None or srv_pre is srv_final:
+            yield Violation(scenario, "server series",
+                            "need server snapshots on both sides of the action", {})
+            return
+        deposits_pre = get_path(srv_pre, "store.deposits")
+        if deposits_pre < 800:
+            yield Violation(scenario, "populate leg",
+                            "the backfill leg deposited too little — the delivery-path "
+                            "deposit choke point is not firing",
+                            {"expected": ">= 800 before the action", "actual": deposits_pre})
+        hits_delta = get_path(srv_final, "store.hits") - get_path(srv_pre, "store.hits")
+        if hits_delta < 800:
+            yield Violation(scenario, "re-serve leg",
+                            "the re-serve wave was not served from the store",
+                            {"expected": ">= 800 store hits after the action", "actual": hits_delta})
+        disk_delta = get_path(srv_final, "disk.submitted") - get_path(srv_pre, "disk.submitted")
+        ceiling = max(200, int(0.25 * d_recv))
+        if disk_delta > ceiling:
+            yield Violation(scenario, "re-serve leg",
+                            "the store-warm re-serve leg re-read region files — the store "
+                            "rung is not intercepting the second join",
+                            {"disk.submitted delta": disk_delta, "ceiling": ceiling})
+        errors = get_path(srv_final, "store.errors")
+        if errors:
+            yield Violation(scenario, "whole run",
+                            "contained store failures fired", {"store.errors": errors})
+        # Byte parity: the armed probes were NBT-served on the populate leg and store-served
+        # on the re-serve leg; recordServedColumnBytes hashes the exact wire bytes each time,
+        # so a stable hash across the action IS byte identity.
+        pre_hashes = srv_pre.get("probe_hashes") or {}
+        final_hashes = srv_final.get("probe_hashes") or {}
+        proven = 0
+        for token, final_hash in final_hashes.items():
+            pre_hash = pre_hashes.get(token)
+            if pre_hash in (None, -1) or final_hash == -1:
+                continue  # probe not served on one leg — parity unprovable for it
+            proven += 1
+            if final_hash != pre_hash:
+                yield Violation(scenario, "probe " + token,
+                                "store-served bytes differ from the NBT-served bytes — the "
+                                "store round trip is not byte-exact",
+                                {"pre": pre_hash, "post": final_hash})
+        if proven == 0:
+            # An armed-but-all(-1) map means the recorder never fired (the vacuous-parity
+            # hole the first live run exposed) — the parity leg must never pass silently.
+            yield Violation(scenario, "probes",
+                            "no probe proved byte parity — server probes unarmed "
+                            "(-Psoak.probes / SERVER_EXTRA_ARGS) or the serve-path recorder "
+                            "(SoakProbeBridge) is not firing",
+                            {"pre": pre_hashes, "final": final_hashes})
+        if ctx.server_snaps and (len(ctx.server_snaps) - 1) not in ctx.quiescent_server:
+            yield Violation(scenario, "final snapshot",
+                            "last server snapshot is not verified-quiescent (the store-warm "
+                            "leg never converged)",
+                            {"wallMs": ctx.server_snaps[-1]["wallMs"]})
+    return check
+
+
+check_store_second_join = make_store_second_join("store-second-join")
+
+
+@named_check("paper-store-unfired-event", ["server.store.hits", "server.store.errors",
+                                           "server.store.deposits", "client.received_columns"])
+def check_paper_store_unfired_event(ctx):
+    """The Paper staleness-bound gate (lod-store-implementation-plan.md Phase 2): a
+    console setblock fires no Bukkit event, so the store's stale row for the edited
+    column can only be culled by the periodic resweep (lodStoreResweepSeconds) — within
+    ≈ one save + one sweep cycle. The timeline saves at 75 s and clearcaches at 120 s
+    (≥ 2 sweep cycles later): the re-declared edited probe MUST come back with DIFFERENT
+    bytes (stale would be byte-identical), the control probe byte-identical, the sweep
+    must be OBSERVED (store.sweep_drops moved), and the re-serve wave must still be
+    store-served with zero contained failures."""
     acts = [a for a in ctx.run_actions.get(1, []) if a["action"] == "clearcache"]
     if len(acts) != 1:
-        yield Violation("store-second-join", "run1",
-                        "expected exactly one clearcache action row — client hook did not fire",
-                        {"actions": len(acts)})
+        yield Violation("paper-store-unfired-event", "run1",
+                        "expected exactly one clearcache action row — client hook did "
+                        "not fire", {"actions": len(acts)})
         return
     snaps = ctx.runs.get(1)
     if not snaps:
-        yield Violation("store-second-join", "run1", "no client snapshots in run 1", {})
+        yield Violation("paper-store-unfired-event", "run1", "no client snapshots", {})
         return
     segs = client_segments(snaps)
     if len(segs) != 2:
-        yield Violation("store-second-join", "run1",
-                        "client series must split into two segments at the clearcache reset",
-                        {"segments": [s[1] for s in segs]})
+        yield Violation("paper-store-unfired-event", "run1",
+                        "client series must split into two segments at the clearcache "
+                        "reset", {"segments": [s[1] for s in segs]})
         return
-    pre_cli = snaps[segs[0][3]]
-    post_cli = snaps[segs[1][3]]
-    d_recv = post_cli["received_columns"] - pre_cli["received_columns"]
+    d_recv = snaps[segs[1][3]]["received_columns"] - snaps[segs[0][3]]["received_columns"]
     if d_recv < 500:
-        yield Violation("store-second-join", "post-action segment",
-                        "the clearcache re-download wave did not happen — nothing for the "
-                        "store to serve", {"expected": ">= 500", "actual": d_recv})
+        yield Violation("paper-store-unfired-event", "post-action segment",
+                        "the clearcache re-download wave did not happen",
+                        {"expected": ">= 500", "actual": d_recv})
         return
     action_wall = acts[0]["wallMs"]
     srv_pre = None
@@ -1838,60 +1955,158 @@ def check_store_second_join(ctx):
             break
     srv_final = ctx.server_snaps[-1] if ctx.server_snaps else None
     if srv_pre is None or srv_final is None or srv_pre is srv_final:
-        yield Violation("store-second-join", "server series",
+        yield Violation("paper-store-unfired-event", "server series",
                         "need server snapshots on both sides of the action", {})
         return
-    deposits_pre = get_path(srv_pre, "store.deposits")
-    if deposits_pre < 800:
-        yield Violation("store-second-join", "populate leg",
-                        "the backfill leg deposited too little — the delivery-path "
-                        "deposit choke point is not firing",
-                        {"expected": ">= 800 before the action", "actual": deposits_pre})
+    if get_path(srv_final, "store.sweep_drops") < 1:
+        yield Violation("paper-store-unfired-event", "resweep",
+                        "store.sweep_drops never moved — the periodic resweep did not "
+                        "cull the un-evented edit (staleness bound unproven)",
+                        {"store.sweep_drops": get_path(srv_final, "store.sweep_drops")})
     hits_delta = get_path(srv_final, "store.hits") - get_path(srv_pre, "store.hits")
     if hits_delta < 800:
-        yield Violation("store-second-join", "re-serve leg",
+        yield Violation("paper-store-unfired-event", "re-serve leg",
                         "the re-serve wave was not served from the store",
-                        {"expected": ">= 800 store hits after the action", "actual": hits_delta})
-    disk_delta = get_path(srv_final, "disk.submitted") - get_path(srv_pre, "disk.submitted")
-    ceiling = max(200, int(0.25 * d_recv))
-    if disk_delta > ceiling:
-        yield Violation("store-second-join", "re-serve leg",
-                        "the store-warm re-serve leg re-read region files — the store "
-                        "rung is not intercepting the second join",
-                        {"disk.submitted delta": disk_delta, "ceiling": ceiling})
+                        {"expected": ">= 800 store hits after the action",
+                         "actual": hits_delta})
     errors = get_path(srv_final, "store.errors")
     if errors:
-        yield Violation("store-second-join", "whole run",
+        yield Violation("paper-store-unfired-event", "whole run",
                         "contained store failures fired", {"store.errors": errors})
-    # Byte parity: the armed probes were NBT-served on the populate leg and store-served
-    # on the re-serve leg; recordServedColumnBytes hashes the exact wire bytes each time,
-    # so a stable hash across the action IS byte identity.
     pre_hashes = srv_pre.get("probe_hashes") or {}
     final_hashes = srv_final.get("probe_hashes") or {}
-    proven = 0
-    for token, final_hash in final_hashes.items():
-        pre_hash = pre_hashes.get(token)
-        if pre_hash in (None, -1) or final_hash == -1:
-            continue  # probe not served on one leg — parity unprovable for it
-        proven += 1
-        if final_hash != pre_hash:
-            yield Violation("store-second-join", "probe " + token,
-                            "store-served bytes differ from the NBT-served bytes — the "
-                            "store round trip is not byte-exact",
-                            {"pre": pre_hash, "post": final_hash})
-    if proven == 0:
-        # An armed-but-all(-1) map means the recorder never fired (the vacuous-parity
-        # hole the first live run exposed) — the parity leg must never pass silently.
-        yield Violation("store-second-join", "probes",
-                        "no probe proved byte parity — server probes unarmed "
-                        "(-Psoak.probes / SERVER_EXTRA_ARGS) or the serve-path recorder "
-                        "(SoakProbeBridge) is not firing",
-                        {"pre": pre_hashes, "final": final_hashes})
-    if ctx.server_snaps and (len(ctx.server_snaps) - 1) not in ctx.quiescent_server:
-        yield Violation("store-second-join", "final snapshot",
-                        "last server snapshot is not verified-quiescent (the store-warm "
-                        "leg never converged)",
-                        {"wallMs": ctx.server_snaps[-1]["wallMs"]})
+    edited_pre, edited_final = pre_hashes.get("20:0"), final_hashes.get("20:0")
+    control_pre, control_final = pre_hashes.get("-20:0"), final_hashes.get("-20:0")
+    if None in (edited_pre, edited_final, control_pre, control_final) \
+            or -1 in (edited_pre, edited_final, control_pre, control_final):
+        yield Violation("paper-store-unfired-event", "probes",
+                        "probes unarmed or unserved on a leg — the staleness comparison "
+                        "is void", {"pre": pre_hashes, "final": final_hashes})
+        return
+    if edited_final == edited_pre:
+        yield Violation("paper-store-unfired-event", "probe 20:0",
+                        "the edited column re-served the PRE-EDIT bytes after the "
+                        "resweep bound — the store is serving stale data past its "
+                        "documented staleness window",
+                        {"pre": edited_pre, "final": edited_final})
+    if control_final != control_pre:
+        yield Violation("paper-store-unfired-event", "probe -20:0",
+                        "the untouched control column's bytes drifted — store re-serve "
+                        "is not byte-exact", {"pre": control_pre, "final": control_final})
+    if (len(ctx.server_snaps) - 1) not in ctx.quiescent_server:
+        yield Violation("paper-store-unfired-event", "final snapshot",
+                        "last server snapshot is not verified-quiescent",
+                        {"wallMs": srv_final["wallMs"]})
+
+
+@named_check("store-offline-populate", ["server.store.deposits", "server.store.errors"])
+def check_store_offline_populate(ctx):
+    """Phase 1 of scripts/store_offline_edit.sh: the backfill must actually charge the
+    store (deposit floor), with zero contained store failures, and BOTH armed probes
+    must have been served — their hashes are the cross-phase baseline the wrapper
+    compares the verify phase against, so an unserved probe here voids the whole
+    offline-edit experiment."""
+    last = ctx.server_snaps[-1] if ctx.server_snaps else None
+    if last is None:
+        yield Violation("store-offline-populate", "server series", "no server snapshots", {})
+        return
+    deposits = get_path(last, "store.deposits")
+    if deposits < 800:
+        yield Violation("store-offline-populate", "whole run",
+                        "the populate leg deposited too little — nothing for the verify "
+                        "phase to serve", {"expected": ">= 800", "actual": deposits})
+    errors = get_path(last, "store.errors")
+    if errors:
+        yield Violation("store-offline-populate", "whole run",
+                        "contained store failures fired", {"store.errors": errors})
+    hashes = last.get("probe_hashes") or {}
+    unserved = sorted(t for t, h in hashes.items() if h == -1)
+    if not hashes or unserved:
+        yield Violation("store-offline-populate", "probes",
+                        "cross-phase baseline probes missing or unserved — arm "
+                        "-Psoak.probes=20:0,-20:0 on the server",
+                        {"hashes": hashes, "unserved": unserved})
+
+
+@named_check("store-offline-mutate", ["server.service.requests_received",
+                                      "server.store.deposits"])
+def check_store_offline_mutate(ctx):
+    """Phase 2: a REAL edit reaches the region file while LSS is disabled end-to-end —
+    what makes the edit 'offline' from the store's point of view. The setblock and
+    save-all must be acknowledged, the client must see server_enabled=false on every
+    snapshot, and no LSS service/disk/store counter may move."""
+    sb = next((c for c in ctx.commands if c["cmd"].startswith("setblock")), None)
+    if sb is None or not sb.get("ok"):
+        yield Violation("store-offline-mutate", "timeline",
+                        "the offline edit's setblock did not run/acknowledge",
+                        {"row": sb})
+    sa = next((c for c in ctx.commands if c["cmd"].startswith("save-all")), None)
+    if sa is None or not sa.get("ok"):
+        yield Violation("store-offline-mutate", "timeline",
+                        "the save-all flushing the edit did not run/acknowledge",
+                        {"row": sa})
+    for s in ctx.runs.get(1, []):
+        if s["server_enabled"] is not False:
+            yield Violation("store-offline-mutate", f"run1 wallMs={s['wallMs']}",
+                            "client reports server_enabled true — the phase was not "
+                            "invisible to LSS", {"server_enabled": s["server_enabled"]})
+            break
+    last = ctx.server_snaps[-1] if ctx.server_snaps else None
+    if last is None:
+        yield Violation("store-offline-mutate", "server series", "no server snapshots", {})
+        return
+    for path in ("service.requests_received", "service.columns_sent", "disk.submitted",
+                 "store.deposits", "store.hits"):
+        v = get_path(last, path)
+        if v != 0:
+            yield Violation("store-offline-mutate", "final snapshot",
+                            f"LSS counter {path} moved during the offline-edit phase",
+                            {"field": path, "expected": 0, "actual": v})
+
+
+@named_check("store-offline-verify", ["server.store.hits", "server.store.errors",
+                                      "server.disk.submitted", "client.received_columns"])
+def check_store_offline_verify(ctx):
+    """Phase 3: a cold-cache client joins the carried world + store after the offline
+    edit. The startup sweep must have run cleanly against the mutated region (errors 0),
+    the unedited annulus must re-serve from the STORE (hits floor + disk-read ceiling —
+    the sweep must not have over-dropped), both probes must serve (the WRAPPER compares
+    hashes across phases: edited probe differs, control probe byte-identical), and the
+    run must end verified-quiescent."""
+    last = ctx.server_snaps[-1] if ctx.server_snaps else None
+    snaps = ctx.runs.get(1)
+    if last is None or not snaps:
+        yield Violation("store-offline-verify", "series",
+                        "need both server and client run-1 snapshots", {})
+        return
+    hits = get_path(last, "store.hits")
+    if hits < 800:
+        yield Violation("store-offline-verify", "whole run",
+                        "the carried store did not serve the re-join — the startup "
+                        "sweep over-dropped or the store did not survive the restart",
+                        {"expected": ">= 800 store hits", "actual": hits})
+    errors = get_path(last, "store.errors")
+    if errors:
+        yield Violation("store-offline-verify", "whole run",
+                        "contained store failures fired", {"store.errors": errors})
+    recv = snaps[-1]["received_columns"]
+    disk = get_path(last, "disk.submitted")
+    ceiling = max(250, int(0.25 * recv))
+    if disk > ceiling:
+        yield Violation("store-offline-verify", "whole run",
+                        "the verify leg re-read region files wholesale — the sweep "
+                        "dropped far more than the edit justifies",
+                        {"disk.submitted": disk, "ceiling": ceiling})
+    hashes = last.get("probe_hashes") or {}
+    unserved = sorted(t for t, h in hashes.items() if h == -1)
+    if not hashes or unserved:
+        yield Violation("store-offline-verify", "probes",
+                        "cross-phase comparison probes missing or unserved",
+                        {"hashes": hashes, "unserved": unserved})
+    if (len(ctx.server_snaps) - 1) not in ctx.quiescent_server:
+        yield Violation("store-offline-verify", "final snapshot",
+                        "last server snapshot is not verified-quiescent",
+                        {"wallMs": last["wallMs"]})
 
 
 @named_check("dimension-rejoin-warm", ["client.dimension", "client.responses.up_to_date"])
@@ -2131,6 +2346,23 @@ CHECKS = {
     "store-second-join": [check_store_second_join,
                           make_handshake_check("store-second-join"),
                           make_disc_completeness("store-second-join")],
+    # The lodStore=full sibling: same timeline, same check — SQLite tier live under the
+    # whole law set (WAL batcher + tiered composition running during a real backfill).
+    "store-second-join-full": [make_store_second_join("store-second-join-full"),
+                               make_handshake_check("store-second-join-full"),
+                               make_disc_completeness("store-second-join-full")],
+    # store_offline_edit.sh phases: each individually law-checked; the cross-phase
+    # probe-hash comparison (edited differs, control identical) lives in the wrapper.
+    "store-offline-populate": [check_store_offline_populate,
+                               make_handshake_check("store-offline-populate"),
+                               make_disc_completeness("store-offline-populate")],
+    # No disc-completeness: a disabled session never builds a disc (like enabled-false).
+    "store-offline-mutate": [check_store_offline_mutate,
+                             make_handshake_check("store-offline-mutate",
+                                                  expect_enabled=False)],
+    "store-offline-verify": [check_store_offline_verify,
+                             make_handshake_check("store-offline-verify"),
+                             make_disc_completeness("store-offline-verify")],
     "dimension-rejoin-warm": [check_dimension_rejoin_warm,
                               make_handshake_check("dimension-rejoin-warm"),
                               make_disc_completeness("dimension-rejoin-warm", run=1),
@@ -2140,6 +2372,9 @@ CHECKS = {
     "paper-dirty-falling-block": [check_paper_dirty_falling_block,
                                   make_handshake_check("paper-dirty-falling-block"),
                                   make_disc_completeness("paper-dirty-falling-block")],
+    "paper-store-unfired-event": [check_paper_store_unfired_event,
+                                  make_handshake_check("paper-store-unfired-event"),
+                                  make_disc_completeness("paper-store-unfired-event")],
 }
 
 
@@ -2479,7 +2714,8 @@ def _srv(wall=1000, seg=0, over=None):
             "dirty": {"pending": 0, "broadcast_positions": 0, "suppressed_total": 0},
             "store": {"hits": 0, "misses": 0, "deposits": 0, "deposit_drops": 0,
                       "deposit_skips": 0,
-                      "errors": 0, "mem_hits": 0, "mem_evictions": 0, "queue": 0,
+                      "errors": 0, "mem_hits": 0, "mem_evictions": 0, "sweep_drops": 0,
+                      "queue": 0,
                       "mem_bytes": 0, "db_bytes": 0, "wal_bytes": 0,
                       "checkpoint_ms_max": 0, "read_avg_us": 0, "read_p95_us": 0},
             "bandwidth": {"total_bytes": 0}, "players": []}
@@ -3208,6 +3444,98 @@ def selftest():
          list(check_store_second_join(ssj_ctx(post_hash=999))), "store-second-join")
     hits("store-second-join action never fired",
          list(check_store_second_join(ssj_ctx(actions=[]))), "store-second-join")
+
+    # --- store-offline-edit phases (store_offline_edit.sh) ---
+    def sop_ctx(deposits=2000, errors=0, hashes=None):
+        srv = _srv(150_000, over={"store.deposits": deposits, "store.errors": errors})
+        srv["probe_hashes"] = {"20:0": 111, "-20:0": 222} if hashes is None else hashes
+        return _ctx(server_snaps=[srv], runs={1: [_cli(150_000)]})
+    clean("store-offline-populate clean", list(check_store_offline_populate(sop_ctx())))
+    hits("store-offline-populate deposits missing",
+         list(check_store_offline_populate(sop_ctx(deposits=10))), "store-offline-populate")
+    hits("store-offline-populate store errors",
+         list(check_store_offline_populate(sop_ctx(errors=1))), "store-offline-populate")
+    hits("store-offline-populate probe unserved (baseline void)",
+         list(check_store_offline_populate(sop_ctx(hashes={"20:0": 111, "-20:0": -1}))),
+         "store-offline-populate")
+
+    som_cmds = [dict(_cmd(10_000, "setblock 328 -60 8 minecraft:glowstone"), ok=True),
+                dict(_cmd(15_000, "save-all"), ok=True)]
+    def som_ctx(commands=None, requests=0, enabled=False):
+        return _ctx(
+            server_snaps=[_srv(45_000, over={"service.requests_received": requests})],
+            commands=som_cmds if commands is None else commands,
+            runs={1: [_cli(40_000, over={"server_enabled": enabled})]})
+    clean("store-offline-mutate clean", list(check_store_offline_mutate(som_ctx())))
+    hits("store-offline-mutate setblock missing",
+         list(check_store_offline_mutate(som_ctx(commands=[som_cmds[1]]))),
+         "store-offline-mutate")
+    hits("store-offline-mutate save-all missing",
+         list(check_store_offline_mutate(som_ctx(commands=[som_cmds[0]]))),
+         "store-offline-mutate")
+    hits("store-offline-mutate LSS not disabled",
+         list(check_store_offline_mutate(som_ctx(enabled=True))), "store-offline-mutate")
+    hits("store-offline-mutate LSS counters moved",
+         list(check_store_offline_mutate(som_ctx(requests=5))), "store-offline-mutate")
+
+    def sov_ctx(hits_=2000, errors=0, disk=100, hashes=None, quiescent=True):
+        srv = _srv(150_000, over={"store.hits": hits_, "store.errors": errors,
+                                  "disk.submitted": disk})
+        srv["probe_hashes"] = {"20:0": 333, "-20:0": 222} if hashes is None else hashes
+        return _ctx(server_snaps=[srv],
+                    runs={1: [_cli(150_000, over={"received_columns": 2200})]},
+                    quiescent_server={0} if quiescent else set())
+    clean("store-offline-verify clean", list(check_store_offline_verify(sov_ctx())))
+    hits("store-offline-verify store did not serve",
+         list(check_store_offline_verify(sov_ctx(hits_=100))), "store-offline-verify")
+    hits("store-offline-verify store errors",
+         list(check_store_offline_verify(sov_ctx(errors=3))), "store-offline-verify")
+    hits("store-offline-verify sweep over-dropped (disk re-reads)",
+         list(check_store_offline_verify(sov_ctx(disk=1500))), "store-offline-verify")
+    hits("store-offline-verify probe unserved",
+         list(check_store_offline_verify(sov_ctx(hashes={"20:0": -1, "-20:0": 222}))),
+         "store-offline-verify")
+    hits("store-offline-verify never converged",
+         list(check_store_offline_verify(sov_ctx(quiescent=False))), "store-offline-verify")
+
+    # --- paper-store-unfired-event: resweep culls the un-evented edit ---
+    def psu_ctx(edited_final=999, control_final=222, sweep_drops=2, hits_final=2000,
+                errors=0, actions=None):
+        srv_pre = _srv(115_000, over={"store.hits": 0, "store.deposits": 1900})
+        srv_pre["probe_hashes"] = {"20:0": 111, "-20:0": 222}
+        srv_fin = _srv(185_000, over={"store.hits": hits_final,
+                                      "store.sweep_drops": sweep_drops,
+                                      "store.errors": errors,
+                                      "store.deposits": 1950})
+        srv_fin["probe_hashes"] = {"20:0": edited_final, "-20:0": control_final}
+        return _ctx(
+            server_snaps=[srv_pre, srv_fin],
+            runs={1: [_cli(110_000, seg=0, over={"received_columns": 2200}),
+                      _cli(185_000, seg=1, over={"received_columns": 4300})]},
+            run_actions={1: actions if actions is not None else [
+                {"event": "action", "wallMs": 120_000, "action": "clearcache",
+                 "atSeconds": 120}]},
+            quiescent_server={1})
+    clean("paper-store-unfired-event clean staleness-bound pass",
+          list(check_paper_store_unfired_event(psu_ctx())))
+    hits("paper-store-unfired-event stale bytes past the bound",
+         list(check_paper_store_unfired_event(psu_ctx(edited_final=111))),
+         "paper-store-unfired-event")
+    hits("paper-store-unfired-event control drifted",
+         list(check_paper_store_unfired_event(psu_ctx(control_final=888))),
+         "paper-store-unfired-event")
+    hits("paper-store-unfired-event resweep never culled",
+         list(check_paper_store_unfired_event(psu_ctx(sweep_drops=0))),
+         "paper-store-unfired-event")
+    hits("paper-store-unfired-event store not serving the wave",
+         list(check_paper_store_unfired_event(psu_ctx(hits_final=100))),
+         "paper-store-unfired-event")
+    hits("paper-store-unfired-event store errors",
+         list(check_paper_store_unfired_event(psu_ctx(errors=1))),
+         "paper-store-unfired-event")
+    hits("paper-store-unfired-event action never fired",
+         list(check_paper_store_unfired_event(psu_ctx(actions=[]))),
+         "paper-store-unfired-event")
 
     # --- dirty-range-filter: drain visible, client silent, follow-up live ---
     drf_cmds = [_cmd(122_000, "setblock -250 310 5 minecraft:stone"),

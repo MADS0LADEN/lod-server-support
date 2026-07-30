@@ -341,6 +341,7 @@ public final class BenchmarkMetricsExporter {
         storeMap.put("errors", storeDiag.getErrors());
         storeMap.put("mem_hits", storeDiag.getMemHits());
         storeMap.put("mem_evictions", storeDiag.getMemEvictions());
+        storeMap.put("sweep_drops", storeDiag.getSweepDrops());
         storeMap.put("queue", storeDiag.getQueueDepth());
         storeMap.put("mem_bytes", storeDiag.getMemBytes());
         storeMap.put("db_bytes", storeDiag.getDbBytes());
@@ -591,6 +592,7 @@ public final class BenchmarkMetricsExporter {
         store.put("errors", storeDiag.getErrors());
         store.put("mem_hits", storeDiag.getMemHits());
         store.put("mem_evictions", storeDiag.getMemEvictions());
+        store.put("sweep_drops", storeDiag.getSweepDrops());
         store.put("queue", storeDiag.getQueueDepth());
         store.put("mem_bytes", storeDiag.getMemBytes());
         store.put("db_bytes", storeDiag.getDbBytes());

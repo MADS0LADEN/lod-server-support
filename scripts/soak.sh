@@ -40,7 +40,8 @@ ALL_SCENARIOS=(fresh-backfill warm-rejoin dimension-trip dirty-broadcast
                generation-capacity-stress bandwidth-throttle
                cold-restart-resync enabled-false teleport-prune
                dirty-range-filter dirty-during-backfill dirty-while-offline
-               clearcache-mid-session dimension-rejoin-warm store-second-join)
+               clearcache-mid-session dimension-rejoin-warm store-second-join
+               store-second-join-full)
 # Scenarios ported to Paper. The remaining ones are Fabric-specific for now: the dirty-*
 # family leans on the save-hook + DirtyContentFilter (Paper's dirty detection is
 # event-driven — paper-dirty-falling-block is the Paper-native dirty scenario),
@@ -51,6 +52,15 @@ PAPER_SCENARIOS=(fresh-backfill warm-rejoin dimension-trip paper-dirty-falling-b
 # save-all steps are mapped to acknowledged no-ops by the driver (Folia unregisters the
 # command); an aggressive bukkit.yml autosave keeps chunks flushing mid-run instead.
 FOLIA_SCENARIOS=("${PAPER_SCENARIOS[@]}")
+# Phases of scripts/store_offline_edit.sh (populate -> offline mutate -> verify, chained
+# via SOAK_WORLD_FROM). Valid standalone invocations on fabric AND paper, but excluded
+# from every 'all' list: mutate/verify are meaningless without the carried world.
+PHASE_SCENARIOS=(store-offline-populate store-offline-mutate store-offline-verify)
+# Paper-only, AFTER the Folia copy above so Folia does not inherit it (the store is
+# unvalidated on Folia): console setblock fires no Bukkit event, so only the store's
+# periodic resweep (lodStoreResweepSeconds) can catch the edit — the unfired-event
+# staleness-bound gate (lod-store-implementation-plan.md Phase 2).
+PAPER_SCENARIOS+=(paper-store-unfired-event)
 # Scenarios that run on a fresh (deleted) world; everything else copies the base world.
 FRESH_WORLD_SCENARIOS="fresh-backfill rate-limit-storm generation-disabled generation-capacity-stress"
 LOG_PREFIX="soak"
@@ -131,8 +141,9 @@ case "$SCENARIO" in
     rate-limit-storm|disk-saturation|generation-disabled|generation-capacity-stress|bandwidth-throttle) ;;
     cold-restart-resync|enabled-false|teleport-prune|dirty-range-filter) ;;
     dirty-during-backfill|dirty-while-offline|clearcache-mid-session|dimension-rejoin-warm) ;;
-    store-second-join) ;;
-    paper-dirty-falling-block) ;;
+    store-second-join|store-second-join-full) ;;
+    store-offline-populate|store-offline-mutate|store-offline-verify) ;;
+    paper-dirty-falling-block|paper-store-unfired-event) ;;
     *)
         echo "[soak] ERROR: Unknown scenario '$SCENARIO'"
         usage
@@ -143,7 +154,7 @@ esac
 # Platform gating: the Paper port covers a validated subset; the falling-block scenario is
 # Paper-native (setblock fires no Bukkit event, and Fabric's save-hook detection would need
 # a save-all the timeline deliberately omits).
-if [[ "$SOAK_PLATFORM" == "paper" && " ${PAPER_SCENARIOS[*]} " != *" $SCENARIO "* ]]; then
+if [[ "$SOAK_PLATFORM" == "paper" && " ${PAPER_SCENARIOS[*]} ${PHASE_SCENARIOS[*]} " != *" $SCENARIO "* ]]; then
     echo "[soak] ERROR: Scenario '$SCENARIO' is not ported to SOAK_PLATFORM=paper"
     usage
     exit 1
@@ -183,15 +194,29 @@ case "$SCENARIO" in
                                 CLIENT_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
     clearcache-mid-session)     CLIENT_RUNS=1; EXPECTED_SECONDS=280
                                 CLIENT_EXTRA_ARGS=("-Psoak.clientActionAt=60:clearcache") ;;
-    store-second-join)          CLIENT_RUNS=1; EXPECTED_SECONDS=280
-                                # The Phase 1 LOD-store gate: backfill populates the
-                                # memory tier, the clearcache forces the full ts<=0
+    store-second-join|store-second-join-full)
+                                CLIENT_RUNS=1; EXPECTED_SECONDS=280
+                                # The Phase 1/2 LOD-store gates: backfill populates the
+                                # store, the clearcache forces the full ts<=0
                                 # re-declaration, the checker requires the re-serve wave
                                 # to be STORE HITS with byte-identical probe hashes.
+                                # The -full flavor runs the same timeline with
+                                # lodStore=full (SQLite tier live under the law set).
                                 CLIENT_EXTRA_ARGS=("-Psoak.clientActionAt=60:clearcache")
                                 SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
     dimension-rejoin-warm)      CLIENT_RUNS=2; EXPECTED_SECONDS=650 ;;
+    store-offline-populate)     CLIENT_RUNS=1; EXPECTED_SECONDS=280
+                                SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
+    store-offline-mutate)       CLIENT_RUNS=1; EXPECTED_SECONDS=160 ;;
+    store-offline-verify)       CLIENT_RUNS=1; EXPECTED_SECONDS=280
+                                SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
     paper-dirty-falling-block)  CLIENT_RUNS=1; EXPECTED_SECONDS=300 ;;
+    paper-store-unfired-event)  CLIENT_RUNS=1; EXPECTED_SECONDS=320
+                                # Backfill charges the store; the un-evented setblock +
+                                # save-all go stale-invisible; two 10 s resweep cycles
+                                # later the clearcache re-declare must get FRESH bytes.
+                                CLIENT_EXTRA_ARGS=("-Psoak.clientActionAt=120:clearcache")
+                                SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
 esac
 RUNTIME_BUDGET=$((EXPECTED_SECONDS + 240))
 DEADLINE_EPOCH=0
@@ -270,7 +295,16 @@ mkdir -p "$RUN_RESULTS_DIR"
 # world_nether/world_the_end dirs), so clearing/copying world/ covers the End too.
 echo "[soak] Staging world for scenario: $SCENARIO"
 rm -rf "$SERVER_RUN_DIR/world"
-if [[ " $FRESH_WORLD_SCENARIOS " != *" $SCENARIO "* ]]; then
+if [[ -n "${SOAK_WORLD_FROM:-}" ]]; then
+    # Multi-phase orchestrators (scripts/store_offline_edit.sh) carry a prior phase's
+    # world forward instead of restaging the base. The dir must contain world/.
+    if [[ ! -d "$SOAK_WORLD_FROM/world" ]]; then
+        echo "[soak] ERROR: SOAK_WORLD_FROM=$SOAK_WORLD_FROM has no world/ dir"
+        exit 1
+    fi
+    echo "[soak] Staging world from SOAK_WORLD_FROM=$SOAK_WORLD_FROM"
+    cp -r "$SOAK_WORLD_FROM/world" "$SERVER_RUN_DIR/world"
+elif [[ " $FRESH_WORLD_SCENARIOS " != *" $SCENARIO "* ]]; then
     cp -r "$BASE_WORLD_DIR/world" "$SERVER_RUN_DIR/world"
 fi
 

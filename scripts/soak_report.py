@@ -88,6 +88,7 @@ SERVER_MECHANISM = {
     # latest-wins) — ordinary machinery, closes deposits+drops+skips == enqueued.
     "store deposit skips": "store.deposit_skips",
     "store memory-tier hits": "store.mem_hits",
+    "store sweep drops": "store.sweep_drops",
 }
 CLIENT_CONCERNING = {
     "columns dropped": "dropped",

@@ -103,6 +103,36 @@ class TieredLodStoreTest {
         store.shutdown();
     }
 
+    /** The Paper unfired-event staleness bound end-to-end at unit level: a periodic
+     *  resweep that drops a stale SQLite row must ALSO evict the memory tier's copy —
+     *  the front tier answers first, so without the sweep-drop fan-out the composed
+     *  get() would keep serving the stale bytes the sweep just culled. */
+    @Test
+    void resweepDropEvictsTheMemoryTierCopy() throws Exception {
+        java.nio.file.Files.createDirectories(this.tmp.resolve("region"));
+        var env = new SqliteLodStore.Environment(this.tmp.resolve("store"), "26.2-test", 18,
+                d -> this.tmp.resolve("region"), d -> "", List.of(OW), 1);
+        TieredLodStore store = (TieredLodStore) LodStores.createOrNull(
+                LodStoreMode.FULL, 8 << 20, env);
+        assertNotNull(store);
+        assertTrue(store.sqliteTier().awaitSweep(10_000));
+        long p = PositionUtil.packPosition(5, 0);
+        store.deposit(OW, p, new byte[]{7, 7, 7}, 100);
+        awaitSqliteVisible(store, p);
+        assertNotNull(store.get(OW, p), "memory tier must be serving before the sweep");
+
+        // The chunk has no region file at all — the resweep's vanished-region rule
+        // drops the SQLite row; the fan-out must take the memory copy with it.
+        boolean gone = false;
+        for (int i = 0; i < 400 && !gone; i++) {
+            gone = store.get(OW, p) == null;
+            Thread.sleep(25);
+        }
+        assertTrue(gone, "the composed get() must stop serving once the resweep drops "
+                + "the row (memory tier evicted via the sweep-drop fan-out)");
+        store.shutdown();
+    }
+
     @Test
     void factoryDegradesToMemoryOnlyWhenSqliteInitFails() {
         // An impossible store dir (a FILE in the path) forces SQLite init to fail.
