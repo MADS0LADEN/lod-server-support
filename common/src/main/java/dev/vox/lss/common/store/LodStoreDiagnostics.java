@@ -28,9 +28,15 @@ public final class LodStoreDiagnostics {
     private final AtomicLong errors = new AtomicLong();
     private final AtomicLong memHits = new AtomicLong();
     private final AtomicLong memEvictions = new AtomicLong();
-    // Hit-read latency (store reads only — never fed by the NBT path)
+    // Hit-read latency (store reads only — never fed by the NBT path). The ring holds the
+    // most recent hit latencies so read_p95_us reflects CURRENT behavior (§0 metric 3
+    // gates on hit p95); a whole-run percentile would bury a late regression under an
+    // early warm phase. 512 entries ≈ the last ~half-ring of a warm join.
+    private static final int READ_LATENCY_RING = 512;
     private final AtomicLong readTotalNanos = new AtomicLong();
     private final AtomicLong readCount = new AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLongArray recentReadNanos =
+            new java.util.concurrent.atomic.AtomicLongArray(READ_LATENCY_RING);
 
     // Gauges (set, not summed)
     private volatile long queueDepth;      // write-batcher queue depth (drains to 0 at rest)
@@ -42,7 +48,8 @@ public final class LodStoreDiagnostics {
     public void recordHit(long readNanos) {
         this.hits.incrementAndGet();
         this.readTotalNanos.addAndGet(readNanos);
-        this.readCount.incrementAndGet();
+        long n = this.readCount.getAndIncrement();
+        this.recentReadNanos.set((int) (n % READ_LATENCY_RING), readNanos);
     }
 
     public void recordMiss() { this.misses.incrementAndGet(); }
@@ -77,6 +84,17 @@ public final class LodStoreDiagnostics {
     public long getReadAvgMicros() {
         long n = this.readCount.get();
         return n == 0 ? 0 : (this.readTotalNanos.get() / n) / 1_000;
+    }
+
+    /** p95 of the most recent (≤512) store-hit read latencies, whole microseconds —
+     *  §0 metric 3's hit-latency gate input. Best-effort under concurrent writes. */
+    public long getReadP95Micros() {
+        int filled = (int) Math.min(this.readCount.get(), READ_LATENCY_RING);
+        if (filled == 0) return 0;
+        long[] copy = new long[filled];
+        for (int i = 0; i < filled; i++) copy[i] = this.recentReadNanos.get(i);
+        java.util.Arrays.sort(copy);
+        return copy[Math.min(filled - 1, (int) Math.floor(0.95 * filled))] / 1_000;
     }
 
     /**

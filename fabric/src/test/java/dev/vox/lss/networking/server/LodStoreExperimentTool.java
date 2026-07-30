@@ -70,8 +70,9 @@ class LodStoreExperimentTool {
     }
 
     private static final Pattern REGION_NAME = Pattern.compile("r\\.(-?\\d+)\\.(-?\\d+)\\.mca");
-    /** Columns processed before timings are recorded (JIT + page-cache warm). */
-    private static final int WARMUP_COLUMNS = 3000;
+    /** Columns processed before timings are recorded (JIT + page-cache warm).
+     *  Overridable for small worlds where size stats matter more than timing purity. */
+    private static final int WARMUP_COLUMNS = Integer.getInteger("lss.store.experiment.warmup", 3000);
     private static final int POINT_READS = 3000;
 
     private static RegistryAccess buildFullBiomeRegistry() {

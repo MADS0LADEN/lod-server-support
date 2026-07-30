@@ -126,6 +126,11 @@ max-tick-time=-1
 pause-when-empty-seconds=-1
 difficulty=peaceful
 PROPS
+# BENCHMARK_EXTRA_SERVER_PROPS: extra server.properties lines (e.g. a level-type override
+# for the store's bytes/col distribution arms — amplified is the §4 upside case).
+if [[ -n "${BENCHMARK_EXTRA_SERVER_PROPS:-}" ]]; then
+    printf '%s\n' "$BENCHMARK_EXTRA_SERVER_PROPS" >> "$SERVER_RUN_DIR/server.properties"
+fi
 
 echo "eula=true" > "$SERVER_RUN_DIR/eula.txt"
 
@@ -144,6 +149,12 @@ run_cycle() {
     # (e.g. -Pbenchmark.c2me=true for the C2ME A/B arm — the client stays unmodified).
     mc_start_server "$RESULTS_DIR/server$suffix.log" :fabric:runBenchmarkServer -Pbenchmark.duration="$DURATION" ${BENCHMARK_SERVER_GRADLE_ARGS:-}
     mc_wait_server_ready "$SERVER_RUN_DIR/logs/latest.log" "$RESULTS_DIR/server$suffix.log" 120
+
+    # 1 Hz CPU/RSS/wire sampler — cpu.jsonl is what analyze_profile_jfr.py derives the
+    # active window from, and the idle-corrected CPU input to the store's §0 metric-2 gate.
+    "$PROJECT_ROOT/scripts/lib/proc_sampler.sh" "$RESULTS_DIR/cpu$suffix.jsonl" $((DURATION + 300)) &
+    local sampler_pid=$!
+
     mc_start_client "$RESULTS_DIR/client$suffix.log" :fabric:runBenchmarkClient
 
     # Wait for server to exit (auto-stops after duration). Enforce the deadline: the
@@ -170,6 +181,8 @@ run_cycle() {
 
     # Wait for client to exit (auto-stops on disconnect)
     mc_wait_client_exit 30
+    kill "$sampler_pid" 2>/dev/null || true
+    wait "$sampler_pid" 2>/dev/null || true
 
     # Collect results
     echo "[benchmark] Collecting results (suffix '$suffix')..."
@@ -216,8 +229,10 @@ else
     run_cycle ""
 fi
 
-# Step 6: Save world for reuse (fresh scenario only)
-if [[ "$SCENARIO" == "fresh" && -d "$SERVER_RUN_DIR/world" ]]; then
+# Step 6: Save world for reuse (fresh scenario only).
+# BENCHMARK_NO_BASE_SAVE=1 skips it — one-off distribution arms (amplified etc.) must
+# never clobber the standard base world every other scenario builds on.
+if [[ "${BENCHMARK_NO_BASE_SAVE:-0}" != "1" && "$SCENARIO" == "fresh" && -d "$SERVER_RUN_DIR/world" ]]; then
     echo "[benchmark] Saving world to $WORLDS_DIR/base/ for reuse"
     mkdir -p "$WORLDS_DIR/base"
     rm -rf "$WORLDS_DIR/base/world"

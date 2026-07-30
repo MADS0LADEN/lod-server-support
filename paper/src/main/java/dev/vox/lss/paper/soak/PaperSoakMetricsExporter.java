@@ -291,6 +291,7 @@ public final class PaperSoakMetricsExporter {
         storeMap.put("wal_bytes", storeDiag.getWalBytes());
         storeMap.put("checkpoint_ms_max", storeDiag.getCheckpointMsMax());
         storeMap.put("read_avg_us", storeDiag.getReadAvgMicros());
+        storeMap.put("read_p95_us", storeDiag.getReadP95Micros());
         result.put("store", storeMap);
 
         // Wall-time per tick over the window since the last snapshot (a stalled server

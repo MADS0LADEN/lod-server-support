@@ -153,15 +153,63 @@ page cache, n=3000):
   `check_store_natives_fabric/paper` (8 sqlite natives by exact path, 6 zstd native
   dirs, nested-jar declaration check, relocation guard) + synthetic fixtures + 3
   selftest cases (55 total). VSS byte-copy pair checks unaffected (verified green).
-- **.mca header-timestamp verification**: `scripts/mca_timestamps.py` (scan + compare
-  modes). Vanilla: PASS (55,678/55,678 nonzero on the base world). C2ME/Moonrise:
-  evidence runs in flight (compare base vs post-run region headers after each arm's
-  no-cache run — vanilla's ~10 s metadata re-saves guarantee rewrites near spawn).
+- **.mca header-timestamp verification: ALL THREE WRITERS PASS.**
+  `scripts/mca_timestamps.py` (scan + compare modes). Vanilla: 55,678/55,678 nonzero
+  header stamps on the base world. C2ME (c2me-fabric nvOkOiyi, chunkio rewrite active —
+  fallback warning present in the run log): 625 chunk stamps ADVANCED across a 90 s
+  no-cache run's metadata re-saves, 0 backward. Moonrise (moonrise-opt W0HImEBl, same
+  run shape): 625 advanced, 0 backward. The §1 per-column `src_stamp` freshness
+  mechanism is real on every chunk system we target — no world degrades to
+  startup-sweep-only on stamp-maintenance grounds.
+- **Bytes/col distribution (plan §4 wants min/median/max, ≥3 worlds — we have the two
+  extremes locally):** superflat soak world = 6,171 B/col wire (uniform), zstd-1
+  **59 B/col** (ratio 105×); normal-terrain benchmark world = 33.8 KB/col wire, zstd-1
+  5,342 B/col. Amplified-terrain arm (via new env knobs `BENCHMARK_EXTRA_SERVER_PROPS` +
+  `BENCHMARK_NO_BASE_SAVE=1`; 625 servable cols, 125 timed): 32.1 KB/col wire, zstd-1
+  4,586 B/col — slightly BELOW normal terrain (the tall band culls more air sections),
+  so normal terrain is the measured per-column maximum, not amplified. Distribution at
+  zstd-1 across the arms: 59 / 4,586 / 5,342 B/col. True donated player worlds
+  (built-up/modded — the §4 upside risk) remain unavailable in this environment —
+  recorded as a caveat for the release-notes disk table.
+- **warm-join smoke (store off): PASS.** Both cycles ran end-to-end (populate 25.1k
+  disk-read serves, measure 28.5k — cycle B's fresh-cache client honestly re-resolved
+  everything, exactly the serve pattern the store converts to hits), artifacts landed as
+  designed (server-populate.json / server.json / warm-join-meta.json), and the `store`
+  group flows through the benchmark exporter (all zeros, store off).
+
+### Phase 0 review round (2 subagents, 2026-07-30) — methodology reviewer findings
+
+Verdict: decisions genuinely made on data, deviations explicit; gate claimable once the
+"last mile" closed. Dispositions:
+- **MAJOR-1 (gate math unwired) — FIXED**: benchmark.sh now attaches proc_sampler per
+  cycle (cpu.jsonl / cpu-populate.jsonl); new `scripts/store_gate.sh` (interleaved
+  off/on kill-switch reps, warm|cold modes, config staging, per-arm collection) + 
+  `scripts/store_gate_check.py` (the §0 calculator: hit-ratio floor 0.95,
+  disk.submitted ≤2% of cols, nbt+serialize bands ≤1%, band-CPU/col cut ≥70% paired,
+  whole-JVM CPU-s/1k informational, hit-p95 ≥5× vs off-arm MEAN read (stricter than
+  p95-vs-p95), cold-mode ≤10% regression + a deposits>0 arm-validity check; 7 selftest
+  cases; gate-verdict.json). MSPT pairing deliberately rides the soak snapshots
+  (mspt_avg_window), not the benchmark.
+- **MINOR-1 (p95 under-delivered) — FIXED**: `store.read_p95_us` added now (512-entry
+  recent-hit ring in LodStoreDiagnostics) through all schema sites before they ossify.
+- **MINOR-2 — recorded**: the SQLite arms used deflate-1 blobs; the 16k zero-overflow
+  conclusion holds a fortiori for the smaller zstd-1 blobs. Honest latency quote: means
+  equal (5.02 vs 5.11 µs) but 16k's warm p95 is ~26% worse (7.48→9.44 µs) — immaterial
+  beside the 24 µs decompress, but it is a trade, not a free win.
+- **MINOR-3 — recorded in the checker itself**: the `zip` band is part-vanilla
+  (connection-level packet deflate), reported but never gated on.
+- **MINOR-6 — standing constraint**: nothing releases from this branch state (natives
+  ship ahead of the store code — an honest spike of the real ship path); taking the
+  flat-file fallback engine later means INVERTING the release_check native gates.
+- **MINOR-7 — done**: evidence committed; vanilla header-ADVANCEMENT evidence is the
+  base world's own stamp range (14:25:05..14:36:51 — stamps advanced across the
+  11-minute generation run that created it), so the three-writer table is symmetric
+  without another run. Plan §2 note: the `meta` table gains a `codec` key (decision 1's
+  drop-and-rebuild lever) — implement in Phase 2.
+- MINOR-4 (micro-bench nits) accepted as direction-safe; MINOR-5 (≥3 worlds) stays a
+  documented §4 caveat.
 
 ### Phase 0 remaining / deferred
-
-- C2ME + Moonrise header-stamp evidence (runs in flight) + a warm-join smoke run
-  (store off) to validate the new scenario mechanics.
 - Deferred to Phase 2 (live-load validation, where sqlite actually loads): the Knot
   duplicate-sqlite-jdbc collision test (needs a second live mod jar), `org.sqlite.tmpdir`
   handling, and a real-jar test-server boot check.
