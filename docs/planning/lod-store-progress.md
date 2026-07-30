@@ -238,30 +238,99 @@ counters/packaging/harness infra landed and reviewed by 2 subagents.
 
 Status: GATE PASS (2026-07-30; commits 1ec4281 + 9711c34; 2-subagent review pending)
 
-### Gate evidence (store-second-join soak, run 20260730T222632Z)
+### Gate evidence (store-second-join soak, ARCHIVED run 20260730T222632Z)
 
-- **PASS, 0 violations** — 28 windows (26 client-laws), 28 quiescent snapshots, all
+(Numbers below quote the archived PASS run itself — an earlier draft transcribed some
+from the preceding red run; caught by the plan-fidelity reviewer, MINOR-1.)
+
+- **PASS, 0 violations** — 27 windows (26 client-laws), 27 quiescent snapshots, all
   conservation laws green INCLUDING the store integrations (A3 + store.hits source term,
-  A6 monotonic on the 7 store counters, store.queue strict drain at quiescence).
+  A6 monotonic on the store counters, store.queue strict drain at quiescence).
 - **The tier served the second join**: store.hits = 1960 — geometry-exact (2401-column
   R=24 disc minus the ~441-column probe-served loaded disc); disk.submitted did NOT move
-  on the re-serve leg (2126 total = the populate leg's cold reads alone).
-- **Deposits honest**: deposits 2126 = misses 2126 (every cold read deposited at the
-  delivery choke point), deposit_drops 0, queue 0 at rest, errors 0, evictions 0
-  (superflat disc ≈ 241 KB compressed — far under the 64 MB cap).
+  on the re-serve leg (2040 total = the populate leg's cold reads alone; re-serve delta 0
+  against a ceiling of ~500).
+- **Deposits honest**: misses 2040, deposits 2030, deposit_drops 0 — the 10-deficit is
+  out-of-order same-position re-reads losing latest-wins (~80 re-reads exist in the
+  run); it exposed that silent skips were UNCOUNTED → `store.deposit_skips` added
+  (identity: enqueued == deposits + drops + skips, pinned in the shed test). queue 0 at
+  rest, errors 0, evictions 0 (superflat disc ≈ 241 KB compressed vs the 64 MB cap).
 - **Byte parity live**: server probe hashes (FNV of exact wire bytes at the enqueue
   choke point, via the new SoakProbeBridge) stable across the NBT→store leg boundary.
-- **Hit latency**: avg 6 µs, p95 9 µs (the §0 metric-3 5× floor vs ~ms NBT reads will
+  Caveat (reviewer MINOR-3): superflat columns are byte-identical, so the live check
+  can't catch cross-position mixups — per-position exactness is unit-pinned; Phase 2's
+  parity gate runs on varied terrain.
+- **Hit latency**: avg 5 µs, p95 5 µs (the §0 metric-3 5× floor vs ~ms NBT reads will
   clear by orders of magnitude).
 - Two real defects the gate run itself caught (the falsifiable-gate discipline working):
   law A3 was missing the store source term (first run red on it), and the armed probes
   silently read -1 because the probe recorder had NO production caller — fixed with
   SoakProbeBridge + the all-(-1)-is-a-violation hardening (re-checked: old recording
   red, wired re-run green).
-- Scan-resistance: unit-level corpus replay curve (hit ≈ 0.47× residency at 4× cap
-  pressure, LRU ≈ 0 by construction). A LIVE cap-pressure curve needs the benchmark
-  world (the soak disc fits any cap) — folded into Phase 2's memory-vs-SQLite A/B where
-  the plan puts that measurement anyway.
+- Scan-resistance: the replay test now sweeps a real CURVE (caps 1/2/4/8 MB over a
+  ~8 MB corpus — the plan-fidelity reviewer's MAJOR-1: one point is not a curve), each
+  under-cap point asserting hit-rate ≥ 0.35× residency AND live evictions; the at-cap
+  point asserts ~free hits. A LIVE cap-pressure curve still needs the benchmark world
+  (the soak disc fits any cap) — folded into Phase 2's memory-vs-SQLite A/B where the
+  plan puts that measurement anyway. **Gate label: PASS with the live-cap-curve clause
+  explicitly deferred to Phase 2** (the reviewer's honest-label correction).
+
+### Measured hit-rate-vs-cap curve (the gate's scan-resistance clause, final)
+
+`[store-curve] cap=1MB residency=0.14 hitRate=0.00 · cap=2MB residency=0.27 hitRate=0.04
+· cap=4MB residency=0.55 hitRate=0.32 · cap=8MB residency=1.00 hitRate=1.00` (~8 MB
+corpus, two-pass closest-first replay with refill). **Design finding recorded for the
+Phase 2 delete-the-tier A/B:** under DEEP pressure (cap ≲ ⅓ of the hot disc) refill
+churn collapses ANY evict-on-admit policy (each miss's re-deposit evicts a random
+not-yet-reached resident; survival ≈ e^−(misses/C) — measured 0.4% at 8×). Random's
+advantage over LRU lives at moderate pressure (0.32 vs ~0.00 at 4MB/0.55 residency).
+The tier's honest operating envelope is cap ≥ ~⅓ of the hot working set; below that it
+degrades to ~0 hits — gracefully (every miss is just the pre-store NBT path), but the
+64 MB default holds only ~12k normal-terrain columns (~R60 disc) at 5.3 KB/col.
+
+### Phase 1 review round (2 subagents) — dispositions
+
+Plan-fidelity reviewer: 3 of 4 gate clauses honestly met; verdict "nothing blocks
+Phase 2". Fixed same-round: MAJOR-1 (curve sweep, above), MINOR-1 (evidence numbers
+re-quoted from the archive, above), MINOR-2 (`store.deposit_skips` through every schema
+site + the shed-test identity), MINOR-4 (`LodStoreService` invalidate/delete contract
+reworded implementation-neutral — "effective before any subsequent get()", the SQLite
+tier may use hit-path freshness instead of sync removal but must re-derive the argument),
+MINOR-5 (shutdown-flush store fan-out now pinned by
+`shutdownFlushFansQueuedInvalidationsIntoTheStore`), MINOR-6 (gen deposit no longer
+gated on `sent` — a send-queue rejection loses the delivery, not the bytes).
+Standing notes: MINOR-3 (superflat parity weakness — Phase 2 gates on varied terrain),
+MINOR-7 (CLAUDE.md doc debts: source tag now has `store`/src:3, common/store/ exists,
+lodStore config keys, 18 scenarios — update at merge), MINOR-8 (zstd-jni trips the JDK
+restricted-native-access warning; a future JVM needs `--enable-native-access` — folded
+into Phase 2 packaging notes).
+
+Concurrency reviewer: tombstone protocol verified airtight interleaving-by-interleaving,
+counter envelope balanced on every path, deposits once-per-result confirmed, lifecycle +
+v16/VSS surfaces clean; verdict "sound to build Phase 2 on" with one condition. Fixed
+same-round:
+- **MAJOR-1 (condition): containment narrowing** — `storeServedHit` now validates a
+  contract-violating `StoreHit(null bytes)` as an errored miss (it would have delivered
+  an authoritative-miss shape and seeded the miss memo falsely), and the submit lambda
+  regained a last-resort catch that ALWAYS delivers `notFoundFromError` (an escaped
+  throw otherwise wedges the position behind Duplicate.IN_FLIGHT for the session — the
+  exact seam the SQLite engine will sit behind). Consequence: the op-path Error re-throw
+  is REMOVED (it was provably unobservable — FutureTask swallowed it — and would now
+  double-deliver through the new catch; `errorThrowingReadDeliversExactlyOneResult…`
+  re-pins the envelope).
+- MINOR-2: tombstones now also sweep on the batcher's idle poll (deposit-quiet servers
+  accumulated one entry per edited position forever).
+- MINOR-3: the diag token renders the LIVE store mode — `store=unavailable` after a
+  codec-probe degrade, never a lying `store=memory h=0` (new `getLodStore()` accessors).
+- MINOR-4: `mem_hits` counted only after a successful decompress (could exceed `hits`).
+- MINOR-5: deposit rules harmonized (both flavors deposit independent of the payload
+  build/send outcome — a send rejection loses the delivery, not the bytes) + commented.
+- OBS-6 carried: the mask fingerprint is LOAD-BEARING in Phase 2 (memory tier is safe
+  only because mask changes restart the service). OBS-7 accepted (rung-in-reader shape
+  instead of widening ReadOperation — simpler, functionally identical, recorded).
+- Test-only learning: the curve test's burst deposits were SHEDDING at the queue, which
+  silently deflated cap pressure (a mid cap passed with zero evictions) — paced offers
+  now make applied == offered.
 
 What landed (all §1 rung-contract items):
 - **`LodStoreService`** (common/store) with the review-derived boundary invariants in the

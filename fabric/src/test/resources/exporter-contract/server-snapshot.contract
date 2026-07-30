@@ -63,6 +63,7 @@ service.up_to_date=long
 store.checkpoint_ms_max=long
 store.db_bytes=long
 store.deposit_drops=long
+store.deposit_skips=long
 store.deposits=long
 store.errors=long
 store.hits=long

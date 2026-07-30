@@ -25,6 +25,10 @@ public final class LodStoreDiagnostics {
     private final AtomicLong misses = new AtomicLong();
     private final AtomicLong deposits = new AtomicLong();
     private final AtomicLong depositDrops = new AtomicLong();
+    // Deposits consumed but NOT applied (tombstoned by a racing invalidation, or lost
+    // latest-wins to a newer-stamped row). Closes the accounting identity:
+    // enqueued == deposits + deposit_drops + deposit_skips.
+    private final AtomicLong depositSkips = new AtomicLong();
     private final AtomicLong errors = new AtomicLong();
     private final AtomicLong memHits = new AtomicLong();
     private final AtomicLong memEvictions = new AtomicLong();
@@ -55,6 +59,7 @@ public final class LodStoreDiagnostics {
     public void recordMiss() { this.misses.incrementAndGet(); }
     public void recordDeposit() { this.deposits.incrementAndGet(); }
     public void recordDepositDrop() { this.depositDrops.incrementAndGet(); }
+    public void recordDepositSkip() { this.depositSkips.incrementAndGet(); }
     public void recordError() { this.errors.incrementAndGet(); }
     public void recordMemHit() { this.memHits.incrementAndGet(); }
     public void recordMemEviction() { this.memEvictions.incrementAndGet(); }
@@ -71,6 +76,7 @@ public final class LodStoreDiagnostics {
     public long getMisses() { return this.misses.get(); }
     public long getDeposits() { return this.deposits.get(); }
     public long getDepositDrops() { return this.depositDrops.get(); }
+    public long getDepositSkips() { return this.depositSkips.get(); }
     public long getErrors() { return this.errors.get(); }
     public long getMemHits() { return this.memHits.get(); }
     public long getMemEvictions() { return this.memEvictions.get(); }
@@ -99,10 +105,13 @@ public final class LodStoreDiagnostics {
 
     /**
      * The {@code /lsslod diag} DiskReader-line TOKEN (never a new line — the golden-order
-     * tests pin the line list). Off mode renders the bare {@code store=off}; active modes
-     * carry the counters an admin needs to see convergence.
+     * tests pin the line list). Off mode renders the bare {@code store=off}; a NULL mode
+     * means requested-but-degraded (the codec native failed at init) and renders
+     * {@code store=unavailable} so an admin can tell it from a running-but-cold store;
+     * active modes carry the counters an admin needs to see convergence.
      */
     public String formatToken(LodStoreMode mode) {
+        if (mode == null) return "store=unavailable";
         if (mode == LodStoreMode.OFF) return "store=off";
         return String.format(
                 "store=%s h=%d m=%d dep=%d drop=%d err=%d q=%d avg_read=%dus",

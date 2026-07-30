@@ -90,7 +90,7 @@ lag we measured). Field names below are the contract.
  "dirty":{"pending":0,"broadcast_positions":0,"marked_total":0,"suppressed_total":0},
  "bandwidth":{"total_bytes":0},
  "dedup":{"groups":0},
- "store":{"hits":0,"misses":0,"deposits":0,"deposit_drops":0,"errors":0,"mem_hits":0,
+ "store":{"hits":0,"misses":0,"deposits":0,"deposit_drops":0,"deposit_skips":0,"errors":0,"mem_hits":0,
           "mem_evictions":0,"queue":0,"mem_bytes":0,"db_bytes":0,"wal_bytes":0,
           "checkpoint_ms_max":0,"read_avg_us":0,"read_p95_us":0},
  "jvm":{"heap_used_mb":0.0,"gc_count":0,"gc_time_ms":0},

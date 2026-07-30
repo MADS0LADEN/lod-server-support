@@ -277,7 +277,10 @@ public class CommandGameTests {
                     service.getOffThreadProcessor().getDiagnostics(), service.getDiskReader(),
                     service.getBandwidthLimiter(),
                     genService != null ? genService.getDiagnostics() : null,
-                    dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore),
+                    dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore)
+                        == dev.vox.lss.common.store.LodStoreMode.OFF
+                        ? dev.vox.lss.common.store.LodStoreMode.OFF
+                        : (service.getLodStore() != null ? service.getLodStore().mode() : null),
                     service.getOffThreadProcessor().getStoreDiagnostics(),
                     service.getPlayers().values());
 

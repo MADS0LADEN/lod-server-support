@@ -707,6 +707,11 @@ public class RequestProcessingService {
         return this.offThreadProcessor;
     }
 
+    /** The live LOD store (null while lodStore=off OR after the codec-probe degrade). */
+    public dev.vox.lss.common.store.LodStoreService getLodStore() {
+        return this.lodStore;
+    }
+
     public DirtyColumnTracker getDirtyTracker() {
         return this.dirtyTracker;
     }

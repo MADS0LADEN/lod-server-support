@@ -337,6 +337,7 @@ public final class BenchmarkMetricsExporter {
         storeMap.put("misses", storeDiag.getMisses());
         storeMap.put("deposits", storeDiag.getDeposits());
         storeMap.put("deposit_drops", storeDiag.getDepositDrops());
+        storeMap.put("deposit_skips", storeDiag.getDepositSkips());
         storeMap.put("errors", storeDiag.getErrors());
         storeMap.put("mem_hits", storeDiag.getMemHits());
         storeMap.put("mem_evictions", storeDiag.getMemEvictions());
@@ -586,6 +587,7 @@ public final class BenchmarkMetricsExporter {
         store.put("misses", storeDiag.getMisses());
         store.put("deposits", storeDiag.getDeposits());
         store.put("deposit_drops", storeDiag.getDepositDrops());
+        store.put("deposit_skips", storeDiag.getDepositSkips());
         store.put("errors", storeDiag.getErrors());
         store.put("mem_hits", storeDiag.getMemHits());
         store.put("mem_evictions", storeDiag.getMemEvictions());

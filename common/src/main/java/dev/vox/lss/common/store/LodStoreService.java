@@ -25,11 +25,13 @@ package dev.vox.lss.common.store;
  *
  * <p>Threading: {@link #get} runs on reader-pool threads; {@link #deposit} enqueues from
  * the processing thread (the write itself happens on the store's own batcher thread);
- * {@link #invalidate}/{@link #delete} apply SYNCHRONOUSLY from the processing thread —
- * the memory tier has no SQLite single-writer constraint, and a synchronous remove
- * closes the stale-hit window between a tscache invalidation and an async store delete
- * outright (safer than the plan's async-delete + freshness-check shape; recorded in the
- * progress file). Never call anything here from the server thread or a region thread.
+ * {@link #invalidate}/{@link #delete} are called from the processing thread and must be
+ * EFFECTIVE before any subsequent {@code get()} can return the invalidated bytes — the
+ * implementation chooses how: the memory tier removes synchronously + tombstones queued
+ * deposits (no single-writer constraint); a disk tier may instead close the window with
+ * a freshness check on the hit path (the plan §1 ordering paragraph), and must then
+ * re-derive the no-stale-hit argument explicitly. Never call anything here from the
+ * server thread or a region thread.
  */
 public interface LodStoreService {
 

@@ -84,6 +84,9 @@ SERVER_MECHANISM = {
     "store hits": "store.hits",
     "store misses": "store.misses",
     "store deposits": "store.deposits",
+    # Deposits consumed but not applied (tombstoned by an edit race / lost
+    # latest-wins) — ordinary machinery, closes deposits+drops+skips == enqueued.
+    "store deposit skips": "store.deposit_skips",
     "store memory-tier hits": "store.mem_hits",
 }
 CLIENT_CONCERNING = {

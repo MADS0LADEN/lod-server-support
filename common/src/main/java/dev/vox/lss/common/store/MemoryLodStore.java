@@ -119,11 +119,16 @@ public final class MemoryLodStore implements LodStoreService {
             if (dim == null) return null;
             Entry e = dim.get(packed);
             if (e == null) return null;
-            this.diag.recordMemHit();
-            if (e.usize() == 0) return new StoreHit(EMPTY, e.ts());
+            if (e.usize() == 0) {
+                this.diag.recordMemHit();
+                return new StoreHit(EMPTY, e.ts());
+            }
             byte[] raw = this.codec.decompress(e.compressed(), e.usize());
             if (raw.length != e.usize()) throw new IllegalStateException(
                     "decompressed " + raw.length + " != stored usize " + e.usize());
+            // Counted only AFTER a successful decompress (review MINOR-4): a failed hit
+            // resolves as an errored miss below and must not inflate mem_hits past hits.
+            this.diag.recordMemHit();
             return new StoreHit(raw, e.ts());
         } catch (Throwable t) {
             // Contained: count, warn once, DELETE the poisoned entry (a repeatable
@@ -213,7 +218,13 @@ public final class MemoryLodStore implements LodStoreService {
             } catch (InterruptedException e) {
                 return; // shutdown
             }
-            if (dep == null) continue;
+            if (dep == null) {
+                // Idle sweep (review MINOR-2): invalidations tombstone on every edit even
+                // with zero LSS clients online (no deposits → the apply-side sweep never
+                // runs) — days of edits would otherwise accumulate tombstones unboundedly.
+                sweepTombstones(System.nanoTime());
+                continue;
+            }
             try {
                 applyDeposit(dep);
             } catch (Throwable t) {
@@ -235,13 +246,19 @@ public final class MemoryLodStore implements LodStoreService {
         var tombs = this.tombstones.get(dep.dimension());
         if (tombs != null) {
             Long t = tombs.get(dep.packed());
-            if (t != null && t >= dep.enqueuedNanos()) return;
+            if (t != null && t >= dep.enqueuedNanos()) {
+                this.diag.recordDepositSkip();
+                return;
+            }
         }
         var dim = this.byDimension.computeIfAbsent(dep.dimension(), k -> new ConcurrentHashMap<>());
         // Latest-wins by STORED timestamp: an older deposit never overwrites a newer row
         // (equal stamps overwrite — same-second serves carry equivalent content).
         Entry existing = dim.get(dep.packed());
-        if (existing != null && existing.ts() > dep.ts()) return;
+        if (existing != null && existing.ts() > dep.ts()) {
+            this.diag.recordDepositSkip();
+            return;
+        }
         byte[] compressed = dep.bytes().length == 0 ? EMPTY : this.codec.compress(dep.bytes());
         var entry = new Entry(compressed, dep.bytes().length, dep.ts());
         Entry replaced = dim.put(dep.packed(), entry);

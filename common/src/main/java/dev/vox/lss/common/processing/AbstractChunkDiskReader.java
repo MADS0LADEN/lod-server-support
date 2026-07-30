@@ -172,6 +172,21 @@ public abstract class AbstractChunkDiskReader {
                     if (!isShutdown()) {
                         readAndDeliver(playerUuid, chunkX, chunkZ, dimension, submissionOrder, operation);
                     }
+                } catch (Throwable t) {
+                    // Last-resort containment (Phase 1 review MAJOR-1): every expected
+                    // failure is handled INSIDE readAndDeliver (the store-rung belt, the
+                    // op-region catch); reaching here means an unexpected throw outside
+                    // those islands (result construction, queue append, an op-path Error
+                    // re-thrown after its own bookkeeping). A result MUST still be
+                    // delivered or the pending entry + dedup group wedge the position
+                    // behind Duplicate.IN_FLIGHT for the whole session. Disk counters
+                    // are deliberately untouched (state unknown — identity drift only on
+                    // OOM-class events); a duplicate result for the Error path resolves
+                    // as the documented ghost (pending already gone, silent drop).
+                    LSSLogger.error("Unexpected failure delivering disk read at "
+                            + chunkX + ", " + chunkZ, t);
+                    addResult(playerUuid, ChunkReadResult.notFoundFromError(
+                            playerUuid, chunkX, chunkZ, dimension, submissionOrder));
                 } finally {
                     this.tasksInFlight.decrementAndGet();
                 }
@@ -235,6 +250,14 @@ public abstract class AbstractChunkDiskReader {
             s.diagnostics().recordMiss();
             return false;
         }
+        if (hit.sectionBytes() == null) {
+            // Contract violation (all-air must be byte[0], never null — a null here
+            // would deliver as an authoritative miss and seed the miss memo falsely).
+            // Contain as an errored miss; the NBT ladder serves the truth.
+            s.diagnostics().recordError();
+            s.diagnostics().recordMiss();
+            return false;
+        }
         s.diagnostics().recordHit(System.nanoTime() - t0);
         boolean allAir = hit.sectionBytes().length == 0;
         byte[] bytes = allAir ? null : hit.sectionBytes();
@@ -280,10 +303,11 @@ public abstract class AbstractChunkDiskReader {
             // Error/timeout TRIAGED as not-found (law A5's disk.errors fold) — says nothing
             // about existence, so it must never seed the miss memo.
             addResult(playerUuid, ChunkReadResult.notFoundFromError(playerUuid, chunkX, chunkZ, dimension, submissionOrder));
-            // An Error (SOE on corrupt NBT, OOM) is re-thrown AFTER bookkeeping + result
-            // delivery — best-effort only (FutureTask captures it into a Future nobody
-            // inspects); the containment above is what matters, the pool thread survives.
-            if (e instanceof Error err) throw err;
+            // Deliberately NO Error re-throw (the pre-Phase-1 shape re-threw best-effort
+            // into a FutureTask nobody inspects — provably unobservable): the last-resort
+            // catch in the submit lambda would now see it and deliver a SECOND result,
+            // breaking the one-result-per-submit envelope. Containment + delivery above
+            // are complete; the pool thread survives either way.
             return;
         }
 

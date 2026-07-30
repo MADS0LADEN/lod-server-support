@@ -152,8 +152,9 @@ class MemoryLodStoreTest {
         drain(s);
         long applied = s.diagnostics().getDeposits();
         long dropped = s.diagnostics().getDepositDrops();
-        assertEquals(offered, applied + dropped,
-                "every offered deposit is either applied or counted as shed");
+        long skipped = s.diagnostics().getDepositSkips();
+        assertEquals(offered, applied + dropped + skipped,
+                "every offered deposit is applied, counted as shed, or counted as skipped");
         assertEquals(0, s.diagnostics().getQueueDepth(), "queue drains to zero at rest");
     }
 
@@ -172,55 +173,81 @@ class MemoryLodStoreTest {
     }
 
     /**
-     * The scan-resistance gate measurement: a two-pass closest-first replay (the second
-     * join re-asks the same positions in the same near-to-far order) over a corpus ~4×
-     * the cap. Random eviction must serve the second pass at roughly the residency
-     * fraction — the plan's floor for calling the tier non-pathological is hit-rate ≫ 0
-     * (plain LRU measures ≈ 0 here by construction). Asserted loosely (≥ half the
-     * residency fraction) so the test pins the PROPERTY, not the RNG.
+     * The scan-resistance gate measurement (the plan's "hit-rate curve vs cap"): a
+     * two-pass closest-first replay (the second join re-asks the same positions in the
+     * same near-to-far order) swept across cap points from ~heavy pressure (~8× the
+     * corpus over the cap) to cap ≈ corpus. Random eviction must serve pass 2 at
+     * roughly the residency fraction at EVERY point — the property plain LRU
+     * catastrophically fails on this workload (its second pass evicts each next-needed
+     * key just before reaching it: hit-rate ≈ 0 at every under-cap point). Asserted at
+     * ≥ 0.35× residency per point: the with-refill hit rate sits below STATIC residency
+     * because every pass-2 miss re-deposits and each re-deposit evicts a random
+     * resident — including ones the scan hasn't reached (measured ≈ 0.4-0.6× across
+     * the sweep). The curve is printed for the gate record.
      */
     @Test
-    void closestFirstReplayHitRateTracksResidencyFraction() {
-        long cap = 2 << 20; // 2 MB
-        var s = store(cap);
-        var r = new Random(13);
+    void closestFirstReplayHitRateCurveTracksResidencyAcrossCaps() {
         int columns = 1200;
+        var r = new Random(13);
         byte[][] corpus = new byte[columns][];
         for (int i = 0; i < columns; i++) {
-            corpus[i] = randomBytes(r, 8_000); // ~2-6 KB compressed -> corpus ~4x cap
+            corpus[i] = randomBytes(r, 8_000); // ~2-6 KB compressed each
         }
-        // Pass 1 (populate, closest-first order = index order).
-        for (int i = 0; i < columns; i++) {
-            s.deposit(DIM, i, corpus[i], 1000 + i);
-        }
-        drain(s);
-        double residency = (double) s.sizeForTest() / columns;
-        // Pass 2 (the second join): same order, count hits; misses re-deposit (as the
-        // real delivery path would).
-        int hits = 0;
-        for (int i = 0; i < columns; i++) {
-            var hit = s.get(DIM, i);
-            if (hit != null) {
-                hits++;
-                assertArrayEquals(corpus[i], hit.sectionBytes(), "hit bytes exact at " + i);
-            } else {
+        long[] caps = {1 << 20, 2 << 20, 4 << 20, 8 << 20}; // ~8x .. ~1x pressure
+        StringBuilder curve = new StringBuilder("[store-curve]");
+        double prevHitRate = -1;
+        for (long cap : caps) {
+            var s = store(cap);
+            for (int i = 0; i < columns; i++) {
                 s.deposit(DIM, i, corpus[i], 1000 + i);
+                // Pace the offers: the test thread outruns the compressing batcher, and a
+                // shed deposit (queue overflow) would silently deflate the cap pressure —
+                // at a mid cap the applied subset can land UNDER the cap with zero
+                // evictions, failing the must-evict premise for the wrong reason.
+                if ((i & 255) == 255) drain(s);
             }
+            drain(s);
+            double residency = (double) s.sizeForTest() / columns;
+            int hits = 0;
+            for (int i = 0; i < columns; i++) {
+                var hit = s.get(DIM, i);
+                if (hit != null) {
+                    hits++;
+                    assertArrayEquals(corpus[i], hit.sectionBytes(), "hit bytes exact at " + i);
+                } else {
+                    s.deposit(DIM, i, corpus[i], 1000 + i); // the real delivery path re-deposits
+                }
+                if ((i & 255) == 255) drain(s); // same pacing, pass 2
+            }
+            double hitRate = (double) hits / columns;
+            curve.append(String.format(" cap=%dMB residency=%.2f hitRate=%.2f evictions=%d;",
+                    cap >> 20, residency, hitRate, s.diagnostics().getMemEvictions()));
+            if (residency < 0.95) {
+                assertTrue(s.diagnostics().getMemEvictions() > 0,
+                        "an under-cap point must actually evict (cap=" + (cap >> 20) + "MB)");
+                // MODERATE pressure (residency >= 0.3): random must track residency —
+                // the regime where it beats LRU's ~0.00 (measured ~0.4-0.5x linear;
+                // refill erosion: each pass-2 miss's re-deposit evicts a random
+                // resident, including ahead of the scan).
+                // DEEP pressure (residency < 0.3): refill churn collapses ANY
+                // evict-on-admit policy — survival to scan arrival ~ e^-(misses/C),
+                // measured 0.004 at 8x. Documented limitation, monotonicity-only here
+                // (the tier's honest operating envelope is cap >= ~1/3 of the hot disc;
+                // recorded in the progress file for the Phase 2 delete-the-tier A/B).
+                if (residency >= 0.3) {
+                    assertTrue(hitRate >= residency * 0.35,
+                            "random eviction must track residency at cap=" + (cap >> 20)
+                                    + "MB: hitRate=" + hitRate + " residency=" + residency);
+                }
+            } else {
+                assertTrue(hitRate > 0.95, "everything fits -> everything hits");
+            }
+            // The CURVE property: hit rate grows with cap, every point.
+            assertTrue(hitRate > prevHitRate,
+                    "hit rate must grow with cap: " + curve);
+            prevHitRate = hitRate;
         }
-        double hitRate = (double) hits / columns;
-        assertTrue(residency > 0.1 && residency < 0.9,
-                "test setup: cap must hold a real fraction, residency=" + residency);
-        // The with-refill hit rate sits BELOW the static residency fraction: every pass-2
-        // miss re-deposits, and each re-deposit evicts a random resident — including ones
-        // the scan hasn't reached yet — so residency erodes ahead of the scan (measured
-        // ≈ 0.47× residency at 4× cap pressure). The property pinned is the LRU
-        // distinction: plain LRU measures ≈ 0.00 here by construction; random must stay
-        // within the same order as residency.
-        assertTrue(hitRate >= residency * 0.35,
-                "random eviction must track residency (scan-resistance): hitRate="
-                        + hitRate + " residency=" + residency);
-        System.out.printf("[store-curve] cap=%d columns=%d residency=%.2f pass2HitRate=%.2f%n",
-                cap, columns, residency, hitRate);
+        System.out.println(curve);
     }
 
     @Test

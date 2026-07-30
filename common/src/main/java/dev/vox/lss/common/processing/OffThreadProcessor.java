@@ -832,7 +832,9 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                     // result (not per dedup recipient), strictly AFTER the stale guard: an
                     // edit-overtaken read must never populate the store (§1). Store hits
                     // are not re-deposited. All-air (null section bytes here) normalizes
-                    // to byte[0] at the store boundary.
+                    // to byte[0] at the store boundary. Deliberately independent of the
+                    // per-recipient payload-build outcome (the gen flavor matches): a
+                    // send rejection loses the delivery, not the bytes.
                     if (this.store != null && !result.fromStore()) {
                         this.store.deposit(result.dimension(), packed,
                                 result.sectionBytes(), result.columnTimestamp());
@@ -1238,8 +1240,10 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
             // LOD-store deposit, generation flavor — same delivery-path choke point,
             // same stale-guard condition (a genStale outcome carries pre-edit bytes and
             // must not populate the store). All-air deposits byte[0] so a warm all-air
-            // column never re-reads NBT (§1 all-air normalization).
-            if (this.store != null && !genStale && (sent || allAir)) {
+            // column never re-reads NBT (§1 all-air normalization). Deliberately NOT
+            // gated on `sent`: a send-queue rejection loses the delivery, not the bytes
+            // — depositing anyway makes the re-ask a warm hit instead of a re-generate.
+            if (this.store != null && !genStale) {
                 this.store.deposit(entry.dimension(), packed,
                         allAir ? null : genSections, entry.columnTimestamp());
             }

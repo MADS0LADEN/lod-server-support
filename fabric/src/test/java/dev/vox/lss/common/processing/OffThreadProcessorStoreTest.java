@@ -276,4 +276,18 @@ class OffThreadProcessorStoreTest {
         assertEquals(2, rig.store.invalidations.poll().length);
         rig.shutdown();
     }
+
+    @Test
+    void shutdownFlushFansQueuedInvalidationsIntoTheStore() {
+        // Invalidations still queued when shutdown lands ride the sentinel take (or the
+        // exit flush) into the store — moot for the memory tier, load-bearing the day a
+        // disk tier persists rows across the restart (review MINOR-5). No cycle runs
+        // between the post and the shutdown, so whichever exit path wins must fan out.
+        var rig = new Rig(false);
+        rig.proc.invalidateTimestamps(DIM, new long[]{PositionUtil.packPosition(9, 9)});
+        rig.proc.shutdown();
+        assertTrue(!rig.store.invalidations.isEmpty(),
+                "queued invalidations must reach the store on the shutdown path");
+        rig.reader.shutdown();
+    }
 }

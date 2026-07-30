@@ -248,6 +248,7 @@ SERVER_MONOTONIC = (
     # The gauges (store.queue is a SERVER_DRAIN; mem_bytes/db_bytes/wal_bytes/
     # checkpoint_ms_max/read_avg_us) are deliberately absent from this whitelist.
     "store.hits", "store.misses", "store.deposits", "store.deposit_drops",
+    "store.deposit_skips",
     "store.errors", "store.mem_hits", "store.mem_evictions",
 )
 CLIENT_MONOTONIC = (
@@ -2475,6 +2476,7 @@ def _srv(wall=1000, seg=0, over=None):
                            "order_gated": 0, "inversions": 0},
             "dirty": {"pending": 0, "broadcast_positions": 0, "suppressed_total": 0},
             "store": {"hits": 0, "misses": 0, "deposits": 0, "deposit_drops": 0,
+                      "deposit_skips": 0,
                       "errors": 0, "mem_hits": 0, "mem_evictions": 0, "queue": 0,
                       "mem_bytes": 0, "db_bytes": 0, "wal_bytes": 0,
                       "checkpoint_ms_max": 0, "read_avg_us": 0, "read_p95_us": 0},
