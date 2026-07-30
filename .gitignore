@@ -35,3 +35,4 @@ oracle/
 .worktrees/
 
 __pycache__/
+.pid
