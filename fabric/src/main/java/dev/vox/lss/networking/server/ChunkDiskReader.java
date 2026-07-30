@@ -3,6 +3,7 @@ package dev.vox.lss.networking.server;
 import dev.vox.lss.common.Brand;
 import dev.vox.lss.common.LSSLogger;
 import dev.vox.lss.common.processing.AbstractChunkDiskReader;
+import dev.vox.lss.compat.MoonriseReadCompat;
 import dev.vox.lss.mixin.AccessorIOWorker;
 import dev.vox.lss.mixin.AccessorServerChunkCache;
 import dev.vox.lss.mixin.AccessorSimpleRegionStorage;
@@ -13,6 +14,7 @@ import net.minecraft.util.thread.PriorityConsecutiveExecutor;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.storage.RegionFileStorage;
 
+import java.lang.invoke.WrongMethodTypeException;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -49,6 +51,19 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
     // foreground path with the adaptive throttle engaged. Never cleared — no flapping.
     private volatile boolean backgroundIncompatible = false;
 
+    // One-way latch for the Moonrise rung, TYPED to the linkage/adaptation failure domain only
+    // (WrongMethodTypeException / adaptation ClassCastException / LinkageError — deterministic
+    // "the resolved handle doesn't fit" shapes where every future invoke would fail identically).
+    // The CCE rung is deliberately broader than pure handle adaptation: it also catches a cast
+    // failing synchronously INSIDE Moonrise's body (impossible on 1.1.0 — its mixin interfaces
+    // are applied to ServerLevel itself — but a future Moonrise could change that); accepted,
+    // because the degradation is fail-safe (warn once + the exact pre-bridge ladder).
+    // Moonrise's own synchronous runtime throws (e.g. a read racing server shutdown hits
+    // PrioritisedTask.queue()'s IllegalStateException) are per-chunk triage and must NOT latch —
+    // on Paper the identical throw is per-read triage with no latch, and this rung mirrors Paper.
+    private volatile boolean moonriseIncompatible = false;
+    private final AtomicBoolean moonriseIncompatibleWarned = new AtomicBoolean();
+
     private final boolean useNbtTranscode;
 
     /** Convenience for tests/gametests: production defaults for the serialize path
@@ -67,14 +82,7 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
                                   int chunkX, int chunkZ, long submissionOrder) {
         var registryAccess = level.registryAccess();
         var chunkMap = ((AccessorServerChunkCache) level.getChunkSource()).getChunkMap();
-        NbtSectionSerializer.ChunkNbtRead read;
-        if (!this.useBackgroundReadPriority || this.backgroundIncompatible) {
-            // Config rollback → foreground, no throttle; or already-latched incompatible → foreground
-            // (the throttle was engaged at latch time). Skip the accessor entirely once latched.
-            read = (cx, cz) -> chunkMap.read(new ChunkPos(cx, cz));
-        } else {
-            read = backgroundReaderOrFallback(chunkMap);
-        }
+        NbtSectionSerializer.ChunkNbtRead read = chooseReadPath(level, chunkMap);
         // The mask entry is captured at submit time (the level is in hand here); the read
         // itself runs on the reader pool where only the dimension string survives.
         var maskEntry = XrayMaskManager.entryForActive(level);
@@ -83,6 +91,92 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
         submitRead(playerUuid, chunkX, chunkZ, dimension, submissionOrder,
                 () -> NbtSectionSerializer.readAndSerializeSections(read, registryAccess, chunkX, chunkZ,
                         maskEntry, minSectionY, maxSectionY, this.useNbtTranscode));
+    }
+
+    /**
+     * The per-submit read ladder. Package-private (and {@code level}-tolerant of null) so the
+     * rung ORDER is unit-testable without a live {@code ServerLevel}:
+     * <ol>
+     * <li>Config rollback ({@code useBackgroundReadPriority=false}) or a latched
+     *     {@code backgroundIncompatible} → foreground {@code chunkMap.read} (unchanged — the
+     *     flag stays a true full rollback on every platform/mod combination, mirroring Paper;
+     *     once latched, the throttle was engaged at latch time and the accessor is skipped).</li>
+     * <li>The Moonrise rung (NEW): when Moonrise-Fabric is present and its IO API resolved,
+     *     read via {@code loadDataAsync(..., Priority.LOW)} — consulted BEFORE the IOWorker
+     *     accessor, because on a Moonrise server that accessor can only ever NPE on the nulled
+     *     worker and latch the C2ME-style fallback. Moonrise LOW is the read protection (the
+     *     analogue of Paper's), so the adaptive throttle stays disengaged. Bonus over the
+     *     vanilla background path: {@code loadDataAsync} serves in-progress writes, so this
+     *     rung has no read-your-writes gap.</li>
+     * <li>The vanilla IOWorker BACKGROUND path with its C2ME-style latch+throttle fallback
+     *     (unchanged — and the automatic degradation target if the Moonrise rung latches).</li>
+     * </ol>
+     */
+    NbtSectionSerializer.ChunkNbtRead chooseReadPath(ServerLevel level, ChunkMap chunkMap) {
+        if (!this.useBackgroundReadPriority || this.backgroundIncompatible) {
+            return foregroundRead(chunkMap);
+        }
+        if (!this.moonriseIncompatible) {
+            var bridge = moonriseBridgeOrNull();
+            if (bridge != null) {
+                return moonriseRead(bridge, level, chunkMap);
+            }
+        }
+        return backgroundReaderOrFallback(chunkMap);
+    }
+
+    /** The plain foreground read. Package-private seam so ladder tests can observe which rung
+     *  was chosen (and the inline latch fallback) without a live {@code ChunkMap}. */
+    NbtSectionSerializer.ChunkNbtRead foregroundRead(ChunkMap chunkMap) {
+        return (cx, cz) -> chunkMap.read(new ChunkPos(cx, cz));
+    }
+
+    /** Package-private seam: the resolved Moonrise LOW-priority read, or null. Production
+     *  consults the per-JVM bridge holder; tests inject recording/throwing bridges. */
+    MoonriseReadCompat.LowPriorityRead moonriseBridgeOrNull() {
+        return MoonriseReadCompat.resolveOrNull();
+    }
+
+    /**
+     * The Moonrise rung's read, with the TYPED failure split (see {@code moonriseIncompatible}):
+     * a linkage/adaptation throw latches + warns once + falls back inline to the foreground read
+     * (this read and the already-queued cohort must not burst {@code disk.errors} — the closure
+     * re-checks the latch at execution time, since up to threads + 32×threads closures bound
+     * before the latch can still be queued); any other Throwable propagates to the base's
+     * per-chunk error triage and the rung stays active — Paper parity.
+     */
+    private NbtSectionSerializer.ChunkNbtRead moonriseRead(MoonriseReadCompat.LowPriorityRead bridge,
+                                                           ServerLevel level, ChunkMap chunkMap) {
+        return (cx, cz) -> {
+            if (this.moonriseIncompatible) {
+                return foregroundRead(chunkMap).read(cx, cz);
+            }
+            try {
+                return bridge.read(level, cx, cz);
+            } catch (WrongMethodTypeException | ClassCastException | LinkageError t) {
+                onMoonriseIncompatible(t);
+                return foregroundRead(chunkMap).read(cx, cz);
+            }
+        };
+    }
+
+    /** Latch the Moonrise rung incompatible (one-way) and warn exactly once. Subsequent submits
+     *  fall down the vanilla ladder — which on a real Moonrise server then latches
+     *  {@code backgroundIncompatible} (nulled worker) and engages the throttle: exactly the
+     *  pre-bridge behavior, reached automatically. */
+    private void onMoonriseIncompatible(Throwable t) {
+        this.moonriseIncompatible = true;
+        if (this.moonriseIncompatibleWarned.compareAndSet(false, true)) {
+            warnMoonriseIncompatible(t);
+        }
+    }
+
+    /** Emit the single Moonrise-latch warning. Overridable (package-private) for the warn-once pin. */
+    void warnMoonriseIncompatible(Throwable t) {
+        LSSLogger.warn("Moonrise LOW-priority read invoke failed with a linkage/adaptation error —"
+                + " disabling the Moonrise read path for this session and falling back to the"
+                + " standard read ladder. A Moonrise update likely changed its internals;"
+                + " please report this.", t);
     }
 
     /**
@@ -149,11 +243,17 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
     }
 
     /** Emit the single fallback warning. Overridable (package-private) so a test can confirm it
-     *  fires exactly once across repeated triggering reads. */
+     *  fires exactly once across repeated triggering reads. Names Moonrise instead of C2ME when
+     *  the Moonrise mod is present (reachable there only if the bridge failed to resolve or
+     *  latched incompatible — the fixed C2ME text would be misleading). */
     void warnBackgroundUnavailable() {
+        String cause = MoonriseReadCompat.moonriseDetected()
+                ? "which Moonrise causes by replacing vanilla chunk IO (and the Moonrise"
+                        + " LOW-priority read path is unavailable — see the preceding warning)"
+                : "which a chunk-IO-overhaul mod (e.g. C2ME) causes by replacing vanilla chunk IO";
         LSSLogger.warn("Background-priority disk reads unavailable — vanilla's IOWorker executor is"
-                + " absent, which a chunk-IO-overhaul mod (e.g. C2ME) causes by replacing vanilla"
-                + " chunk IO. " + Brand.shortName() + " switched to adaptive read throttling so LOD reads still yield to"
+                + " absent, " + cause + ". "
+                + Brand.shortName() + " switched to adaptive read throttling so LOD reads still yield to"
                 + " gameplay. Set useBackgroundReadPriority=false to disable read protection entirely.");
     }
 
@@ -168,6 +268,27 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
     /** Package-private test seam: whether the one-way incompatible latch has fired. */
     boolean isBackgroundIncompatibleForTest() {
         return this.backgroundIncompatible;
+    }
+
+    /** Package-private test seam: whether the Moonrise-rung one-way latch has fired. */
+    boolean isMoonriseIncompatibleForTest() {
+        return this.moonriseIncompatible;
+    }
+
+    /**
+     * The Moonrise rung is live-only (no CI runtime loads the mod), so — like the C2ME
+     * fallback's {@code read_throttle=ENGAGED} token — it gets an end-to-end diagnostics
+     * signal: {@code read_path=moonrise-low} while active, {@code read_path=moonrise-incompatible}
+     * after the typed latch. Absent entirely when Moonrise is absent, the config flag is off,
+     * or the vanilla path latched first — existing diagnostics goldens do not move.
+     */
+    @Override
+    public String getDiagnostics() {
+        String base = super.getDiagnostics();
+        if (!this.useBackgroundReadPriority) return base;
+        if (this.moonriseIncompatible) return base + ", read_path=moonrise-incompatible";
+        if (this.backgroundIncompatible) return base;
+        return moonriseBridgeOrNull() != null ? base + ", read_path=moonrise-low" : base;
     }
 
     private NbtSectionSerializer.ChunkNbtRead backgroundRead(PriorityConsecutiveExecutor executor,
