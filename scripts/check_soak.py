@@ -169,6 +169,17 @@ SERVER_MOVING = (
 # Quiescence: gauges that must be ZERO at both endpoints of the pair.
 # store.queue (the LOD-store write-batcher depth) is a strict drain: deposits only happen
 # on serves, so a quiescent server has nothing left to batch and the queue must be empty.
+# THE BATCHER CONTRACT THIS GATE IMPOSES (Phase 2 must be designed to it, or every
+# store-on soak reds on law-coverage — Phase 0 correctness-review F1):
+#   1. IDLE FLUSH: a "<64-row txn" batcher must also flush on a timer well inside the 5 s
+#      snapshot cadence — a residual sub-batch tail held until the next serve would keep
+#      store.queue nonzero at EVERY candidate pair and zero out the quiescent windows.
+#   2. DRAIN-SIDE GAUGE: setQueueDepth must be updated when the batcher DRAINS, not only
+#      on enqueue (a stale nonzero gauge has the same window-killing effect).
+#   3. OFF-SERVE PRODUCERS STAY OFF THIS GAUGE: the Paper periodic re-sweep (autosave
+#      cadence — 5 s on the Folia soak staging!) and other timer-driven store ops must
+#      not ride store.queue; give them their own gauge OUTSIDE SERVER_DRAINS (cf.
+#      dirty.pending's tolerance for exactly this shape).
 SERVER_DRAINS = ("disk.pending", "generation.active", "dirty.pending", "store.queue")
 PLAYER_DRAINS = ("held_sync", "held_gen", "send_queue", "backlog")
 # backlog (v17) is a strict drain: a want entry retained by a full slot / exhausted disk pool is

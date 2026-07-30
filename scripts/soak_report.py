@@ -132,9 +132,9 @@ HIGH_WATER = {
     "store wal bytes": "store.wal_bytes",
     "store mem bytes": "store.mem_bytes",
 }
-# Local copy of check_soak.SERVER_DRAINS — keep in sync by hand (store.queue added with
-# the LOD-store counter family).
-DRAIN_GAUGES = ("disk.pending", "generation.active", "dirty.pending", "store.queue")
+# Shared with the checker (section_margins already references CS.SERVER_MOVING the same
+# way) — never a hand-copy: the store.queue addition proved hand-sync drifts.
+DRAIN_GAUGES = CS.SERVER_DRAINS
 DEFAULT_INTERVAL_MS = 5000
 CADENCE_GAP_FACTOR = 1.5
 MIN_TPS = 19.5

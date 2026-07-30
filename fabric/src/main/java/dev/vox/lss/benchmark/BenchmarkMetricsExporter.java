@@ -589,9 +589,11 @@ public final class BenchmarkMetricsExporter {
         store.put("errors", storeDiag.getErrors());
         store.put("mem_hits", storeDiag.getMemHits());
         store.put("mem_evictions", storeDiag.getMemEvictions());
+        store.put("queue", storeDiag.getQueueDepth());
         store.put("mem_bytes", storeDiag.getMemBytes());
         store.put("db_bytes", storeDiag.getDbBytes());
         store.put("wal_bytes", storeDiag.getWalBytes());
+        store.put("checkpoint_ms_max", storeDiag.getCheckpointMsMax());
         store.put("read_avg_us", storeDiag.getReadAvgMicros());
         store.put("read_p95_us", storeDiag.getReadP95Micros());
         result.put("store", store);

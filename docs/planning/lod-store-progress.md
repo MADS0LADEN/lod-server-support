@@ -209,6 +209,26 @@ Verdict: decisions genuinely made on data, deviations explicit; gate claimable o
 - MINOR-4 (micro-bench nits) accepted as direction-safe; MINOR-5 (≥3 worlds) stays a
   documented §4 caveat.
 
+Correctness reviewer verdict: "sound to build Phase 1 on" — every schema surface carries
+the same store family consistently; packaging verified in the built artifacts incl. VSS
+pair; measurement tooling wired to real key names/frame formats. Four findings, all
+fixed same-round:
+- **F1 (the important one): `store.queue` as a STRICT quiescence drain imposes a batcher
+  CONTRACT on Phase 2**, now written into the SERVER_DRAINS comment in check_soak.py:
+  (1) idle/timer flush well inside the 5 s snapshot cadence (a held sub-64-row tail
+  would zero out every quiescence window), (2) drain-side setQueueDepth updates, (3)
+  off-serve producers (Paper periodic re-sweep — 5 s autosave on Folia staging!) get
+  their own gauge OUTSIDE SERVER_DRAINS. The Phase 2 batcher is designed to this gate.
+- F2: benchmark server.json store site gained `queue` + `checkpoint_ms_max` (site parity).
+- F3: release_check gained the ABSENCE assertion (_check_native_strip — an out-of-matrix
+  native shipping = strip regression, +1 selftest case, 56 total); slimStoreDepJars'
+  keep lists are now task inputs (stale-cache fix).
+- F4: soak_report's DRAIN_GAUGES now references CS.SERVER_DRAINS (hand-copy deleted).
+
+**PHASE 0 GATE: MET** — baselines recorded (bands, warm-join smoke, corpus arms), codec
+(zstd-1, deflate-1 fallback) + page-size (16k) + mmap (off) decisions made on data,
+counters/packaging/harness infra landed and reviewed by 2 subagents.
+
 ### Phase 0 remaining / deferred
 - Deferred to Phase 2 (live-load validation, where sqlite actually loads): the Knot
   duplicate-sqlite-jdbc collision test (needs a second live mod jar), `org.sqlite.tmpdir`

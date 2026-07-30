@@ -218,6 +218,25 @@ def _check_zstd_natives(base, where, names, problems):
                             "the store silently degrades to off on that platform")
 
 
+# Native roots the strip lists prune (mirrors the gradle strip lists). Any native FILE
+# under these that is NOT in the kept matrix means the strip regressed and the full
+# multi-platform payload (+~10 MB) is shipping — presence checks alone stay green then.
+STORE_NATIVE_ROOTS = ("org/sqlite/native/", "linux/", "win/", "darwin/", "freebsd/", "aix/")
+
+
+def _check_native_strip(base, where, names, problems):
+    kept_dirs = tuple({n[:n.rfind("/") + 1] for n in SQLITE_NATIVES}) + ZSTD_NATIVE_DIRS
+    stray = [n for n in names
+             if any(n.startswith(r) for r in STORE_NATIVE_ROOTS)
+             and (n.endswith(".so") or n.endswith(".dll") or n.endswith(".dylib")
+                  or n.endswith(".jnilib"))
+             and not any(n.startswith(d) for d in kept_dirs)]
+    if stray:
+        problems.append(f"{base}: {where} carries {len(stray)} native(s) outside the "
+                        f"supported matrix (e.g. {stray[0]}) — the native strip regressed "
+                        "and the full multi-platform payload is shipping")
+
+
 def check_store_natives_fabric(jar, problems):
     """The Fabric jar nests native-stripped sqlite-jdbc/zstd-jni as Jar-in-Jar; the
     fabric.mod.json 'jars' entries and the matrix inside each nested jar are the ship gate."""
@@ -239,6 +258,8 @@ def check_store_natives_fabric(jar, problems):
                             "the loader will never load it")
     _check_sqlite_natives(base, "nested sqlite-jdbc-slim.jar", set(sq), problems)
     _check_zstd_natives(base, "nested zstd-jni-slim.jar", set(zs), problems)
+    _check_native_strip(base, "nested sqlite-jdbc-slim.jar", set(sq), problems)
+    _check_native_strip(base, "nested zstd-jni-slim.jar", set(zs), problems)
 
 
 def check_store_natives_paper(jar, problems):
@@ -254,6 +275,7 @@ def check_store_natives_paper(jar, problems):
                         "sqlite native loader; it must stay at org/sqlite")
     _check_sqlite_natives(base, "shadow jar", names, problems)
     _check_zstd_natives(base, "shadow jar", names, problems)
+    _check_native_strip(base, "shadow jar", names, problems)
 
 
 def check_vss_fabric_identity(jar, problems):
@@ -1217,6 +1239,16 @@ def _selftest():
         check_store_natives_paper(sn_pap, p)
         check(any("Mac/aarch64" in m for m in p),
               f"paper jar missing a sqlite native not caught: {p}")
+        # a regressed strip (an out-of-matrix native shipping) must be caught (F3)
+        sn_pap_fat = os.path.join(td, "store-pap-fat.jar")
+        fat_entries = _store_paper_entries()
+        fat_entries["org/sqlite/native/Linux-Android/aarch64/libsqlitejdbc.so"] = "elf"
+        fat_entries["linux/ppc64le/libzstd-jni-1.5.7-3.so"] = "elf"
+        _make_jar(sn_pap_fat, fat_entries)
+        p = []
+        check_store_natives_paper(sn_pap_fat, p)
+        check(any("outside the supported matrix" in m for m in p),
+              f"regressed native strip not caught: {p}")
 
         # ---- discover(): end-to-end wiring over a synthetic build tree ----
         # The leaf checks above prove each check works; these prove discover() actually

@@ -205,6 +205,10 @@ def storeNativeRoots = ['org/sqlite/native/', 'linux/', 'win/', 'darwin/', 'free
 tasks.register('slimStoreDepJars') {
     description = 'Repackages the LOD-store deps as native-stripped nested mod jars.'
     inputs.files(configurations.storeDeps)
+    // The keep/root lists are task inputs too — without this, editing them leaves the
+    // cached slim jars stale until a clean (Phase 0 correctness-review F3).
+    inputs.property('storeNativeKeep', storeNativeKeep)
+    inputs.property('storeNativeRoots', storeNativeRoots)
     outputs.dir(storeDepSlimDir)
     doLast {
         def outDir = storeDepSlimDir.get().asFile
