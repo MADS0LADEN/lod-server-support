@@ -2032,9 +2032,16 @@ def check_store_offline_populate(ctx):
                                       "server.store.deposits"])
 def check_store_offline_mutate(ctx):
     """Phase 2: a REAL edit reaches the region file while LSS is disabled end-to-end —
-    what makes the edit 'offline' from the store's point of view. The setblock and
-    save-all must be acknowledged, the client must see server_enabled=false on every
-    snapshot, and no LSS service/disk/store counter may move."""
+    what makes the edit 'offline' from the store's point of view. The forceload-add,
+    setblock, and save-all must all be acknowledged (the forceload is LOAD-BEARING: a
+    setblock into an unloaded chunk silently no-ops with a dispatch-level ok — the exact
+    false-green the first live run produced), the client must see server_enabled=false
+    on every snapshot, and no LSS service/disk/store counter may move."""
+    fl = next((c for c in ctx.commands if c["cmd"].startswith("forceload add")), None)
+    if fl is None or not fl.get("ok"):
+        yield Violation("store-offline-mutate", "timeline",
+                        "the forceload-add did not run — the setblock would silently "
+                        "no-op into an unloaded chunk", {"row": fl})
     sb = next((c for c in ctx.commands if c["cmd"].startswith("setblock")), None)
     if sb is None or not sb.get("ok"):
         yield Violation("store-offline-mutate", "timeline",
@@ -3459,7 +3466,8 @@ def selftest():
          list(check_store_offline_populate(sop_ctx(hashes={"20:0": 111, "-20:0": -1}))),
          "store-offline-populate")
 
-    som_cmds = [dict(_cmd(10_000, "setblock 328 -60 8 minecraft:glowstone"), ok=True),
+    som_cmds = [dict(_cmd(8_000, "forceload add 328 8"), ok=True),
+                dict(_cmd(10_000, "setblock 328 -60 8 minecraft:glowstone"), ok=True),
                 dict(_cmd(15_000, "save-all"), ok=True)]
     def som_ctx(commands=None, requests=0, enabled=False):
         return _ctx(
@@ -3467,11 +3475,14 @@ def selftest():
             commands=som_cmds if commands is None else commands,
             runs={1: [_cli(40_000, over={"server_enabled": enabled})]})
     clean("store-offline-mutate clean", list(check_store_offline_mutate(som_ctx())))
+    hits("store-offline-mutate forceload missing (setblock would no-op unloaded)",
+         list(check_store_offline_mutate(som_ctx(commands=som_cmds[1:]))),
+         "store-offline-mutate")
     hits("store-offline-mutate setblock missing",
-         list(check_store_offline_mutate(som_ctx(commands=[som_cmds[1]]))),
+         list(check_store_offline_mutate(som_ctx(commands=[som_cmds[0], som_cmds[2]]))),
          "store-offline-mutate")
     hits("store-offline-mutate save-all missing",
-         list(check_store_offline_mutate(som_ctx(commands=[som_cmds[0]]))),
+         list(check_store_offline_mutate(som_ctx(commands=som_cmds[:2]))),
          "store-offline-mutate")
     hits("store-offline-mutate LSS not disabled",
          list(check_store_offline_mutate(som_ctx(enabled=True))), "store-offline-mutate")

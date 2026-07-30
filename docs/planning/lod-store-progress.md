@@ -458,3 +458,49 @@ What landed (all §1 rung-contract items):
   measurement says otherwise.
 - `Op.Resweep` exists for a future `/lsslod store resweep` verb; the periodic path
   triggers off `nextResweepNanos` directly.
+
+### PAUSED 2026-07-30 — resume point (user needs the box; timing runs must wait)
+
+Phase 2 code + unit/gametest/harness work is DONE and committed; the live validation
+runs are partially done. **Nothing in flight; no contaminated results** — the one FAIL
+seen so far was a deterministic scenario bug (below), not box load.
+
+Run status:
+- [x] store-second-join-full — PASS (run 20260730T233635Z): hits=1960 (geometry-exact),
+  all mem_hits (in-session rejoin, as predicted), errors=0, p95 5 µs. Note for later:
+  in FULL mode `store.deposits` counts per-tier applies (4132 = 2 × 2066 misses; both
+  tiers report through the shared diag) — document in CLAUDE.md at merge, or split the
+  counter if the reviewers prefer.
+- [ ] store_offline_edit.sh (fabric) — first run FAILED CORRECTLY at the cross-phase
+  verdict: the mutate phase's `setblock 328 -60 8` silently no-opped because chunk
+  (20,0) was UNLOADED (vanilla setblock requires a loaded position; the driver's ok is
+  dispatch-level). Diagnosed by header-stamp forensics (edited chunk kept its Jul 29
+  base-world stamp), reproduced with a solo mutate run. FIXED: both edit timelines now
+  bracket the setblock with `forceload add 328 8` / `forceload remove` (the
+  dirty-range-filter precedent), and check_store_offline_mutate requires the
+  forceload-add row. RE-RUN NEEDED on an idle box.
+- [ ] store_offline_edit.sh (paper) — not yet run.
+- [ ] SOAK_PLATFORM=paper soak.sh paper-store-unfired-event — not yet run (timeline
+  fixed same way).
+- [ ] store_gate.sh warm 3 60 (the §0 three-part gate) — not yet run. MUST be idle-box.
+- [ ] store_gate.sh cold 3 60 (≤10% deposit-regression gate) — not yet run.
+- [ ] p95-under-batcher-load + memory-vs-SQLite verdicts — extract from the runs above
+  (cycle B of warm = pure SQLite-tier reads; offline-verify = hits concurrent with
+  re-deposits).
+Then: Phase 2 two-subagent review (user cadence), fold findings, close task #6.
+
+Learnings this session (beyond the src_stamp/livelock/loc==0/dimIdsShared defects in
+the section above):
+- **setblock into an unloaded chunk silently fails with a dispatch-level ok** — any
+  scenario editing beyond view distance must forceload first (dirty-range-filter
+  already knew; now pinned by the mutate check).
+- **26.2 Paper uses the vanilla unified world layout** (world/dimensions/minecraft/…,
+  verified on disk) — the server worldRoot is the correct getStorageFolder root on BOTH
+  platforms on this line; Bukkit's legacy split dirs (world_nether/DIM-1) are a
+  BACKPORT caveat only (comment left in PaperRequestProcessingService).
+- **A resweep drop must evict the memory tier too** (sweep-drop fan-out + the new
+  store.sweep_drops counter through both exporters/contract/monotonic/report) — found
+  while designing the Paper staleness-bound scenario, pinned by a tiered unit test.
+- The soak checker is structurally single-server-run (monotonic counters reset), hence
+  store_offline_edit.sh = three individually law-checked phases chained by
+  SOAK_WORLD_FROM + a wrapper-level cross-phase probe-hash verdict.

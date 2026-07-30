@@ -34,6 +34,11 @@
     },
     {
       "anchor": 1,
+      "at": 68,
+      "cmd": "forceload add 328 8"
+    },
+    {
+      "anchor": 1,
       "at": 70,
       "cmd": "setblock 328 -60 8 minecraft:glowstone"
     },
@@ -41,6 +46,11 @@
       "anchor": 1,
       "at": 75,
       "cmd": "save-all"
+    },
+    {
+      "anchor": 1,
+      "at": 80,
+      "cmd": "forceload remove 328 8"
     }
   ],
   "end": {
