@@ -236,7 +236,32 @@ counters/packaging/harness infra landed and reviewed by 2 subagents.
 
 ## Phase 1 — memory-tier integration spike
 
-Status: IN PROGRESS (started 2026-07-30; core landed as commit 1ec4281)
+Status: GATE PASS (2026-07-30; commits 1ec4281 + 9711c34; 2-subagent review pending)
+
+### Gate evidence (store-second-join soak, run 20260730T222632Z)
+
+- **PASS, 0 violations** — 28 windows (26 client-laws), 28 quiescent snapshots, all
+  conservation laws green INCLUDING the store integrations (A3 + store.hits source term,
+  A6 monotonic on the 7 store counters, store.queue strict drain at quiescence).
+- **The tier served the second join**: store.hits = 1960 — geometry-exact (2401-column
+  R=24 disc minus the ~441-column probe-served loaded disc); disk.submitted did NOT move
+  on the re-serve leg (2126 total = the populate leg's cold reads alone).
+- **Deposits honest**: deposits 2126 = misses 2126 (every cold read deposited at the
+  delivery choke point), deposit_drops 0, queue 0 at rest, errors 0, evictions 0
+  (superflat disc ≈ 241 KB compressed — far under the 64 MB cap).
+- **Byte parity live**: server probe hashes (FNV of exact wire bytes at the enqueue
+  choke point, via the new SoakProbeBridge) stable across the NBT→store leg boundary.
+- **Hit latency**: avg 6 µs, p95 9 µs (the §0 metric-3 5× floor vs ~ms NBT reads will
+  clear by orders of magnitude).
+- Two real defects the gate run itself caught (the falsifiable-gate discipline working):
+  law A3 was missing the store source term (first run red on it), and the armed probes
+  silently read -1 because the probe recorder had NO production caller — fixed with
+  SoakProbeBridge + the all-(-1)-is-a-violation hardening (re-checked: old recording
+  red, wired re-run green).
+- Scan-resistance: unit-level corpus replay curve (hit ≈ 0.47× residency at 4× cap
+  pressure, LRU ≈ 0 by construction). A LIVE cap-pressure curve needs the benchmark
+  world (the soak disc fits any cap) — folded into Phase 2's memory-vs-SQLite A/B where
+  the plan puts that measurement anyway.
 
 What landed (all §1 rung-contract items):
 - **`LodStoreService`** (common/store) with the review-derived boundary invariants in the
