@@ -12,15 +12,6 @@ https://github.com/user-attachments/assets/721fb344-890e-4e03-ab36-539444427f7b
 
 All builds are on [Modrinth](https://modrinth.com/plugin/lod-server-support) — pick the file matching your Minecraft version: `lod-server-support-fabric` (the client/server Fabric mod) or `lod-server-support-paper` (the server plugin). GitHub Releases on this repository mirror every version.
 
-### Also published as "Voxy Server Side" (v0.7.x only)
-
-Releases v0.7.0–v0.7.3 were additionally published to the
-[Voxy Server Side](https://modrinth.com/plugin/voxy-server-side) Modrinth page; **from v0.8.0
-on, new versions ship only on this LOD Server Support listing.** Both carry the **same mod** —
-identical internals and networking protocol; only the display name, description, and icon
-differ. Compatibility is total: a v0.7.x VSS install interoperates with LSS peers, and
-switching a VSS install to the LSS jar is drop-in (same config, same networking).
-
 ### Redistribution
 
 This mod is MIT-licensed — redistribution with attribution is welcome, and modpacks
@@ -57,10 +48,9 @@ Each Minecraft version has its own build; only the latest is listed. Older-MC bu
 
 | Minecraft | LSS Version | Fabric | Paper | Folia | Voxy | Java |
 |---|---|---|---|---|---|---|
-| **26.2** | v0.8.0 | ✅ | ✅ | — | 0.2.17-alpha+ | 25+ |
-| **26.1.x** | v0.8.0+mc26.1 | ✅ | ✅ | ✅ | 0.2.14-alpha+ | 25+ |
-| **1.21.11** | v0.8.0+mc1.21.11 | ✅ | ✅ | ✅ | 0.2.15-beta+ | 21+ |
-| **1.21.8** | v0.6.1+mc1.21.8 | ✅ | ✅ | ✅ | 0.2.5-alpha+ | 21+ |
+| **26.2** | v0.8.2+mc26.2 | ✅ | ✅ | — | 0.2.17-alpha+ | 25+ |
+| **26.1.x** | v0.8.1+mc26.1 | ✅ | ✅ | ✅ | 0.2.14-alpha+ | 25+ |
+| **1.21.11** | v0.8.1+mc1.21.11 | ✅ | ✅ | ✅ | 0.2.15-beta+ | 21+ |
 
 Fabric builds are client + server; the Paper plugin is server-only and also runs on Purpur. On the older support lines Folia uses the same plugin JAR (experimental). The 26.2 plugin does **not** declare Folia support — no Folia build exists for MC 26.2, and support returns once Folia ships 26.2 and validation passes.
 
