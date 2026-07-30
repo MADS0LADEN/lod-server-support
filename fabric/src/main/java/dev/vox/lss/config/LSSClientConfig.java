@@ -33,6 +33,13 @@ public class LSSClientConfig extends JsonConfig {
     // strict load-only (Tier A). No effect unless enableV16ServerCompat is also on, and never on a
     // v18 session. See docs/planning/v16-client-compat-design.md §4 (Tier B).
     public boolean enableV16Generation = true;
+    // Ingest-pressure request pacing (issue #71, docs/planning/ingest-backpressure-design.md):
+    // scale the want-set budget down — and halt declarations entirely at a threshold — when a
+    // registered LOD consumer reports a pending ingest backlog (Voxy's ingest queue depth via
+    // the reflective bridge). Keeps a weak client from being fed faster than it can absorb.
+    // Kill switch: false restores pre-#71 pacing (decode-queue signal only). No effect when no
+    // consumer reports a backlog.
+    public boolean enableIngestBackpressure = true;
 
     @Override
     protected String getFileName() {

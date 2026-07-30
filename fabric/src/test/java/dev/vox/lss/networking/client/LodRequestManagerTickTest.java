@@ -79,7 +79,7 @@ class LodRequestManagerTickTest {
     /** Drive tickScanPhase until the 20-tick cadence fires; returns the scanned count. */
     private int fireScanPhase(int playerCx, int playerCz, int viewDistance) {
         for (int i = 0; i <= LSSConstants.TICKS_PER_SECOND; i++) {
-            int n = manager.tickScanPhase(playerCx, playerCz, viewDistance, 0, () -> 0);
+            int n = manager.tickScanPhase(playerCx, playerCz, viewDistance, 0, -1, () -> 0);
             if (n >= 0) return n;
         }
         throw new AssertionError("scan cadence never fired");
@@ -89,7 +89,7 @@ class LodRequestManagerTickTest {
 
     @Test
     void firstTickAtChunkOriginRunsThePrimedScanImmediately() {
-        manager.tickWithContext(0, 0, dim("overworld"), 0, 0, 0L, () -> 0);
+        manager.tickWithContext(0, 0, dim("overworld"), 0, 0, 0L, -1, () -> 0);
 
         assertEquals(1, sent.size(), "a (0,0) join keeps the primed immediate first scan");
         assertEquals(24, sent.get(0).count(),
@@ -104,7 +104,7 @@ class LodRequestManagerTickTest {
         // primed join scan. The old debounce here cost every such join ~1 s of LOD delay.
         var overworld = dim("overworld");
 
-        manager.tickWithContext(10, 0, overworld, 0, 0, 0L, () -> 0);
+        manager.tickWithContext(10, 0, overworld, 0, 0, 0L, -1, () -> 0);
         assertEquals(1, sent.size(),
                 "the primed first scan fires on tick 1 even through the movement branch");
     }
@@ -123,7 +123,7 @@ class LodRequestManagerTickTest {
 
         for (int i = 0; i < 60; i++) {
             int cx = 1 - (i / 10) % 2;
-            manager.tickWithContext(cx, 0, overworld, 0, 0, 0L, () -> 0);
+            manager.tickWithContext(cx, 0, overworld, 0, 0, 0L, -1, () -> 0);
         }
         assertEquals(3, sent.size(),
                 "scans fire on schedule while moving: the primed tick-1 scan + ticks 21 and 41"
@@ -166,7 +166,7 @@ class LodRequestManagerTickTest {
         manager.onColumnReceived(near, 5000L, overworld);
         manager.trackerForTest().replaceWith(new long[]{far}, 1);
 
-        manager.tickWithContext(3, 0, overworld, 64, 0, 0L, () -> 0); // movement: prune at lod+32 = 34
+        manager.tickWithContext(3, 0, overworld, 64, 0, 0L, -1, () -> 0); // movement: prune at lod+32 = 34
 
         assertEquals(-1L, manager.columnsForTest().timestampFor(far),
                 "out-of-range stamp pruned (re-requested as unknown when back in range)");
@@ -181,13 +181,13 @@ class LodRequestManagerTickTest {
         var overworld = dim("overworld");
         var end = dim("the_end");
         setupManager(config(2, true), "lss-cl025-" + System.nanoTime());
-        manager.tickWithContext(0, 0, overworld, 64, 0, 0L, () -> 0); // establish dimension A
+        manager.tickWithContext(0, 0, overworld, 64, 0, 0L, -1, () -> 0); // establish dimension A
         long stamped = PositionUtil.packPosition(1, 1);
         long inFlightOnly = PositionUtil.packPosition(2, 1);
         manager.onColumnReceived(stamped, 5000L, overworld);
         manager.trackerForTest().replaceWith(new long[]{inFlightOnly}, 1);
 
-        manager.tickWithContext(0, 0, end, 64, 0, 0L, () -> 0); // the flip
+        manager.tickWithContext(0, 0, end, 64, 0, 0L, -1, () -> 0); // the flip
 
         assertEquals(0, manager.getPendingCount(), "no awaited survivor can gate a status into the fresh dimension");
         assertEquals(0, manager.getReceivedColumnCount());
@@ -234,7 +234,7 @@ class LodRequestManagerTickTest {
         int halt = ClientColumnProcessor.MAX_QUEUED_COLUMNS * 3 / 4;
         assertEquals(6000, halt, "pinned threshold: 3/4 of the 8000-column decode queue");
         assertEquals(halt, LodRequestManager.haltThreshold());
-        manager.tickWithContext(0, 0, overworld, 0, halt, 0L, () -> 0); // exactly at threshold: halted
+        manager.tickWithContext(0, 0, overworld, 0, halt, 0L, -1, () -> 0); // exactly at threshold: halted
 
         assertEquals(-1L, manager.columnsForTest().timestampFor(cached),
                 "cache poll skipped while backpressured");
@@ -243,7 +243,7 @@ class LodRequestManagerTickTest {
                         + " server pumping the last want-set (up to 1024 backlogged asks)");
         assertEquals(0, sent.get(0).count(), "no want-set is declared while halted, only the clear");
 
-        manager.tickWithContext(0, 0, overworld, 0, halt - 1, 0L, () -> 0); // one below: all resume
+        manager.tickWithContext(0, 0, overworld, 0, halt - 1, 0L, -1, () -> 0); // one below: all resume
 
         assertEquals(5000L, manager.columnsForTest().timestampFor(cached), "cache result applied");
         assertEquals(2, sent.size(), "the scan resumes");
@@ -267,15 +267,87 @@ class LodRequestManagerTickTest {
         assertEquals(192L * 1024 * 1024, byteHalt,
                 "pinned threshold: 3/4 of the 256 MiB decode-queue byte cap");
 
-        manager.tickWithContext(0, 0, overworld, 0, 0, byteHalt, () -> 0); // count 0, bytes at threshold
+        manager.tickWithContext(0, 0, overworld, 0, 0, byteHalt, -1, () -> 0); // count 0, bytes at threshold
 
         assertEquals(1, sent.size(), "byte-dimension halt sends the empty backpressure clear");
         assertEquals(0, sent.get(0).count(), "no want-set is declared while byte-halted");
 
-        manager.tickWithContext(0, 0, overworld, 0, 0, byteHalt - 1, () -> 0); // one below: resumes
+        manager.tickWithContext(0, 0, overworld, 0, 0, byteHalt - 1, -1, () -> 0); // one below: resumes
 
         assertEquals(2, sent.size(), "the scan resumes one byte below the threshold");
         assertTrue(sent.get(1).count() > 0, "a real want-set is declared again after recovery");
+    }
+
+    // ---- consumer ingest-backlog halt (issue #71) ----
+
+    @Test
+    void ingestBacklogHaltsDeclarationsWithOneEdgeTriggeredClearPerCrossing() {
+        var overworld = dim("overworld");
+        int haltSections = LodRequestManager.INGEST_BACKLOG_HALT_SECTIONS;
+        assertEquals(6144, haltSections,
+                "pinned threshold: the consumer ingest-backlog halt point");
+
+        manager.tickWithContext(0, 0, overworld, 0, 0, 0L, haltSections, () -> 0); // at threshold
+        assertEquals(1, sent.size(), "entering the ingest halt sends the empty clear");
+        assertEquals(0, sent.get(0).count(), "the clear is an empty want-set");
+
+        manager.tickWithContext(0, 0, overworld, 0, 0, 0L, haltSections + 500, () -> 0); // deeper in
+        assertEquals(1, sent.size(), "edge-triggered: no second clear inside the same crossing");
+
+        // Cause-switch inside the episode: a decode-queue-halted tick while the flag is
+        // still set is the SAME episode — one flag, one clear, regardless of which signal
+        // holds the halt (the design's "per crossing", not "per cause").
+        manager.tickWithContext(0, 0, overworld, 0, LodRequestManager.haltThreshold(), 0L,
+                -1, () -> 0);
+        assertEquals(1, sent.size(), "switching halt cause must not restart the episode");
+
+        manager.tickWithContext(0, 0, overworld, 0, 0, 0L, haltSections - 1, () -> 0); // recovery
+        assertEquals(2, sent.size(), "the scan resumes one section below the halt");
+        assertEquals(1, sent.get(1).count(),
+                "just below the halt the taper floors the budget at 1 — the shrunken want-set"
+                        + " REPLACES the server backlog, an active brake while the consumer drains");
+
+        manager.tickWithContext(0, 0, overworld, 0, 0, 0L, haltSections, () -> 0); // re-cross
+        assertEquals(3, sent.size(), "a re-crossing re-arms and re-sends the clear");
+        assertEquals(0, sent.get(2).count(), "the re-cross clear is empty again");
+    }
+
+    @Test
+    void noSignalIngestBacklogNeverHalts() {
+        var overworld = dim("overworld");
+        manager.tickWithContext(0, 0, overworld, 0, 0, 0L, -1, () -> 0);
+        assertEquals(1, sent.size(), "no-signal (-1) ticks scan normally");
+        assertTrue(sent.get(0).count() > 0, "a real want-set is declared, not a clear");
+        assertEquals(-1, manager.getLastIngestBacklog(), "the polled value is surfaced for diag");
+    }
+
+    @Test
+    void productionBacklogSupplierReadsTheApiAggregateBehindTheConfigGate() {
+        // Wiring pin (the seam's DEFAULT is production): tick() polls
+        // LSSApi.maxReportedIngestBacklog() gated on enableIngestBackpressure — a revert of
+        // either half of that expression reds this test without a running client.
+        var reporting = new dev.vox.lss.api.VoxelColumnConsumer() {
+            @Override
+            public void onVoxelColumnReceived(net.minecraft.client.multiplayer.ClientLevel level,
+                                              ResourceKey<Level> dimension, int chunkX, int chunkZ,
+                                              dev.vox.lss.api.VoxelColumnData columnData) {}
+
+            @Override
+            public int pendingIngestBacklog() { return 4321; }
+        };
+        dev.vox.lss.api.LSSApi.registerColumnConsumer(reporting);
+        boolean previous = dev.vox.lss.config.LSSClientConfig.CONFIG.enableIngestBackpressure;
+        try {
+            dev.vox.lss.config.LSSClientConfig.CONFIG.enableIngestBackpressure = true;
+            assertEquals(4321, manager.ingestBacklogSupplier.getAsInt(),
+                    "the production supplier must surface the LSSApi aggregate");
+            dev.vox.lss.config.LSSClientConfig.CONFIG.enableIngestBackpressure = false;
+            assertEquals(-1, manager.ingestBacklogSupplier.getAsInt(),
+                    "the kill switch must force no-signal");
+        } finally {
+            dev.vox.lss.config.LSSClientConfig.CONFIG.enableIngestBackpressure = previous;
+            dev.vox.lss.api.LSSApi.removeColumnConsumer(reporting);
+        }
     }
 
     @Test
@@ -285,7 +357,7 @@ class LodRequestManagerTickTest {
         manager.onColumnReceived(far, 5000L, overworld);
 
         manager.tickWithContext(3, 0, overworld, 64,
-                ClientColumnProcessor.MAX_QUEUED_COLUMNS * 3 / 4, 0L, () -> 0);
+                ClientColumnProcessor.MAX_QUEUED_COLUMNS * 3 / 4, 0L, -1, () -> 0);
 
         assertEquals(-1L, manager.columnsForTest().timestampFor(far),
                 "the movement prune precedes the backpressure halt — state never goes stale"
@@ -309,7 +381,7 @@ class LodRequestManagerTickTest {
         // The teleport tick: movement phase (prune + recenter) runs BEFORE the scan phase,
         // and the cadence is decoupled from movement, so the primed scan fires on this very
         // tick — already from the NEW position, already without the pruned want.
-        manager.tickWithContext(300, 0, overworld, 0, 0, 0L, () -> 0);
+        manager.tickWithContext(300, 0, overworld, 0, 0, 0L, -1, () -> 0);
 
         assertEquals(-1L, manager.columnsForTest().timestampFor(far), "premise: column state pruned");
         assertEquals(1, sent.size(),

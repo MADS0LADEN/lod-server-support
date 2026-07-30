@@ -54,6 +54,7 @@ class SpiralScanner {
      */
     int maybeScan(int playerCx, int playerCz, int viewDistance,
                   int columnQueueSize, int columnQueueHaltThreshold,
+                  int ingestBacklogSections, int ingestBacklogHaltThreshold,
                   IntSupplier missingVanilla,
                   ColumnStateMap columns,
                   long[] posOut, long[] tsOut) {
@@ -62,15 +63,30 @@ class SpiralScanner {
 
         this.missingVanillaChunks = missingVanilla.getAsInt();
 
-        // Compute scan budget: base × queue-pressure-scale. The base is
+        // Compute scan budget: base × pressure-scale. The base is
         // the ONE want-set budget — a constant; no client budget derives from any server cap
         // (server-owned generation). Raising it buys nothing: the window self-throttles to
         // the serve rate (as heads resolve they classify SATISFIED and drop out), so a bigger
         // window only inflates duplicate-skip traffic. WantSetBudgetInvariantTest pins it
         // above the worst-case in-flight set with frontier headroom and inside one wire batch.
+        //
+        // Two independent pressure factors, composed by MIN (not multiplied — both gauge the
+        // same downstream pipe, so multiplying would double-count): LSS's own decode queue,
+        // and the consumer-reported ingest backlog (issue #71 — Voxy's unbounded ingest queue
+        // is invisible to the decode-queue signal; <=0 means no signal and leaves the budget
+        // untouched). Linear taper against each signal's halt threshold: the budget shrinks
+        // until arrivals match the consumer's real drain rate — a proportional controller
+        // whose equilibrium IS rate-matching (docs/planning/ingest-backpressure-design.md).
         int budget = LSSConstants.WANT_SET_BUDGET;
+        float scale = 1f;
         if (columnQueueSize > 0) {
-            budget = Math.max(1, Math.round(budget * Math.max(0f, 1f - (float) columnQueueSize / columnQueueHaltThreshold)));
+            scale = Math.min(scale, 1f - (float) columnQueueSize / columnQueueHaltThreshold);
+        }
+        if (ingestBacklogSections > 0) {
+            scale = Math.min(scale, 1f - (float) ingestBacklogSections / ingestBacklogHaltThreshold);
+        }
+        if (scale < 1f) {
+            budget = Math.max(1, Math.round(budget * Math.max(0f, scale)));
         }
         // The vanilla-load budget scale is GONE (2026-07-17, user call): it was client-side
         // triage of SERVER resources — v17 moved all of that server-side (BACKGROUND/LOW

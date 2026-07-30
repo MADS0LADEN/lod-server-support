@@ -13,8 +13,15 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.LevelChunk;
+
+import java.util.concurrent.ConcurrentHashMap;
 
 public class LSSServerNetworking {
     private static volatile RequestProcessingService requestService;
@@ -70,6 +77,40 @@ public class LSSServerNetworking {
         LSSLogger.info(Brand.shortName() + " LOD request processing service starting (LAN server)");
         requestService = new RequestProcessingService(server);
         LSSClientNetworking.triggerHostHandshake();
+    }
+
+    // Dimension strings for the save hook, cached per ResourceKey: Identifier.toString
+    // allocates, and the hook runs on every committed chunk save. Keyed by the
+    // lightweight interned ResourceKey (never the ServerLevel — that would pin departed
+    // worlds); bounded by the distinct dimensions a JVM ever loads.
+    private static final ConcurrentHashMap<ResourceKey<Level>, String> DIMENSION_STRINGS =
+            new ConcurrentHashMap<>();
+
+    /**
+     * The dirty-detection hook body ({@code ChunkSaveDataHook}'s copyOf injection — the
+     * choke point vanilla's {@code ChunkMap.save} and Moonrise's replacement save
+     * pipeline both call; issue #69). Runs on whatever thread legally snapshots the live
+     * chunk for saving — the same access domain {@code copyOf} itself needs, so reading
+     * section content here is safe wherever the call is legal.
+     *
+     * <p>Only FULL chunks: a ProtoChunk save during generation has no LOD-servable
+     * content yet (re-requesting it reads "not found" and escalates to generation), and
+     * the completed chunk reaches clients through the generation serve path. The
+     * {@code enabled=false} gate also lives here: the service tick (and so the
+     * dirty-broadcast drain) is disabled, so marking would grow the tracker without
+     * bound — and the content hash serializes the column on every save for nothing.
+     * Vanilla re-saves loaded chunks for metadata alone (inhabitedTime), so a save is
+     * not evidence of change — only hash-confirmed content edits mark dirty.
+     */
+    public static void onChunkSaveData(ServerLevel level, ChunkAccess chunk) {
+        if (!(chunk instanceof LevelChunk levelChunk)) return;
+        var service = requestService;
+        if (service == null || !LSSServerConfig.CONFIG.enabled) return;
+        String dimension = DIMENSION_STRINGS.computeIfAbsent(level.dimension(),
+                key -> key.identifier().toString());
+        if (service.getDirtyContentFilter().contentChanged(level, levelChunk, dimension)) {
+            service.getDirtyTracker().markDirty(dimension, chunk.getPos().x(), chunk.getPos().z());
+        }
     }
 
     /** Reply hook for {@link #handleHandshake}; production wires {@code ServerPlayNetworking.send}. */

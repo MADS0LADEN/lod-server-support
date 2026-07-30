@@ -291,4 +291,29 @@ class ConfigValidationTest {
         assertTrue(c.enableV16Generation, "Tier B generation-drive must default ON");
     }
 
+    @Test
+    void ingestBackpressureDefaultsOn() {
+        // Issue #71: the ingest-pressure pacing is the shipped protection for weak clients —
+        // a silent default-off revert would pass CI green (no consumer reports in any tier).
+        var c = clientConfig();
+        assertTrue(c.enableIngestBackpressure, "ingest-pressure request pacing must default ON");
+        c.validate();
+        assertTrue(c.enableIngestBackpressure, "validate() must not touch the boolean");
+    }
+
+    @Test
+    void ingestBackpressureRoundTripsThroughJson() {
+        // The GSON leg of the save/load contract: the field serializes under its exact key
+        // (a rename would silently orphan every saved kill-switch choice) and a saved false
+        // binds back as false.
+        var gson = new com.google.gson.Gson();
+        String saved = gson.toJson(clientConfig());
+        assertTrue(saved.contains("\"enableIngestBackpressure\":true"),
+                "a fresh config must persist the default under the exact key: " + saved);
+        var loaded = gson.fromJson(saved.replace(
+                "\"enableIngestBackpressure\":true", "\"enableIngestBackpressure\":false"),
+                LSSClientConfig.class);
+        assertFalse(loaded.enableIngestBackpressure, "a saved false must bind back as false");
+    }
+
 }

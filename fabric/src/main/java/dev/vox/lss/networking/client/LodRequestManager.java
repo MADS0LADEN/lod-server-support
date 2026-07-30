@@ -1,8 +1,10 @@
 package dev.vox.lss.networking.client;
 
+import dev.vox.lss.api.LSSApi;
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.LSSLogger;
 import dev.vox.lss.common.PositionUtil;
+import dev.vox.lss.config.LSSClientConfig;
 import dev.vox.lss.networking.payloads.BatchChunkRequestC2SPayload;
 import dev.vox.lss.networking.payloads.SessionConfigS2CPayload;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
@@ -19,6 +21,16 @@ public class LodRequestManager {
     /** Backpressure threshold: halt sending when column processing queue exceeds this fraction. */
     private static final int BACKPRESSURE_NUMERATOR = 3;
     private static final int BACKPRESSURE_DENOMINATOR = 4;
+    /**
+     * Halt point for the CONSUMER-reported ingest backlog (issue #71,
+     * docs/planning/ingest-backpressure-design.md): pending sections at which declarations
+     * halt entirely. ~750–1200 real terrain columns ≈ 20–60 MB of retained section data at
+     * steady state — bounded heap even on a small client. The budget taper (SpiralScanner)
+     * scales against the same constant, so the halt is a backstop, not the operating point:
+     * at equilibrium the budget settles where arrivals match the consumer's drain rate.
+     * Deliberately derives from no server cap (the retired Global Constraint #28 class).
+     */
+    static final int INGEST_BACKLOG_HALT_SECTIONS = 6144;
 
     private SessionConfigS2CPayload sessionConfig;
     private String serverAddress;
@@ -64,6 +76,19 @@ public class LodRequestManager {
 
     // Expanding ring scanner (owns scan cadence + budget policy)
     private final SpiralScanner scanner = new SpiralScanner();
+
+    /**
+     * Ingest-backlog poll (issue #71): the largest consumer-reported pending-ingest depth
+     * in sections, -1 when no consumer reports or the kill switch is off. Package-private
+     * seam so tests pin both the production wiring (LSSApi aggregation) and the config
+     * gate without a running Minecraft client; tick() polls it every tick.
+     */
+    IntSupplier ingestBacklogSupplier = () ->
+            LSSClientConfig.CONFIG.enableIngestBackpressure
+                    ? LSSApi.maxReportedIngestBacklog() : -1;
+
+    // Last polled backlog — trace + /lss diag observability.
+    private int lastIngestBacklog = -1;
 
     public void onSessionConfig(SessionConfigS2CPayload config, String serverAddress) {
         this.sessionConfig = config;
@@ -131,6 +156,7 @@ public class LodRequestManager {
         tickWithContext(playerCx, playerCz, level.dimension(), viewDistance,
                 LSSClientNetworking.getQueuedColumnCount(),
                 LSSClientNetworking.getQueuedColumnBytes(),
+                this.ingestBacklogSupplier.getAsInt(),
                 () -> countMissingVanillaChunks(level, playerCx, playerCz, viewDistance));
     }
 
@@ -143,11 +169,12 @@ public class LodRequestManager {
      */
     void tickWithContext(int playerCx, int playerCz, ResourceKey<Level> currentDim,
                          int viewDistance, int columnQueueSize, long columnQueueBytes,
-                         IntSupplier missingVanilla) {
+                         int ingestBacklogSections, IntSupplier missingVanilla) {
+        this.lastIngestBacklog = ingestBacklogSections;
         tickDimensionAndCachePhase(currentDim);
         tickMovementPhase(playerCx, playerCz);
         this.metrics.updateRollingRates();
-        if (haltedByBackpressure(columnQueueSize, columnQueueBytes)) {
+        if (haltedByBackpressure(columnQueueSize, columnQueueBytes, ingestBacklogSections)) {
             // Entering the halt: silence would leave the server pumping the last want-set
             // (up to 1024 backlogged asks). An EMPTY batch is the explicit "want nothing"
             // declaration — it replaces the backlog with nothing; already-admitted work
@@ -161,7 +188,8 @@ public class LodRequestManager {
         }
         this.backpressureClearSent = false;
         if (!tickCacheGatePhase()) return;
-        tickScanPhase(playerCx, playerCz, viewDistance, columnQueueSize, missingVanilla);
+        tickScanPhase(playerCx, playerCz, viewDistance, columnQueueSize, ingestBacklogSections,
+                missingVanilla);
     }
 
     /** The explicit backpressure clear: an empty want-set replaces the server backlog with nothing. */
@@ -219,13 +247,18 @@ public class LodRequestManager {
     }
 
     /** Backpressure: halt when the column processing queue is mostly full — by COUNT or by
-     *  BYTES. Admission ({@code ClientColumnProcessor.admits}) is bounded by both, and for
-     *  columns above ~44 KiB the byte cap binds first; a count-only halt would let arrivals
-     *  hit the byte-cap drop path instead (each drop burns an ingest-failure strike, and
-     *  four park the position for the session). Halting at 3/4 of EITHER cap keeps the
-     *  designed halt+clear ahead of the drop regime regardless of column size. */
-    boolean haltedByBackpressure(int columnQueueSize, long columnQueueBytes) {
-        return columnQueueSize >= haltThreshold() || columnQueueBytes >= byteHaltThreshold();
+     *  BYTES — or when a consumer's reported ingest backlog crosses its own halt point.
+     *  Admission ({@code ClientColumnProcessor.admits}) is bounded by both queue caps, and
+     *  for columns above ~44 KiB the byte cap binds first; a count-only halt would let
+     *  arrivals hit the byte-cap drop path instead (each drop burns an ingest-failure
+     *  strike, and four park the position for the session). Halting at 3/4 of EITHER cap
+     *  keeps the designed halt+clear ahead of the drop regime regardless of column size.
+     *  The ingest term (issue #71) covers the pipe the queue caps cannot see: a consumer
+     *  whose hand-off is non-blocking (Voxy's unbounded ingest queue) drains our decode
+     *  queue at full speed while its own backlog eats the heap; <=0 = no signal. */
+    boolean haltedByBackpressure(int columnQueueSize, long columnQueueBytes, int ingestBacklogSections) {
+        return columnQueueSize >= haltThreshold() || columnQueueBytes >= byteHaltThreshold()
+                || ingestBacklogSections >= INGEST_BACKLOG_HALT_SECTIONS;
     }
 
     /** Package-private so the backpressure-clear tests can drive the exact halt edge. */
@@ -274,9 +307,10 @@ public class LodRequestManager {
      * @return the {@link SpiralScanner#maybeScan} result (-1 when no walk happened)
      */
     int tickScanPhase(int playerCx, int playerCz, int viewDistance, int columnQueueSize,
-                      IntSupplier missingVanilla) {
+                      int ingestBacklogSections, IntSupplier missingVanilla) {
         int scanned = this.scanner.maybeScan(playerCx, playerCz, viewDistance,
-                columnQueueSize, haltThreshold(), missingVanilla,
+                columnQueueSize, haltThreshold(),
+                ingestBacklogSections, INGEST_BACKLOG_HALT_SECTIONS, missingVanilla,
                 this.columns, this.sendPositionBuffer, this.sendTimestampBuffer);
         if (scanned >= 0 && ClientTraceLog.enabled()) {
             int minRing = Integer.MAX_VALUE, maxRing = -1;
@@ -291,6 +325,7 @@ public class LodRequestManager {
                     + "],\"confirmed\":" + this.scanner.getConfirmedRing()
                     + ",\"declared\":" + scanned
                     + ",\"budget\":" + this.scanner.getLastBudget()
+                    + ",\"ingest_backlog\":" + ingestBacklogSections
                     + ",\"missing_vanilla\":" + this.scanner.getMissingVanillaChunks()
                     + ",\"ring_min\":" + (maxRing < 0 ? -1 : minRing)
                     + ",\"ring_max\":" + maxRing);
@@ -700,4 +735,6 @@ public class LodRequestManager {
     // Last scan budget
     public int getLastBudget() { return this.scanner.getLastBudget(); }
     public int getLastQueued() { return this.scanner.getLastQueued(); }
+    /** Last polled consumer ingest backlog in sections (-1 = no signal). Diag/trace only. */
+    public int getLastIngestBacklog() { return this.lastIngestBacklog; }
 }

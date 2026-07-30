@@ -97,6 +97,45 @@ public final class LSSApi {
         LSSClientNetworking.reportIngestFailure(dimension, chunkX, chunkZ);
     }
 
+    // Warn-once latch for a throwing pendingIngestBacklog() — the poll runs at up to
+    // 20 Hz on the main client thread, so per-call logging would flood. Per-JVM (LSSApi
+    // has no session lifecycle to key a per-session latch on); package-private reset
+    // seam so the warn-once contract is testable.
+    private static final java.util.concurrent.atomic.AtomicBoolean backlogWarnLatch =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** Test seam: re-arm the {@link #maxReportedIngestBacklog} warn-once latch. */
+    static void resetBacklogWarnLatchForTest() { backlogWarnLatch.set(false); }
+
+    /** Test seam: whether the warn-once latch has fired (pins at-most-one-warn). */
+    static boolean backlogWarnLatchedForTest() { return backlogWarnLatch.get(); }
+
+    /**
+     * Internal — not part of the public API. The largest
+     * {@link VoxelColumnConsumer#pendingIngestBacklog()} across registered consumers, or
+     * -1 when none report. Max, not sum: every consumer ingests the SAME columns in
+     * parallel fan-out, so the slowest one must pace the stream. A throwing reporter is
+     * contained to -1 (warn once per JVM) so a broken gauge degrades to "no signal", never
+     * to a dead request loop. Main client thread, up to 20 Hz.
+     * @hidden
+     */
+    public static int maxReportedIngestBacklog() {
+        int max = -1;
+        for (var consumer : columnConsumers) {
+            try {
+                max = Math.max(max, consumer.pendingIngestBacklog());
+            } catch (Throwable e) {
+                if (e instanceof Error err && !(e instanceof AssertionError)) throw err;
+                if (backlogWarnLatch.compareAndSet(false, true)) {
+                    LSSLogger.warn("A voxel column consumer's pendingIngestBacklog() threw — "
+                            + "treated as unreported (further warnings suppressed): "
+                            + consumer.getClass().getName(), e);
+                }
+            }
+        }
+        return max;
+    }
+
     /**
      * Internal dispatch method — not part of the public API.
      * Called by the client networking layer to fan out column data to consumers.
