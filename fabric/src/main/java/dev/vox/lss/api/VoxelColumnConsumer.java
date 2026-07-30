@@ -19,4 +19,22 @@ import net.minecraft.world.level.Level;
 public interface VoxelColumnConsumer {
     void onVoxelColumnReceived(ClientLevel level, ResourceKey<Level> dimension,
                                 int chunkX, int chunkZ, VoxelColumnData columnData);
+
+    /**
+     * The consumer's pending ingest backlog, in SECTION units: sections accepted (from
+     * {@link #onVoxelColumnReceived} or any other source) but not yet durably ingested.
+     * LSS scales its request rate down as this grows and halts requesting entirely at a
+     * threshold, so a consumer that reports honestly is never fed faster than it can
+     * absorb — the fix for weak clients drowning in an unbounded ingest queue (issue #71).
+     *
+     * <p>Return -1 (the default) to report nothing; LSS then paces only on its own
+     * decode queue, exactly as before this method existed. Any negative value means
+     * "no signal"; 0 is a real report meaning "empty".
+     *
+     * <p><b>Threading — note this differs from {@link #onVoxelColumnReceived}:</b> polled
+     * from the MAIN CLIENT THREAD, up to 20 times per second. Implementations must be
+     * fast, non-blocking, and thread-safe — return a cached or atomic gauge (a queue
+     * size, a semaphore permit count), never compute or take locks.
+     */
+    default int pendingIngestBacklog() { return -1; }
 }

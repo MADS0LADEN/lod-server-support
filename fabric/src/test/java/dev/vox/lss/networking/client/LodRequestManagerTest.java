@@ -100,7 +100,7 @@ class LodRequestManagerTest {
      * the lod distance, so a fired scan declares nothing — pure cadence observation.
      */
     private int maybeScanOnce() {
-        return manager.scannerForTest().maybeScan(0, 0, 64, 0, 1000, () -> 0,
+        return manager.scannerForTest().maybeScan(0, 0, 64, 0, 1000, -1, LodRequestManager.INGEST_BACKLOG_HALT_SECTIONS, () -> 0,
                 manager.columnsForTest(), scanPos, scanTs);
     }
 
@@ -131,7 +131,7 @@ class LodRequestManagerTest {
     /** Drive tickScanPhase at the origin until the 20-tick cadence fires; returns the want-set size. */
     private int fireScan(int viewDistance) {
         for (int i = 0; i < LSSConstants.TICKS_PER_SECOND + 1; i++) {
-            int n = manager.tickScanPhase(0, 0, viewDistance, 0, () -> 0);
+            int n = manager.tickScanPhase(0, 0, viewDistance, 0, -1, () -> 0);
             if (n >= 0) return n;
         }
         throw new AssertionError("scan cadence never fired");
@@ -479,12 +479,12 @@ class LodRequestManagerTest {
         // disc — must walk anyway under the retired scale), then step ONE mid-window tick.
         int primed = -1;
         for (int i = 0; i < LSSConstants.TICKS_PER_SECOND + 1 && primed < 0; i++) {
-            primed = manager.tickScanPhase(0, 0, 2, 0, () -> 25);
+            primed = manager.tickScanPhase(0, 0, 2, 0, -1, () -> 25);
         }
         assertTrue(primed >= 0, "premise: a fully missing vanilla disc still walks (scale retired)");
         manager.trackerForTest().replaceWith(new long[]{POS}, 1);
 
-        int walked = manager.tickScanPhase(0, 0, 2, 0, () -> 25);
+        int walked = manager.tickScanPhase(0, 0, 2, 0, -1, () -> 25);
 
         assertEquals(-1, walked, "a mid-window tick must report NO walk, not an empty one");
         assertTrue(manager.trackerForTest().isInFlight(POS),
@@ -500,16 +500,16 @@ class LodRequestManagerTest {
         // viewDistance 90 fully subsumes the lod-64 disc (corners included — see fireScanAtOrigin),
         // so a recovered tick walks and wants nothing. Every batch this test sees is therefore a
         // backpressure clear, never a want-set.
-        manager.tickWithContext(0, 0, dim, 90, halt, 0L, () -> 0);  // enters halt
-        manager.tickWithContext(0, 0, dim, 90, halt, 0L, () -> 0);  // still halted
+        manager.tickWithContext(0, 0, dim, 90, halt, 0L, -1, () -> 0);  // enters halt
+        manager.tickWithContext(0, 0, dim, 90, halt, 0L, -1, () -> 0);  // still halted
 
         assertEquals(1, sent.size(), "edge-triggered: exactly one clear per halt episode");
         assertEquals(0, sent.get(0).count(),
                 "the clear is the EMPTY want-set — the explicit 'want nothing' that replaces the"
                         + " server backlog with nothing (the only empty batch the protocol allows)");
 
-        manager.tickWithContext(0, 0, dim, 90, 0, 0L, () -> 0);     // recovered
-        manager.tickWithContext(0, 0, dim, 90, halt, 0L, () -> 0);  // re-enters halt
+        manager.tickWithContext(0, 0, dim, 90, 0, 0L, -1, () -> 0);     // recovered
+        manager.tickWithContext(0, 0, dim, 90, halt, 0L, -1, () -> 0);  // re-enters halt
 
         assertEquals(2, sent.size(), "a new halt episode re-arms the clear");
         assertEquals(0, sent.get(1).count());
@@ -926,10 +926,10 @@ class LodRequestManagerTest {
         var end = dim("the_end");
         manager.onSessionConfig(config(64, true), "lss-cl064-" + System.nanoTime());
         manager.markCacheLoadedForTest();
-        manager.tickWithContext(0, 0, overworld, 64, 0, 0L, () -> 0); // establish dimension A
+        manager.tickWithContext(0, 0, overworld, 64, 0, 0L, -1, () -> 0); // establish dimension A
         manager.onColumnReceived(POS, 5000L, overworld);
 
-        manager.tickWithContext(0, 0, end, 64, 0, 0L, () -> 0); // the flip resets all request state
+        manager.tickWithContext(0, 0, end, 64, 0, 0L, -1, () -> 0); // the flip resets all request state
         assertEquals(0, manager.getReceivedColumnCount(), "premise: dimension flip reset the map");
 
         advanceToOneCallBeforeScanFire();

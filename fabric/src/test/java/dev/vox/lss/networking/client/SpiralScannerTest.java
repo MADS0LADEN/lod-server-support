@@ -72,8 +72,18 @@ class SpiralScannerTest {
     private static int fireScan(SpiralScanner s, int viewDistance, int columnQueueSize,
                                 int columnQueueHaltThreshold, int missingVanilla,
                                 ColumnStateMap columns, Sink queue) {
+        return fireScan(s, viewDistance, columnQueueSize, columnQueueHaltThreshold,
+                -1, 1000, missingVanilla, columns, queue);
+    }
+
+    /** fireScan with full pressure inputs, incl. the consumer-reported ingest backlog (issue #71). */
+    private static int fireScan(SpiralScanner s, int viewDistance, int columnQueueSize,
+                                int columnQueueHaltThreshold, int ingestBacklog, int ingestBacklogHalt,
+                                int missingVanilla,
+                                ColumnStateMap columns, Sink queue) {
         for (int i = 0; i < LSSConstants.TICKS_PER_SECOND + 1; i++) {
             int n = s.maybeScan(CX, CZ, viewDistance, columnQueueSize, columnQueueHaltThreshold,
+                    ingestBacklog, ingestBacklogHalt,
                     () -> missingVanilla, columns, queue.pos, queue.ts);
             if (n >= 0) { queue.count = Math.max(n, 0); return n; }
         }
@@ -89,6 +99,7 @@ class SpiralScannerTest {
                                     ColumnStateMap columns, Sink queue) {
         for (int i = 0; i < LSSConstants.TICKS_PER_SECOND + 1; i++) {
             int n = s.maybeScan(cx, cz, viewDistance, columnQueueSize, columnQueueHaltThreshold,
+                    -1, 1000,
                     () -> missingVanilla, columns, queue.pos, queue.ts);
             if (n >= 0) { queue.count = Math.max(n, 0); return n; }
         }
@@ -332,6 +343,61 @@ class SpiralScannerTest {
         assertEquals(LSSConstants.WANT_SET_BUDGET, fireScan(s, 2, new ColumnStateMap(), queue));
     }
 
+    // ---- consumer ingest-backlog budget scaling (issue #71) ----
+
+    @Test
+    void ingestBacklogTapersTheBudgetLinearly() {
+        // Backlog at half the halt threshold halves the budget — the proportional controller
+        // whose equilibrium matches the ask rate to the consumer's real drain rate.
+        var s = scanner(16);
+        var queue = new Sink();
+        int n = fireScan(s, 2, 0, 1000, 3072, 6144, 0, new ColumnStateMap(), queue);
+        assertEquals(Math.round(LSSConstants.WANT_SET_BUDGET * 0.5f), n,
+                "a half-full consumer ingest backlog must halve the want-set budget");
+    }
+
+    @Test
+    void noSignalIngestBacklogLeavesTheBudgetUntouched() {
+        // -1 = no consumer reports (soak, gametests, non-reporting mods, kill switch) and
+        // 0 = an EMPTY reported backlog: both must be bit-identical to the pre-#71 budget.
+        var s = scanner(16);
+        var queue = new Sink();
+        assertEquals(LSSConstants.WANT_SET_BUDGET,
+                fireScan(s, 2, 0, 1000, -1, 6144, 0, new ColumnStateMap(), queue),
+                "-1 (no signal) must not taper");
+        assertEquals(LSSConstants.WANT_SET_BUDGET,
+                fireScan(s, 2, 0, 1000, 0, 6144, 0, new ColumnStateMap(), queue),
+                "0 (empty backlog) must not taper");
+    }
+
+    @Test
+    void pressureFactorsComposeByMinNotMultiplication() {
+        // Both factors gauge the same downstream pipe; multiplying would double-count.
+        var s = scanner(16);
+        var queue = new Sink();
+        // queue factor 0.9, ingest factor 0.25 → the ingest factor wins alone (200, not 180)
+        int ingestDominates = fireScan(s, 2, 100, 1000, 4608, 6144, 0, new ColumnStateMap(), queue);
+        assertEquals(Math.round(LSSConstants.WANT_SET_BUDGET * 0.25f), ingestDominates,
+                "min composition: the tighter (ingest) factor alone must scale the budget");
+        // queue factor 0.25, ingest factor 0.9 → the queue factor wins alone
+        int queueDominates = fireScan(s, 2, 750, 1000, 615, 6144, 0, new ColumnStateMap(), queue);
+        assertEquals(Math.round(LSSConstants.WANT_SET_BUDGET * 0.25f), queueDominates,
+                "min composition: the tighter (queue) factor alone must scale the budget");
+    }
+
+    @Test
+    void ingestBacklogAtOrPastTheHaltFloorsTheBudgetAtOne() {
+        // The actual halt lives in tickWithContext (this scanner call is then unreached);
+        // if the scanner IS driven at/past the halt anyway, the taper floors at 1 — never 0,
+        // never a skipped scan (maybeScan's budget<=0 return stays dead defense).
+        var s = scanner(16);
+        var queue = new Sink();
+        assertEquals(1, fireScan(s, 2, 0, 1000, 6144, 6144, 0, new ColumnStateMap(), queue),
+                "backlog at the halt threshold floors the budget at 1");
+        assertEquals(1, fireScan(s, 2, 0, 1000, 100_000, 6144, 0, new ColumnStateMap(), queue),
+                "an absurd backlog still floors at 1, never negative/zero");
+    }
+
     @Test
     void retryMarkInsideConfirmedDiscForcesRescanFromRingZero() {
         var columns = new ColumnStateMap();
@@ -485,12 +551,12 @@ class SpiralScannerTest {
 
         // A fresh scanner is primed: the very FIRST cadence call must fire (join burst),
         // not the 20th — the fireScan helper used elsewhere cannot tell those apart.
-        int first = s.maybeScan(CX, CZ, 2, 0, 1000, () -> 0, new ColumnStateMap(), queue.pos, queue.ts);
+        int first = s.maybeScan(CX, CZ, 2, 0, 1000, -1, 1000, () -> 0, new ColumnStateMap(), queue.pos, queue.ts);
         assertEquals(8 * 3 + 8 * 4, first, "first maybeScan on a fresh scanner must fire and queue the annulus");
 
         // reset() (new session / flushCache) re-primes: again a single call fires.
         s.reset();
-        int afterReset = s.maybeScan(CX, CZ, 2, 0, 1000, () -> 0, new ColumnStateMap(), queue.pos, queue.ts);
+        int afterReset = s.maybeScan(CX, CZ, 2, 0, 1000, -1, 1000, () -> 0, new ColumnStateMap(), queue.pos, queue.ts);
         assertEquals(8 * 3 + 8 * 4, afterReset, "first maybeScan after reset() must fire immediately");
     }
 
@@ -544,7 +610,7 @@ class SpiralScannerTest {
         // cadence alone — the old debounce restarted it here, which starved scanning (and
         // re-declaration with it) for as long as crossings outpaced the window.
         for (int i = 0; i < LSSConstants.TICKS_PER_SECOND - 1; i++) {
-            assertEquals(-1, s.maybeScan(CX, CZ, 2, 0, 1000, () -> 0, columns, queue.pos, queue.ts));
+            assertEquals(-1, s.maybeScan(CX, CZ, 2, 0, 1000, -1, 1000, () -> 0, columns, queue.pos, queue.ts));
         }
         s.recenter();
 
@@ -552,7 +618,7 @@ class SpiralScannerTest {
                 "movement must zero ring confirmation (the confirmed prefix belonged to the old center)");
         assertTrue(columns.hasRetries(), "movement preserves in-range retry marks");
         queue.clear();
-        int n = s.maybeScan(CX, CZ, 2, 0, 1000, () -> 0, columns, queue.pos, queue.ts);
+        int n = s.maybeScan(CX, CZ, 2, 0, 1000, -1, 1000, () -> 0, columns, queue.pos, queue.ts);
         assertEquals(1, n, "the in-progress cadence window completes ON SCHEDULE through a"
                 + " recenter and the scan re-walks the disc, declaring the retry");
         assertEquals(List.of(retried), queue.positions(n));
@@ -606,7 +672,7 @@ class SpiralScannerTest {
 
         assertEquals(0, s.getConfirmedRing(), "reset() zeroes ring confirmation");
         assertFalse(columns.hasRetries(), "session state cleared with the map");
-        int first = s.maybeScan(CX, CZ, 2, 0, 1000, () -> 0, columns, queue.pos, queue.ts);
+        int first = s.maybeScan(CX, CZ, 2, 0, 1000, -1, 1000, () -> 0, columns, queue.pos, queue.ts);
         assertEquals(8 * 3 + 8 * 4, first,
                 "reset() primes the cadence: the rejoin scan fires on the FIRST call");
     }
