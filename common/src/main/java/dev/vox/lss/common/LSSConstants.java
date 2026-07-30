@@ -104,6 +104,10 @@ public final class LSSConstants {
     // LOD-store memory-tier byte cap (compressed resident bytes; plan §1 "memory tier").
     public static final int MIN_LOD_STORE_MEMORY_MB = 8;
     public static final int MAX_LOD_STORE_MEMORY_MB = 2048;
+    // LOD-store periodic freshness re-sweep cadence (0 = off). Paper's stale bound —
+    // its unfired-event gaps (walk-in generation etc.) heal within ≈ autosave + sweep.
+    public static final int MIN_LOD_STORE_RESWEEP_SECONDS = 0;
+    public static final int MAX_LOD_STORE_RESWEEP_SECONDS = 3600;
 
     /** X-ray mask height clamp (docs/planning/antixray-compat-design.md §3): comfortably
      *  outside any MC build height so any real world Y is expressible, while bounding

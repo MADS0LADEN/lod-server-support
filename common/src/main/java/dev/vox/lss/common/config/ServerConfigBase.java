@@ -91,6 +91,15 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public int lodStoreMemoryMB = 64;
     /**
+     * Periodic LOD-store freshness re-sweep (seconds; 0 = off). This is PAPER's stale
+     * bound: its dirty detection is event-driven with documented unfired-event gaps
+     * (e.g. walk-in generation without ChunkPopulateEvent opted in), so the store
+     * re-checks region mtimes/header stamps on this cadence — staleness is bounded by
+     * ≈ one autosave + one sweep. Fabric leaves it 0: the content-hash dirty pipeline
+     * invalidates store rows at runtime, and the startup sweep covers offline edits.
+     */
+    public int lodStoreResweepSeconds = 0;
+    /**
      * LOD x-ray masking (docs/planning/antixray-compat-design.md §3). "auto" (default)
      * masks iff an anti-xray engine is detected — Paper's built-in anti-xray config, or the
      * AntiXray mod on Fabric — adopting its per-world hidden list + max-block-height
@@ -156,6 +165,8 @@ public abstract class ServerConfigBase extends JsonConfig {
         lodStore = dev.vox.lss.common.store.LodStoreMode.normalize(lodStore).configValue();
         lodStoreMemoryMB = Math.clamp(lodStoreMemoryMB,
                 LSSConstants.MIN_LOD_STORE_MEMORY_MB, LSSConstants.MAX_LOD_STORE_MEMORY_MB);
+        lodStoreResweepSeconds = Math.clamp(lodStoreResweepSeconds,
+                LSSConstants.MIN_LOD_STORE_RESWEEP_SECONDS, LSSConstants.MAX_LOD_STORE_RESWEEP_SECONDS);
         xrayObfuscation = XrayMaskPolicy.normalizeMode(xrayObfuscation);
         if (xrayHiddenBlocks == null) xrayHiddenBlocks = defaultXrayHiddenBlocks();
         xrayMaxBlockHeight = Math.clamp(xrayMaxBlockHeight, LSSConstants.MIN_XRAY_MAX_BLOCK_HEIGHT, LSSConstants.MAX_XRAY_MAX_BLOCK_HEIGHT);

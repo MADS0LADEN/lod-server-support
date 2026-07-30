@@ -392,3 +392,69 @@ What landed (all §1 rung-contract items):
 - The Paper exporter contract test mocks `OffThreadProcessor` — every new processor
   accessor the exporter calls needs a `doReturn` there or it NPEs (found immediately by
   the contract tests, which is what they're for).
+
+## Phase 2 — SQLite tier + freshness sweep + tiered composition
+
+### Landed (2026-07-30/31)
+
+- **`SqliteLodStore`** (~750 lines, `common/store/`): WAL + synchronous=NORMAL, page_size
+  16384, per-dimension `lods_<dimId>` ROWID tables (`pos INTEGER PRIMARY KEY` IS the
+  rowid), `dims`/`regions`/`meta` side tables. Meta mismatch (schema/wire/mc/codec) or a
+  corrupt DB file → drop-and-rebuild, never migrate. Thread-confined reader connections
+  (ThreadLocal, `query_only=1`, `wal_autocheckpoint=0`); ALL writes on the single batcher
+  thread (64-row txns, idle flush). Tombstones close the async-delete window (memory
+  tier's proven protocol: stamp-then-remove on invalidate, check-write-recheck on apply).
+  Startup freshness sweep (serving gated until it completes) + Paper's periodic re-sweep
+  (`lodStoreResweepSeconds`, default 0). WAL watchdog TRUNCATEs >64 MB. Writer-failure
+  latch (20 consecutive) → one-way `latchedOff`. Row integrity (usize + FNV chash)
+  verified on every read; a poisoned row counts `store.errors` and is purged.
+- **`TieredLodStore`** (`full` = memory in front of SQLite, shared diagnostics, NO
+  promotion-on-read) + **`LodStores`** factory (degrades full→memory-only→null, warn
+  each). Both services now build `SqliteLodStore.Environment` (worldRoot via
+  `getWorldPath(ROOT)`, region dirs via `DimensionType.getStorageFolder(...)`, mask
+  fingerprints via the active mask-manager entry → `sourceLabel:hex(fingerprint)`,
+  `getServerVersion()`, `PROTOCOL_VERSION`, resweep config).
+- **`MaskSet.fingerprint()`** (FNV over hiddenByStateId bits + maxBlockHeight) on both
+  platforms — the load-bearing OBS-6 input.
+- Config: `lodStoreResweepSeconds` (0=off, clamp 0..3600) + both platforms' anti-vacuity
+  sweeps updated (Fabric's floor-0 exception list + Paper's SHARED_BOUNDS) +
+  `check_soak.py` SERVER_CONFIG_INT_KEYS.
+- Tests: `SqliteLodStoreTest` (16) — cross-restart round-trip incl. all-air byte[0],
+  latest-wins + deposit_skips, tombstone-before-async-delete, 50× deposit-then-invalidate
+  never resurrects, meta-drift + corrupt-DB drop-and-rebuild, row-integrity purge, the
+  full sweep decision table (stale-header drop at per-COLUMN granularity, unchanged-mtime
+  skip, vanished region, absent chunk loc==0, unresolvable dir per-dimension, mask-drift
+  drop+fingerprint update), serving-gate-until-sweep, periodic re-sweep in-session;
+  `TieredLodStoreTest` (4) — fan-out, memory-first, no-promotion, factory degrade.
+
+### Defects caught by writing/running the Phase 2 tests (fixed same-session)
+
+1. **`src_stamp` stored the column ts, not the deposit wall second.** A disk-sourced
+   column's ts IS its region header stamp, so the sweep's `header >= src_stamp` fired on
+   EQUAL stamps — any region whose mtime moved would drop EVERY row in it (the sweep
+   would degrade to region granularity). Now: `src_stamp = System.currentTimeMillis()/1000`
+   at the deposit() call; the sweep test pins per-column granularity (edited column
+   dropped, untouched neighbour in the SAME region kept).
+2. **`enqueue` livelock + shed-able deletes.** The old single bounded queue could cycle
+   poll→re-offer forever when full of deletes, and a shed delete would outlive its 10 s
+   tombstone → stale-row resurrection. Now: deletes/resweeps ride a separate UNBOUNDED
+   `controlQueue` drained BEFORE deposits (volume is edit-rate-bounded; a mass
+   invalidation is ONE op carrying the array); deposits keep shed-oldest on the bounded
+   queue; the batcher's graceful exit flushes queued deletes.
+3. **Absent chunk (loc==0) kept its row.** Header stamp mapped to MIN_VALUE → `>=` never
+   fired → the store would intercept the miss that regenerates a region-tool-deleted
+   chunk. Now MAX_VALUE (drop), the vanished-region rule at chunk granularity.
+4. **`dimIdsShared` survived drop-and-rebuild** (loadDims cleared only the writer-side
+   map) → post-rebuild get() queried a dropped `lods_<id>` table → spurious
+   `store.errors` per read. Caught by the meta-drift test's errors==0 assertion.
+
+### Phase 2 design decisions
+
+- `src_stamp` = deposit-call wall second (see defect 1). Conservative both ways: an
+  untouched chunk's header stays < it (kept); a save at-or-after the deposit is >= it
+  (dropped; `>=` covers the same-second race).
+- Reader statements are prepared per get() (no per-thread statement cache): SQLite
+  prepare is ~µs against the 24 µs zstd decompress; revisit only if the Phase 2 p95
+  measurement says otherwise.
+- `Op.Resweep` exists for a future `/lsslod store resweep` verb; the periodic path
+  triggers off `nextResweepNanos` directly.

@@ -217,11 +217,11 @@ class ConfigValidationTest {
             var c = serverConfig();
             f.setInt(c, Integer.MIN_VALUE);
             c.validate();
-            // missMemoTtlSeconds is the one field whose legal floor is 0 (the memo kill
-            // switch, MIN_MISS_MEMO_TTL_SECONDS); xrayMaxBlockHeight's floor is a world Y
-            // and deliberately negative — every other numeric floor is >= 1.
+            // missMemoTtlSeconds and lodStoreResweepSeconds have a legal floor of 0
+            // (each 0 is that feature's kill switch); xrayMaxBlockHeight's floor is a
+            // world Y and deliberately negative — every other numeric floor is >= 1.
             int floor = switch (f.getName()) {
-                case "missMemoTtlSeconds" -> 0;
+                case "missMemoTtlSeconds", "lodStoreResweepSeconds" -> 0;
                 case "xrayMaxBlockHeight" -> LSSConstants.MIN_XRAY_MAX_BLOCK_HEIGHT;
                 default -> 1;
             };

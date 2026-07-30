@@ -93,14 +93,16 @@ public final class MemoryLodStore implements LodStoreService {
     public static MemoryLodStore createOrNull(LodStoreMode mode, long maxBytes) {
         StoreCodec codec = StoreCodec.zstdOrNull();
         if (codec == null) return null;
-        return new MemoryLodStore(mode, codec, maxBytes);
+        return new MemoryLodStore(mode, codec, maxBytes, new LodStoreDiagnostics());
     }
 
-    MemoryLodStore(LodStoreMode mode, StoreCodec codec, long maxBytes) {
+    /** Diagnostics are INJECTED so a tiered composition (memory in front of SQLite,
+     *  Phase 2) reports through one counter family the exporters already read. */
+    MemoryLodStore(LodStoreMode mode, StoreCodec codec, long maxBytes, LodStoreDiagnostics diag) {
         this.mode = mode;
         this.codec = codec;
         this.maxBytes = maxBytes;
-        this.diag = new LodStoreDiagnostics();
+        this.diag = diag;
         this.batcher = new Thread(this::batcherLoop, Brand.shortName() + " LOD Store Batcher");
         this.batcher.setDaemon(true);
         this.batcher.setPriority(Thread.MIN_PRIORITY + 1);

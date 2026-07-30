@@ -125,15 +125,38 @@ public class RequestProcessingService {
                 config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
                         + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS);
 
-        // LOD store (docs/planning/lod-store-implementation-plan.md; Phase 1 = the memory
-        // tier for every non-off mode). Attached to BOTH consumers before any submit/tick:
-        // the reader owns the hit rung, the processor owns deposits + invalidation fan-out.
-        // A failed codec probe (native outside the shipped matrix) degrades to store-off
-        // with one warning — never a crash.
+        // LOD store (docs/planning/lod-store-implementation-plan.md): memory tier for
+        // "memory", memory + SQLite for "full". Attached to BOTH consumers before any
+        // submit/tick: the reader owns the hit rung, the processor owns deposits +
+        // invalidation fan-out. Environment resolved eagerly on the main thread (levels
+        // are loaded at SERVER_STARTED): per-dimension region dirs via the same API the
+        // game uses (getStorageFolder — never hand-derived layouts), and per-dimension
+        // mask fingerprints (deposited bytes are post-mask; a mask change drops the
+        // dimension's rows at the sweep). A failed codec/native probe degrades to
+        // store-off with one warning — never a crash.
         var storeMode = dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore);
         if (storeMode != dev.vox.lss.common.store.LodStoreMode.OFF) {
-            this.lodStore = dev.vox.lss.common.store.MemoryLodStore.createOrNull(
-                    storeMode, config.lodStoreMemoryMB * 1024L * 1024L);
+            var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
+            var regionDirs = new HashMap<String, java.nio.file.Path>();
+            var maskFingerprints = new HashMap<String, String>();
+            var dimensions = new ArrayList<String>();
+            for (ServerLevel level : server.getAllLevels()) {
+                String dim = level.dimension().identifier().toString();
+                dimensions.add(dim);
+                regionDirs.put(dim, net.minecraft.world.level.dimension.DimensionType
+                        .getStorageFolder(level.dimension(), worldRoot)
+                        .resolve("region").normalize());
+                var maskEntry = XrayMaskManager.entryForActive(level);
+                maskFingerprints.put(dim, maskEntry == null ? "off"
+                        : maskEntry.sourceLabel() + ":"
+                                + Long.toHexString(maskEntry.mask().fingerprint()));
+            }
+            var env = new dev.vox.lss.common.store.SqliteLodStore.Environment(
+                    worldRoot.resolve("lss-lod"), server.getServerVersion(),
+                    LSSConstants.PROTOCOL_VERSION, regionDirs::get, maskFingerprints::get,
+                    dimensions, config.lodStoreResweepSeconds);
+            this.lodStore = dev.vox.lss.common.store.LodStores.createOrNull(
+                    storeMode, config.lodStoreMemoryMB * 1024L * 1024L, env);
             if (this.lodStore == null) {
                 LSSLogger.warn("lodStore=" + storeMode.configValue() + " requested but the "
                         + dev.vox.lss.common.store.StoreCodec.NAME + " codec native cannot "

@@ -118,6 +118,22 @@ public final class XrayMaskFilter {
         public int maxBlockHeight() {
             return this.maxBlockHeight;
         }
+
+        /** Stable fingerprint of the mask SEMANTICS (hidden-state-id bits + cutoff) —
+         *  the LOD store's per-dimension staleness key (plan §1: deposited bytes are
+         *  post-mask; a mask change must drop the dimension's rows). Registry-order
+         *  drift across mod-set changes shifts state ids and therefore the fingerprint
+         *  — a conservative drop, never a stale serve. */
+        public long fingerprint() {
+            long hash = 0xcbf29ce484222325L;
+            for (boolean b : this.hiddenByStateId) {
+                hash ^= b ? 1 : 0;
+                hash *= 0x100000001b3L;
+            }
+            hash ^= this.maxBlockHeight;
+            hash *= 0x100000001b3L;
+            return hash;
+        }
     }
 
     /**

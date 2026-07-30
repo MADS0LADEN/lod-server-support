@@ -149,6 +149,8 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     "xrayMaxBlockHeight",
     # LOD-store memory-tier cap — the Phase 1 hit-rate-curve scenarios sweep it.
     "lodStoreMemoryMB",
+    # LOD-store periodic freshness re-sweep (Paper's stale bound; 0 = off).
+    "lodStoreResweepSeconds",
 })
 # X-ray masking tri-state ("auto"/"on"/"off"), the LOD-store switch ("off"/"memory"/
 # "full" — scenarios A/B store gates against it), + hidden-block id list — the only

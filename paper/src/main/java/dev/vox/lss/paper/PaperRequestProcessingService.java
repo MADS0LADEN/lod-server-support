@@ -300,14 +300,36 @@ public class PaperRequestProcessingService {
                 config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
                         + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS);
 
-        // LOD store (Phase 1 = the memory tier for every non-off mode) — attached to both
-        // consumers BEFORE the processor starts / any submit. A failed codec probe
-        // degrades to store-off with one warning (the Fabric twin is identical).
+        // LOD store: memory tier for "memory", memory + SQLite for "full" — attached to
+        // both consumers BEFORE the processor starts / any submit. Environment resolved
+        // eagerly on the construction thread (levels loaded at plugin enable); the
+        // periodic re-sweep (lodStoreResweepSeconds) is PAPER's stale bound for its
+        // unfired-event dirty gaps. A failed codec/native probe degrades to store-off
+        // with one warning (the Fabric twin is identical).
         dev.vox.lss.common.store.LodStoreService lodStore = null;
         var storeMode = dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore);
         if (storeMode != dev.vox.lss.common.store.LodStoreMode.OFF) {
-            lodStore = dev.vox.lss.common.store.MemoryLodStore.createOrNull(
-                    storeMode, config.lodStoreMemoryMB * 1024L * 1024L);
+            var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
+            var regionDirs = new java.util.HashMap<String, java.nio.file.Path>();
+            var maskFingerprints = new java.util.HashMap<String, String>();
+            var dimensions = new java.util.ArrayList<String>();
+            for (ServerLevel level : server.getAllLevels()) {
+                String dim = level.dimension().identifier().toString();
+                dimensions.add(dim);
+                regionDirs.put(dim, net.minecraft.world.level.dimension.DimensionType
+                        .getStorageFolder(level.dimension(), worldRoot)
+                        .resolve("region").normalize());
+                var maskEntry = PaperXrayMaskManager.entryForActive(level);
+                maskFingerprints.put(dim, maskEntry == null ? "off"
+                        : maskEntry.sourceLabel() + ":"
+                                + Long.toHexString(maskEntry.mask().fingerprint()));
+            }
+            var env = new dev.vox.lss.common.store.SqliteLodStore.Environment(
+                    worldRoot.resolve("lss-lod"), server.getServerVersion(),
+                    LSSConstants.PROTOCOL_VERSION, regionDirs::get, maskFingerprints::get,
+                    dimensions, config.lodStoreResweepSeconds);
+            lodStore = dev.vox.lss.common.store.LodStores.createOrNull(
+                    storeMode, config.lodStoreMemoryMB * 1024L * 1024L, env);
             if (lodStore == null) {
                 LSSLogger.warn("lodStore=" + storeMode.configValue() + " requested but the "
                         + dev.vox.lss.common.store.StoreCodec.NAME + " codec native cannot "
