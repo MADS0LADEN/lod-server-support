@@ -201,6 +201,7 @@ def analyze_jfr(run_dir, jfr_tool):
     exec_by_thread = Counter()
     self_methods = Counter()
     self_methods_lss = Counter()
+    bands = Counter()
     hot_stacks = Counter()
     collapsed = Counter()
     alloc_by_class = Counter()
@@ -222,6 +223,7 @@ def analyze_jfr(run_dir, jfr_tool):
             if stack:
                 leaf = shorten(stack[0])
                 self_methods[leaf] += 1
+                bands[band_for_stack(stack)] += 1
                 for fr in stack:
                     if fr.startswith("dev.vox.lss"):
                         self_methods_lss[shorten(fr)] += 1
@@ -259,10 +261,23 @@ def analyze_jfr(run_dir, jfr_tool):
         for stackline, n in collapsed.most_common():
             f.write(f"{stackline} {n}\n")
 
+    # Machine-readable band attribution for the store gates (§0 metric 2 reads
+    # lss_attributed_samples × idle-corrected CPU ÷ columns from this file).
+    band_summary = {
+        "window_s": round(t_last - t_first, 1),
+        "total_exec_samples": total_exec,
+        "bands": {name: bands.get(name, 0)
+                  for name in [b[0] for b in BANDS] + ["unattributed"]},
+        "lss_attributed_samples": sum(bands.get(b, 0) for b in LSS_ATTRIBUTED_BANDS),
+    }
+    with open(os.path.join(run_dir, "bands.json"), "w") as f:
+        json.dump(band_summary, f, indent=1)
+
     return {
         "run": os.path.basename(run_dir),
         "window_s": round(t_last - t_first, 1),
         "total_exec_samples": total_exec,
+        "bands": band_summary,
         "exec_by_thread": exec_by_thread.most_common(14),
         "self_methods": self_methods.most_common(22),
         "self_methods_lss": self_methods_lss.most_common(12),
@@ -288,6 +303,14 @@ def render_report(r):
     tot = r["total_exec_samples"] or 1
     for th, n in r["exec_by_thread"]:
         lines.append(f"- {th}: {n} ({100 * n / tot:.1f}%)")
+    lines.append("")
+
+    lines.append("### Band attribution (leaf-first stack-prefix buckets; store gates read these)")
+    for name, n in r["bands"]["bands"].items():
+        lines.append(f"- {name}: {n} ({100 * n / tot:.1f}%)")
+    lines.append(f"- lss_attributed (store+zip+nbt+serialize+lss-other): "
+                 f"{r['bands']['lss_attributed_samples']} "
+                 f"({100 * r['bands']['lss_attributed_samples'] / tot:.1f}%)")
     lines.append("")
 
     lines.append("### Top self methods (leaf frames)")

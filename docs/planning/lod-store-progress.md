@@ -114,6 +114,58 @@ page cache, n=3000):
    vanilla-written world) — the §1 freshness mechanism is real on vanilla Fabric.
    Moonrise/C2ME verification still pending (needs worlds written by those systems).
 
+### Infrastructure landed (2026-07-30)
+
+- **(d) Counters plumbed end-to-end, store OFF** (commit 027ac5f): `common/store/`
+  package born with `LodStoreMode` (off|memory|full, unknown→off safe-biased, pinned by
+  `LodStoreModeTest`) + `LodStoreDiagnostics` (AtomicLong family — the store's OWN
+  counters, never `disk.*`, never the throttle EWMA). `lodStore` config key. Diag TOKEN
+  on the DiskReader line (`store=off` / `store=<mode> h=… m=…`). Store group in both
+  exporter twins + the benchmark server.json second site + server-snapshot.contract.
+  check_soak: 7 monotonic counters, `store.queue` a strict SERVER_DRAIN, `_srv` fixture,
+  `lodStore` config key, 148 selftest cases. soak_report: errors/deposit_drops
+  concerning, hits/misses/deposits/mem_hits mechanism, byte gauges in HIGH_WATER,
+  DRAIN_GAUGES hand-sync. All test tiers green (fabric T1, paper T1 322, T2 59).
+- **(b) JFR band attribution** in analyze_profile_jfr.py: leaf-first stack-prefix bands
+  (store / zip / nbt / serialize / lss-other), `bands.json` per run for gate math +
+  report section. Baseline on the 2026-07-29 vanilla no-cache JFR: nbt 19.4%,
+  serialize 48.9%, zip 0.5%, lss-other 2.5% → lss_attributed 71.3% of exec samples —
+  the serialize+nbt ≈ 68% is exactly what §0 metric 1 expects a warm store hit to zero.
+- **(a) warm-join benchmark scenario**: benchmark.sh restructured around `run_cycle`;
+  `warm-join` = cycle A (populate, base-world copy) + cycle B (measure: server RESTART
+  on the same world — the store DB rides the world folder — fresh client cache).
+  `BENCHMARK_DROP_CACHES=1` drops the OS page cache before the measure cycle
+  (passwordless-sudo best-effort, recorded in warm-join-meta.json). Phase 1's
+  SAME-SESSION second-join gate deliberately rides the soak harness instead (its
+  two-client-run machinery + 5 s JSONL snapshots give run-2 deltas for free;
+  benchmark.sh measures the cross-restart shape that Phase 2 gates on).
+- **(c) Paper/Folia CPU sampling**: proc_sampler server-discovery pattern is now
+  overridable (`PROC_SAMPLER_SRV_PATTERN`); soak.sh attaches it on every platform via
+  `-Dlss.soak.scenario`, writing `cpu.jsonl` next to the run's JSONL.
+- **Packaging spike: PASSED.** Fabric: `slimStoreDepJars` repacks sqlite-jdbc + zstd-jni
+  native-stripped (linux/win/mac × x64/arm64 + Linux-Musl for sqlite) with a generated
+  minimal fabric.mod.json each (nested jars must be mods), nested via META-INF/jars +
+  hand-declared `"jars"` entries (version-free file names so the descriptor never chases
+  version bumps; Loom MERGES its common entry into the array — verified in the built
+  jar). Release jar 330 KB → 7.6 MB (sqlite-slim 5.0 MB, zstd-slim 2.3 MB). Paper:
+  plain `implementation` deps + a shared native-strip exclude closure on both shadow
+  tasks, org.sqlite deliberately NOT relocated; 7.5 MB. release_check.py gained
+  `check_store_natives_fabric/paper` (8 sqlite natives by exact path, 6 zstd native
+  dirs, nested-jar declaration check, relocation guard) + synthetic fixtures + 3
+  selftest cases (55 total). VSS byte-copy pair checks unaffected (verified green).
+- **.mca header-timestamp verification**: `scripts/mca_timestamps.py` (scan + compare
+  modes). Vanilla: PASS (55,678/55,678 nonzero on the base world). C2ME/Moonrise:
+  evidence runs in flight (compare base vs post-run region headers after each arm's
+  no-cache run — vanilla's ~10 s metadata re-saves guarantee rewrites near spawn).
+
+### Phase 0 remaining / deferred
+
+- C2ME + Moonrise header-stamp evidence (runs in flight) + a warm-join smoke run
+  (store off) to validate the new scenario mechanics.
+- Deferred to Phase 2 (live-load validation, where sqlite actually loads): the Knot
+  duplicate-sqlite-jdbc collision test (needs a second live mod jar), `org.sqlite.tmpdir`
+  handling, and a real-jar test-server boot check.
+
 ### Learnings
 
 - **sqlite-jdbc under Fabric's Knot classloader: `DriverManager.getConnection` fails with
@@ -125,3 +177,9 @@ page cache, n=3000):
 - ~22% of the benchmark world's chunks are not-FULL (10,089/55,678) — spawn-prep and
   gen-radius partials. The store only ever sees FULL columns (serializer returns null
   otherwise), so backfill coverage math should use servable counts, not header counts.
+- Fabric Loader requires nested Jar-in-Jar entries to BE mods (fabric.mod.json inside),
+  and Loom merges its include-generated `jars` entries into a hand-written array rather
+  than replacing it.
+- The Paper exporter contract test mocks `OffThreadProcessor` — every new processor
+  accessor the exporter calls needs a `doReturn` there or it NPEs (found immediately by
+  the contract tests, which is what they're for).

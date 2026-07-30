@@ -31,6 +31,14 @@
   "mixins": [
     "lss.mixins.json"
   ],
+  "jars": [
+    {
+      "file": "META-INF/jars/sqlite-jdbc-slim.jar"
+    },
+    {
+      "file": "META-INF/jars/zstd-jni-slim.jar"
+    }
+  ],
   "depends": {
     "minecraft": ">=26.2 <26.3-",
     "fabricloader": ">=0.18.4",

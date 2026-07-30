@@ -361,6 +361,15 @@ mc_start_server "$RUN_RESULTS_DIR/server.log" "$SERVER_GRADLE_TASK" -Psoak.scena
 mc_wait_server_ready "$SERVER_RUN_DIR/logs/latest.log" "$RUN_RESULTS_DIR/server.log" "$SERVER_READY_TIMEOUT"
 DEADLINE_EPOCH=$(( $(date +%s) + RUNTIME_BUDGET ))
 
+# Step 9b: 1 Hz CPU/RSS/wire sampler (LOD-store plan §5 Phase 0 (c) — the store's CPU
+# gates need Paper/Folia samples, and benchmark.sh is Fabric-only). The soak server JVM
+# is discovered via -Dlss.soak.scenario (every platform's soak run task carries it). The
+# sampler self-terminates when the server JVM disappears; the explicit kill at collect is
+# belt-and-braces. Analysis lives with the profile tooling (cpu.jsonl schema unchanged).
+PROC_SAMPLER_SRV_PATTERN='Dlss\.soak\.scenario' \
+    "$PROJECT_ROOT/scripts/lib/proc_sampler.sh" "$RUN_RESULTS_DIR/cpu.jsonl" $((RUNTIME_BUDGET + 300)) &
+SAMPLER_PID=$!
+
 # Step 10: Client runs (the server kicks the client between runs / halts at scenario end)
 for (( run=1; run<=CLIENT_RUNS; run++ )); do
     echo "[soak] Client run $run/$CLIENT_RUNS"
@@ -403,6 +412,8 @@ SERVER_PID=""
 echo "[soak] Server exited"
 
 # Step 12: Collect results (gradle logs were written there directly)
+kill "$SAMPLER_PID" 2>/dev/null || true
+wait "$SAMPLER_PID" 2>/dev/null || true
 echo "[soak] Collecting results into $RUN_RESULTS_DIR"
 if [[ -f "$SERVER_RUN_DIR/soak-results/server.jsonl" ]]; then
     cp "$SERVER_RUN_DIR/soak-results/server.jsonl" "$RUN_RESULTS_DIR/server.jsonl"

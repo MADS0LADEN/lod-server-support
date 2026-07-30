@@ -3,8 +3,31 @@ set -euo pipefail
 
 # LSS Benchmark Orchestrator
 # Usage: ./scripts/benchmark.sh [scenario] [duration]
-#   scenario: fresh | no-cache  (default: fresh)
-#   duration: seconds                     (default: 60)
+#   scenario: fresh | no-cache | warm-join   (default: fresh)
+#   duration: seconds per cycle             (default: 60)
+#
+# Scenarios:
+#   fresh      Empty world, chunks generated on demand (generation + serialization).
+#              Saves the resulting world to benchmark-worlds/base for reuse.
+#   no-cache   Pre-built base world, cold client cache (disk-read + serialization).
+#   warm-join  LOD-store cross-restart warm join (lod-store-implementation-plan.md §5):
+#              cycle A ("populate") serves the base world once — with lodStore on, the
+#              delivery-path deposits fill the store; cycle B ("measure") RESTARTS the
+#              server on the SAME world (the store DB lives in the world folder) and a
+#              second client with a cleared cache joins — the measured arm. Results:
+#              server.json/client.json = cycle B; *-populate.json = cycle A.
+#              The kill-switch A/B arm is the same scenario with lodStore=off staged in
+#              the server config (the caller stages config; this script is config-agnostic).
+#
+# Env knobs:
+#   BENCHMARK_SERVER_GRADLE_ARGS  extra gradle args for the SERVER invocation only
+#                                 (e.g. -Pbenchmark.c2me=true)
+#   BENCHMARK_DROP_CACHES=1       drop the OS page cache before the MEASURE cycle
+#                                 (warm-join cycle B / the single cycle otherwise).
+#                                 Needs passwordless sudo; warns and continues without
+#                                 it otherwise. The store's worst case is ~800 random
+#                                 point reads into a multi-GB file on a cold cache —
+#                                 every warm number rode a fully-cached world.
 
 SCENARIO="${1:-fresh}"
 DURATION="${2:-60}"
@@ -30,6 +53,39 @@ cd "$PROJECT_ROOT"
 # Step 2: Prepare run directories
 mkdir -p "$SERVER_RUN_DIR" "$CLIENT_RUN_DIR" "$RESULTS_DIR"
 
+require_base_world() {
+    if [[ ! -d "$WORLDS_DIR/base/world" ]]; then
+        echo "[benchmark] ERROR: No base world found at $WORLDS_DIR/base/world"
+        echo "[benchmark] Run a 'fresh' scenario first to generate a base world."
+        exit 1
+    fi
+}
+
+reset_world_from_base() {
+    rm -rf "$SERVER_RUN_DIR/world"
+    cp -r "$WORLDS_DIR/base/world" "$SERVER_RUN_DIR/world"
+}
+
+clear_client_lss_cache() {
+    rm -rf "$CLIENT_RUN_DIR/config/lss/cache" "$CLIENT_RUN_DIR/config/vss/cache" 2>/dev/null || true
+}
+
+# Drop the OS page cache (measure-cycle cold-read variant). Best-effort: passwordless
+# sudo only — an interactive prompt would hang an unattended run.
+drop_page_caches() {
+    sync
+    if sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null; then
+        echo "[benchmark] Dropped OS page caches (cold-cache measure cycle)"
+        DROPPED_CACHES=true
+    else
+        echo "[benchmark] WARNING: BENCHMARK_DROP_CACHES=1 but passwordless sudo is"
+        echo "[benchmark]          unavailable — measure cycle runs WARM. Grant NOPASSWD"
+        echo "[benchmark]          for 'sh -c echo 3 > /proc/sys/vm/drop_caches' or run once with sudo -v."
+        DROPPED_CACHES=false
+    fi
+}
+DROPPED_CACHES=n/a
+
 # Step 3: Prepare world based on scenario
 echo "[benchmark] Preparing world for scenario: $SCENARIO"
 case "$SCENARIO" in
@@ -38,17 +94,12 @@ case "$SCENARIO" in
         rm -rf "$SERVER_RUN_DIR/world_nether"
         rm -rf "$SERVER_RUN_DIR/world_the_end"
         ;;
-    no-cache)
-        if [[ ! -d "$WORLDS_DIR/base/world" ]]; then
-            echo "[benchmark] ERROR: No base world found at $WORLDS_DIR/base/world"
-            echo "[benchmark] Run a 'fresh' scenario first to generate a base world."
-            exit 1
-        fi
-        rm -rf "$SERVER_RUN_DIR/world"
-        cp -r "$WORLDS_DIR/base/world" "$SERVER_RUN_DIR/world"
+    no-cache|warm-join)
+        require_base_world
+        reset_world_from_base
         ;;
     *)
-        echo "[benchmark] ERROR: Unknown scenario '$SCENARIO'. Use: fresh | no-cache"
+        echo "[benchmark] ERROR: Unknown scenario '$SCENARIO'. Use: fresh | no-cache | warm-join"
         exit 1
         ;;
 esac
@@ -62,10 +113,7 @@ joinedFirstServer:true
 soundCategory_master:0.0
 OPTS
 
-# Step 4b: Clear stale server log from previous runs
-rm -f "$SERVER_RUN_DIR/logs/latest.log"
-
-# Step 4c: Write server.properties + eula.txt
+# Step 4b: Write server.properties + eula.txt
 # difficulty=peaceful: the base world's saved time-of-day is whatever the build run ended
 # at (a 900 s build saves NIGHT), and a hostile mob killing the idle benchmark player
 # freezes the client's want-set declarations mid-run (tick()'s isDeadOrDying guard) —
@@ -81,67 +129,94 @@ PROPS
 
 echo "eula=true" > "$SERVER_RUN_DIR/eula.txt"
 
-# Step 5: Start server
-# BENCHMARK_SERVER_GRADLE_ARGS: optional extra gradle args for the SERVER invocation only
-# (e.g. -Pbenchmark.c2me=true for the C2ME A/B arm — the client stays unmodified).
-mc_start_server "$RESULTS_DIR/server.log" :fabric:runBenchmarkServer -Pbenchmark.duration="$DURATION" ${BENCHMARK_SERVER_GRADLE_ARGS:-}
+# run_cycle <result-suffix>: one full server+client cycle. Collects
+# server{suffix}.json / client{suffix}.json / *.jfr into RESULTS_DIR.
+run_cycle() {
+    local suffix="$1"
 
-# Step 6: Wait for server ready
-mc_wait_server_ready "$SERVER_RUN_DIR/logs/latest.log" "$RESULTS_DIR/server.log" 120
+    rm -f "$SERVER_RUN_DIR/logs/latest.log"
+    rm -f "$SERVER_RUN_DIR/benchmark-results/server.json" \
+          "$CLIENT_RUN_DIR/benchmark-results/client.json" \
+          "$SERVER_RUN_DIR/server-benchmark.jfr" "$CLIENT_RUN_DIR/client-benchmark.jfr"
 
-# Step 7: Start client
-mc_start_client "$RESULTS_DIR/client.log" :fabric:runBenchmarkClient
+    # Start server
+    # BENCHMARK_SERVER_GRADLE_ARGS: optional extra gradle args for the SERVER invocation only
+    # (e.g. -Pbenchmark.c2me=true for the C2ME A/B arm — the client stays unmodified).
+    mc_start_server "$RESULTS_DIR/server$suffix.log" :fabric:runBenchmarkServer -Pbenchmark.duration="$DURATION" ${BENCHMARK_SERVER_GRADLE_ARGS:-}
+    mc_wait_server_ready "$SERVER_RUN_DIR/logs/latest.log" "$RESULTS_DIR/server$suffix.log" 120
+    mc_start_client "$RESULTS_DIR/client$suffix.log" :fabric:runBenchmarkClient
 
-# Step 8: Wait for server to exit (auto-stops after duration). Enforce the deadline: the
-# benchmark server only halts on tick count (max-tick-time=-1 disables the vanilla
-# watchdog), so a stalled JVM would otherwise hang this script forever.
-TOTAL_TIMEOUT=$((DURATION + 120))
-echo "[benchmark] Waiting up to ${TOTAL_TIMEOUT}s for benchmark to complete..."
-elapsed=0
-while kill -0 "$SERVER_PID" 2>/dev/null; do
-    if [ "$elapsed" -ge "$TOTAL_TIMEOUT" ]; then
-        echo "[benchmark] Deadline exceeded (${TOTAL_TIMEOUT}s) — killing stalled server" >&2
-        kill "$SERVER_PID" 2>/dev/null || true
-        break
+    # Wait for server to exit (auto-stops after duration). Enforce the deadline: the
+    # benchmark server only halts on tick count (max-tick-time=-1 disables the vanilla
+    # watchdog), so a stalled JVM would otherwise hang this script forever.
+    local total_timeout=$((DURATION + 120))
+    echo "[benchmark] Waiting up to ${total_timeout}s for cycle to complete..."
+    local elapsed=0
+    while kill -0 "$SERVER_PID" 2>/dev/null; do
+        if [ "$elapsed" -ge "$total_timeout" ]; then
+            echo "[benchmark] Deadline exceeded (${total_timeout}s) — killing stalled server" >&2
+            kill "$SERVER_PID" 2>/dev/null || true
+            break
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    if wait "$SERVER_PID" 2>/dev/null; then
+        echo "[benchmark] Server exited normally"
+    else
+        echo "[benchmark] Server exited with code $?"
     fi
-    sleep 1
-    elapsed=$((elapsed + 1))
-done
-if wait "$SERVER_PID" 2>/dev/null; then
-    echo "[benchmark] Server exited normally"
-else
-    echo "[benchmark] Server exited with code $?"
-fi
-SERVER_PID=""
+    SERVER_PID=""
 
-# Step 9: Wait for client to exit (auto-stops on disconnect)
-mc_wait_client_exit 30
+    # Wait for client to exit (auto-stops on disconnect)
+    mc_wait_client_exit 30
 
-# Step 10: Collect results
-echo "[benchmark] Collecting results..."
-if [[ -f "$SERVER_RUN_DIR/benchmark-results/server.json" ]]; then
-    cp "$SERVER_RUN_DIR/benchmark-results/server.json" "$RESULTS_DIR/server.json"
-    echo "[benchmark] Server metrics: $RESULTS_DIR/server.json"
-else
-    echo "[benchmark] WARNING: No server metrics found"
-fi
-
-if [[ -f "$CLIENT_RUN_DIR/benchmark-results/client.json" ]]; then
-    cp "$CLIENT_RUN_DIR/benchmark-results/client.json" "$RESULTS_DIR/client.json"
-    echo "[benchmark] Client metrics: $RESULTS_DIR/client.json"
-else
-    echo "[benchmark] WARNING: No client metrics found"
-fi
-
-# Copy JFR files if present
-for jfr in "$SERVER_RUN_DIR/server-benchmark.jfr" "$CLIENT_RUN_DIR/client-benchmark.jfr"; do
-    if [[ -f "$jfr" ]]; then
-        cp "$jfr" "$RESULTS_DIR/"
-        echo "[benchmark] JFR: $RESULTS_DIR/$(basename "$jfr")"
+    # Collect results
+    echo "[benchmark] Collecting results (suffix '$suffix')..."
+    if [[ -f "$SERVER_RUN_DIR/benchmark-results/server.json" ]]; then
+        cp "$SERVER_RUN_DIR/benchmark-results/server.json" "$RESULTS_DIR/server$suffix.json"
+        echo "[benchmark] Server metrics: $RESULTS_DIR/server$suffix.json"
+    else
+        echo "[benchmark] WARNING: No server metrics found"
     fi
-done
+    if [[ -f "$CLIENT_RUN_DIR/benchmark-results/client.json" ]]; then
+        cp "$CLIENT_RUN_DIR/benchmark-results/client.json" "$RESULTS_DIR/client$suffix.json"
+        echo "[benchmark] Client metrics: $RESULTS_DIR/client$suffix.json"
+    else
+        echo "[benchmark] WARNING: No client metrics found"
+    fi
+    if [[ -f "$SERVER_RUN_DIR/server-benchmark.jfr" ]]; then
+        cp "$SERVER_RUN_DIR/server-benchmark.jfr" "$RESULTS_DIR/server-benchmark$suffix.jfr"
+    fi
+    if [[ -f "$CLIENT_RUN_DIR/client-benchmark.jfr" ]]; then
+        cp "$CLIENT_RUN_DIR/client-benchmark.jfr" "$RESULTS_DIR/client-benchmark$suffix.jfr"
+    fi
+}
 
-# Step 11: Save world for reuse (fresh scenario only)
+# Step 5: Run the scenario's cycle(s)
+if [[ "$SCENARIO" == "warm-join" ]]; then
+    clear_client_lss_cache
+    echo "[benchmark] warm-join cycle A (populate)..."
+    run_cycle "-populate"
+    # Cycle B: SAME world (keeps the store DB the populate cycle deposited), fresh
+    # client cache, fresh server session — the cross-restart warm join.
+    clear_client_lss_cache
+    if [[ "${BENCHMARK_DROP_CACHES:-0}" == "1" ]]; then
+        drop_page_caches
+    fi
+    echo "[benchmark] warm-join cycle B (measure)..."
+    run_cycle ""
+    cat > "$RESULTS_DIR/warm-join-meta.json" <<EOF
+{"scenario":"warm-join","duration_s":$DURATION,"dropped_caches":"$DROPPED_CACHES","finished":"$(date -Is)"}
+EOF
+else
+    if [[ "${BENCHMARK_DROP_CACHES:-0}" == "1" ]]; then
+        drop_page_caches
+    fi
+    run_cycle ""
+fi
+
+# Step 6: Save world for reuse (fresh scenario only)
 if [[ "$SCENARIO" == "fresh" && -d "$SERVER_RUN_DIR/world" ]]; then
     echo "[benchmark] Saving world to $WORLDS_DIR/base/ for reuse"
     mkdir -p "$WORLDS_DIR/base"
@@ -149,7 +224,7 @@ if [[ "$SCENARIO" == "fresh" && -d "$SERVER_RUN_DIR/world" ]]; then
     cp -r "$SERVER_RUN_DIR/world" "$WORLDS_DIR/base/world"
 fi
 
-# Step 12: Print server results
+# Step 7: Print server results
 echo ""
 echo "========================================="
 echo " Benchmark Complete"
