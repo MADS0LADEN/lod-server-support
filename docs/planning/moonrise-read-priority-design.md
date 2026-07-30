@@ -1,7 +1,21 @@
 # Moonrise-Fabric low-priority disk reads (reflective bridge)
 
-Status: IMPLEMENTED (2026-07-30, branch feat/moonrise-low-priority-reads) — follow-up
-to issue #69's Moonrise compat (PR #70, merged 2026-07-30).
+Status: IMPLEMENTED + LIVE-VALIDATED (2026-07-30, branch feat/moonrise-low-priority-reads)
+— follow-up to issue #69's Moonrise compat (PR #70, merged 2026-07-30).
+Live gate (§5) result: `disk-saturation` with real moonrise-opt 1.1.0
+(`SOAK_EXTRA_GRADLE_ARGS="-Pbenchmark.moonrise=true"`, run 20260730T175822Z) — checker
+PASS 0 violations/0 warnings, adoption INFO fired once, ZERO
+"Background-priority disk reads unavailable" (pre-bridge it would fire),
+disk.submitted=completed=1960 with errors=0/saturated=0, superseded=350 (the ≥100
+premise held under Moonrise IO). Vanilla control leg (run 20260730T175422Z): PASS,
+2144 reads, no Moonrise lines — the null-bridge path is bit-identical to today.
+Review round 2 (implementation, three agents — runtime/integration/test lenses):
+2 more MAJORs fixed (the gitignore-eaten shaded-package Priority stub broke
+clean-checkout compilation — force-tracked + `!**/src/**/libs/**` negation; weak
+pins — decoy overloads + bridge-invocation counting). Runtime agent probe-verified
+resolution+invoke against the real 1.1.0 class files (unique non-synthetic 7-arg
+match, WMTE-free adaptation, defensive-copy callbacks, shutdown ISE lands in the
+per-chunk triage domain).
 Target: `main`, Fabric module only.
 Review round 1 (plan, 2026-07-30, one adversarial agent): 1 MAJOR fixed — the
 invoke-throw latch domain is now TYPED (linkage/adaptation only; Moonrise's own
