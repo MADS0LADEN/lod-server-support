@@ -585,12 +585,18 @@ def law_A2(ps, cs, pc, cc, window):
 
 def law_A3(ps, cs, window):
     d_sent = delta(ps, cs, "service.columns_sent")
+    # store.hits joined the source side with the LOD store (Phase 1): a store hit serves
+    # a column without touching disk.successful (the rung contract excludes hits from the
+    # disk pair). Hits legitimately OVER-count the right side (an all-air hit resolves
+    # without a column send) — safe for an inequality law.
     d_src = (delta(ps, cs, "service.in_memory")
              + delta(ps, cs, "disk.successful")
-             + delta(ps, cs, "generation.completed"))
+             + delta(ps, cs, "generation.completed")
+             + delta(ps, cs, "store.hits"))
     if d_sent > d_src:
         return [Violation("A3", window,
-                          "columns_sent exceeds in_memory + disk.successful + generation.completed",
+                          "columns_sent exceeds in_memory + disk.successful + "
+                          "generation.completed + store.hits",
                           {"d_columns_sent": d_sent, "d_sources": d_src})]
     return []
 
@@ -1859,19 +1865,25 @@ def check_store_second_join(ctx):
     # so a stable hash across the action IS byte identity.
     pre_hashes = srv_pre.get("probe_hashes") or {}
     final_hashes = srv_final.get("probe_hashes") or {}
-    if not final_hashes:
-        yield Violation("store-second-join", "probes",
-                        "no server probe hashes — the scenario must arm -Psoak.probes "
-                        "on the SERVER (soak.sh SERVER_EXTRA_ARGS)", {})
+    proven = 0
     for token, final_hash in final_hashes.items():
         pre_hash = pre_hashes.get(token)
         if pre_hash in (None, -1) or final_hash == -1:
-            continue  # probe not served on one leg — parity unprovable for it, not a fail
+            continue  # probe not served on one leg — parity unprovable for it
+        proven += 1
         if final_hash != pre_hash:
             yield Violation("store-second-join", "probe " + token,
                             "store-served bytes differ from the NBT-served bytes — the "
                             "store round trip is not byte-exact",
                             {"pre": pre_hash, "post": final_hash})
+    if proven == 0:
+        # An armed-but-all(-1) map means the recorder never fired (the vacuous-parity
+        # hole the first live run exposed) — the parity leg must never pass silently.
+        yield Violation("store-second-join", "probes",
+                        "no probe proved byte parity — server probes unarmed "
+                        "(-Psoak.probes / SERVER_EXTRA_ARGS) or the serve-path recorder "
+                        "(SoakProbeBridge) is not firing",
+                        {"pre": pre_hashes, "final": final_hashes})
     if ctx.server_snaps and (len(ctx.server_snaps) - 1) not in ctx.quiescent_server:
         yield Violation("store-second-join", "final snapshot",
                         "last server snapshot is not verified-quiescent (the store-warm "
@@ -2555,6 +2567,9 @@ def selftest():
     cs_bad = _srv(6000, over={"service.columns_sent": 5, "service.in_memory": 1,
                               "disk.successful": 2, "generation.completed": 1})
     hits("A3 conjured column", law_A3(_srv(1000), cs_bad, "selftest"), "A3")
+    cs_store = _srv(6000, over={"service.columns_sent": 5, "service.in_memory": 1,
+                                "disk.successful": 2, "store.hits": 2})
+    clean("A3 store hits are a source", law_A3(_srv(1000), cs_store, "selftest"))
 
     # --- A4: generation accounting ---
     cs = _srv(6000, over={"generation.submitted": 5, "generation.completed": 4,

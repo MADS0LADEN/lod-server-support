@@ -100,6 +100,10 @@ public class FabricOffThreadProcessor extends OffThreadProcessor<PlayerRequestSt
                 source, sectionBytes);
         state.addReadyPayload(new QueuedPayload<>(payload, estimatedBytes, submissionOrder,
                 PositionUtil.packPosition(cx, cz)));
+        // Soak probe hashes (dev-only, no-op unless -Dlss.soak.probes): the EXACT wire
+        // bytes, at the one choke point every serve source (probe/disk/store/gen) passes
+        // through — the store byte-parity gate compares these across serve legs.
+        SoakProbeBridge.recordServed(cx, cz, sectionBytes);
         return true;
     }
 

@@ -234,6 +234,53 @@ counters/packaging/harness infra landed and reviewed by 2 subagents.
   duplicate-sqlite-jdbc collision test (needs a second live mod jar), `org.sqlite.tmpdir`
   handling, and a real-jar test-server boot check.
 
+## Phase 1 — memory-tier integration spike
+
+Status: IN PROGRESS (started 2026-07-30; core landed as commit 1ec4281)
+
+What landed (all §1 rung-contract items):
+- **`LodStoreService`** (common/store) with the review-derived boundary invariants in the
+  javadoc; **`MemoryLodStore`** — zstd-1 compressed entries, single batcher thread,
+  RANDOM eviction, sync invalidate/delete; **`StoreCodec`** (zstd-1, init probe →
+  store-off degrade on native failure).
+- **Reader rung** in `AbstractChunkDiskReader.readAndDeliver`: hits serve stored
+  bytes + STORED ts (`fromStore` on `ChunkReadResult`), excluded from `disk.*` and the
+  AIMD throttle (`recordSubmitted` moved to the NBT-path start; a new `tasksInFlight`
+  counter feeds the throttle — the submitted−completed pair no longer measures pool
+  occupancy). The old outer catch is consolidated into the op-region catch
+  (`Throwable`, Error rethrown after bookkeeping).
+- **Delivery-path deposits** at the drain choke points (disk once-per-result next to the
+  tscache stamp; generation next to its stamp) — both behind the stale guards.
+  **Ghost-guard delete** on `authoritativeMiss` only (an error-triaged not-found keeps
+  the row). **Invalidation fan-out** at all three sites (applyInvalidations, shutdown
+  sentinel, exit flush). `COLUMN_SOURCE_STORE = 3` attribution.
+- Platform wiring in both services (create → attach both consumers → start; shutdown
+  after reader+processor). Config `lodStoreMemoryMB` (8..2048, default 64).
+- Gate harness: `store-second-join` soak scenario (clearcache-mid-session shape +
+  lodStore=memory + SERVER-armed probes — new `SERVER_EXTRA_ARGS` + soakServer probes
+  vmArg) + named check (deposits floor, hits floor, disk.submitted stillness, zero
+  store.errors, probe-hash byte parity across the store-served leg, final quiescence)
+  with 6 selftest fixtures (155 total).
+
+### Phase 1 design decisions & learnings
+
+- **Sync invalidate/delete + tombstones (deviation from plan text, strictly safer):**
+  the plan's async-batcher delete relies on the Phase 2 freshness check to close the
+  stale-hit window; the memory tier has no freshness, so deletes apply synchronously AND
+  a tombstone map kills queued/mid-apply deposits (with a re-check-after-put closing the
+  last µs-scale interleaving). MemoryLodStoreTest pins the poison sequence 50×.
+- **Random eviction measured**: two-pass closest-first replay at 4× cap pressure →
+  pass-2 hit rate ≈ 0.47× static residency (refill erosion: every miss's re-deposit
+  evicts a random resident, including ahead of the scan). LRU would measure ≈ 0.00; the
+  test pins hit-rate ≥ 0.35× residency.
+- **Probe serves neither deposit nor hit**: the router's in-memory rung outruns the
+  store rung, so the loaded disc near the player stays out of the store entirely — gate
+  floors are sized to the disk-served annulus (~1960 of 2401 at R=24/view 10), and the
+  same geometry will shape the §0 hit-ratio denominator in Phase 2.
+- Counter-envelope change of note for reviewers: the saturation bounce now records
+  submitted+saturated+completed TOGETHER, and `disk.submitted` counts at the NBT-path
+  start (store hits never count) — DiskReaderStoreRungTest pins both.
+
 ### Learnings
 
 - **sqlite-jdbc under Fabric's Knot classloader: `DriverManager.getConnection` fails with

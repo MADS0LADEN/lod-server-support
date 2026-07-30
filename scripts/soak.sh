@@ -40,7 +40,7 @@ ALL_SCENARIOS=(fresh-backfill warm-rejoin dimension-trip dirty-broadcast
                generation-capacity-stress bandwidth-throttle
                cold-restart-resync enabled-false teleport-prune
                dirty-range-filter dirty-during-backfill dirty-while-offline
-               clearcache-mid-session dimension-rejoin-warm)
+               clearcache-mid-session dimension-rejoin-warm store-second-join)
 # Scenarios ported to Paper. The remaining ones are Fabric-specific for now: the dirty-*
 # family leans on the save-hook + DirtyContentFilter (Paper's dirty detection is
 # event-driven — paper-dirty-falling-block is the Paper-native dirty scenario),
@@ -131,6 +131,7 @@ case "$SCENARIO" in
     rate-limit-storm|disk-saturation|generation-disabled|generation-capacity-stress|bandwidth-throttle) ;;
     cold-restart-resync|enabled-false|teleport-prune|dirty-range-filter) ;;
     dirty-during-backfill|dirty-while-offline|clearcache-mid-session|dimension-rejoin-warm) ;;
+    store-second-join) ;;
     paper-dirty-falling-block) ;;
     *)
         echo "[soak] ERROR: Unknown scenario '$SCENARIO'"
