@@ -80,6 +80,8 @@ class PaperConfigValidationTest {
                     new Bounds(LSSConstants.MIN_CONCURRENCY_LIMIT, LSSConstants.MAX_CONCURRENCY_LIMIT)),
             Map.entry("perDimensionTimestampCacheSizeMB",
                     new Bounds(LSSConstants.MIN_TIMESTAMP_CACHE_SIZE_MB, LSSConstants.MAX_TIMESTAMP_CACHE_SIZE_MB)),
+            Map.entry("lodStoreMemoryMB",
+                    new Bounds(LSSConstants.MIN_LOD_STORE_MEMORY_MB, LSSConstants.MAX_LOD_STORE_MEMORY_MB)),
             Map.entry("xrayMaxBlockHeight",
                     new Bounds(LSSConstants.MIN_XRAY_MAX_BLOCK_HEIGHT, LSSConstants.MAX_XRAY_MAX_BLOCK_HEIGHT)));
 

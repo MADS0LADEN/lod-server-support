@@ -136,6 +136,9 @@ loom {
             runDir "build/run/soak-server"
             vmArg "-Dlss.soak.scenario=${findProperty('soak.scenario') ?: ''}"
             vmArg "-Dlss.soak.dirtydebug=${findProperty('soak.dirtydebug') ?: 'false'}"
+            // Server-side probe hashes (probe_hashes in server.jsonl — the store
+            // byte-parity gate): armed per scenario via soak.sh SERVER_EXTRA_ARGS.
+            vmArg "-Dlss.soak.probes=${findProperty('soak.probes') ?: ''}"
             programArg "--nogui"
         }
         register("soakClient") {

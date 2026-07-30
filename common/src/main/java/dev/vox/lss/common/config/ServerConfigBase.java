@@ -85,6 +85,12 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public String lodStore = "off";
     /**
+     * Memory-tier size cap for the LOD store (compressed resident bytes), used by both
+     * the "memory" and "full" modes. The Phase 1 gate measures the hit-rate curve
+     * against this cap; scan-workload hit rate ≈ cap / working-set (random eviction).
+     */
+    public int lodStoreMemoryMB = 64;
+    /**
      * LOD x-ray masking (docs/planning/antixray-compat-design.md §3). "auto" (default)
      * masks iff an anti-xray engine is detected — Paper's built-in anti-xray config, or the
      * AntiXray mod on Fabric — adopting its per-world hidden list + max-block-height
@@ -148,6 +154,8 @@ public abstract class ServerConfigBase extends JsonConfig {
         perDimensionTimestampCacheSizeMB = Math.clamp(perDimensionTimestampCacheSizeMB, LSSConstants.MIN_TIMESTAMP_CACHE_SIZE_MB, LSSConstants.MAX_TIMESTAMP_CACHE_SIZE_MB);
         missMemoTtlSeconds = Math.clamp(missMemoTtlSeconds, LSSConstants.MIN_MISS_MEMO_TTL_SECONDS, LSSConstants.MAX_MISS_MEMO_TTL_SECONDS);
         lodStore = dev.vox.lss.common.store.LodStoreMode.normalize(lodStore).configValue();
+        lodStoreMemoryMB = Math.clamp(lodStoreMemoryMB,
+                LSSConstants.MIN_LOD_STORE_MEMORY_MB, LSSConstants.MAX_LOD_STORE_MEMORY_MB);
         xrayObfuscation = XrayMaskPolicy.normalizeMode(xrayObfuscation);
         if (xrayHiddenBlocks == null) xrayHiddenBlocks = defaultXrayHiddenBlocks();
         xrayMaxBlockHeight = Math.clamp(xrayMaxBlockHeight, LSSConstants.MIN_XRAY_MAX_BLOCK_HEIGHT, LSSConstants.MAX_XRAY_MAX_BLOCK_HEIGHT);

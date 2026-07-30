@@ -26,7 +26,23 @@ public record ChunkReadResult(UUID playerUuid, int chunkX, int chunkZ,
                               long columnTimestamp,
                               boolean notFound, boolean saturated,
                               boolean authoritativeMiss,
+                              boolean fromStore,
                               long submissionOrder) {
+
+    /**
+     * Pre-store signature (fromStore = false) — the shape every NBT-path outcome and
+     * test rig uses. {@code fromStore = true} marks a LOD-store hit: its
+     * {@code columnTimestamp} is the STORED stamp (delivery honesty — never freshly
+     * fabricated), delivery attributes it {@code COLUMN_SOURCE_STORE}, and the delivery
+     * path must NOT re-deposit it.
+     */
+    public ChunkReadResult(UUID playerUuid, int chunkX, int chunkZ,
+                           byte[] sectionBytes, String dimension, int estimatedBytes,
+                           long columnTimestamp, boolean notFound, boolean saturated,
+                           boolean authoritativeMiss, long submissionOrder) {
+        this(playerUuid, chunkX, chunkZ, sectionBytes, dimension, estimatedBytes,
+                columnTimestamp, notFound, saturated, authoritativeMiss, false, submissionOrder);
+    }
 
     /** An authoritative miss: storage positively answered "no such chunk". */
     public static ChunkReadResult notFoundAuthoritative(UUID playerUuid, int chunkX, int chunkZ,

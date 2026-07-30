@@ -48,6 +48,8 @@ public class RequestProcessingService {
     private final ChunkGenerationService generationService;
     private final SharedBandwidthLimiter bandwidthLimiter;
     private final FabricOffThreadProcessor offThreadProcessor;
+    // Null while lodStore=off or when the codec native cannot load (degrade, never crash).
+    private final dev.vox.lss.common.store.LodStoreService lodStore;
     private final DirtyColumnTracker dirtyTracker;
     private final DirtyContentFilter dirtyContentFilter = new DirtyContentFilter();
 
@@ -122,6 +124,28 @@ public class RequestProcessingService {
                 config.perDimensionTimestampCacheSizeMB, config.missMemoTtlSeconds,
                 config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
                         + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS);
+
+        // LOD store (docs/planning/lod-store-implementation-plan.md; Phase 1 = the memory
+        // tier for every non-off mode). Attached to BOTH consumers before any submit/tick:
+        // the reader owns the hit rung, the processor owns deposits + invalidation fan-out.
+        // A failed codec probe (native outside the shipped matrix) degrades to store-off
+        // with one warning — never a crash.
+        var storeMode = dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore);
+        if (storeMode != dev.vox.lss.common.store.LodStoreMode.OFF) {
+            this.lodStore = dev.vox.lss.common.store.MemoryLodStore.createOrNull(
+                    storeMode, config.lodStoreMemoryMB * 1024L * 1024L);
+            if (this.lodStore == null) {
+                LSSLogger.warn("lodStore=" + storeMode.configValue() + " requested but the "
+                        + dev.vox.lss.common.store.StoreCodec.NAME + " codec native cannot "
+                        + "load on this platform — running WITHOUT the LOD store");
+            } else {
+                this.diskReader.attachStore(this.lodStore);
+                this.offThreadProcessor.attachStore(this.lodStore);
+            }
+        } else {
+            this.lodStore = null;
+        }
+
         this.offThreadProcessor.start();
 
         this.dirtyBroadcaster = new DirtyColumnBroadcaster(
@@ -721,6 +745,15 @@ public class RequestProcessingService {
             this.diskReader.shutdown();
         } catch (Exception e) {
             LSSLogger.error("Error shutting down disk reader", e);
+        }
+        try {
+            // After the reader (no more store rung callers) and after the processor (its
+            // sentinel take fanned the final invalidations into the store).
+            if (this.lodStore != null) {
+                this.lodStore.shutdown();
+            }
+        } catch (Exception e) {
+            LSSLogger.error("Error shutting down LOD store", e);
         }
         try {
             if (this.generationService != null) {

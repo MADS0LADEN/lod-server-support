@@ -162,6 +162,7 @@ fi
 # gradle -P properties for the CLIENT JVM (per-position probes / scripted client action).
 # Kill switch budget = expected + 240s slack.
 CLIENT_EXTRA_ARGS=()
+SERVER_EXTRA_ARGS=()
 case "$SCENARIO" in
     fresh-backfill)             CLIENT_RUNS=1; EXPECTED_SECONDS=300 ;;
     warm-rejoin)                CLIENT_RUNS=2; EXPECTED_SECONDS=360 ;;
@@ -181,6 +182,13 @@ case "$SCENARIO" in
                                 CLIENT_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
     clearcache-mid-session)     CLIENT_RUNS=1; EXPECTED_SECONDS=280
                                 CLIENT_EXTRA_ARGS=("-Psoak.clientActionAt=60:clearcache") ;;
+    store-second-join)          CLIENT_RUNS=1; EXPECTED_SECONDS=280
+                                # The Phase 1 LOD-store gate: backfill populates the
+                                # memory tier, the clearcache forces the full ts<=0
+                                # re-declaration, the checker requires the re-serve wave
+                                # to be STORE HITS with byte-identical probe hashes.
+                                CLIENT_EXTRA_ARGS=("-Psoak.clientActionAt=60:clearcache")
+                                SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
     dimension-rejoin-warm)      CLIENT_RUNS=2; EXPECTED_SECONDS=650 ;;
     paper-dirty-falling-block)  CLIENT_RUNS=1; EXPECTED_SECONDS=300 ;;
 esac
@@ -357,7 +365,7 @@ if soak_port_in_use; then
 fi
 
 # Step 9: Start server and arm the kill switch once it is ready
-mc_start_server "$RUN_RESULTS_DIR/server.log" "$SERVER_GRADLE_TASK" -Psoak.scenario="$SCENARIO_JSON" ${SOAK_EXTRA_GRADLE_ARGS:-}
+mc_start_server "$RUN_RESULTS_DIR/server.log" "$SERVER_GRADLE_TASK" -Psoak.scenario="$SCENARIO_JSON" ${SERVER_EXTRA_ARGS[@]+"${SERVER_EXTRA_ARGS[@]}"} ${SOAK_EXTRA_GRADLE_ARGS:-}
 mc_wait_server_ready "$SERVER_RUN_DIR/logs/latest.log" "$RUN_RESULTS_DIR/server.log" "$SERVER_READY_TIMEOUT"
 DEADLINE_EPOCH=$(( $(date +%s) + RUNTIME_BUDGET ))
 

@@ -19,6 +19,10 @@ public final class LSSConstants {
     public static final byte COLUMN_SOURCE_IN_MEMORY = 0;
     public static final byte COLUMN_SOURCE_DISK = 1;
     public static final byte COLUMN_SOURCE_GENERATION = 2;
+    // LOD-store hit (docs/planning/lod-store-implementation-plan.md): served from the
+    // store instead of a region read. Diagnostic attribution only (client /lss trace
+    // src:3); pre-store clients keep the byte verbatim by the unknown-values rule.
+    public static final byte COLUMN_SOURCE_STORE = 3;
 
     // Channel identifiers (used as Minecraft resource location strings)
     public static final String CHANNEL_HANDSHAKE = "lss:handshake_c2s";
@@ -96,6 +100,10 @@ public final class LSSConstants {
      *  up to the TTL. */
     public static final int MIN_MISS_MEMO_TTL_SECONDS = 0;
     public static final int MAX_MISS_MEMO_TTL_SECONDS = 60;
+
+    // LOD-store memory-tier byte cap (compressed resident bytes; plan §1 "memory tier").
+    public static final int MIN_LOD_STORE_MEMORY_MB = 8;
+    public static final int MAX_LOD_STORE_MEMORY_MB = 2048;
 
     /** X-ray mask height clamp (docs/planning/antixray-compat-design.md §3): comfortably
      *  outside any MC build height so any real world Y is expressible, while bounding

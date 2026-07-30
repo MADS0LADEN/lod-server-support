@@ -48,6 +48,8 @@ public class PaperRequestProcessingService {
     private final SharedBandwidthLimiter bandwidthLimiter;
     private final PaperConfig config;
     private final PaperOffThreadProcessor offThreadProcessor;
+    // Null while lodStore=off or when the codec native cannot load (degrade, never crash).
+    private final dev.vox.lss.common.store.LodStoreService lodStore;
     private final DirtyColumnTracker dirtyTracker;
     private final PaperDirtyColumnBroadcaster dirtyBroadcaster;
     // The v16 compat shim's per-player sessions (legacy protocol-16 clients). The pipeline
@@ -239,7 +241,20 @@ public class PaperRequestProcessingService {
                   PaperChunkGenerationService generationService,
                   PaperOffThreadProcessor offThreadProcessor,
                   DirtyColumnTracker dirtyTracker,
-                  PaperDirtyColumnBroadcaster dirtyBroadcaster) {}
+                  PaperDirtyColumnBroadcaster dirtyBroadcaster,
+                  dev.vox.lss.common.store.LodStoreService lodStore) {
+
+        /** Pre-store test-wiring shape (no store attached). */
+        Wiring(Map<UUID, PaperPlayerRequestState> players,
+               PaperChunkDiskReader diskReader,
+               PaperChunkGenerationService generationService,
+               PaperOffThreadProcessor offThreadProcessor,
+               DirtyColumnTracker dirtyTracker,
+               PaperDirtyColumnBroadcaster dirtyBroadcaster) {
+            this(players, diskReader, generationService, offThreadProcessor,
+                    dirtyTracker, dirtyBroadcaster, null);
+        }
+    }
 
     // Null in test wiring — only the production-default regionTaskScheduler dereferences it,
     // and probe tests always inject a recording scheduler.
@@ -268,6 +283,7 @@ public class PaperRequestProcessingService {
         this.offThreadProcessor = wiring.offThreadProcessor();
         this.dirtyTracker = wiring.dirtyTracker();
         this.dirtyBroadcaster = wiring.dirtyBroadcaster();
+        this.lodStore = wiring.lodStore();
     }
 
     private static Wiring productionWiring(MinecraftServer server, Plugin plugin, PaperConfig config) {
@@ -283,13 +299,31 @@ public class PaperRequestProcessingService {
                 config.perDimensionTimestampCacheSizeMB, config.missMemoTtlSeconds,
                 config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
                         + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS);
+
+        // LOD store (Phase 1 = the memory tier for every non-off mode) — attached to both
+        // consumers BEFORE the processor starts / any submit. A failed codec probe
+        // degrades to store-off with one warning (the Fabric twin is identical).
+        dev.vox.lss.common.store.LodStoreService lodStore = null;
+        var storeMode = dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore);
+        if (storeMode != dev.vox.lss.common.store.LodStoreMode.OFF) {
+            lodStore = dev.vox.lss.common.store.MemoryLodStore.createOrNull(
+                    storeMode, config.lodStoreMemoryMB * 1024L * 1024L);
+            if (lodStore == null) {
+                LSSLogger.warn("lodStore=" + storeMode.configValue() + " requested but the "
+                        + dev.vox.lss.common.store.StoreCodec.NAME + " codec native cannot "
+                        + "load on this platform — running WITHOUT the LOD store");
+            } else {
+                diskReader.attachStore(lodStore);
+                offThreadProcessor.attachStore(lodStore);
+            }
+        }
         offThreadProcessor.start();
 
         var dirtyTracker = new DirtyColumnTracker();
         var dirtyBroadcaster = new PaperDirtyColumnBroadcaster(
                 server, players, dirtyTracker, offThreadProcessor);
         return new Wiring(players, diskReader, generationService, offThreadProcessor,
-                dirtyTracker, dirtyBroadcaster);
+                dirtyTracker, dirtyBroadcaster, lodStore);
     }
 
     public DirtyColumnTracker getDirtyTracker() {
@@ -1021,6 +1055,15 @@ public class PaperRequestProcessingService {
             this.diskReader.shutdown();
         } catch (Exception e) {
             LSSLogger.error("Error shutting down disk reader", e);
+        }
+        try {
+            // After the reader (no more store rung callers) and after the processor (its
+            // sentinel take fanned the final invalidations into the store).
+            if (this.lodStore != null) {
+                this.lodStore.shutdown();
+            }
+        } catch (Exception e) {
+            LSSLogger.error("Error shutting down LOD store", e);
         }
         try {
             if (this.generationService != null) {

@@ -51,6 +51,16 @@ public abstract class AbstractChunkDiskReader {
     private final int threadCount;
     private final ConcurrentHashMap<UUID, ConcurrentLinkedQueue<ChunkReadResult>> playerResults = new ConcurrentHashMap<>();
     private final AtomicBoolean isShutdown = new AtomicBoolean(false);
+    // Pool tasks accepted but not yet finished — the adaptive throttle's in-flight input.
+    // A dedicated counter (not submitted-completed): store hits occupy pool capacity like
+    // any task but are EXCLUDED from disk.submitted/completed by the rung contract, so
+    // the counter pair no longer measures pool occupancy.
+    private final AtomicInteger tasksInFlight = new AtomicInteger();
+
+    // The LOD store (docs/planning/lod-store-implementation-plan.md §1): consulted by the
+    // rung in readAndDeliver before any region IO. Null while lodStore=off. Volatile:
+    // attached once at service init (before the first submit) from the server thread.
+    private volatile dev.vox.lss.common.store.LodStoreService store;
 
     // Adaptive read throttle (Approach B): null until a platform reader detects that its
     // background-priority path is incompatible (a chunk-IO-overhaul mod replaced vanilla IO) and
@@ -90,12 +100,17 @@ public abstract class AbstractChunkDiskReader {
         if (t != null) {
             // Approach B expressed as a headroom modifier: when the adaptive limit is reached the
             // router leaves the read in the want-set backlog (NO_DISK_HEADROOM) and the client
-            // re-declares it — no bounce, no rate_limited (retired in v17). in-flight = submitted -
-            // completed, the same measure the pool bounds.
-            int inFlight = (int) Math.max(0, this.diag.getSubmittedCount() - this.diag.getCompletedCount());
-            if (!t.canSubmit(inFlight)) return false;
+            // re-declares it — no bounce, no rate_limited (retired in v17). in-flight is the
+            // dedicated pool-task counter (store hits occupy the pool too, but are excluded
+            // from the submitted/completed pair by the store rung contract).
+            if (!t.canSubmit(this.tasksInFlight.get())) return false;
         }
         return true;
+    }
+
+    /** Attach the LOD store (lodStore != off). Must happen before the first submit. */
+    public final void attachStore(dev.vox.lss.common.store.LodStoreService store) {
+        this.store = store;
     }
 
     /**
@@ -136,37 +151,33 @@ public abstract class AbstractChunkDiskReader {
 
     /**
      * Submit a read: the operation runs on the reader pool and its outcome is triaged into
-     * the player's result queue (data / all-air / not-found / saturated). An {@link Error}
-     * still produces a result first — otherwise the request would be stranded in flight
-     * forever (leaked admission slot + orphaned dedup group). The re-throw after that is
-     * best-effort only: {@code executor.submit()} wraps the task in a FutureTask, which
-     * captures the Error into a Future nobody inspects — it never reaches an uncaught-
-     * exception handler. The logging + result delivery above are the real containment;
-     * the pool thread survives either way.
+     * the player's result queue (store hit / data / all-air / not-found / saturated).
+     * The store rung inside {@link #readAndDeliver} runs first; only a MISS proceeds to
+     * region IO and the {@code disk.*} counters — {@code disk.submitted} therefore counts
+     * at the start of the NBT path, not here (the rung contract: hits are excluded from
+     * the disk pair and the throttle EWMA). Error containment lives inside
+     * {@code readAndDeliver} (broadened to {@link Throwable}: an {@link Error} — SOE on
+     * corrupt NBT — still produces a result first, or the request would strand its
+     * admission slot + dedup group; the re-throw after bookkeeping is best-effort only,
+     * FutureTask captures it into a Future nobody inspects).
      */
     protected final void submitRead(UUID playerUuid, int chunkX, int chunkZ, String dimension,
                                      long submissionOrder, ReadOperation operation) {
         if (isShutdown()) return;
 
-        this.diag.recordSubmitted();
         try {
+            this.tasksInFlight.incrementAndGet();
             this.executor.submit(() -> {
-                if (isShutdown()) return;
                 try {
-                    readAndDeliver(playerUuid, chunkX, chunkZ, dimension, submissionOrder, operation);
-                } catch (Throwable t) {
-                    LSSLogger.error("Failed to read chunk from disk at " + chunkX + ", " + chunkZ, t);
-                    this.diag.recordError();
-                    this.diag.recordCompleted(0);
-                    // notFoundFromError, NOT authoritative: an Error (SOE on corrupt NBT, OOM)
-                    // escaping readAndDeliver says nothing about the chunk's existence — an
-                    // authoritative result here would seed the miss memo and suppress reads
-                    // of a chunk that may exist for the memo TTL.
-                    addResult(playerUuid, ChunkReadResult.notFoundFromError(playerUuid, chunkX, chunkZ, dimension, submissionOrder));
-                    if (t instanceof Error err) throw err;
+                    if (!isShutdown()) {
+                        readAndDeliver(playerUuid, chunkX, chunkZ, dimension, submissionOrder, operation);
+                    }
+                } finally {
+                    this.tasksInFlight.decrementAndGet();
                 }
             });
         } catch (RejectedExecutionException e) {
+            this.tasksInFlight.decrementAndGet();
             // nanoTime, not currentTimeMillis: the wall clock can step backwards (NTP), which
             // would silence the aggregate warning exactly while the pool is behind demand.
             long rejected = this.saturationWarn.recordAndTryAcquire(System.nanoTime() / 1_000_000);
@@ -175,6 +186,9 @@ public abstract class AbstractChunkDiskReader {
                         + " since the last warning — clients re-request automatically; raise"
                         + " diskReaderThreads in lss-server-config.json if this persists");
             }
+            // The bounce never consulted the store or storage: submitted+saturated+completed
+            // recorded together so the at-rest identity (completed == outcomes) holds.
+            this.diag.recordSubmitted();
             this.diag.recordSaturation();
             this.diag.recordCompleted(0);
             addResult(playerUuid, ChunkReadResult.saturated(playerUuid, chunkX, chunkZ, dimension, submissionOrder));
@@ -190,15 +204,60 @@ public abstract class AbstractChunkDiskReader {
         if (t != null) t.recordLatency(elapsedNanos);
     }
 
+    /**
+     * The store rung (§1 rung contract): consult the LOD store before any region IO. A
+     * hit delivers the STORED bytes + STORED timestamp (delivery honesty — never a
+     * fabricated fresh stamp) tagged {@code fromStore}, touching NEITHER the
+     * {@code disk.*} counters NOR {@link #recordRealCompletion} — a sub-100 µs hit fed
+     * to the AIMD EWMA would collapse the adaptive limit on exactly the C2ME-latched
+     * servers where the throttle is the only gameplay protection. {@code byte[0]} from
+     * the store means all-air (delivered as the all-air result shape, never as
+     * not-found — null section bytes would read as an authoritative miss and seed the
+     * miss memo). {@link dev.vox.lss.common.store.LodStoreService#get} is contained by
+     * contract (a store failure reads as a miss and counts {@code store.errors}).
+     */
+    private boolean storeServedHit(UUID playerUuid, int chunkX, int chunkZ, String dimension,
+                                    long submissionOrder) {
+        var s = this.store;
+        if (s == null) return false;
+        long t0 = System.nanoTime();
+        dev.vox.lss.common.store.LodStoreService.StoreHit hit;
+        try {
+            hit = s.get(dimension, dev.vox.lss.common.PositionUtil.packPosition(chunkX, chunkZ));
+        } catch (Throwable t) {
+            // get() is contained by contract; this belt exists because an escaped throw
+            // here would strand the request in flight (leaked slot + orphaned dedup
+            // group) — a miss is always the safe reading.
+            s.diagnostics().recordError();
+            hit = null;
+        }
+        if (hit == null) {
+            s.diagnostics().recordMiss();
+            return false;
+        }
+        s.diagnostics().recordHit(System.nanoTime() - t0);
+        boolean allAir = hit.sectionBytes().length == 0;
+        byte[] bytes = allAir ? null : hit.sectionBytes();
+        int estimatedBytes = allAir ? 0
+                : bytes.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
+        addResult(playerUuid, new ChunkReadResult(playerUuid, chunkX, chunkZ, bytes,
+                dimension, estimatedBytes, hit.columnTimestamp(),
+                false, false, false, true, submissionOrder));
+        return true;
+    }
+
     private void readAndDeliver(UUID playerUuid, int chunkX, int chunkZ, String dimension,
                                  long submissionOrder, ReadOperation operation) {
         if (isShutdown()) return;
+        if (storeServedHit(playerUuid, chunkX, chunkZ, dimension, submissionOrder)) return;
+
         long startNs = System.nanoTime();
+        this.diag.recordSubmitted(); // the NBT path begins here — store hits never count
 
         byte[] serializedSections;
         try {
             serializedSections = operation.read();
-        } catch (Exception e) {
+        } catch (Throwable e) {
             if (e instanceof java.util.concurrent.TimeoutException) {
                 // A read exceeding DISK_READ_TIMEOUT_SECONDS is a documented TRANSIENT on
                 // slow IO under generation save pressure (miss-memo-design.md A/B finding):
@@ -221,6 +280,10 @@ public abstract class AbstractChunkDiskReader {
             // Error/timeout TRIAGED as not-found (law A5's disk.errors fold) — says nothing
             // about existence, so it must never seed the miss memo.
             addResult(playerUuid, ChunkReadResult.notFoundFromError(playerUuid, chunkX, chunkZ, dimension, submissionOrder));
+            // An Error (SOE on corrupt NBT, OOM) is re-thrown AFTER bookkeeping + result
+            // delivery — best-effort only (FutureTask captures it into a Future nobody
+            // inspects); the containment above is what matters, the pool thread survives.
+            if (e instanceof Error err) throw err;
             return;
         }
 

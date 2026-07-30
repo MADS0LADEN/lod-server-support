@@ -82,6 +82,7 @@ ANOMALY_OPT_INS = {
     "dirty-during-backfill": frozenset({"saturated"}),
     "dirty-while-offline": frozenset({"saturated"}),
     "clearcache-mid-session": frozenset({"saturated"}),
+    "store-second-join": frozenset({"saturated"}),
     "dimension-rejoin-warm": frozenset({"saturated"}),
     # Paper/Folia (SOAK_PLATFORM=paper|folia): cold-cache disc resync from the base world, like
     # warm-rejoin run 1, so the same load-shaped opt-ins apply.
@@ -115,6 +116,7 @@ MIN_CLIENT_WINDOWS = {
     # clearcache splits run 1 into pre/post-action segments (the flushCache counter reset
     # is a segment boundary, like a dimension change)
     "clearcache-mid-session": {(1, 0): 4, (1, 1): 4},
+    "store-second-join": {(1, 0): 4, (1, 1): 4},
     "dimension-rejoin-warm": {(1, 0): 2, (1, 1): 5, (2, 0): 3, (2, 1): 3},
     "paper-dirty-falling-block": {(1, 0): 3},
 }
@@ -145,6 +147,8 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     "missMemoTtlSeconds",
     # X-ray masking cutoff (docs/planning/antixray-compat-design.md §3).
     "xrayMaxBlockHeight",
+    # LOD-store memory-tier cap — the Phase 1 hit-rate-curve scenarios sweep it.
+    "lodStoreMemoryMB",
 })
 # X-ray masking tri-state ("auto"/"on"/"off"), the LOD-store switch ("off"/"memory"/
 # "full" — scenarios A/B store gates against it), + hidden-block id list — the only
@@ -1780,6 +1784,101 @@ def check_clearcache_mid_session(ctx):
                         {"wallMs": ctx.server_snaps[-1]["wallMs"]})
 
 
+@named_check("store-second-join", ["client.requested_total", "client.received_columns",
+                                   "server.store.hits", "server.store.deposits",
+                                   "server.store.errors", "server.disk.submitted"])
+def check_store_second_join(ctx):
+    """The Phase 1 LOD-store gate (lod-store-implementation-plan.md §5): the backfill leg
+    populates the memory tier through delivery-path deposits; the mid-session clearcache
+    forces the full ts<=0 re-declaration of the disc, and the re-serve wave must come
+    from the STORE — store.hits carries it, disk.submitted stays nearly still — with
+    byte-identical content (server probe hashes stable across the store-served leg) and
+    zero contained store failures. The loaded disc near the player resolves via the probe
+    rung on BOTH legs (never deposited, never store-served), so the floors are sized to
+    the disk-served annulus, not the whole disc."""
+    acts = [a for a in ctx.run_actions.get(1, []) if a["action"] == "clearcache"]
+    if len(acts) != 1:
+        yield Violation("store-second-join", "run1",
+                        "expected exactly one clearcache action row — client hook did not fire",
+                        {"actions": len(acts)})
+        return
+    snaps = ctx.runs.get(1)
+    if not snaps:
+        yield Violation("store-second-join", "run1", "no client snapshots in run 1", {})
+        return
+    segs = client_segments(snaps)
+    if len(segs) != 2:
+        yield Violation("store-second-join", "run1",
+                        "client series must split into two segments at the clearcache reset",
+                        {"segments": [s[1] for s in segs]})
+        return
+    pre_cli = snaps[segs[0][3]]
+    post_cli = snaps[segs[1][3]]
+    d_recv = post_cli["received_columns"] - pre_cli["received_columns"]
+    if d_recv < 500:
+        yield Violation("store-second-join", "post-action segment",
+                        "the clearcache re-download wave did not happen — nothing for the "
+                        "store to serve", {"expected": ">= 500", "actual": d_recv})
+        return
+    action_wall = acts[0]["wallMs"]
+    srv_pre = None
+    for s in ctx.server_snaps:
+        if s["wallMs"] <= action_wall:
+            srv_pre = s
+        else:
+            break
+    srv_final = ctx.server_snaps[-1] if ctx.server_snaps else None
+    if srv_pre is None or srv_final is None or srv_pre is srv_final:
+        yield Violation("store-second-join", "server series",
+                        "need server snapshots on both sides of the action", {})
+        return
+    deposits_pre = get_path(srv_pre, "store.deposits")
+    if deposits_pre < 800:
+        yield Violation("store-second-join", "populate leg",
+                        "the backfill leg deposited too little — the delivery-path "
+                        "deposit choke point is not firing",
+                        {"expected": ">= 800 before the action", "actual": deposits_pre})
+    hits_delta = get_path(srv_final, "store.hits") - get_path(srv_pre, "store.hits")
+    if hits_delta < 800:
+        yield Violation("store-second-join", "re-serve leg",
+                        "the re-serve wave was not served from the store",
+                        {"expected": ">= 800 store hits after the action", "actual": hits_delta})
+    disk_delta = get_path(srv_final, "disk.submitted") - get_path(srv_pre, "disk.submitted")
+    ceiling = max(200, int(0.25 * d_recv))
+    if disk_delta > ceiling:
+        yield Violation("store-second-join", "re-serve leg",
+                        "the store-warm re-serve leg re-read region files — the store "
+                        "rung is not intercepting the second join",
+                        {"disk.submitted delta": disk_delta, "ceiling": ceiling})
+    errors = get_path(srv_final, "store.errors")
+    if errors:
+        yield Violation("store-second-join", "whole run",
+                        "contained store failures fired", {"store.errors": errors})
+    # Byte parity: the armed probes were NBT-served on the populate leg and store-served
+    # on the re-serve leg; recordServedColumnBytes hashes the exact wire bytes each time,
+    # so a stable hash across the action IS byte identity.
+    pre_hashes = srv_pre.get("probe_hashes") or {}
+    final_hashes = srv_final.get("probe_hashes") or {}
+    if not final_hashes:
+        yield Violation("store-second-join", "probes",
+                        "no server probe hashes — the scenario must arm -Psoak.probes "
+                        "on the SERVER (soak.sh SERVER_EXTRA_ARGS)", {})
+    for token, final_hash in final_hashes.items():
+        pre_hash = pre_hashes.get(token)
+        if pre_hash in (None, -1) or final_hash == -1:
+            continue  # probe not served on one leg — parity unprovable for it, not a fail
+        if final_hash != pre_hash:
+            yield Violation("store-second-join", "probe " + token,
+                            "store-served bytes differ from the NBT-served bytes — the "
+                            "store round trip is not byte-exact",
+                            {"pre": pre_hash, "post": final_hash})
+    if ctx.server_snaps and (len(ctx.server_snaps) - 1) not in ctx.quiescent_server:
+        yield Violation("store-second-join", "final snapshot",
+                        "last server snapshot is not verified-quiescent (the store-warm "
+                        "leg never converged)",
+                        {"wallMs": ctx.server_snaps[-1]["wallMs"]})
+
+
 @named_check("dimension-rejoin-warm", ["client.dimension", "client.responses.up_to_date"])
 def check_dimension_rejoin_warm(ctx):
     """Kick while in the End; the rejoining cold client must land back in the End
@@ -2014,6 +2113,9 @@ CHECKS = {
     "clearcache-mid-session": [check_clearcache_mid_session,
                                make_handshake_check("clearcache-mid-session"),
                                make_disc_completeness("clearcache-mid-session")],
+    "store-second-join": [check_store_second_join,
+                          make_handshake_check("store-second-join"),
+                          make_disc_completeness("store-second-join")],
     "dimension-rejoin-warm": [check_dimension_rejoin_warm,
                               make_handshake_check("dimension-rejoin-warm"),
                               make_disc_completeness("dimension-rejoin-warm", run=1),
@@ -3053,6 +3155,40 @@ def selftest():
         cc_ctx(post_received=2900, actions=cc_action, post_utd=900))), "clearcache-mid-session")
     hits("clearcache action never fired", list(check_clearcache_mid_session(
         cc_ctx(post_received=4250, actions=[]))), "clearcache-mid-session")
+
+    # --- store-second-join: the re-serve wave must be store hits with byte parity ---
+    ssj_action = [{"event": "action", "wallMs": 60_000, "action": "clearcache", "atSeconds": 60}]
+    def ssj_ctx(hits_final=2000, disk_final=2100, deposits_pre=1900, errors=0,
+                pre_hash=111, post_hash=111, actions=None):
+        srv_pre = _srv(55_000, over={"store.deposits": deposits_pre,
+                                     "store.hits": 0, "disk.submitted": 2000})
+        srv_pre["probe_hashes"] = {"20:0": pre_hash}
+        srv_fin = _srv(120_000, over={"store.deposits": deposits_pre + 50,
+                                      "store.hits": hits_final,
+                                      "disk.submitted": disk_final,
+                                      "store.errors": errors})
+        srv_fin["probe_hashes"] = {"20:0": post_hash}
+        return _ctx(
+            server_snaps=[srv_pre, srv_fin],
+            runs={1: [_cli(50_000, seg=0, over={"requested_total": 2200,
+                                                "received_columns": 2200}),
+                      _cli(120_000, seg=1, over={"requested_total": 4400,
+                                                 "received_columns": 4300})]},
+            run_actions={1: actions if actions is not None else ssj_action},
+            quiescent_server={1})
+    clean("store-second-join clean warm re-serve", list(check_store_second_join(ssj_ctx())))
+    hits("store-second-join hits missing (rung not intercepting)",
+         list(check_store_second_join(ssj_ctx(hits_final=100))), "store-second-join")
+    hits("store-second-join disk re-reads (warm leg re-read regions)",
+         list(check_store_second_join(ssj_ctx(disk_final=4100))), "store-second-join")
+    hits("store-second-join deposits missing (choke point dead)",
+         list(check_store_second_join(ssj_ctx(deposits_pre=10))), "store-second-join")
+    hits("store-second-join store errors",
+         list(check_store_second_join(ssj_ctx(errors=2))), "store-second-join")
+    hits("store-second-join byte drift (round trip not exact)",
+         list(check_store_second_join(ssj_ctx(post_hash=999))), "store-second-join")
+    hits("store-second-join action never fired",
+         list(check_store_second_join(ssj_ctx(actions=[]))), "store-second-join")
 
     # --- dirty-range-filter: drain visible, client silent, follow-up live ---
     drf_cmds = [_cmd(122_000, "setblock -250 310 5 minecraft:stone"),
