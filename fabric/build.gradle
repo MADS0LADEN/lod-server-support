@@ -51,9 +51,11 @@ dependencies {
     if ((findProperty('benchmark.moonrise') ?: 'false').toString() == 'true') {
         localRuntime "maven.modrinth:moonrise-opt:W0HImEBl"
     }
-    // Same arm for C2ME (the version test-server.sh installs): the copyOf hook must fire
-    // through C2ME's rewritten save paths too — the old ChunkMap.save hook silently never
-    // did (the documented C2ME dirty-path gap this fix closes).
+    // Same arm for C2ME (the Modrinth version test-server.sh installs), doing double duty:
+    // the disk-read profile measures the chunk-IO-overhaul fallback path (adaptive read
+    // throttle) against the vanilla IOWorker background-priority path, and the copyOf dirty
+    // hook is validated through C2ME's rewritten save paths — the old ChunkMap.save hook
+    // silently never fired there. Runtime-only: release jars and normal builds are unaffected.
     if ((findProperty('benchmark.c2me') ?: 'false').toString() == 'true') {
         localRuntime "maven.modrinth:c2me-fabric:nvOkOiyi"
     }
@@ -79,6 +81,7 @@ fabricApi {
 }
 
 loom {
+    accessWidenerPath = file("src/main/resources/lss.accesswidener")
     runs {
         register("benchmarkServer") {
             server()

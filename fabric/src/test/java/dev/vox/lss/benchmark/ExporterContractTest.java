@@ -195,7 +195,7 @@ class ExporterContractTest {
     void clientSnapshotMatchesTheCheckedInContract() throws Exception {
         BenchmarkMetricsExporter.setProbesForTest("7:-3");
         var snapshot = BenchmarkMetricsExporter.buildClientSnapshot(
-                new LodRequestManager(), true, 10L, 1000L, 0L, 2);
+                new LodRequestManager(), true, 10L, 1000L, 0L, 2, 4096L);
         assertEquals(contractLines("client-snapshot.contract"), flattenedLines(snapshot),
                 "client snapshot schema drifted from exporter-contract/client-snapshot.contract");
     }
@@ -283,8 +283,8 @@ class ExporterContractTest {
     void disabledClientSessionZeroFillsManagerFieldsWithTheSameKeySet() {
         BenchmarkMetricsExporter.setProbesForTest("7:-3");
         var enabled = BenchmarkMetricsExporter.buildClientSnapshot(
-                new LodRequestManager(), true, 10L, 1000L, 0L, 2);
-        var disabled = BenchmarkMetricsExporter.buildClientSnapshot(null, false, 0L, 0L, 0L, 0);
+                new LodRequestManager(), true, 10L, 1000L, 0L, 2, 4096L);
+        var disabled = BenchmarkMetricsExporter.buildClientSnapshot(null, false, 0L, 0L, 0L, 0, 0L);
 
         var enabledFlat = new TreeMap<String, String>();
         var disabledFlat = new TreeMap<String, String>();
@@ -324,7 +324,7 @@ class ExporterContractTest {
     @Test
     void emptyProbeSpecEmitsNoProbesOrProbeHashesKey() {
         BenchmarkMetricsExporter.setProbesForTest("");
-        var client = BenchmarkMetricsExporter.buildClientSnapshot(null, false, 0L, 0L, 0L, 0);
+        var client = BenchmarkMetricsExporter.buildClientSnapshot(null, false, 0L, 0L, 0L, 0, 0L);
         assertFalse(client.containsKey("probes"), "no probes key when the property is blank");
         var server = BenchmarkMetricsExporter.buildServerMetrics(fullShapeSource());
         assertFalse(server.containsKey("probe_hashes"), "no probe_hashes key when the property is blank");

@@ -78,7 +78,7 @@ state), **HARD LIMIT** (fixed cap / config clamp), **IMPLICIT** (bounded as a si
   zlib compresses below the LSS layer, so the real link is throttled tighter than the numbers.
 
 **Send queue = upstream backpressure hinge · HARD LIMIT**
-- `sendQueueLimitPerPlayer` = **4000** (clamp 1–100 000). Full → router `sendQueueFull` retains
+- `sendQueueLimitPerPlayer` = **1024** (= the wire batch cap; clamp 1–100 000). Full → router `sendQueueFull` retains
   the request and stops the pass, so a bandwidth-limited client stops causing disk reads.
 
 **Wire-frame caps (protocol safety) · HARD LIMIT**
@@ -133,7 +133,7 @@ Two client-side real-measure throttles that also cut server demand:
 | `DirtyContentFilter` (Fabric) | HARD LIMIT | 524 288/dim, whole-map-clear on overflow (self-heals) |
 | Ingress mailbox | HARD LIMIT | latest-wins `AtomicReference` → ≤ 1 batch (≤ 1024) / player |
 | Backlog `ArrayDeque` | HARD LIMIT | ≤ 1024 (replaced wholesale each batch) |
-| Send queue | HARD LIMIT | `sendQueueLimitPerPlayer=4000` [1,100 000] |
+| Send queue | HARD LIMIT | `sendQueueLimitPerPlayer=1024` [1,100 000] |
 | Client ingest queue | HARD LIMIT | 8000 cols / 256 MiB, drop-and-re-request |
 | Client `ColumnCacheStore` | HARD LIMIT | 2 000 000-entry load guard |
 | `DedupTracker` groups | IMPLICIT | bounded by in-flight disk reads; swept on player removal |
@@ -168,7 +168,7 @@ Two client-side real-measure throttles that also cut server demand:
 ```
 client scans want-set @1Hz, budget scaled by decode-queue pressure → CPU/net demand governor (client)
 server range-filters at lodDist+32                             → volume bound
-router admits only while send queue < 4000                     → NETWORK backpressure → throttles disk
+router admits only while send queue < 1024                     → NETWORK backpressure → throttles disk
 slot cap (sync 200 / gen 16) gates concurrency                 → MEMORY/CPU bound; retain-don't-bounce
 hasHeadroom(): disk pool queue + adaptive throttle             → DISK gate → NO_DISK_HEADROOM retains
 disk read at BACKGROUND / Moonrise LOW priority                → DISK yields to vanilla (real priority)
@@ -223,7 +223,7 @@ cache sizes, `lodDistanceChunks=256`, `dirtyBroadcastIntervalSeconds=10`.
 | `diskReaderThreads` | 5 | 1–64 | Disk / CPU |
 | `bytesPerSecondLimitPerPlayer` | 20 MiB | 1 KiB–100 MiB | Network |
 | `bytesPerSecondLimitGlobal` | 100 MiB | 1 KiB–1 GiB | Network |
-| `sendQueueLimitPerPlayer` | 4000 | 1–100 000 | Network → disk backpressure |
+| `sendQueueLimitPerPlayer` | 1024 | 1–100 000 | Network → disk backpressure |
 | `lodDistanceChunks` | 256 | 1–2048 | Network volume |
 | `dirtyBroadcastIntervalSeconds` | 10 | 1–300 | Network |
 | *(const)* `SYNC_ON_LOAD_SLOT_CAP` | 200 | — | CPU/Mem/Disk in-flight |

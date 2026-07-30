@@ -128,7 +128,10 @@ EXCLUSION_RADIUS = 8
 # reads exactly these). GSON silently ignores unknown keys, so a typo in a scenario's
 # -config.json would silently fall back to defaults and de-fang the scenario; --validate
 # rejects unknown keys and wrong JSON types instead.
-SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBackgroundReadPriority"})
+SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBackgroundReadPriority",
+                                     # NBT->wire transcode kill switch (round 2, 2026-07-29):
+                                     # scenarios may pin it off for object-path A/Bs.
+                                     "useNbtTranscode"})
 SERVER_CONFIG_INT_KEYS = frozenset({
     "lodDistanceChunks", "bytesPerSecondLimitPerPlayer", "diskReaderThreads",
     "sendQueueLimitPerPlayer", "bytesPerSecondLimitGlobal",
@@ -257,10 +260,12 @@ KNOWN_CLIENT_KEYS = {
     # effective_lod/rtt/ingest_failures are the round-2 client data-capture additions; like
     # probes they are presence-optional (older recordings predate them). request_queue left
     # with v17's drip-feed queue; rtt now measures last-declare->answer, not first-ask->answer.
+    # queued_bytes: the decode-queue byte gauge (disk-read profile round, presence-optional
+    # like the other late additions — older recordings predate it).
     "snapshot": {"event", "wallMs", "dimension", "received_columns", "received_bytes",
                  "dropped", "responses", "requested_total", "send_cycles", "columns",
-                 "scan", "tracker_in_flight", "queued", "server_enabled", "probes",
-                 "effective_lod", "rtt", "ingest_failures"},
+                 "scan", "tracker_in_flight", "queued", "queued_bytes", "server_enabled",
+                 "probes", "effective_lod", "rtt", "ingest_failures"},
     # One scripted client-side action (-Dlss.soak.clientActionAt); resets the request
     # metrics, so the loader treats it as a client segment boundary.
     "action": {"event", "wallMs", "action", "atSeconds"},

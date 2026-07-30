@@ -66,18 +66,25 @@ OPTS
 rm -f "$SERVER_RUN_DIR/logs/latest.log"
 
 # Step 4c: Write server.properties + eula.txt
+# difficulty=peaceful: the base world's saved time-of-day is whatever the build run ended
+# at (a 900 s build saves NIGHT), and a hostile mob killing the idle benchmark player
+# freezes the client's want-set declarations mid-run (tick()'s isDeadOrDying guard) —
+# diagnosed 2026-07-29 as the "client early-stop" that truncated 2 of 4 profile runs.
 cat > "$SERVER_RUN_DIR/server.properties" <<'PROPS'
 online-mode=false
 level-seed=benchmark-seed-42
 spawn-protection=0
 max-tick-time=-1
 pause-when-empty-seconds=-1
+difficulty=peaceful
 PROPS
 
 echo "eula=true" > "$SERVER_RUN_DIR/eula.txt"
 
 # Step 5: Start server
-mc_start_server "$RESULTS_DIR/server.log" :fabric:runBenchmarkServer -Pbenchmark.duration="$DURATION"
+# BENCHMARK_SERVER_GRADLE_ARGS: optional extra gradle args for the SERVER invocation only
+# (e.g. -Pbenchmark.c2me=true for the C2ME A/B arm — the client stays unmodified).
+mc_start_server "$RESULTS_DIR/server.log" :fabric:runBenchmarkServer -Pbenchmark.duration="$DURATION" ${BENCHMARK_SERVER_GRADLE_ARGS:-}
 
 # Step 6: Wait for server ready
 mc_wait_server_ready "$SERVER_RUN_DIR/logs/latest.log" "$RESULTS_DIR/server.log" 120

@@ -35,4 +35,6 @@ oracle/
 .worktrees/
 
 __pycache__/
+profile-results/
+benchmark-compare-results/
 .pid

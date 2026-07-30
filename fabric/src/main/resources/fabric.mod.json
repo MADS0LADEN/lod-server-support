@@ -12,6 +12,7 @@
   },
   "license": "MIT",
   "icon": "assets/lss/icon.png",
+  "accessWidener": "lss.accesswidener",
   "environment": "*",
   "entrypoints": {
     "main": [

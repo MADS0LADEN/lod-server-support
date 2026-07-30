@@ -157,8 +157,10 @@ clear batch empties only the server's BACKLOG; everything already past admission
 arrives and dispatches into the consumer: the server's send queue, admitted slot work,
 and the client's own decode queue. With the taper active the realistic tail is ~one
 want-set of in-flight work (≈ 5–8k further sections — roughly doubling past the halt);
-the adversarial co-occurrence (a full 4000-payload send queue AND a near-full decode
-queue at the moment of halt) is bounded but much larger (~100–400 MB) — the taper makes
+the adversarial co-occurrence (a full send queue AND a near-full decode
+queue at the moment of halt) is bounded but much larger (~100–400 MB at the 4000-payload
+default this section was written against; the disk-read-profile round lowered the default
+to 1024, shrinking that co-occurrence bound ~4x) — the taper makes
 it unlikely (reaching the halt requires the budget to have already collapsed toward 1,
 which starves the send queue first). Still a one-shot, bounded overshoot versus today's
 unbounded growth. The live acceptance run (§6) explicitly watches peak `getTaskCount()`
