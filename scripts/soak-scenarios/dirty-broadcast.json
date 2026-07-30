@@ -34,6 +34,16 @@
     },
     {
       "anchor": 1,
+      "at": 30,
+      "cmd": "save-all flush"
+    },
+    {
+      "anchor": 1,
+      "at": 45,
+      "cmd": "save-all flush"
+    },
+    {
+      "anchor": 1,
       "at": 60,
       "cmd": "forceload add 320 0"
     },

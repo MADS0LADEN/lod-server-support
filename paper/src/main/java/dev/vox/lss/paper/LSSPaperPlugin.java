@@ -81,7 +81,7 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
         LSSLogger.info("Starting " + Brand.shortName() + " LOD request processing service");
 
         // Register dirty chunk event listeners. enabled=false gates here (mirrors Fabric's
-        // ChunkMapSaveHook gate): the service tick — and so the dirty-broadcast drain — is
+        // ChunkSaveDataHook gate): the service tick — and so the dirty-broadcast drain — is
         // disabled, so marking would grow the DirtyColumnTracker without bound for the whole
         // server run. enabled is immutable per run, so skipping registration is safe.
         if (config.enabled) {

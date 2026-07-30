@@ -404,7 +404,7 @@ public class ServiceLifecycleGameTests {
                 }
                 case 1 -> {
                     // Live end-to-end: edit → real save → the position must surface in the live
-                    // dirty tracker (ChunkMapSaveHook → DirtyContentFilter → DirtyColumnTracker).
+                    // dirty tracker (ChunkSaveDataHook → DirtyContentFilter → DirtyColumnTracker).
                     // Drain, save, and re-drain in one callback: saves and the broadcaster only
                     // run on the main thread, so nothing can interleave and steal the mark.
                     var edit = level.getBlockState(editPos).is(Blocks.STONE)
@@ -1039,7 +1039,7 @@ public class ServiceLifecycleGameTests {
 
     /**
      * FP-039: a generation-stage ProtoChunk passing through the real save pass must not
-     * mark dirty ({@code ChunkMapSaveHook}'s {@code instanceof LevelChunk} guard) — proto
+     * mark dirty ({@code LSSServerNetworking.onChunkSaveData}'s {@code instanceof LevelChunk} guard) — proto
      * saves have no LOD-servable content, and marking them would broadcast positions that
      * then resolve not-found. The edited LevelChunk in the same save pass is the positive
      * control proving the save ran and the hook is live. Drain–save–drain runs in one
@@ -1081,7 +1081,7 @@ public class ServiceLifecycleGameTests {
                 "premise/control: the edited LevelChunk must mark dirty in this save pass "
                         + "(proves the save ran and the hook is live)");
         helper.assertTrue(!containsPosition(dirty, protoPacked),
-                "a ProtoChunk save must NOT mark dirty (ChunkMapSaveHook must exclude "
+                "a ProtoChunk save must NOT mark dirty (ChunkSaveDataHook must exclude "
                         + "generation-stage saves — they have no LOD-servable content)");
         chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, controlPos, 0);
         helper.succeed();

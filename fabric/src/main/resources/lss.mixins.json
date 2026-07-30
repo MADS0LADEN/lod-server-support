@@ -7,10 +7,9 @@
   },
   "mixins": [
     "AccessorServerChunkCache",
-    "AccessorChunkMap",
     "AccessorSimpleRegionStorage",
     "AccessorIOWorker",
-    "ChunkMapSaveHook"
+    "ChunkSaveDataHook"
   ],
   "client": [
     "IntegratedServerLanHook"

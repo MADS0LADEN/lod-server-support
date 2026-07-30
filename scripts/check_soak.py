@@ -1826,8 +1826,18 @@ def check_dirty_resave_quiet(ctx):
     The timeline uses 'save-all flush': plain save-all is THROTTLED (vanilla dribbles the
     save wave over many seconds), so under machine load the seeding wave from the edit
     save can drain past the baseline snapshot and late first-observation marks read as
-    violations. flush makes seeding synchronous; the startswith match accepts both."""
+    violations. flush makes seeding synchronous; the startswith match accepts both.
+
+    The save-all list is anchored AFTER the setblock: the law's subject is "once the
+    EDITED save-all has broadcast" (above), so the timeline's warmup save-alls BEFORE the
+    edit (added 2026-07-30 so the first-save hash-seeding wave lands before
+    check_dirty_broadcast's baseline on platforms whose chunk systems defer autosave —
+    Moonrise never saves until asked) must not shift the window onto the edit itself.
+    No-setblock recordings keep the legacy index-based window."""
     save_alls = [c for c in ctx.commands if c["cmd"].strip().startswith("save-all")]
+    setblock = next((c for c in ctx.commands if "setblock" in c["cmd"]), None)
+    if setblock is not None:
+        save_alls = [c for c in save_alls if c["wallMs"] > setblock["wallMs"]]
     if len(save_alls) < 2:
         return
     resave_wall = save_alls[1]["wallMs"]
@@ -2860,6 +2870,17 @@ def selftest():
         server_snaps=[_srv(90_000, over={"dirty.broadcast_positions": 40}),
                       _srv(140_000, over={"dirty.broadcast_positions": 40})],
         commands=[_cmd(64_000, "save-all flush"), _cmd(95_000, "save-all flush")],
+        runs={1: resave_cli}))))
+    # Warmup save-alls BEFORE the setblock (the 2026-07-30 Moonrise-deferred-autosave
+    # timeline hardening) must not shift the no-edit window onto the edit itself: the
+    # anchor is the save-alls AFTER the setblock, so [1] stays the t+95 re-save.
+    clean("dirty-resave warmup save-alls before the edit do not shift the window",
+          list(check_dirty_resave_quiet(_ctx(
+        server_snaps=[_srv(90_000, over={"dirty.broadcast_positions": 40}),
+                      _srv(140_000, over={"dirty.broadcast_positions": 40})],
+        commands=[_cmd(30_000, "save-all flush"), _cmd(45_000, "save-all flush"),
+                  _cmd(62_000, "setblock 320 310 0 minecraft:stone"),
+                  _cmd(64_000, "save-all flush"), _cmd(95_000, "save-all flush")],
         runs={1: resave_cli}))))
 
     # --- dirty-while-offline probes: rise/equality + drain mechanics (hold while empty,

@@ -24,11 +24,20 @@ import java.util.Map;
  * harmless, a missed update is not. Paper needs no twin: its dirty detection is
  * Bukkit-event-driven (block changes), not save-driven.
  *
- * <p>All callers run on the main server thread (ChunkMap.save call sites were verified
- * main-thread-only through the saveChunkIfNeeded/scheduleUnload/saveAllChunks roots on the
- * 26.1 line and the hook shape is unchanged on 26.2; chunk-IO-overhaul mods that move saves
- * off-thread are the known gap — see the C2ME entry in CLAUDE.md); the synchronization is
- * cheap insurance against those, not a vanilla need.
+ * <p>Thread contract (issue #69 retarget): callers arrive from the
+ * {@code SerializableChunkData.copyOf} hook, which vanilla runs on the main server thread
+ * but chunk-system overhaul mods legitimately run elsewhere (C2ME's rewritten system
+ * calls copyOf from its scheduler's save path; Moonrise from its holder save). Reading
+ * the live chunk here is safe wherever copyOf itself is legal — the hook only ever runs
+ * inside a call whose entire purpose is snapshotting that chunk's sections — and the
+ * synchronization below makes the hash state safe for those off-main callers (no longer
+ * just insurance). One read is wider than copyOf's own under Moonrise: its Starlight
+ * mixin redirects copyOf's light reads to Starlight state, while our serializer still
+ * reads {@code getDataLayerData} — safe (SWMR nibble arrays are multi-reader by design;
+ * the same API feeds vanilla light packets), but "identical read set" holds only on
+ * vanilla/C2ME. Known contention point, accepted for now: the whole column serialization
+ * runs inside this monitor, so parallel-save systems funnel through one lock during
+ * autosave storms — hoist the hash outside the lock if that ever measures hot.
  */
 public class DirtyContentFilter {
     /** Per-dimension cap; on overflow the map is cleared (chunks re-mark dirty once — self-heals).

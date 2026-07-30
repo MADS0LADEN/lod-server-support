@@ -16,7 +16,12 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
  * Uses {@link LevelChunkSection#write(FriendlyByteBuf)} for block states + biomes,
  * plus raw DataLayer nibble bytes for light data.
  *
- * <p>Must be called on the server thread (reads LightEngine).
+ * <p>Thread contract: the serve paths call this on the server thread; the dirty-detection
+ * hook (issue #69 retarget) may additionally call it from whatever thread legally runs
+ * {@code SerializableChunkData.copyOf} — C2ME/Moonrise save workers — where reading the
+ * section and light data is safe because copyOf itself performs the same class of reads
+ * there (under Moonrise the light layers come from Starlight's SWMR nibble arrays, which
+ * are multi-reader by design).
  */
 public final class SectionSerializer {
     private SectionSerializer() {}
