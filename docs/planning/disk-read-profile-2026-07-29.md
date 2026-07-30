@@ -115,6 +115,59 @@ conditions vs baseline `20260729-152424`:
   transcode (agents' report: staged plan, per-section fallback ladder, additive goldens
   — est. 3-5 days, on the order of a further 25-35% of server CPU).
 
+### Optimization round 2 — NBT→wire transcode, IMPLEMENTED and validated (2026-07-30)
+
+Stages B+C of `nbt-transcode-design.md` landed (`useNbtTranscode`, default true): the disk
+path skips the container codec entirely — palette global ids resolved through the extended
+element memo, count headers from a raw histogram over the disk longs, palette + long array
+emitted verbatim; per-section object fallback for Global configs / malformed data /
+mask-needing sections. Byte identity gated by six new object-path-generated goldens
+(two-entry/hashmap/global block tiers, duplicate-air, biome 3-bit/global), a 32-round
+transcode-vs-object fuzz, the corpus + parity + Tier-2 disk-vs-live and masked gates.
+
+**Measurement: same-night A/B, not cross-day.** Validation ran TWO matrices back-to-back
+under identical conditions (`20260730-objectpath` staged `PROFILE_NBT_TRANSCODE=false`,
+`20260730-transcode` the new default) because the whole-JVM wobble this file warns about is
+real: the object-path matrix measured vanilla 1.60 CPU-s/1k the same evening that the SAME
+code path measured 1.78 in the morning matrix — a cross-day compare would have minted a
+phantom ~10% win. Bucket aggregation over `flame.collapsed` with shared category regexes
+(first-match: recount/transcode/entry-decode/container-plumbing/nbt-load/serializer-other/
+wire-send/vanilla-tick), LSS-attribution split by serializer frames.
+
+- **The round-2 target is eliminated, not just shrunk**: LSS-attributed container-plumbing
+  samples (RecordCodecBuilder/ListCodec/NbtOps/DataResult/LONG_STREAM under the serializer)
+  354 → **0** (vanilla), 552 → **3** (c2me). The surviving "plumbing" band (~65-114
+  samples/arm, both matrices) is vanilla's own ForkJoinPool codec work, present on both
+  sides. Palette-entry decode −96/−99%; the recount/histogram band −92/−98% (its residual
+  is the transcoder's own in-band histogram).
+- **Whole LSS serializer band**: vanilla 920 → 540 samples (35.1% → 24.2% of all exec
+  samples, −41%); c2me 1246 → 988 (41.9% → 35.5%, −21%). Total windowed exec samples −15%
+  (vanilla) / −5% (c2me).
+- **Sampled allocation −22% / −17%** (vanilla ~19.6 → ~15.2 GB, c2me ~20.1 → ~16.6 GB per
+  active window) — the DFU DataResult/Pair/boxed-long churn is gone; `byte[]` now dominates
+  what remains (the wire buffers themselves).
+- **What did NOT move, as predicted**: the raw NBT tag load (−1%/+2% — now the largest
+  serializer-side residual at ~19-23% of samples; killing it needs the custom region
+  reader, out of round-2 scope), vanilla ticking (+4-5%, the known wobble band), wire send
+  (noise-level counts). `queue_full`/`not_found`/`errors` all 0 in every run.
+- **Whole-JVM CPU-s/1k is a wash** (vanilla 1.60 → 1.58, c2me 1.57 → 1.56): at this
+  dilution the serializer-band win sits inside the box's day wobble — same lesson as
+  round 1, judged on bands and allocation, not the aggregate. Throughput unchanged
+  (bandwidth-bound by design; ~565/590 col/s both matrices).
+- The cross-day compare against the official `20260729-optimized` baseline tells the same
+  structural story (plumbing −73/−85%, entry decode −97/−99%, totals −21/−9%) and is
+  recorded only as corroboration.
+
+**Soak note (fresh-backfill, the same evening):** Paper PASS through the transcoder (40/40
+windows). Fabric redded A7-only three times at exactly +5 = `diskReaderThreads` (one >10 s
+IOWorker stall expiring all five blocked readers mid-gen-wave; reads averaged 107-131 ms
+all evening vs ~2 ms in every profile run — the box was in the documented degraded-IO
+state), with a `useNbtTranscode:false` control green between them and every byte-economy
+law (A1-A6 + client laws) green in every run. Triage recorded in CLAUDE.md's A7 catalog:
+the freed reader-pool CPU is a memo-style acceleration of the gen-save flood on a
+constrained box, not byte drift — a transcoder byte bug would fire A5/up-to-date-economy
+anomalies, never A7.
+
 ### Optimization leads (round-1 source material; transcode Tier 2 still open)
 
 1. **Skip or cheapen `recalcBlockCounts` on the disk path.** The section ctor recounts

@@ -29,6 +29,9 @@ die() { echo "[profile] ERROR: $*" >&2; exit 1; }
 # PROFILE_SEND_QUEUE: sendQueueLimitPerPlayer override (default 4000) — set BELOW
 # WANT_SET_BUDGET (800) to force the router's sendQueueFull admission gate to engage
 # (single-player, the client's bounded want-set otherwise backpressures first).
+# PROFILE_NBT_TRANSCODE: useNbtTranscode override (default true) — set false for a
+# same-box-state object-path baseline matrix (round-2 A/B; pitfall: never compare
+# matrices across days or box states).
 stage_server_config() { # <path>
     cat > "$1" <<EOF
 {
@@ -46,6 +49,7 @@ stage_server_config() { # <path>
   "perDimensionTimestampCacheSizeMB": 32,
   "missMemoTtlSeconds": 30,
   "useBackgroundReadPriority": true,
+  "useNbtTranscode": ${PROFILE_NBT_TRANSCODE:-true},
   "enableV16Compat": true
 }
 EOF
@@ -130,6 +134,7 @@ cmd_run() {
   "duration_s": $duration,
   "lod_distance": $LOD_R,
   "bw_per_player": ${PROFILE_BW_PER_PLAYER:-20971520},
+  "nbt_transcode": ${PROFILE_NBT_TRANSCODE:-true},
   "fallback_warn": "$warn",
   "arm_valid": $warn_ok,
   "orchestrator_rc": $rc,

@@ -128,7 +128,10 @@ EXCLUSION_RADIUS = 8
 # reads exactly these). GSON silently ignores unknown keys, so a typo in a scenario's
 # -config.json would silently fall back to defaults and de-fang the scenario; --validate
 # rejects unknown keys and wrong JSON types instead.
-SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBackgroundReadPriority"})
+SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBackgroundReadPriority",
+                                     # NBT->wire transcode kill switch (round 2, 2026-07-29):
+                                     # scenarios may pin it off for object-path A/Bs.
+                                     "useNbtTranscode"})
 SERVER_CONFIG_INT_KEYS = frozenset({
     "lodDistanceChunks", "bytesPerSecondLimitPerPlayer", "diskReaderThreads",
     "sendQueueLimitPerPlayer", "bytesPerSecondLimitGlobal",
