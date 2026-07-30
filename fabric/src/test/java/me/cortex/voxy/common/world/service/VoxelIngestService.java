@@ -41,8 +41,23 @@ public final class VoxelIngestService {
         return behavior.ingest(call);
     }
 
+    /** Value returned by the instance {@link #getTaskCount()} (the backlog-probe terminal). */
+    public static volatile int taskCount = 0;
+
+    /** When non-null, {@link #getTaskCount()} throws this instead of returning. */
+    public static volatile RuntimeException taskCountThrow = null;
+
+    /** Instance method mirroring the shape the backlog probe resolves: {@code int getTaskCount()}. */
+    public int getTaskCount() {
+        var t = taskCountThrow;
+        if (t != null) throw t;
+        return taskCount;
+    }
+
     public static void reset() {
         calls.clear();
         behavior = call -> true;
+        taskCount = 0;
+        taskCountThrow = null;
     }
 }

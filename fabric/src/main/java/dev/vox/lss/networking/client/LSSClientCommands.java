@@ -124,12 +124,13 @@ public class LSSClientCommands {
                 confirmedRing, scanRing, maxRing, manager.getMissingVanillaChunks()
         )).withStyle(ChatFormatting.GRAY));
 
-        // Budget line
+        // Budget line (ingest_backlog: the consumer-reported pending sections driving the
+        // #71 taper/halt; -1 = no consumer reports)
         int budget = manager.getLastBudget();
         int lastQueued = manager.getLastQueued();
         source.sendFeedback(Component.literal(String.format(
-                "Budget: used=%d/%d",
-                lastQueued, budget
+                "Budget: used=%d/%d, ingest_backlog=%d",
+                lastQueued, budget, manager.getLastIngestBacklog()
         )).withStyle(ChatFormatting.GRAY));
     }
 }

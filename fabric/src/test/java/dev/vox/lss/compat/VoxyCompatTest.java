@@ -5,6 +5,7 @@ import dev.vox.lss.api.VoxelColumnConsumer;
 import dev.vox.lss.api.VoxelColumnData;
 import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.common.world.service.VoxelIngestService;
+import me.cortex.voxy.commonImpl.VoxyCommon;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.registries.Registries;
@@ -57,6 +58,7 @@ class VoxyCompatTest {
         WorldIdentifier.reset();
         VoxelIngestService.reset();
         VoxyConfig.reset();
+        VoxyCommon.reset();
         VoxyCompat.reportSink = (dimension, chunkX, chunkZ) ->
                 reports.add(new Report(dimension, chunkX, chunkZ));
         VoxyCompat.consumerRegistrar = registered::add;
@@ -68,6 +70,7 @@ class VoxyCompatTest {
         WorldIdentifier.reset();
         VoxelIngestService.reset();
         VoxyConfig.reset();
+        VoxyCommon.reset();
     }
 
     /** Runs init() against the stubs and returns the bridge consumer it registered. */
@@ -297,6 +300,62 @@ class VoxyCompatTest {
         consumer.onVoxelColumnReceived(null, DIM, 11, 0, column(sectionData(0)));
         assertEquals(2, VoxelIngestService.calls.size(), "an Exception must not dead-latch");
         assertEquals(1, reports.size());
+    }
+
+    // ---- ingest-backlog probe (issue #71) ----
+
+    @Test
+    void backlogProbeSurfacesTheLiveTaskCount() {
+        VoxelIngestService.taskCount = 1234;
+        var consumer = initBridge();
+        assertEquals(1234, consumer.pendingIngestBacklog(),
+                "the probe must surface VoxyCommon.getInstance().getIngestService().getTaskCount()");
+        VoxelIngestService.taskCount = 7;
+        assertEquals(7, consumer.pendingIngestBacklog(), "live per-poll read, not a snapshot");
+    }
+
+    @Test
+    void backlogProbeNullInstanceReportsNoSignal() {
+        var consumer = initBridge();
+        VoxyCommon.instance = null; // pre-join / post-shutdown — routine, never an error
+        assertEquals(-1, consumer.pendingIngestBacklog(),
+                "no VoxyInstance yet must read as no-signal");
+        VoxyCommon.reset();
+        VoxelIngestService.taskCount = 5;
+        assertEquals(5, consumer.pendingIngestBacklog(), "the probe recovers once an instance exists");
+    }
+
+    @Test
+    void backlogProbeNullServiceReportsNoSignal() {
+        var consumer = initBridge();
+        VoxyCommon.instance.ingestService = null; // production never does this — defensive rung
+        assertEquals(-1, consumer.pendingIngestBacklog());
+    }
+
+    @Test
+    void backlogProbeThrowIsContainedToNoSignal() {
+        var consumer = initBridge();
+        VoxelIngestService.taskCountThrow = new IllegalStateException("gauge broke");
+        assertEquals(-1, consumer.pendingIngestBacklog(),
+                "a throwing gauge degrades to no-signal, never up the tick loop");
+        VoxelIngestService.taskCountThrow = null;
+        VoxelIngestService.taskCount = 9;
+        assertEquals(9, consumer.pendingIngestBacklog(), "and recovers when the gauge does");
+    }
+
+    @Test
+    void missingBacklogChainStillRegistersTheIngestBridge() {
+        // SEPARATE failure domains: a Voxy without the backlog surface (renamed/removed)
+        // must cost only the pacing signal — the ingest bridge still registers and works.
+        VoxyCompat.classResolver = name -> {
+            if (name.endsWith("VoxyCommon")) throw new ClassNotFoundException(name);
+            return Class.forName(name);
+        };
+        var consumer = initBridge(); // init still succeeds
+        assertEquals(-1, consumer.pendingIngestBacklog(),
+                "an unresolved probe permanently reports no-signal");
+        VoxelIngestService.taskCount = 1234;
+        assertEquals(-1, consumer.pendingIngestBacklog(), "still no-signal — the chain never bound");
     }
 
     // ---- distance query (the contract the SpiralScanner min-ladder tests lean on) ----
