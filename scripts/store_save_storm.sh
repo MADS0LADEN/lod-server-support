@@ -4,14 +4,15 @@ set -euo pipefail
 # Phase 3 MSPT-pairing gate (lod-store-implementation-plan.md Phase 3): runs the
 # store-save-storm scenario twice — lodStore=full (the gated arm, with the save-hook
 # deposit named check) and lodStore=off (the pairing arm, laws only) — and compares
-# paired MSPT over the STORM window. The save-hook path must be tick-neutral: the
-# serialization it consumes was already paid by the DirtyContentFilter hash; the only
-# added work is a queue offer, so a paired MSPT delta outside noise means the hook is
-# doing something it shouldn't on the save path.
+# paired PROCESS CPU over the STORM window (t in [60s,115s]; the save-alls fire at
+# 65..110 s). The save-hook path must be CPU-neutral: the serialization it consumes
+# was already paid by the DirtyContentFilter hash; the added work is a queue offer +
+# the batcher's off-thread compress/insert of the first-observation set.
+# mspt_avg_window is an INTERVAL metric pegged at ~50 ms below saturation (measured:
+# both arms 49.97) — kept only as a cadence-hold overload guard, never the pairing.
 #
 # Usage: ./scripts/store_save_storm.sh
-# Noise bound: |mean_on - mean_off| <= max(2.0 ms, 40% of mean_off) over the storm
-# window (t in [60s, 115s] of each run — the save-alls fire at 65..110 s).
+# CPU bound: on - off <= max(1.0 CPU-s, 25% of off) over the storm window.
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RESULTS_ROOT="$PROJECT_ROOT/soak-results"
@@ -36,33 +37,57 @@ log "=== arm: store-save-storm-off (lodStore=off, MSPT pair) ==="
 "$PROJECT_ROOT/scripts/soak.sh" store-save-storm-off
 OFF_DIR="$(latest_results store-save-storm-off)"
 
-log "paired MSPT verdict over the storm window"
-python3 - "$ON_DIR/server.jsonl" "$OFF_DIR/server.jsonl" <<'EOF'
+log "paired storm-window verdict (process CPU + cadence hold)"
+python3 - "$ON_DIR" "$OFF_DIR" <<'VERDICT'
 import json, statistics, sys
 
-def storm_mspt(path):
-    rows = [json.loads(l) for l in open(path, encoding="utf-8")
+def storm_rows(d):
+    rows = [json.loads(l) for l in open(d + "/server.jsonl", encoding="utf-8")
             if '"snapshot"' in l]
-    t0 = rows[0]["wallMs"]
+    return rows, rows[0]["wallMs"]
+
+def cadence(d):
+    rows, t0 = storm_rows(d)
     vals = [r["mspt_avg_window"] for r in rows
             if 60_000 <= r["wallMs"] - t0 <= 115_000
             and isinstance(r.get("mspt_avg_window"), (int, float))
             and r["mspt_avg_window"] >= 0]
-    if len(vals) < 5:
-        print(f"[save-storm] FAIL: only {len(vals)} MSPT samples in the storm window "
-              f"of {path}")
-        sys.exit(1)
-    return statistics.mean(vals)
+    return statistics.mean(vals) if len(vals) >= 5 else None
 
-on, off = storm_mspt(sys.argv[1]), storm_mspt(sys.argv[2])
-delta = on - off
-bound = max(2.0, 0.40 * off)
-print(f"[save-storm]   storm-window MSPT: off {off:.2f} ms -> on {on:.2f} ms "
-      f"(delta {delta:+.2f} ms, bound ±{bound:.2f} ms)")
-if abs(delta) > bound:
-    print("[save-storm] FAIL: paired MSPT delta outside noise — the save-hook deposit "
-          "path is loading the tick")
+def storm_cpu_seconds(d):
+    # Process-CPU jiffies over the storm wall window from the attached proc sampler.
+    # mspt_avg_window measures tick INTERVAL (pegged at ~50 ms below saturation —
+    # measured 49.97 on both arms), so it cannot see sub-cadence work; CPU is the real
+    # pairing measure and MSPT stays only as a cadence-hold (overload) guard.
+    rows = [json.loads(l) for l in open(d + "/cpu.jsonl", encoding="utf-8") if l.strip()]
+    rows = [r for r in rows if isinstance(r.get("srv_cpu"), (int, float))]
+    _, t0 = storm_rows(d)
+    w_lo, w_hi = (t0 + 60_000) / 1000.0, (t0 + 115_000) / 1000.0
+    window = [r for r in rows if w_lo <= r["t"] <= w_hi]
+    if len(window) < 10:
+        print(f"[save-storm] FAIL: only {len(window)} CPU samples in the storm window of {d}")
+        sys.exit(1)
+    return (window[-1]["srv_cpu"] - window[0]["srv_cpu"]) / 100.0
+
+on_dir, off_dir = sys.argv[1], sys.argv[2]
+on_cpu, off_cpu = storm_cpu_seconds(on_dir), storm_cpu_seconds(off_dir)
+delta = on_cpu - off_cpu
+bound = max(1.0, 0.25 * off_cpu)
+print(f"[save-storm]   storm-window process CPU: off {off_cpu:.2f} s -> on {on_cpu:.2f} s "
+      f"(delta {delta:+.2f} s, bound +{bound:.2f} s)")
+if delta > bound:
+    print("[save-storm] FAIL: paired storm-window CPU outside noise — the save-hook "
+          "deposit path is doing real per-save work beyond the queue offer")
     sys.exit(1)
-print("[save-storm] paired MSPT verdict: PASS (save-hook path tick-neutral)")
-EOF
+on_mspt, off_mspt = cadence(on_dir), cadence(off_dir)
+if on_mspt is None or off_mspt is None:
+    print("[save-storm] FAIL: too few MSPT samples for the cadence-hold check")
+    sys.exit(1)
+print(f"[save-storm]   cadence hold: off {off_mspt:.2f} ms, on {on_mspt:.2f} ms "
+      f"(both must stay <= 52 ms — interval metric, overload guard only)")
+if on_mspt > 52.0 or off_mspt > 52.0:
+    print("[save-storm] FAIL: an arm lost the tick cadence during the storm")
+    sys.exit(1)
+print("[save-storm] paired verdict: PASS (save-hook path CPU-neutral, cadence held)")
+VERDICT
 log "save-storm gate PASS"

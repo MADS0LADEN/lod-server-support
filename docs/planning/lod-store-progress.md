@@ -669,3 +669,33 @@ three phases + cross-phase verdict PASS; paper-store-unfired-event PASS (premise
 resweep culled, control byte-identical). **Phase 2 + its review round CLOSED** — one
 open item rides to the phase boundary (the §0 metric-2-as-written 62.2% vs 70% flag)
 and one to Phase 5 (multi-player unfired-event burn-in).
+
+## Phase 3 — Fabric save-hook deposits (2026-07-31)
+
+Landed: `DirtyContentFilter.observeSave` (record-return — bytes handed OUT of the
+monitor, no callback-under-lock possible structurally); `onChunkSaveData` deposits the
+hashed bytes with the SAVE's timestamp via the testable
+`applySaveObservationToStore` bridge (all-air → byte[0]; serializer fail-open →
+DELETE the row — a stale pre-edit row must never outlive an edit we could not
+re-serialize); Fabric disables the dirty→store invalidation fan-out
+(`setStoreDirtyInvalidation(false)` — the hook's fresh deposit would otherwise be
+tombstoned by its own edit's later broadcast-drain invalidation; Paper keeps the
+fan-out, its event marks carry no bytes). Unit tests: observeSave contract ×3,
+bridge ×4, fan-out gating ×1.
+
+**Gate PASS (store_save_storm.sh, runs 054706Z/055043Z):**
+- store-save-storm (full arm) all laws green; named check pins: deposit_drops=0 under
+  a 10× save-all storm (the filter suppressed every metadata re-save), the save-hook
+  margin (deposits − misses ≥ 300 — the loaded set's first observations, impossible
+  in the Phase 2 shape where deposits ≈ misses), and the three-way probe story:
+  pre-edit hash ≠ post-edit hash == post-clearcache STORE serve — the save-hook
+  deposited bytes are byte-identical to the live re-serve, and the fresh row came
+  from the hook, not an NBT re-read (disk ceiling).
+- Paired arm verdict REWRITTEN mid-gate for honesty: `mspt_avg_window` is an INTERVAL
+  metric pegged at ~50 ms below saturation (measured 49.97 both arms) — the original
+  MSPT pairing was vacuous. The pairing now uses storm-window PROCESS CPU from the
+  attached proc sampler: off 5.23 s → on 4.67 s (delta −0.56 s, bound +1.31 s) —
+  CPU-neutral; MSPT kept only as a cadence-hold overload guard (both 50.00 ≤ 52 ms).
+- Deviation note: the plan's "SUSPECT/stale-demotion rate stays low" clause is v1
+  vocabulary (per-region SUSPECT state) with no v2 analogue — its v2 counterpart is
+  deposit_drops=0 + the sweep_drops-at-next-boot economy, both covered.
