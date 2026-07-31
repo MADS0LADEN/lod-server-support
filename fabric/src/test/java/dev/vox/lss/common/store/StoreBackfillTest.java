@@ -1,0 +1,169 @@
+package dev.vox.lss.common.store;
+
+import dev.vox.lss.common.PositionUtil;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * The Phase 4 backfill driver against a REAL SqliteLodStore in a temp dir: traversal
+ * order (nearest-origin region first), skip-if-row-already-present, per-region
+ * resumability across a store restart, stop semantics, and the restraint pause gates.
+ * Region files are synthesized as bare location headers (the driver reads only the
+ * location table; the fake ColumnReader supplies the "NBT" bytes).
+ */
+class StoreBackfillTest {
+
+    private static final String OW = "minecraft:overworld";
+
+    @TempDir
+    Path tmp;
+
+    private Path regionDir() {
+        return this.tmp.resolve("region");
+    }
+
+    /** Region with the given chunk indices present (bare 4 KiB location header). */
+    private void writeRegion(int rx, int rz, int... presentIdx) throws Exception {
+        Files.createDirectories(regionDir());
+        ByteBuffer buf = ByteBuffer.allocate(4096);
+        for (int idx : presentIdx) buf.putInt(idx * 4, (2 << 8) | 1);
+        Files.write(regionDir().resolve("r." + rx + "." + rz + ".mca"), buf.array());
+    }
+
+    private SqliteLodStore openStore() throws Exception {
+        var env = new SqliteLodStore.Environment(this.tmp.resolve("store"), "26.2-test", 18,
+                d -> regionDir(), d -> "", 0);
+        SqliteLodStore store = SqliteLodStore.createOrNull(LodStoreMode.FULL, env,
+                new LodStoreDiagnostics());
+        assertNotNull(store);
+        assertTrue(store.awaitSweep(10_000));
+        return store;
+    }
+
+    private StoreBackfill backfill(SqliteLodStore store, StoreBackfill.ColumnReader reader,
+                                   AtomicBoolean headroom, AtomicBoolean tickOk) {
+        return new StoreBackfill(store, d -> regionDir(), d -> new long[]{0, 0},
+                List.of(OW), reader, headroom::get, tickOk::get);
+    }
+
+    private static void awaitDone(StoreBackfill bf) throws Exception {
+        for (int i = 0; i < 400 && bf.isRunning(); i++) Thread.sleep(25);
+        assertTrue(!bf.isRunning(), "backfill must finish; status: " + bf.statusLine());
+    }
+
+    @Test
+    void walksNearestRegionFirstAndDepositsPresentChunks() throws Exception {
+        writeRegion(3, 0, 0, 1);   // far region: chunks (96,0), (97,0)
+        writeRegion(0, 0, 5);      // near region: chunk (5,0)
+        var order = new ConcurrentLinkedQueue<Long>();
+        SqliteLodStore store = openStore();
+        var bf = backfill(store, (dim, cx, cz) -> {
+            order.add(PositionUtil.packPosition(cx, cz));
+            return new byte[]{(byte) cx, (byte) cz, 9};
+        }, new AtomicBoolean(true), new AtomicBoolean(true));
+        assertTrue(bf.start());
+        awaitDone(bf);
+
+        assertEquals(PositionUtil.packPosition(5, 0), order.peek(),
+                "the origin-nearest region must be walked first");
+        assertEquals(3, order.size(), "every present chunk read exactly once");
+        for (int i = 0; i < 400; i++) {
+            if (store.get(OW, PositionUtil.packPosition(96, 0)) != null) break;
+            Thread.sleep(25);
+        }
+        assertNotNull(store.get(OW, PositionUtil.packPosition(5, 0)),
+                "backfilled column must be servable");
+        assertEquals(3, store.diagnostics().getBackfillDeposits());
+        store.shutdown();
+    }
+
+    @Test
+    void skipsColumnsTheStoreAlreadyHas() throws Exception {
+        writeRegion(0, 0, 5, 6);
+        SqliteLodStore store = openStore();
+        long present = PositionUtil.packPosition(5, 0);
+        store.deposit(OW, present, new byte[]{1}, 100);
+        for (int i = 0; i < 400 && store.get(OW, present) == null; i++) Thread.sleep(25);
+        var reads = new ConcurrentLinkedQueue<Long>();
+        var bf = backfill(store, (dim, cx, cz) -> {
+            reads.add(PositionUtil.packPosition(cx, cz));
+            return new byte[]{2};
+        }, new AtomicBoolean(true), new AtomicBoolean(true));
+        bf.start();
+        awaitDone(bf);
+        assertEquals(1, reads.size(), "the already-present column must not be re-read");
+        assertEquals(PositionUtil.packPosition(6, 0), reads.peek());
+        assertEquals(1, store.diagnostics().getBackfillSkips());
+        store.shutdown();
+    }
+
+    @Test
+    void finishedRegionsResumeAsDoneAcrossAStoreRestart() throws Exception {
+        writeRegion(0, 0, 5);
+        SqliteLodStore store = openStore();
+        var bf = backfill(store, (dim, cx, cz) -> new byte[]{1},
+                new AtomicBoolean(true), new AtomicBoolean(true));
+        bf.start();
+        awaitDone(bf);
+        for (int i = 0; i < 400 && !store.isBackfillRegionDone(OW, 0, 0); i++) Thread.sleep(25);
+        assertTrue(store.isBackfillRegionDone(OW, 0, 0), "region must be marked done");
+        store.shutdown();
+
+        SqliteLodStore reopened = openStore();
+        assertTrue(reopened.isBackfillRegionDone(OW, 0, 0),
+                "the progress table must survive a restart (resumability)");
+        var reads = new ConcurrentLinkedQueue<Long>();
+        var bf2 = backfill(reopened, (dim, cx, cz) -> {
+            reads.add(1L);
+            return new byte[]{1};
+        }, new AtomicBoolean(true), new AtomicBoolean(true));
+        bf2.start();
+        awaitDone(bf2);
+        assertEquals(0, reads.size(), "a done region must be skipped on resume");
+        reopened.shutdown();
+    }
+
+    @Test
+    void pauseGateHoldsWhileRestrainedAndStopExits() throws Exception {
+        writeRegion(0, 0, 1, 2, 3);
+        SqliteLodStore store = openStore();
+        var headroom = new AtomicBoolean(false); // restrained from the start
+        var bf = backfill(store, (dim, cx, cz) -> new byte[]{1},
+                headroom, new AtomicBoolean(true));
+        bf.start();
+        for (int i = 0; i < 200 && !bf.statusLine().startsWith("paused"); i++) Thread.sleep(25);
+        assertTrue(bf.statusLine().startsWith("paused"),
+                "no-headroom must pause, not read: " + bf.statusLine());
+        assertEquals(0, store.diagnostics().getBackfillReads(),
+                "no reads while restrained");
+        assertTrue(bf.stop(), "stop while paused must be accepted");
+        awaitDone(bf);
+        assertTrue(bf.statusLine().startsWith("stopped"), bf.statusLine());
+        store.shutdown();
+    }
+
+    @Test
+    void startIsIdempotentWhileRunning() throws Exception {
+        writeRegion(0, 0, 1);
+        SqliteLodStore store = openStore();
+        var gate = new AtomicBoolean(false); // hold it paused so it stays running
+        var bf = backfill(store, (dim, cx, cz) -> new byte[]{1},
+                gate, new AtomicBoolean(true));
+        assertTrue(bf.start());
+        assertTrue(!bf.start(), "second start while running must be rejected");
+        gate.set(true);
+        awaitDone(bf);
+        store.shutdown();
+    }
+}
