@@ -733,3 +733,29 @@ bridge ×4, fan-out gating ×1.
    present, churn 25 <= 50, freshness held, laws green both arms, storm-window process
    CPU off 5.33 s -> on 5.33 s (save-all-anchored window), cadence held.
    **Phase 3 + review CLOSED.**
+
+## Phase 4 — background backfill (IN PROGRESS, design sketch)
+
+Plan requirements: ships DEFAULT OFF (opt-in via /lsslod store backfill start|stop);
+single MIN_PRIORITY thread; submits through the same hasHeadroom self-restraint as
+everything else + an MSPT ceiling (NOT v1's "pause while any player backlog nonempty" —
+near-always true under 1 Hz re-declaration); traversal = regions ordered by Chebyshev
+distance from spawn, sequential within a region; resumable via a per-region progress
+table (store DB); on Fabric it re-enters the A7 IOWorker mechanism — the gate pins
+disk.errors == 0 on a constrained box. Gate: rate-under-load (effective col/s WITH an
+active player), resumability via mid-run kill, DB growth curve published
+(store.db_bytes over the run).
+
+Design decisions (pre-implementation):
+- The backfill reads region headers to enumerate present chunks, SKIPS positions whose
+  store row is already fresh (row exists; the deposit refreshes src_stamp anyway), and
+  reads+serializes via the platform's existing NBT path (same serializers as serves,
+  so deposited bytes match serve bytes), depositing through the normal choke.
+- Throttles: reader-pool hasHeadroom (never competes with player reads), an MSPT-proxy
+  tick-health seam per platform, and a col/s cap; one region at a time.
+- Progress table `backfill (dim, rpos, done_stamp)` in store.db — drop-and-rebuild
+  safe (derived like everything else).
+- New counters: store.backfill_{read,deposited,skipped} + diag/exporter/schema
+  plumbing (same 6-site checklist as sweep_drops).
+- Command surface: /lsslod store backfill start|stop|status (permission-gated like
+  the existing admin verbs), Fabric first; Paper parity if cheap.
