@@ -1,9 +1,18 @@
 # Timestamp persistence unification — SQLite `stamps` table replaces the bin file
 
-**Status: DESIGN ONLY — not scheduled.** Depends on `feat/lod-store` merging first; must
-ride its own branch with a full soak gauntlet (this touches protocol-load-bearing state
-on EVERY server, store-enabled or not). Written 2026-07-31 out of the post-review
-brainstorm: "do we still need the separate timestamp cache now that SQLite ships?"
+**Status: DESIGN + implementation plan** (see
+`timestamp-store-implementation-plan.md` for the phased plan). Depends on
+`feat/lod-store` merging first; must ride its own branch with a full soak gauntlet
+(this touches protocol-load-bearing state on EVERY server, store-enabled or not).
+Written 2026-07-31 out of the post-review brainstorm: "do we still need the separate
+timestamp cache now that SQLite ships?"
+
+**Sequencing decision (user, 2026-07-31): TEST-FIRST.** Before any persistence code
+moves, a dedicated Phase 0 builds out client-resync-path regression coverage (the
+thinnest-covered area this design later touches) — including a persistence CONTRACT
+suite that runs against the bin implementations now and must pass unchanged against
+the sqlite implementations later. The swap is only allowed to begin once Phase 0's
+tests are green against CURRENT code.
 
 ## 0. The one-paragraph answer
 
