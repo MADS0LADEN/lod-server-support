@@ -81,8 +81,13 @@ Since 2026-07 `build.yml` contains the flakes automatically: docs-only changes (
                               #  join contaminates a running soak)
 ./test-server.sh run-folia    # one platform only (also run-fabric, run-paper)
 ./test-server.sh run-fabric-no-c2me  # Fabric with c2me*.jar parked as .disabled (A/B vs C2ME; run-fabric re-enables)
+./test-server.sh run-fabric-store    # run-fabric with the LOD store ON (lodStore=full) — warm rejoins
+./test-server.sh run-paper-store     # run-paper with the LOD store ON; store DB at <world>/lss-lod/
 ./test-server.sh update       # rebuild + reinstall the LSS jars into all three (restart to apply)
 ./test-server.sh clean        # delete test-server/
+# LSS_LODSTORE=off|memory|full is written into EVERY staged lss-server-config.json (default
+# off; the run-*-store entrypoints force full) — the staging REWRITES that config each run,
+# so hand-edits don't survive; the env var is the supported knob.
 ```
 
 Downloads real server jars (Fabric launcher; Paper/Folia latest stable via fill.papermc.io),

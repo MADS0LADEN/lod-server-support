@@ -72,6 +72,18 @@ case "$LSS_ADMISSION_TRACE" in
     *)              ADMISSION_TRACE_FLAG="-Dlss.admissionTrace=true" ;;
 esac
 
+# LOD store for manual play: LSS_LODSTORE=off|memory|full (default off) is written into
+# the staged lss-server-config.json on EVERY run — the staging rewrites that file, so a
+# hand-edit does not survive a re-run; this variable is the supported way to flip it.
+# `run-fabric-store` / `run-paper-store` below force "full". The store DB lives at
+# <world>/lss-lod/store.db and persists across restarts (derived data — deleting the
+# lss-lod/ dir is always safe); eyeball it with '/lsslod store status' in-game.
+LSS_LODSTORE="${LSS_LODSTORE:-off}"
+case "$LSS_LODSTORE" in
+    off|memory|full) ;;
+    *) echo "LSS_LODSTORE must be off, memory, or full (got '$LSS_LODSTORE')" >&2; exit 1 ;;
+esac
+
 # ============================================================
 # Helpers
 # ============================================================
@@ -189,9 +201,9 @@ EOF
 
 write_lss_config() {
     local dir="$1"
-    echo "  Writing lss-server-config.json"
+    echo "  Writing lss-server-config.json (lodStore=${LSS_LODSTORE})"
     mkdir -p "$dir"
-    cat > "$dir/lss-server-config.json" << 'EOF'
+    cat > "$dir/lss-server-config.json" << EOF
 {
   "enabled": true,
   "lodDistanceChunks": 64,
@@ -203,7 +215,8 @@ write_lss_config() {
   "generationConcurrencyLimitPerPlayer": 40,
   "enableChunkGeneration": true,
   "generationConcurrencyLimitGlobal": 40,
-  "generationTimeoutSeconds": 60
+  "generationTimeoutSeconds": 60,
+  "lodStore": "${LSS_LODSTORE}"
 }
 EOF
 }
@@ -560,12 +573,40 @@ case "${1:-run}" in
         echo ""
         run_fabric
         ;;
+    run-fabric-store)
+        LSS_LODSTORE=full
+        setup_fabric
+        set_mod_enabled c2me true       # same baseline as run-fabric, only the store differs
+        set_mod_enabled antixray false
+        echo ""
+        echo "=== Starting Fabric server (LOD store: full) ==="
+        echo "  Connect to: localhost:25564"
+        echo "  Store DB: test-server/fabric/world/lss-lod/store.db — persists across runs"
+        echo "  (a REJOIN after backfill should serve warm: watch '/lsslod store status'"
+        echo "  and the client's /lss trace src:3 columns). Delete the lss-lod/ dir for a"
+        echo "  cold-store run; run-fabric (store off) leaves the DB in place but unused."
+        echo ""
+        run_fabric
+        ;;
     run-paper)
         setup_paper
         echo ""
         echo "=== Starting Paper server ==="
         echo "  Connect to: localhost:25566"
         echo "  Paper native anti-xray is ENABLED (config/paper-world-defaults.yml)."
+        echo ""
+        run_paper
+        ;;
+    run-paper-store)
+        LSS_LODSTORE=full
+        setup_paper
+        echo ""
+        echo "=== Starting Paper server (LOD store: full) ==="
+        echo "  Connect to: localhost:25566"
+        echo "  Paper native anti-xray is ENABLED (config/paper-world-defaults.yml) — the"
+        echo "  store fingerprints the mask per dimension and rebuilds on any change."
+        echo "  Store DB: test-server/paper/world/lss-lod/store.db — persists across runs;"
+        echo "  '/lsslod store status' shows health, '/lsslod store invalidate all' resets."
         echo ""
         run_paper
         ;;
@@ -603,7 +644,7 @@ case "${1:-run}" in
         echo "Done."
         ;;
     *)
-        echo "Usage: $0 {setup|run|run-fabric|run-fabric-no-c2me|run-fabric-antixray|run-paper|run-folia|run-legacy|update|clean}"
+        echo "Usage: $0 {setup|run|run-fabric|run-fabric-no-c2me|run-fabric-antixray|run-fabric-store|run-paper|run-paper-store|run-folia|run-legacy|update|clean}"
         echo ""
         echo "  setup      - Download and set up all servers"
         echo "  run        - Set up and start all servers (default)"
@@ -613,7 +654,11 @@ case "${1:-run}" in
         echo "  run-fabric-antixray - Same as run-fabric plus DrexHD AntiXray — the live gate"
         echo "               for the AntiXray compat shim + masking (current builds must"
         echo "               survive a client join and serve masked; only pre-shim builds crash)"
+        echo "  run-fabric-store - Same as run-fabric with the LOD store ON (lodStore=full):"
+        echo "               warm rejoins serve from world/lss-lod/store.db; '/lsslod store"
+        echo "               status' + client /lss trace src:3 are the eyeball instruments"
         echo "  run-paper  - Set up and start Paper server only (port 25566; native anti-xray on)"
+        echo "  run-paper-store - Same as run-paper with the LOD store ON (lodStore=full)"
         echo "  run-folia  - Set up and start Folia server only (port 25567)"
         echo "  run-legacy - Set up and start an OLD LSS v${LEGACY_LSS_VERSION} (protocol 16) server (port 25568),"
         echo "               for eyeballing the client-side v16 backward-compat path"
@@ -624,6 +669,10 @@ case "${1:-run}" in
         echo "  SERVER_RAM  - Server memory allocation per server (default: 2G)"
         echo "  LSS_ADMISSION_TRACE - Fabric [lss-adm] generation-admission trace (default: 1)."
         echo "                        Set to 0 to silence it — it is verbose during backfill."
+        echo "  LSS_LODSTORE - lodStore mode written into EVERY staged lss-server-config.json"
+        echo "                 (off|memory|full, default: off; the run-*-store entrypoints"
+        echo "                 force full). Hand-edits to the config do NOT survive a re-run"
+        echo "                 — the staging rewrites it; this variable is the supported knob."
         exit 1
         ;;
 esac
