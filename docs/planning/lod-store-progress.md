@@ -541,10 +541,43 @@ Run status (updated 2026-07-31 during the run sequence):
   * SQLite-alone (stamp 20260730-235758): deposits 28.5k (halved ✓), reps +7.2%/−1.2%/
     +10.3%, **median +7.2% ≤ +10% — GATE PASS** (check_cold gates on the median now,
     same discipline as check_warm; the −1.2%..+10.3% rep spread is scheduler noise).
-- [~] store_gate.sh warm 3 60 re-run on the sqlite-alone shape — RUNNING (cycle B was
-  already effectively sqlite-served, but the record should match the shipped shape).
-- [ ] store-second-join-full + paper-store-unfired-event re-runs on the sqlite-alone
-  shape — queued (their serve legs previously exercised the deleted memory tier).
+- [x] store_gate.sh warm — **GATE PASS on the shipped sqlite-alone shape** (stamp
+  20260731, distance 96 / 120 s cycles): median hit ratio 0.988, disk.submitted 1.17%,
+  addressable-CPU cut 75.2%, whole-band cut 54.6%, hit p95 ~108 µs = 17.9×, whole-JVM
+  CPU/col IMPROVED 20.5% (informational). Two intermediate learnings recorded on the
+  way: (a) the sqlite-alone 64-distance run failed marginally (2.23%/68.8%) because
+  deleting the tier made cycle A FASTER, so it wins the spawn-annulus serve-vs-load
+  race for more columns (deterministic 369-row doomed set vs 240 tiered — these rows
+  get resaved at shutdown and conservatively swept); the fix was a LARGER disc
+  (distance 96 dilutes the constant annulus to ~1%), not looser ceilings.
+- [x] store-second-join-full re-run (sqlite-alone): PASS — hits 1960 (geometry-exact,
+  now all SQLite: mem_hits 0), deposits 2068 (per-tier double-count gone), p95 42 µs,
+  errors 0. The in-session kick-rejoin warm path is ~100 µs SQLite hits now.
+- [x] paper-store-unfired-event re-runs (sqlite-alone): attempt 1 FAILED and exposed a
+  RACY PREMISE — the glowstone edit sometimes fires a configured neighbor Bukkit event
+  (run 1 marked_total=0, run 2 =1, identical timeline): the dirty broadcast re-served
+  fresh BEFORE the action and the check mis-read pre==final as staleness. (That
+  accidental run live-validated the Paper dirty→store-invalidation path — the edit was
+  healed by broadcast within ~20 s.) Fixed: the edit is now an in-ground bedrock
+  replace (no neighbor can react) + the check has a premise guard (marked_total moved
+  pre-action = loud premise violation, never a false stale verdict). Attempt 2 PASS:
+  marked_total 0, edited probe flips only at the post-sweep re-ask (t+133), control
+  byte-identical, sweep_drops 209, errors 0, p95 26 µs.
+
+### Phase 2 gate summary — ALL GREEN on the shipped shape (sqlite-alone full mode)
+
+1. Cross-restart warm join meets §0 (recalibrated as documented above): hit 0.988 /
+   disk 1.17% / addressable cut 75.2% / band cut 54.6% / p95 17.9-24.6×.
+2. Cold-path deposit regression: median +7.2% ≤ 10% (tiered shape failed at +14.6% —
+   the delete-the-tier A/B verdict the plan pre-authorized).
+3. Store read p95 under concurrent batcher load: 49 µs (offline-verify, 378 concurrent
+   tier-deposits during serving) — stable, ~50× under the NBT path.
+4. store-offline-edit green on BOTH platforms (three law-checked phases + cross-phase
+   probe-hash verdict; identical hash values across platforms = wire-parity bonus).
+5. paper-store-unfired-event: staleness bounded by save + one sweep, premise-guarded.
+6. Memory-vs-SQLite A/B: RESOLVED — tier deleted from full mode (see cold gate).
+Full Tier 1 (Fabric + Paper) + Tier 2 (60 gametests incl. the store parity test) green
+on the final tree; checker selftest 180 cases; store_gate selftest 9 cases.
 Then: Phase 2 two-subagent review (user cadence), fold findings, close task #6.
 
 Learnings this session (beyond the src_stamp/livelock/loc==0/dimIdsShared defects in
