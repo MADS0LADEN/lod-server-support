@@ -1804,10 +1804,10 @@ def check_clearcache_mid_session(ctx):
 
 
 def make_store_second_join(scenario):
-    """Factory: store-second-join (memory tier) and store-second-join-full (memory +
-    SQLite) share this check verbatim — the serving TIER is invisible to the gated
-    counters (store.hits counts either tier answering; mem-vs-sqlite attribution is
-    a soak_report lens, not a gate)."""
+    """Factory: store-second-join (lodStore=memory) and store-second-join-full
+    (lodStore=full — the SQLite store alone since the Phase 2 delete-the-tier verdict)
+    share this check verbatim: the serving ENGINE is invisible to the gated counters
+    (store.hits counts whichever store answers)."""
     @named_check(scenario, ["client.requested_total", "client.received_columns",
                                        "server.store.hits", "server.store.deposits",
                                        "server.store.errors", "server.disk.submitted"])
@@ -2353,8 +2353,8 @@ CHECKS = {
     "store-second-join": [check_store_second_join,
                           make_handshake_check("store-second-join"),
                           make_disc_completeness("store-second-join")],
-    # The lodStore=full sibling: same timeline, same check — SQLite tier live under the
-    # whole law set (WAL batcher + tiered composition running during a real backfill).
+    # The lodStore=full sibling: same timeline, same check — the SQLite store live
+    # under the whole law set (WAL batcher running during a real backfill).
     "store-second-join-full": [make_store_second_join("store-second-join-full"),
                                make_handshake_check("store-second-join-full"),
                                make_disc_completeness("store-second-join-full")],

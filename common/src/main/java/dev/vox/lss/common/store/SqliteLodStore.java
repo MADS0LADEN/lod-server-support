@@ -587,22 +587,20 @@ public final class SqliteLodStore implements LodStoreService {
             }
         }
         int dimId = dimIdFor(dep.dim());
-        // Latest-wins by STORED ts: never let an older deposit overwrite a newer row.
-        try (PreparedStatement ps = this.writer.prepareStatement(
-                "SELECT ts FROM lods_" + dimId + " WHERE pos=?")) {
-            ps.setLong(1, dep.packed());
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next() && rs.getLong(1) > dep.ts()) {
-                    this.diag.recordDepositSkip();
-                    return;
-                }
-            }
-        }
         byte[] blob = dep.bytes().length == 0 ? EMPTY : this.codec.compress(dep.bytes());
+        // Latest-wins by STORED ts in ONE statement: the conditional upsert replaces the
+        // old SELECT-then-INSERT pair (the cold-path gate measured per-deposit cost —
+        // statement overhead matters at backfill rates). 0 rows changed = the WHERE
+        // rejected an older deposit; compressing the rare loser first is cheaper than a
+        // SELECT on every winner.
         PreparedStatement insert = this.insertByDim.get(dep.dim());
         if (insert == null) {
-            insert = this.writer.prepareStatement("INSERT OR REPLACE INTO lods_" + dimId
-                    + " (pos, ts, chash, usize, src_stamp, blob) VALUES (?,?,?,?,?,?)");
+            insert = this.writer.prepareStatement("INSERT INTO lods_" + dimId
+                    + " (pos, ts, chash, usize, src_stamp, blob) VALUES (?,?,?,?,?,?)"
+                    + " ON CONFLICT(pos) DO UPDATE SET ts=excluded.ts,"
+                    + " chash=excluded.chash, usize=excluded.usize,"
+                    + " src_stamp=excluded.src_stamp, blob=excluded.blob"
+                    + " WHERE excluded.ts >= ts");
             this.insertByDim.put(dep.dim(), insert);
         }
         insert.setLong(1, dep.packed());
@@ -612,8 +610,11 @@ public final class SqliteLodStore implements LodStoreService {
         // src_stamp: the deposit-CALL wall second (never the column ts — see deposit()).
         insert.setLong(5, dep.srcStampSeconds());
         insert.setBytes(6, blob);
-        insert.executeUpdate();
-        this.diag.recordDeposit();
+        if (insert.executeUpdate() > 0) {
+            this.diag.recordDeposit();
+        } else {
+            this.diag.recordDepositSkip(); // lost latest-wins to a newer-stamped row
+        }
         bumpTxn(1);
         // Tombstone re-check after the write (the memory tier's proven interleaving
         // guard): an invalidate between the first check and the write must win.
