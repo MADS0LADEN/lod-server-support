@@ -780,3 +780,19 @@ stop idempotence, pause-gates) driving a real SqliteLodStore in temp + fake read
 resumability evidence; (5) Paper wiring parity decision (defer to Phase 5 if the
 review agrees — the Paper service lacks the sync-read seam); then the 2-subagent
 Phase 4 review (task #11).
+
+**Phase 4 gate (warm-join run, 2026-07-31 02:3x): PASS.**
+- Rate-under-load: cycle A backfill_reads 14,796 over ~149 s ≈ 99 col/s — pinned AT
+  the 100 col/s cap WITH the client actively pulling its own disc (the cap, not
+  contention, was binding — the trickle-not-burst intent). disk_reader.errors = 0 in
+  BOTH cycles (the A7/constrained-box pin), store.errors 0.
+- Mid-run-kill resumability LIVE: cycle A ended mid-walk (~11 regions done-marked of
+  ~48; 14,444 backfill + 13,846 serve deposits applied); cycle B enumerated "37
+  region(s) to process" (wholesale-skipped the done ones), column-skipped 3,323 of A's
+  partial coverage, and continued at cap (14,900 reads). The boot sweep between the
+  cycles dropped only 5 conservative rows — A's coverage survived the restart.
+- DB growth curve: 210.8 MB (A end) → 292.0 MB (B end) for ~54k rows ≈ 5.4 KB/col,
+  matching Phase 0's 5.3 KB/col corpus measurement.
+- Deviation for the review: Paper backfill wiring deferred (the Paper service lacks
+  the sync-read seam); traversal anchor is world origin (the 26.2 spawn accessor
+  moved; seam kept). Both flagged for the Phase 4 review round.
