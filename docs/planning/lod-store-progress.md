@@ -663,3 +663,9 @@ band-share conflation — nbt+serialize was 95.8% OF THE BAND, not 68%). Disposi
 - Deliberately NOT re-run after the engine fixes: the warm/cold GATES (their hot
   paths — get/deposit — are untouched; only sweep bookkeeping and shutdown changed);
   re-run: the sweep-gating scenarios (offline-edit fabric, unfired-event paper).
+
+Re-validation on the fixed engine (2026-07-31): store_offline_edit.sh (fabric) all
+three phases + cross-phase verdict PASS; paper-store-unfired-event PASS (premise held,
+resweep culled, control byte-identical). **Phase 2 + its review round CLOSED** — one
+open item rides to the phase boundary (the §0 metric-2-as-written 62.2% vs 70% flag)
+and one to Phase 5 (multi-player unfired-event burn-in).
