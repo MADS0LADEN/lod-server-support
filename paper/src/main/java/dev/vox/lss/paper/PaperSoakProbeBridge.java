@@ -1,0 +1,45 @@
+package dev.vox.lss.paper;
+
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+
+/**
+ * Reflective bridge from the production serve path to the dev-only soak probe recorder
+ * ({@code PaperSoakMetricsExporter.recordServedColumnBytes} — the {@code probe_hashes}
+ * FNV of the exact wire bytes served per armed position, the store byte-parity gate's
+ * evidence). Textual twin of the Fabric {@code SoakProbeBridge}: the soak package is
+ * excluded from the release shadowJar, so this resolves by name once, only when
+ * {@code -Dlss.soak.probes} is non-blank (soak runs only), and no-ops everywhere else —
+ * same convention as {@code PaperSoakBridge}. Production cost when unarmed: one static
+ * null check per serve.
+ */
+final class PaperSoakProbeBridge {
+
+    private static final MethodHandle RECORD = resolve();
+
+    private PaperSoakProbeBridge() {}
+
+    private static MethodHandle resolve() {
+        String probes = System.getProperty("lss.soak.probes");
+        if (probes == null || probes.isBlank()) return null;
+        try {
+            var exporter = Class.forName("dev.vox.lss.paper.soak.PaperSoakMetricsExporter");
+            return MethodHandles.lookup().findStatic(exporter, "recordServedColumnBytes",
+                    MethodType.methodType(void.class, int.class, int.class, byte[].class));
+        } catch (Throwable t) {
+            return null; // release jar without the soak classes — probes stay -1
+        }
+    }
+
+    /** Record one served column's exact wire bytes (no-op unless probes are armed). */
+    static void recordServed(int cx, int cz, byte[] wireBytes) {
+        var h = RECORD;
+        if (h == null) return;
+        try {
+            h.invokeExact(cx, cz, wireBytes);
+        } catch (Throwable ignored) {
+            // diagnostic instrument only — never let it touch the serve path
+        }
+    }
+}

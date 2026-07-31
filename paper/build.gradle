@@ -112,6 +112,10 @@ tasks.register('runSoakServer', xyz.jpenilla.runpaper.task.RunServer) {
     runDirectory(file('build/run/soak-server'))
     pluginJars(soakShadowJar.flatMap { it.archiveFile })
     systemProperty 'lss.soak.scenario', findProperty('soak.scenario') ?: ''
+    // Server-side probe hashes (probe_hashes in server.jsonl — the store byte-parity
+    // gate): armed per scenario via soak.sh SERVER_EXTRA_ARGS, twin of the Fabric
+    // soakServer vmArg.
+    systemProperty 'lss.soak.probes', findProperty('soak.probes') ?: ''
     maxHeapSize = '2G'
 }
 
@@ -131,6 +135,10 @@ runPaper.folia.registerTask {
     runDirectory(file('build/run/folia-soak-server'))
     pluginJars(soakShadowJar.flatMap { it.archiveFile })
     systemProperty 'lss.soak.scenario', findProperty('soak.scenario') ?: ''
+    // Server-side probe hashes (probe_hashes in server.jsonl — the store byte-parity
+    // gate): armed per scenario via soak.sh SERVER_EXTRA_ARGS, twin of the Fabric
+    // soakServer vmArg.
+    systemProperty 'lss.soak.probes', findProperty('soak.probes') ?: ''
     maxHeapSize = '2G'
 }
 

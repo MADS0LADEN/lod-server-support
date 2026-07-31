@@ -93,6 +93,11 @@ public class PaperOffThreadProcessor extends OffThreadProcessor<PaperPlayerReque
                 cx, cz, dimension, columnTimestamp, source, sectionBytes);
         state.addReadyPayload(new QueuedPayload<>(encoded, estimatedBytes, submissionOrder,
                 PositionUtil.packPosition(cx, cz)));
+        // Soak probe hashes (dev-only, no-op unless -Dlss.soak.probes): the EXACT wire
+        // bytes, at the one choke point every serve source (probe/disk/store/gen) passes
+        // through — the store byte-parity gate compares these across serve legs. Twin of
+        // the Fabric hook in FabricOffThreadProcessor.buildAndEnqueueColumnPayload.
+        PaperSoakProbeBridge.recordServed(cx, cz, sectionBytes);
         return true;
     }
 
