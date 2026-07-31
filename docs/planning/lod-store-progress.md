@@ -841,3 +841,31 @@ path ("stopped (shutdown): 11 regions, 3942 deposited, 7858 skipped, 0 errors").
 **Phase 4 + review CLOSED** — deferred to Phase 5 burn-in: kill -9 leg,
 constrained-box disk.errors leg, Paper backfill parity decision, backfill-enabled
 soak scenario, the 7.6-vs-5.3 KB/col explanation (vacuum work).
+
+## Phase 5 — eviction, ops, burn-in (IN PROGRESS)
+
+Plan scope: size cap (nonzero default) + oldest-ts batch eviction + incremental_vacuum;
+/lsslod store verbs status|invalidate <all|dim>|rebuild|backfill...; store size in
+diag/exporter (db_bytes exists); release notes; burn-in = soak.sh all on fabric+paper
+with lodStore=full. Plus the Phase 4 deferrals listed above and the §0 metric-2
+phase-boundary flag to surface to the user at the end.
+
+Implementation decisions:
+- auto_vacuum=INCREMENTAL requires being set before table creation → SCHEMA_VERSION
+  bump 1→2 (drop-and-rebuild is the legal migration for derived data; every existing
+  store rebuilds once).
+- Config lodStoreMaxMB (default 2048, clamp 64..32768) enforced on the batcher at the
+  5 s gauge refresh: while db+wal > cap, delete the oldest-ts 512-row batch per dim
+  round-robin, then PRAGMA incremental_vacuum. Eviction rows counted into the existing
+  sweep_drops? NO — new counter avoided deliberately (schema churn); eviction logs +
+  rides db_bytes/gauges; revisit if burn-in shows need.
+- Verbs: /lsslod store status (mode+diag token+backfill status), invalidate <dim|all>
+  (fan-out through the processor path so tscache stays consistent... simplest correct:
+  store.invalidate per dim from the dims the service knows + tscache invalidate),
+  rebuild (shutdown store, delete db files, reconstruct = drop-and-rebuild lever).
+  rebuild is heavy — implement as "latch off + delete at next boot"? Simpler honest v1:
+  status + backfill verbs shipped (Phase 4), invalidate/rebuild = Phase 5 now.
+- Burn-in: SOAK_LODSTORE_OVERRIDE=full env in soak.sh merges lodStore=full +
+  lodStoreResweepSeconds=10 (paper) into every staged scenario config; run
+  `soak.sh all` fabric + paper. Kill -9 leg: script kills the server mid-backfill and
+  restarts (resume + sweep + laws green).
