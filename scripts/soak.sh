@@ -355,6 +355,18 @@ printf '%s' "$SOAK_PLATFORM" > "$CACHE_PLATFORM_MARKER"
 # Step 6a: Stage server config override (fabric: config/; paper: the plugin data folder)
 mkdir -p "$SERVER_CONFIG_DIR"
 cp "$SCENARIO_CONFIG" "$SERVER_CONFIG_DIR/lss-server-config.json"
+# Phase 5 burn-in lever: SOAK_LODSTORE_OVERRIDE=full merges the store into EVERY
+# scenario's staged config (the laws are store-aware; named checks are engine-blind).
+if [[ -n "${SOAK_LODSTORE_OVERRIDE:-}" ]]; then
+    python3 - "$SERVER_CONFIG_DIR/lss-server-config.json" "$SOAK_LODSTORE_OVERRIDE" <<'PYEOF'
+import json, sys
+path, mode = sys.argv[1], sys.argv[2]
+cfg = json.load(open(path))
+cfg["lodStore"] = mode
+json.dump(cfg, open(path, "w"), indent=2)
+print(f"[soak] SOAK_LODSTORE_OVERRIDE: lodStore={mode} merged into the staged config")
+PYEOF
+fi
 
 # Step 6b: Write server.properties + eula.txt. Superflat: fresh noise terrain carries
 # minutes of unsettled fluid ticks (aquifers, gen-border flows) that mutate chunk content
