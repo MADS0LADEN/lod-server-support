@@ -771,9 +771,7 @@ check numeric fields so no test-table entries needed), ChunkDiskReader
 .readColumnBytesSyncForBackfill (same path+serializers as serves), Fabric service
 wiring (built only over SqliteLodStore; config auto-start; shutdown; getStoreBackfill;
 traversal anchored at world origin — 26.2 spawn accessor moved, seam kept).
-STILL TO DO for Phase 4: (1) exporter plumbing for the 3 counters (6-site checklist:
-BenchmarkMetricsExporter both sites, PaperSoakMetricsExporter, server-snapshot.contract,
-check_soak SERVER_MONOTONIC + _srv fixture, soak_report mechanism dict); (2) /lsslod
+STILL TO DO for Phase 4: (1) DONE — exporter plumbing landed + committed; (2) /lsslod
 store backfill start|stop|status verbs in LSSServerCommands (admin-gated) + command
 test; (3) StoreBackfillTest unit tests (ordering, skip-fresh, resume-across-restart,
 stop idempotence, pause-gates) driving a real SqliteLodStore in temp + fake reader;
