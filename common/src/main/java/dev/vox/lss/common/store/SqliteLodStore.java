@@ -416,7 +416,12 @@ public final class SqliteLodStore implements LodStoreService {
             if (this.shutdown.get() || this.latchedOff) return;
             if (this.queue.poll() != null) this.diag.recordDepositDrop();
         }
-        this.diag.setQueueDepth(queueDepth());
+        // Deliberately NO gauge write here: store.queue is a DRAIN-SIDE gauge (the
+        // documented SERVER_DRAINS contract) — producer-side writes made sub-200 ms
+        // transients visible to the soak quiescence predicate, and the Phase 3 save
+        // hook's idle-save trickle red-ded converged runs on a 1-deep flicker. The
+        // batcher stamps the depth after every drain pass; sustained backlogs still
+        // show.
     }
 
     @Override
@@ -436,11 +441,11 @@ public final class SqliteLodStore implements LodStoreService {
         enqueueControl(new Op.DeleteRows(dimension, new long[]{packed}));
     }
 
-    /** Deletes/resweeps: unbounded, never shed (see {@link #controlQueue}). */
+    /** Deletes/resweeps: unbounded, never shed (see {@link #controlQueue}).
+     *  No gauge write — drain-side gauge (see deposit()). */
     private void enqueueControl(Op op) {
         if (this.shutdown.get() || this.latchedOff) return;
         this.controlQueue.add(op);
-        this.diag.setQueueDepth(queueDepth());
     }
 
     private int queueDepth() {
