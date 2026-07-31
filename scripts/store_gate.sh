@@ -37,10 +37,18 @@ log() { echo "[store-gate] $*"; }
 
 stage_config() { # <lodStore-value>
     mkdir -p "$SRV_CFG_DIR"
+    # warm mode MUST use a disc that CONVERGES within one cycle (~480 col/s measured):
+    # cycle B re-declares closest-first, so any frontier beyond cycle A's deposited
+    # coverage reads as store misses and the gate measures frontier progression, not
+    # warm serving (diagnosed live 2026-07-31: 256-distance 60 s cycles red-ded metric 1
+    # at 0.87-0.95 with the ratio CLIMBING per rep as the page cache warmed cycle A).
+    # cold mode keeps the huge disc: sustained-throughput measurement wants no idle tail.
+    local distance=256
+    [[ "$MODE" == "warm" ]] && distance=64
     cat > "$SRV_CFG_DIR/lss-server-config.json" <<EOF
 {
   "enabled": true,
-  "lodDistanceChunks": 256,
+  "lodDistanceChunks": $distance,
   "diskReaderThreads": 5,
   "enableChunkGeneration": false,
   "missMemoTtlSeconds": 30,
