@@ -759,3 +759,26 @@ Design decisions (pre-implementation):
   plumbing (same 6-site checklist as sweep_drops).
 - Command surface: /lsslod store backfill start|stop|status (permission-gated like
   the existing admin verbs), Fabric first; Paper parity if cheap.
+
+Phase 4 status (mid-implementation checkpoint): LANDED + COMPILING + Tier1 green —
+StoreBackfill driver (common/store: MIN_PRIORITY thread, spawn-ordered region walk,
+present-chunk header scan, skip-if-row-exists, hasHeadroom + tick-health (<45ms
+getCurrentSmoothedTickTime) + 100 col/s pacing, per-region resume via the store's new
+`backfill` table + Op.BackfillMark, statusLine), SqliteLodStore mark/isDone plumbing,
+3 diag counters (backfill_{reads,deposits,skips} — recordBackfillRead/Deposit/Skip),
+config `lodStoreBackfill` (default false, no clamp — the anti-vacuity sweeps only
+check numeric fields so no test-table entries needed), ChunkDiskReader
+.readColumnBytesSyncForBackfill (same path+serializers as serves), Fabric service
+wiring (built only over SqliteLodStore; config auto-start; shutdown; getStoreBackfill;
+traversal anchored at world origin — 26.2 spawn accessor moved, seam kept).
+STILL TO DO for Phase 4: (1) exporter plumbing for the 3 counters (6-site checklist:
+BenchmarkMetricsExporter both sites, PaperSoakMetricsExporter, server-snapshot.contract,
+check_soak SERVER_MONOTONIC + _srv fixture, soak_report mechanism dict); (2) /lsslod
+store backfill start|stop|status verbs in LSSServerCommands (admin-gated) + command
+test; (3) StoreBackfillTest unit tests (ordering, skip-fresh, resume-across-restart,
+stop idempotence, pause-gates) driving a real SqliteLodStore in temp + fake reader;
+(4) the gate runs: benchmark-world run with lodStoreBackfill=true + active client
+(rate-under-load col/s, disk.errors==0, db_bytes growth curve), mid-run-kill
+resumability evidence; (5) Paper wiring parity decision (defer to Phase 5 if the
+review agrees — the Paper service lacks the sync-read seam); then the 2-subagent
+Phase 4 review (task #11).

@@ -36,6 +36,10 @@ public final class LodStoreDiagnostics {
     // mask drift / unresolvable dim). The ONLY live observable that a sweep actually
     // culled something — the Paper unfired-event soak gates on it moving.
     private final AtomicLong sweepDrops = new AtomicLong();
+    // Backfill (Phase 4, opt-in): columns read / deposited / skipped-already-present.
+    private final AtomicLong backfillReads = new AtomicLong();
+    private final AtomicLong backfillDeposits = new AtomicLong();
+    private final AtomicLong backfillSkips = new AtomicLong();
     // Hit-read latency (store reads only — never fed by the NBT path). The ring holds the
     // most recent hit latencies so read_p95_us reflects CURRENT behavior (§0 metric 3
     // gates on hit p95); a whole-run percentile would bury a late regression under an
@@ -68,6 +72,9 @@ public final class LodStoreDiagnostics {
     public void recordMemHit() { this.memHits.incrementAndGet(); }
     public void recordMemEviction() { this.memEvictions.incrementAndGet(); }
     public void recordSweepDrops(long rows) { this.sweepDrops.addAndGet(rows); }
+    public void recordBackfillRead() { this.backfillReads.incrementAndGet(); }
+    public void recordBackfillDeposit() { this.backfillDeposits.incrementAndGet(); }
+    public void recordBackfillSkip() { this.backfillSkips.incrementAndGet(); }
 
     public void setQueueDepth(long depth) { this.queueDepth = depth; }
     public void setMemBytes(long bytes) { this.memBytes = bytes; }
@@ -86,6 +93,9 @@ public final class LodStoreDiagnostics {
     public long getMemHits() { return this.memHits.get(); }
     public long getMemEvictions() { return this.memEvictions.get(); }
     public long getSweepDrops() { return this.sweepDrops.get(); }
+    public long getBackfillReads() { return this.backfillReads.get(); }
+    public long getBackfillDeposits() { return this.backfillDeposits.get(); }
+    public long getBackfillSkips() { return this.backfillSkips.get(); }
     public long getQueueDepth() { return this.queueDepth; }
     public long getMemBytes() { return this.memBytes; }
     public long getDbBytes() { return this.dbBytes; }

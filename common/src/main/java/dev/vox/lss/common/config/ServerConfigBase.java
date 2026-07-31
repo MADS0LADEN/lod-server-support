@@ -102,6 +102,15 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public int lodStoreResweepSeconds = 0;
     /**
+     * Opt-in LOD-store background backfill (Phase 4, docs/planning/
+     * lod-store-implementation-plan.md): when true AND lodStore=full, a MIN_PRIORITY
+     * thread walks every region file nearest-spawn-first and warms the store for
+     * terrain no client has asked for yet, yielding to player reads and tick health.
+     * Also controllable at runtime via /lsslod store backfill start|stop. Default
+     * false — the store warms organically from serves either way. No clamp: boolean.
+     */
+    public boolean lodStoreBackfill = false;
+    /**
      * LOD x-ray masking (docs/planning/antixray-compat-design.md §3). "auto" (default)
      * masks iff an anti-xray engine is detected — Paper's built-in anti-xray config, or the
      * AntiXray mod on Fabric — adopting its per-world hidden list + max-block-height

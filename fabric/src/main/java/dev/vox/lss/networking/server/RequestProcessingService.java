@@ -50,6 +50,9 @@ public class RequestProcessingService {
     private final FabricOffThreadProcessor offThreadProcessor;
     // Null while lodStore=off or when the codec native cannot load (degrade, never crash).
     private final dev.vox.lss.common.store.LodStoreService lodStore;
+    // Null unless lodStore=full with a live SQLite store (the backfill's only target).
+    private final dev.vox.lss.common.store.StoreBackfill storeBackfill;
+
     private final DirtyColumnTracker dirtyTracker;
     private final DirtyContentFilter dirtyContentFilter = new DirtyContentFilter();
 
@@ -163,8 +166,40 @@ public class RequestProcessingService {
                 this.diskReader.attachStore(this.lodStore);
                 this.offThreadProcessor.attachStore(this.lodStore);
             }
+            // Opt-in background backfill (Phase 4): built only over the SQLite store
+            // (a memory store's backfill would evaporate at restart). Config-started;
+            // /lsslod store backfill start|stop controls it at runtime either way.
+            if (this.lodStore instanceof dev.vox.lss.common.store.SqliteLodStore sqlite) {
+                var levelByDim = new HashMap<String, ServerLevel>();
+                for (ServerLevel level : server.getAllLevels()) {
+                    levelByDim.put(level.dimension().identifier().toString(), level);
+                }
+                this.storeBackfill = new dev.vox.lss.common.store.StoreBackfill(
+                        sqlite, regionDirs::get,
+                        // Traversal anchor: world origin. The 26.2 spawn accessor
+                        // moved (respawn-data rework) and the anchor only ORDERS the
+                        // walk — origin == spawn on every test world and nearly all
+                        // servers; the seam stays so a real spawn can be wired later.
+                        dim -> new long[]{0, 0},
+                        List.copyOf(levelByDim.keySet()),
+                        (dim, cx, cz) -> {
+                            var level = levelByDim.get(dim);
+                            return level == null ? null
+                                    : this.diskReader.readColumnBytesSyncForBackfill(level, cx, cz);
+                        },
+                        this.diskReader::hasHeadroom,
+                        // Tick-health ceiling: pause the backfill while the smoothed
+                        // tick time is over 45 ms (the plan's MSPT gate).
+                        () -> server.getCurrentSmoothedTickTime() < 45.0f);
+                if (config.lodStoreBackfill) {
+                    this.storeBackfill.start();
+                }
+            } else {
+                this.storeBackfill = null;
+            }
         } else {
             this.lodStore = null;
+            this.storeBackfill = null;
         }
 
         this.offThreadProcessor.start();
@@ -737,6 +772,10 @@ public class RequestProcessingService {
         return this.dirtyTracker;
     }
 
+    public dev.vox.lss.common.store.StoreBackfill getStoreBackfill() {
+        return this.storeBackfill;
+    }
+
     public DirtyContentFilter getDirtyContentFilter() {
         return this.dirtyContentFilter;
     }
@@ -762,6 +801,7 @@ public class RequestProcessingService {
             for (var entry : this.dirtyTracker.drainAll().entrySet()) {
                 this.offThreadProcessor.invalidateTimestamps(entry.getKey(), entry.getValue());
             }
+            if (this.storeBackfill != null) this.storeBackfill.shutdown();
             this.offThreadProcessor.shutdown();
         } catch (Exception e) {
             LSSLogger.error("Error shutting down off-thread processor", e);

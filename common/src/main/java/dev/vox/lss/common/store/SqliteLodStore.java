@@ -98,6 +98,7 @@ public final class SqliteLodStore implements LodStoreService {
                        long enqueuedNanos) implements Op {}
         record DeleteRows(String dim, long[] positions) implements Op {}
         record Resweep() implements Op {}
+        record BackfillMark(String dim, int rx, int rz) implements Op {}
     }
 
     private final LodStoreMode mode;
@@ -229,6 +230,8 @@ public final class SqliteLodStore implements LodStoreService {
                     + " name TEXT UNIQUE, mask_fingerprint TEXT)");
             st.execute("CREATE TABLE IF NOT EXISTS regions (dim INTEGER, rpos INTEGER,"
                     + " seen_mtime INTEGER, PRIMARY KEY (dim, rpos)) WITHOUT ROWID");
+            st.execute("CREATE TABLE IF NOT EXISTS backfill (dim TEXT, rx INTEGER,"
+                    + " rz INTEGER, done INTEGER, PRIMARY KEY (dim, rx, rz)) WITHOUT ROWID");
         }
         this.writer.setAutoCommit(false);
         this.writer.commit();
@@ -432,6 +435,33 @@ public final class SqliteLodStore implements LodStoreService {
         return this.diag;
     }
 
+    /** Backfill progress (Phase 4): mark a region fully processed (batcher-written,
+     *  dropped with the DB — derived data). */
+    public void markBackfillRegionDone(String dimension, int rx, int rz) {
+        enqueueControl(new Op.BackfillMark(dimension, rx, rz));
+    }
+
+    /** Whether a region was already backfilled (backfill-thread read connection). */
+    public boolean isBackfillRegionDone(String dimension, int rx, int rz) {
+        if (this.latchedOff) return true; // latched store: do no work
+        try {
+            Connection c = readerConnection();
+            if (c == null) return false;
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT done FROM backfill WHERE dim=? AND rx=? AND rz=?")) {
+                ps.setString(1, dimension);
+                ps.setInt(2, rx);
+                ps.setInt(3, rz);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() && rs.getInt(1) != 0;
+                }
+            }
+        } catch (Throwable t) {
+            this.diag.recordError();
+            return false;
+        }
+    }
+
     /** Blocks until the startup sweep finishes (test/harness seam). */
     public boolean awaitSweep(long timeoutMs) throws InterruptedException {
         return this.sweepDone.await(timeoutMs, TimeUnit.MILLISECONDS);
@@ -597,6 +627,16 @@ public final class SqliteLodStore implements LodStoreService {
             case Op.Resweep ignored -> {
                 commitTxn();
                 runSweep(false);
+            }
+            case Op.BackfillMark mark -> {
+                try (PreparedStatement ps = this.writer.prepareStatement(
+                        "INSERT OR REPLACE INTO backfill (dim, rx, rz, done) VALUES (?,?,?,1)")) {
+                    ps.setString(1, mark.dim());
+                    ps.setInt(2, mark.rx());
+                    ps.setInt(3, mark.rz());
+                    ps.executeUpdate();
+                }
+                bumpTxn(1);
             }
         }
     }

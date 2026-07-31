@@ -112,6 +112,18 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
      *     (unchanged — and the automatic degradation target if the Moonrise rung latches).</li>
      * </ol>
      */
+    /** Synchronous single-column read for the opt-in store backfill (Phase 4): the
+     *  SAME read path + serializers as player serves (priority machinery included), run
+     *  on the backfill's own MIN_PRIORITY thread, one at a time. Null = not servable. */
+    public byte[] readColumnBytesSyncForBackfill(ServerLevel level, int chunkX, int chunkZ)
+            throws Exception {
+        var chunkMap = ((AccessorServerChunkCache) level.getChunkSource()).getChunkMap();
+        NbtSectionSerializer.ChunkNbtRead read = chooseReadPath(level, chunkMap);
+        return NbtSectionSerializer.readAndSerializeSections(read,
+                level.registryAccess(), chunkX, chunkZ, XrayMaskManager.entryForActive(level),
+                level.getMinSectionY(), level.getMaxSectionY(), this.useNbtTranscode);
+    }
+
     NbtSectionSerializer.ChunkNbtRead chooseReadPath(ServerLevel level, ChunkMap chunkMap) {
         if (!this.useBackgroundReadPriority || this.backgroundIncompatible) {
             return foregroundRead(chunkMap);
