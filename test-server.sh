@@ -83,6 +83,15 @@ case "$LSS_LODSTORE" in
     off|memory|full) ;;
     *) echo "LSS_LODSTORE must be off, memory, or full (got '$LSS_LODSTORE')" >&2; exit 1 ;;
 esac
+# Background store population (Fabric only — Paper has no backfill wiring yet, the key
+# is inert there): lodStoreBackfill=true auto-starts a low-priority region walk that
+# pre-warms the store, yielding to players and tick health (100 col/s cap, pauses under
+# load). run-fabric-store forces it on; '/lsslod store backfill status|stop' to steer.
+LSS_LODSTORE_BACKFILL="${LSS_LODSTORE_BACKFILL:-false}"
+case "$LSS_LODSTORE_BACKFILL" in
+    true|false) ;;
+    *) echo "LSS_LODSTORE_BACKFILL must be true or false (got '$LSS_LODSTORE_BACKFILL')" >&2; exit 1 ;;
+esac
 
 # ============================================================
 # Helpers
@@ -201,7 +210,7 @@ EOF
 
 write_lss_config() {
     local dir="$1"
-    echo "  Writing lss-server-config.json (lodStore=${LSS_LODSTORE})"
+    echo "  Writing lss-server-config.json (lodStore=${LSS_LODSTORE}, backfill=${LSS_LODSTORE_BACKFILL})"
     mkdir -p "$dir"
     cat > "$dir/lss-server-config.json" << EOF
 {
@@ -216,7 +225,8 @@ write_lss_config() {
   "enableChunkGeneration": true,
   "generationConcurrencyLimitGlobal": 40,
   "generationTimeoutSeconds": 60,
-  "lodStore": "${LSS_LODSTORE}"
+  "lodStore": "${LSS_LODSTORE}",
+  "lodStoreBackfill": ${LSS_LODSTORE_BACKFILL}
 }
 EOF
 }
@@ -575,16 +585,21 @@ case "${1:-run}" in
         ;;
     run-fabric-store)
         LSS_LODSTORE=full
+        LSS_LODSTORE_BACKFILL=true
         setup_fabric
         set_mod_enabled c2me true       # same baseline as run-fabric, only the store differs
         set_mod_enabled antixray false
         echo ""
-        echo "=== Starting Fabric server (LOD store: full) ==="
+        echo "=== Starting Fabric server (LOD store: full + background backfill) ==="
         echo "  Connect to: localhost:25564"
         echo "  Store DB: test-server/fabric/world/lss-lod/store.db — persists across runs"
         echo "  (a REJOIN after backfill should serve warm: watch '/lsslod store status'"
         echo "  and the client's /lss trace src:3 columns). Delete the lss-lod/ dir for a"
         echo "  cold-store run; run-fabric (store off) leaves the DB in place but unused."
+        echo "  The backfill walk auto-starts after the startup sweep and pre-warms the"
+        echo "  store from existing region files, nearest-spawn first — low priority,"
+        echo "  yields to players/tick, resumes across restarts. Steer it with"
+        echo "  '/lsslod store backfill status|stop|start'."
         echo ""
         run_fabric
         ;;
@@ -607,6 +622,8 @@ case "${1:-run}" in
         echo "  store fingerprints the mask per dimension and rebuilds on any change."
         echo "  Store DB: test-server/paper/world/lss-lod/store.db — persists across runs;"
         echo "  '/lsslod store status' shows health, '/lsslod store invalidate all' resets."
+        echo "  NOTE: background backfill is Fabric-only for now — Paper's store warms"
+        echo "  from serves (first joins backfill it; rejoins serve warm)."
         echo ""
         run_paper
         ;;
@@ -654,11 +671,14 @@ case "${1:-run}" in
         echo "  run-fabric-antixray - Same as run-fabric plus DrexHD AntiXray — the live gate"
         echo "               for the AntiXray compat shim + masking (current builds must"
         echo "               survive a client join and serve masked; only pre-shim builds crash)"
-        echo "  run-fabric-store - Same as run-fabric with the LOD store ON (lodStore=full):"
-        echo "               warm rejoins serve from world/lss-lod/store.db; '/lsslod store"
-        echo "               status' + client /lss trace src:3 are the eyeball instruments"
+        echo "  run-fabric-store - Same as run-fabric with the LOD store ON (lodStore=full)"
+        echo "               AND the background backfill (lodStoreBackfill=true — auto-walks"
+        echo "               existing regions to pre-warm the store): warm rejoins serve from"
+        echo "               world/lss-lod/store.db; '/lsslod store status' + client /lss"
+        echo "               trace src:3 are the eyeball instruments"
         echo "  run-paper  - Set up and start Paper server only (port 25566; native anti-xray on)"
-        echo "  run-paper-store - Same as run-paper with the LOD store ON (lodStore=full)"
+        echo "  run-paper-store - Same as run-paper with the LOD store ON (lodStore=full)."
+        echo "               No backfill on Paper (Fabric-only) — the store warms from serves"
         echo "  run-folia  - Set up and start Folia server only (port 25567)"
         echo "  run-legacy - Set up and start an OLD LSS v${LEGACY_LSS_VERSION} (protocol 16) server (port 25568),"
         echo "               for eyeballing the client-side v16 backward-compat path"
@@ -673,6 +693,9 @@ case "${1:-run}" in
         echo "                 (off|memory|full, default: off; the run-*-store entrypoints"
         echo "                 force full). Hand-edits to the config do NOT survive a re-run"
         echo "                 — the staging rewrites it; this variable is the supported knob."
+        echo "  LSS_LODSTORE_BACKFILL - lodStoreBackfill written the same way (true|false,"
+        echo "                 default: false; run-fabric-store forces true). Fabric-only —"
+        echo "                 the key is inert on Paper/Folia."
         exit 1
         ;;
 esac
