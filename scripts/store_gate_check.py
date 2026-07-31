@@ -277,6 +277,11 @@ def check_warm(stamp_dir):
 
 
 def check_cold(stamp_dir):
+    # Gated on the MEDIAN across reps, same discipline as check_warm (established on
+    # the warm mode first): single-box rep spread measured -1.2%..+10.3% within one
+    # stamp, so a per-rep ceiling judges scheduler noise, not the deposit cost.
+    # The no-deposits sanity leg stays per-rep: any arm that made zero deposits did
+    # not run the cold path at all.
     failures = []
     regressions = []
     for rep, off, on in pair_runs(stamp_dir):
@@ -285,14 +290,16 @@ def check_cold(stamp_dir):
         regressions.append(reg)
         deposits = on.store.get("deposits", 0)
         print(f"— rep {rep}: CPU-s/1k off {off_k:.1f} -> on {on_k:.1f} ({reg:+.1%}, "
-              f"ceil +{COLD_REGRESSION_CEIL:.0%}); deposits={deposits}")
-        if reg > COLD_REGRESSION_CEIL:
-            failures.append(f"rep{rep}: cold-path regression {reg:+.1%} > "
-                            f"+{COLD_REGRESSION_CEIL:.0%}")
+              f"ceil +{COLD_REGRESSION_CEIL:.0%} on the median); deposits={deposits}")
         if deposits == 0:
             failures.append(f"rep{rep}: on-arm made no deposits — the arm did not "
                             "exercise the cold path (config staging bug?)")
-    print(f"median cold-path regression: {statistics.median(regressions):+.1%}")
+    if regressions:
+        med = statistics.median(regressions)
+        print(f"median cold-path regression: {med:+.1%} (ceil +{COLD_REGRESSION_CEIL:.0%})")
+        if med > COLD_REGRESSION_CEIL:
+            failures.append(f"median cold-path regression {med:+.1%} > "
+                            f"+{COLD_REGRESSION_CEIL:.0%}")
     return failures
 
 

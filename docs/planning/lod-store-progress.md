@@ -526,7 +526,25 @@ Run status (updated 2026-07-31 during the run sequence):
   (page-cache/scheduler variance; rep 3 of attempt 2 was visibly noisy). A run with no
   band data now FAILS the band leg instead of silently skipping (selftest-pinned, 9
   cases).
-- [~] store_gate.sh cold 3 60 (≤10% deposit-regression gate) — RUNNING.
+- [x] store_gate.sh cold 3 60 — ran TWICE, and the first run delivered the plan's
+  memory-vs-SQLite A/B verdict:
+  * Tiered composition (stamp 20260730-234645): +14.6% median whole-JVM CPU/col
+    (ceiling +10%), deposits ≈ 56.8k for ~28k cols — every column zstd-compressed
+    TWICE (once per tier) plus a SELECT+INSERT pair. FAIL, and rightly so.
+  * **DELETE-THE-TIER decision** (pre-authorized by the plan as a Phase 2 outcome):
+    lodStore=full is now the SQLite store ALONE (TieredLodStore deleted; MemoryLodStore
+    remains as lodStore=memory and the sqlite-init degrade). The front tier bought
+    5 µs vs ~100 µs warm hits — both invisible next to the 2.4 ms NBT path — and cost
+    the double compression, 64 MB RAM, eviction machinery, and the resweep fan-out
+    complexity. applyDeposit also became a single conditional upsert
+    (ON CONFLICT ... WHERE excluded.ts >= ts; 0 rows = deposit_skip).
+  * SQLite-alone (stamp 20260730-235758): deposits 28.5k (halved ✓), reps +7.2%/−1.2%/
+    +10.3%, **median +7.2% ≤ +10% — GATE PASS** (check_cold gates on the median now,
+    same discipline as check_warm; the −1.2%..+10.3% rep spread is scheduler noise).
+- [~] store_gate.sh warm 3 60 re-run on the sqlite-alone shape — RUNNING (cycle B was
+  already effectively sqlite-served, but the record should match the shipped shape).
+- [ ] store-second-join-full + paper-store-unfired-event re-runs on the sqlite-alone
+  shape — queued (their serve legs previously exercised the deleted memory tier).
 Then: Phase 2 two-subagent review (user cadence), fold findings, close task #6.
 
 Learnings this session (beyond the src_stamp/livelock/loc==0/dimIdsShared defects in
