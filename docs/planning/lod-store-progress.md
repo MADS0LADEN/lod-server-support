@@ -869,3 +869,17 @@ Implementation decisions:
   lodStoreResweepSeconds=10 (paper) into every staged scenario config; run
   `soak.sh all` fabric + paper. Kill -9 leg: script kills the server mid-backfill and
   restarts (resume + sweep + laws green).
+
+Phase 5 status: eviction (schema v2, auto_vacuum, lodStoreMaxMB default 2048,
+oldest-ts batches, pinned by sizeCapEvictsOldestRowsAndKeepsNewest) + ops verbs
+(/lsslod store status, invalidate all via the batcher DropAll op) LANDED + committed;
+SOAK_LODSTORE_OVERRIDE=full burn-in lever landed. **RUNNING: fabric `soak.sh all`
+under lodStore=full (19 scenarios, ~100 min).** After it: paper burn-in
+(SOAK_LODSTORE_OVERRIDE=full SOAK_PLATFORM=paper soak.sh all), the kill -9 leg
+(kill server mid-backfill, restart, laws+resume green), release-notes draft, the
+CLAUDE.md doc debts, and the FINAL REPORT to the user which MUST surface: (a) the
+§0 metric-2-as-written verdict (whole-band cut 62.2% vs the plan's 70% — accept /
+amend / miss, implementer recommends accept-with-record), (b) the multi-player
+unfired-event deviation, (c) the 7.6-vs-5.3 KB/col open question, (d) never release
+from this branch without the CLAUDE.md updates (source tag store/src:3, common/store/,
+config keys, scenario list).
