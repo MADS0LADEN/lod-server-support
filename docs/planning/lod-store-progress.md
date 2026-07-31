@@ -908,3 +908,121 @@ the honest verdict every warm-gate run); (b) multi-player unfired-event + Paper
 backfill parity + the 7.6-vs-5.3 KB/col explanation remain as future work (recorded);
 (c) release-notes draft at docs/planning/lod-store-release-notes-draft.md; (d) branch
 feat/lod-store is NOT to be released without a fresh pre-flight (CLAUDE.md updated).
+
+---
+
+## Final 4-agent Opus review round (2026-07-31, user-requested post-completion)
+
+Four Opus 5 reviewers over the whole `main...feat/lod-store` diff, one lens each
+(store core / integration+parity / backfill+ops+config / harness+release-safety),
+each primed with this file's dispositions. The round produced the strongest findings
+of the whole plan — every one below was re-verified in code by the implementer before
+acceptance. Dispositions: **FIXED** (this round), **RECORDED** (accepted, no code
+change), **USER** (decision pending).
+
+### Confirmed MAJORs
+
+- **R1-M1 FIXED — batched deletes lost to a later op's rollback.** `Op.DeleteRows`
+  applied inside the shared 64-row txn; a subsequent op's failure rolled back
+  applied-but-uncommitted deletes while re-queuing only the op that threw — tombstone
+  expires 10 s later, stale row resurrects (violates the no-resurrection invariant the
+  code itself states). Fix: commit immediately after every applied `DeleteRows`.
+- **R1-M2 FIXED — src_stamp captured one step too late.** Stamped at deposit-CALL
+  time; the sweep's `header >= src_stamp` freshness argument needs the stamp ≤ the
+  byte-ACQUISITION moment. A region save landing between read and deposit got
+  `header < src_stamp` and became permanently sweep-invisible. Live exposure: Paper's
+  unfired-event class (the exact class the resweep backstops) + the backfill (no stale
+  guard at all). Fix: `deposit()` takes an explicit acquisition-time stamp; delivery
+  path stamps at read submit, save hook at observeSave, backfill pre-read.
+- **R2-M1 FIXED — Paper mask fingerprints all recorded "off".** The `this(...)`
+  ctor delegation evaluates `productionWiring(...)` (which snapshots
+  `entryForActive` per level) BEFORE the ctor body runs
+  `PaperXrayMaskManager.activate` — holder unset → every dim fingerprinted `"off"`,
+  mask-drift drop-and-rebuild inert on Paper, x-ray leak on mask widening. Fabric was
+  correct only by ordering luck. Fix: activate inside `productionWiring` before the
+  Environment snapshot (manager carried via Wiring for the guarded retract).
+- **R2-M2 FIXED — the Phase 3 save-hook write-through never survives.** Confirmed
+  chain: hook deposits fire ONLY on `obs.changed()`, the same branch marks dirty, the
+  broadcaster drains EVERY mark through `applyInvalidations` → `store.invalidate`
+  unconditionally, and the fan-out tombstone is strictly newer than the hook deposit's
+  enqueue — so 100% of hook deposits die within one broadcast interval. All burn-in
+  greens are explained without it: gen-served first saves are hash-seeded (no mark),
+  warm hits come from serve-path deposits. Harms: wasted compress+insert+delete per
+  changed save, shed pressure on the bounded queue during save waves, and hook-induced
+  shed permanently starving backfill done-marks (global-counter check). The Phase 3
+  fan-out-gating experiment (stale-overwrite hole) is NOT re-litigated — fan-out stays
+  ON; instead the hook becomes DELETE-only (prompt stale-row removal; fan-out
+  re-delete idempotent; edit freshness re-warms via the dirty-broadcast re-serve,
+  which is what actually happened all along). Stale "fan-out is disabled on Fabric"
+  comment corrected.
+- **R2-M3 FIXED — no registry fingerprint in the meta guard.** Stored wire bytes
+  embed global block-state/biome registry IDs; a mod/datapack change shifts them,
+  region files don't change, no existing guard fires → every warm column decodes as
+  wrong blocks/biomes until the DB is hand-deleted. Fix: `registry_fingerprint` meta
+  key (platform-supplied via Environment), drop-and-rebuild on mismatch.
+- **R3-M1 FIXED — `invalidate all` / eviction never reset backfill done-marks.**
+  The documented remediation pairing (invalidate → re-backfill) enumerated 0 regions.
+  Fix: `Op.DropAll` clears the backfill table; size-cap eviction clears the evicted
+  rows' regions' marks.
+- **R4-M1 FIXED — 346 MB of JFR gate artifacts were committed (450 files).**
+  `store-gate-results/` was never gitignored. Branch history rewritten
+  (filter-branch, branch never pushed; evidence retained on
+  `backup/lod-store-pre-strip`), directory gitignored.
+- **R4-M2 OPEN→boot-check this round — the Fabric jar-in-jar store path never booted.**
+  Every green Fabric gate ran sqlite/zstd off the `localRuntime` dev classpath; the
+  nested slim jars + Knot native extraction path (the SHIPPED path) has zero live
+  evidence (Paper's shadowJar path IS live-validated by the burn-in). Real-jar boot
+  check on the Fabric test server is part of this round's exit gate.
+
+### Confirmed MINORs (all fixed unless noted)
+
+R1: no `busy_timeout` anywhere + `get()` purging rows on ANY Throwable (transient
+SQLException = row loss); tombstone map swept only on idle batcher iterations
+(unbounded growth while busy; fix preserves the never-expire-while-predating-deposit-
+queued invariant); WAL checkpoint result ignored + size cap counting db+wal (busy
+checkpoints → WAL growth → eviction shreds live rows while the real DB is under cap;
+cap now compares db only); drop-and-rebuild never verified deletion (a surviving file
++ next wire bump = silent garbage serves; now verified, degrade on failure);
+same-second mtime granularity skipping a raced region forever (post-read re-stat);
+`usize` unbounded pre-validation alloc. R2: `MemoryLodStore.deposit` wrote the
+`store.queue` gauge producer-side (the exact shape that red-ded the burn-in, fixed
+for SQLite only); frozen `HashMap::get` resolvers (mask resolver made
+construction-ordered correctly; live-resolver upgrade RECORDED as future work);
+Fabric resweep=0 = save-hook single-point-of-failure (RECORDED — `require = 0` hook
+absence now means no in-session freshness backstop; revisit if a hook-miss is ever
+observed live). R3: mark-ahead-of-deposits crash window (mark now waits for the
+deposit queue to drain, closing both the crash bound and the shed-after-sample race);
+mid-region latch burning up to 1024 reads (in-loop health check); Paper had NO store
+ops verbs (status + invalidate-all added; backfill verbs stay Fabric-only, recorded);
+false command comment claiming tscache invalidation (impl deliberately doesn't —
+comment fixed to match the recorded rationale); backfill thread name bypassed Brand;
+`spawnChunkResolver` unguarded; latched-store status reading "complete: 0 regions".
+R4: `lodStoreBackfill` missing from check_soak's config allowlist;
+`store_save_storm.sh` off-arm inheriting `SOAK_LODSTORE_OVERRIDE` (env-scrubbed +
+arm-validity assertion); store_gate_check metric-2 leg missing the per-rep
+completeness guard its addressable twin has (+ silent verdict suppression when empty);
+release_check not rejecting undeclared nested jars; zstd-jni BSD-2 notice shipped in
+neither jar; PaperConfig 300-resweep override pinned by no test; Folia release-note
+claim ("stays effectively off") false as an engine statement (reworded — no gate
+exists; today's protection is `folia-supported` absence on 26.2).
+
+### Refuted / downgraded by verification
+
+- R3's "tscache invalidation missing from invalidate-all" — the implementation
+  documents the omission as deliberate and the rationale holds (stamps describe
+  REGION truth; re-asks re-resolve honestly); the COMMAND comment was the bug.
+- R2's harm framing "every newly generated chunk's first save pays the doomed
+  deposit" — wrong for gen-SERVED chunks (DirtyContentFilter seeding suppresses the
+  mark); right for never-served walk-in saves. The fix (delete-only hook) covers both.
+- v16 shim / COLUMN_SOURCE_STORE=3, SQL identifier safety, delivery-path stale-guard
+  ordering, law A1/A3/A5 balance, exporter schema parity, traversal math (negative
+  regions, truncated headers), pause/stop semantics, clamps, Paper GSON override
+  mechanics — all adversarially checked clean by the respective reviewers.
+
+### Left for the USER (unchanged from PLAN COMPLETE, plus this round's additions)
+
+(a) §0 metric-2-as-written 62.2% vs 70% verdict; (b) whether Folia should get a hard
+store-off gate or stay wording-only; (c) merge/release timing (pre-flight required);
+(d) recorded future work: live resolvers, Paper backfill parity, multi-player
+unfired-event, 7.6-vs-5.3 KB/col, backfill-enabled soak scenario (allowlist key now
+in place), lodStore=memory burn-in leg.

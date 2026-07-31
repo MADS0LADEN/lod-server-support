@@ -21,6 +21,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class PaperConfigValidationTest {
 
+    /** Pins the Paper-only resweep default (4-agent round R3: nothing pinned it — the
+     *  instance initializer is Paper's ONLY bound on unfired-event staleness, and
+     *  deleting it would go green everywhere). GSON keeps the initialized value on a
+     *  missing key, so a fresh Paper config writes 300 while Fabric stays 0 (the
+     *  save-hook owns Fabric's within-session freshness). */
+    @Test
+    void paperDefaultsTheLodStoreResweepTo300() {
+        assertEquals(300, new PaperConfig().lodStoreResweepSeconds,
+                "Paper's periodic resweep default is its unfired-event staleness bound");
+    }
+
     @Test
     void validateClampsInheritedFieldsAndGuardsUpdateEvents() {
         PaperConfig c = new PaperConfig();

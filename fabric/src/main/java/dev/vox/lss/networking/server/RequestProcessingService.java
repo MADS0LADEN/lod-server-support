@@ -155,7 +155,8 @@ public class RequestProcessingService {
             var env = new dev.vox.lss.common.store.SqliteLodStore.Environment(
                     worldRoot.resolve("lss-lod"), server.getServerVersion(),
                     LSSConstants.PROTOCOL_VERSION, regionDirs::get, maskFingerprints::get,
-                    config.lodStoreResweepSeconds, config.lodStoreMaxMB * 1024L * 1024L);
+                    config.lodStoreResweepSeconds, config.lodStoreMaxMB * 1024L * 1024L,
+                    storeRegistryFingerprint(server));
             this.lodStore = dev.vox.lss.common.store.LodStores.createOrNull(
                     storeMode, config.lodStoreMemoryMB * 1024L * 1024L, env);
             if (this.lodStore == null) {
@@ -761,6 +762,33 @@ public class RequestProcessingService {
 
     public OffThreadProcessor<?> getOffThreadProcessor() {
         return this.offThreadProcessor;
+    }
+
+    /** Registry identity for the LOD store meta guard (4-agent round R2-M3): stored
+     *  wire bytes embed GLOBAL block-state ids and biome ids, both assignment-order
+     *  dependent — a mod or datapack change shifts them while region files stay
+     *  untouched, so only this fingerprint can trigger the rebuild. Block states are
+     *  captured by registry SIZE (any add/remove shifts every id above it); biomes by
+     *  an id-ordered key-list hash (a dynamic registry — datapacks re-shape it).
+     *  Accepted gap: a same-count block-state reorder with an identical biome list —
+     *  no realistic mod swap keeps the exact state count. Textual twin in
+     *  PaperRequestProcessingService. */
+    static String storeRegistryFingerprint(MinecraftServer server) {
+        long hash = 0xcbf29ce484222325L;
+        var biomes = server.registryAccess()
+                .lookupOrThrow(net.minecraft.core.registries.Registries.BIOME);
+        for (var biome : biomes) {
+            var key = biomes.getKey(biome);
+            String s = key == null ? "?" : key.toString();
+            for (int i = 0; i < s.length(); i++) {
+                hash ^= s.charAt(i);
+                hash *= 0x100000001b3L;
+            }
+            hash ^= ':';
+            hash *= 0x100000001b3L;
+        }
+        return "bs" + net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size()
+                + "-bio" + Long.toHexString(hash);
     }
 
     /** The live LOD store (null while lodStore=off OR after the codec-probe degrade). */

@@ -88,15 +88,18 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     // start(). The processor owns the DELIVERY-PATH side of the store contract: deposits
     // AFTER the stale guard, the invalidation fan-out, and the ghost-guard delete.
     private volatile dev.vox.lss.common.store.LodStoreService store;
-    // NOTE (Phase 3 review): the dirty->store invalidation fan-out stays ON on BOTH
-    // platforms, deliberately. A Fabric gating experiment (save-hook deposits carry the
-    // fresh bytes, so the later drain invalidation looked redundant) opened two real
-    // holes: a stale in-flight disk read completing after the edit's save could
-    // overwrite the hook's fresh row with ts >= save-ts AND a src_stamp the boot sweep
-    // can never catch, and a hook deposit shed at queue capacity stranded the stale row
-    // for the whole session. The fan-out heals both (the edit's drain tombstones the
-    // row; the next serve re-reads the SAVED region). Cost: one NBT re-read per edited
-    // column per session — the hook's warmth still covers everything not just edited.
+    // NOTE (Phase 3 review + 4-agent round R2-M2): the dirty->store invalidation
+    // fan-out stays ON on BOTH platforms, deliberately. A Fabric gating experiment
+    // (save-hook deposits looked like they made the drain invalidation redundant)
+    // opened two real holes — a stale in-flight disk read completing after the edit
+    // could overwrite the fresh row with a src_stamp the boot sweep can never catch,
+    // and a shed hook deposit stranded the stale row for the session — so the fan-out
+    // was restored. The final review round then proved the CONVERSE: with the fan-out
+    // unconditional, no hook deposit could ever survive it (the same save that
+    // deposits also marks; the drain tombstone postdates the deposit), so the hook is
+    // now DELETE-only (LSSServerNetworking.onChunkSaveData) and edited columns re-warm
+    // through THIS delivery path on the dirty re-serve. Cost: one NBT re-read per
+    // edited column per session.
     private final Path dataDir;
     private int evictionCounter;
     private int saveCounter;
@@ -846,7 +849,8 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                     // send rejection loses the delivery, not the bytes.
                     if (this.store != null && !result.fromStore()) {
                         this.store.deposit(result.dimension(), packed,
-                                result.sectionBytes(), result.columnTimestamp());
+                                result.sectionBytes(), result.columnTimestamp(),
+                                result.srcStampSeconds());
                     }
                 } else if (result.notFound()) {
                     // Disk says the chunk no longer exists (region trimmed/deleted outside
@@ -1253,8 +1257,12 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
             // gated on `sent`: a send-queue rejection loses the delivery, not the bytes
             // — depositing anyway makes the re-ask a warm hit instead of a re-generate.
             if (this.store != null && !genStale) {
+                // The gen columnTimestamp IS the acquisition stamp: both platforms set
+                // it via epochSeconds() at completion-serialization, the moment the
+                // bytes exist (R1-M2 — closes the completion→delivery mailbox gap).
                 this.store.deposit(entry.dimension(), packed,
-                        allAir ? null : genSections, entry.columnTimestamp());
+                        allAir ? null : genSections, entry.columnTimestamp(),
+                        entry.columnTimestamp());
             }
             if (!sent) {
                 if (allAir && !genStale) {

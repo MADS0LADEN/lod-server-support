@@ -43,7 +43,7 @@ class OffThreadProcessorStoreTest {
 
         @Override public LodStoreMode mode() { return LodStoreMode.MEMORY; }
         @Override public StoreHit get(String dimension, long packed) { return null; }
-        @Override public void deposit(String d, long p, byte[] b, long ts) {
+        @Override public void deposit(String d, long p, byte[] b, long ts, long acq) {
             this.deposits.add(new Dep(d, p, b, ts));
         }
         @Override public void invalidate(String d, long[] p) { this.invalidations.add(p); }
@@ -205,7 +205,7 @@ class OffThreadProcessorStoreTest {
         byte[] bytes = {5, 5, 5};
         rig.reader.getPlayerQueue(rig.uuid).add(new ChunkReadResult(rig.uuid, 1, 2, bytes, DIM,
                 bytes.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES, TS,
-                false, false, false, /* fromStore */ true, 4));
+                false, false, false, /* fromStore */ true, 4, 0L));
         rig.await(() -> !rig.proc.enqueued.isEmpty(), "store-hit delivery");
         var col = rig.proc.enqueued.poll();
         assertEquals(LSSConstants.COLUMN_SOURCE_STORE, col.source());

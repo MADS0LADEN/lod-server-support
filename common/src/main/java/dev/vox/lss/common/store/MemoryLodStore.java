@@ -147,7 +147,10 @@ public final class MemoryLodStore implements LodStoreService {
     }
 
     @Override
-    public void deposit(String dimension, long packed, byte[] sectionBytes, long columnTimestamp) {
+    public void deposit(String dimension, long packed, byte[] sectionBytes, long columnTimestamp,
+                        long acquiredEpochSeconds) {
+        // acquiredEpochSeconds unused: the memory store has no freshness sweep — it
+        // dies with the session, so region-header comparisons never apply to it.
         if (this.shutdown.get()) return;
         byte[] normalized = sectionBytes == null || sectionBytes.length == 0 ? EMPTY : sectionBytes;
         var dep = new Deposit(dimension, packed, normalized, columnTimestamp, System.nanoTime());
@@ -156,7 +159,9 @@ public final class MemoryLodStore implements LodStoreService {
             // re-deposits on the next serve of that column.
             if (this.queue.poll() != null) this.diag.recordDepositDrop();
         }
-        this.diag.setQueueDepth(this.queue.size());
+        // Deliberately NO gauge write here: store.queue is a DRAIN-SIDE gauge (the
+        // SERVER_DRAINS contract — the SQLite twin documents the burn-in red a
+        // producer-side write caused; R2 found this twin kept the old shape).
     }
 
     @Override

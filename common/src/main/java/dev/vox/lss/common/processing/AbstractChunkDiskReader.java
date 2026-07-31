@@ -265,7 +265,7 @@ public abstract class AbstractChunkDiskReader {
                 : bytes.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
         addResult(playerUuid, new ChunkReadResult(playerUuid, chunkX, chunkZ, bytes,
                 dimension, estimatedBytes, hit.columnTimestamp(),
-                false, false, false, true, submissionOrder));
+                false, false, false, true, submissionOrder, 0L));
         return true;
     }
 
@@ -275,6 +275,11 @@ public abstract class AbstractChunkDiskReader {
         if (storeServedHit(playerUuid, chunkX, chunkZ, dimension, submissionOrder)) return;
 
         long startNs = System.nanoTime();
+        // Freshness stamp at READ START (R1-M2): the bytes the read produces reflect
+        // region state no earlier than this second, so any save landing during the read
+        // or in the read→deposit gap has a header stamp >= it and the sweep drops the
+        // row. Stamping later (completion/deposit-call) left those saves invisible.
+        long srcStampSeconds = LSSConstants.epochSeconds();
         this.diag.recordSubmitted(); // the NBT path begins here — store hits never count
 
         byte[] serializedSections;
@@ -325,7 +330,8 @@ public abstract class AbstractChunkDiskReader {
             this.diag.recordAllAir();
             recordRealCompletion(System.nanoTime() - startNs);
             addResult(playerUuid, new ChunkReadResult(playerUuid, chunkX, chunkZ,
-                    null, dimension, 0, columnTimestamp, false, false, false, submissionOrder));
+                    null, dimension, 0, columnTimestamp, false, false, false, false,
+                    submissionOrder, srcStampSeconds));
             return;
         }
 
@@ -335,7 +341,7 @@ public abstract class AbstractChunkDiskReader {
         recordRealCompletion(System.nanoTime() - startNs);
         addResult(playerUuid, new ChunkReadResult(playerUuid, chunkX, chunkZ,
                 serializedSections, dimension, estimatedBytes, columnTimestamp,
-                false, false, false, submissionOrder));
+                false, false, false, false, submissionOrder, srcStampSeconds));
     }
 
     public void registerPlayer(UUID playerUuid) {

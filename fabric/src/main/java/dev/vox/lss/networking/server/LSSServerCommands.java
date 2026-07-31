@@ -64,9 +64,11 @@ class LSSServerCommands {
     }
 
     /** Phase 5 ops: the admin remediation lever for "LODs look stale" — tombstones and
-     *  deletes every stored row in every dimension the service knows; the store re-warms
-     *  from serves (and the backfill, if enabled). Timestamp cache invalidation rides
-     *  the same call so up-to-date answers stay honest. */
+     *  deletes every stored row in every dimension the service knows (backfill
+     *  done-marks reset with them); the store re-warms from serves (and the backfill,
+     *  if enabled). The timestamp cache is deliberately NOT touched — its stamps
+     *  describe REGION truth, not store contents (see
+     *  RequestProcessingService.invalidateStoreAllDimensions). */
     private static int storeInvalidateAll(CommandSourceStack source) {
         var service = LSSServerNetworking.getRequestService();
         if (service == null || service.getLodStore() == null) {

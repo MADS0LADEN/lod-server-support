@@ -274,6 +274,13 @@ def check_warm(stamp_dir):
     if len(addr_cuts) < n_reps:
         failures.append(f"addressable-band data on only {len(addr_cuts)}/{n_reps} reps "
                         "— every rep must carry bands (a lost JFR must not shrink the sample)")
+    # Same completeness guard for metric 2 (4-agent round R4: the addressable leg got
+    # the guard in review round 2, this twin silently gated on a shrunken sample — and
+    # an EMPTY sample suppressed the plan-as-written verdict line the phase-boundary
+    # decision depends on).
+    if len(cuts) < n_reps:
+        failures.append(f"band-CPU data on only {len(cuts)}/{n_reps} reps "
+                        "— every rep must carry bands (a lost JFR must not shrink the sample)")
     gate("addressable-CPU cut", addr_cuts, ADDR_CPU_CUT_FLOOR, True, lambda v: f"{v:.1%}")
     gate("band-CPU cut", cuts, BAND_CPU_CUT_FLOOR, True, lambda v: f"{v:.1%}")
     if cuts:
@@ -283,6 +290,9 @@ def check_warm(stamp_dir):
               f"{PLAN_BAND_CPU_CUT_FLOOR:.0%}): {verdict} at median {med:.1%} — "
               "reported for the phase-boundary decision, not gated here "
               "(see BAND_CPU_CUT_FLOOR comment)")
+    else:
+        print("plan §0 metric-2 AS-WRITTEN: verdict UNAVAILABLE — no rep carried "
+              "band data (the completeness failure above is the real problem)")
     if jvm_deltas:
         print(f"median whole-JVM delta: {statistics.median(jvm_deltas):+.1%} (informational)")
     return failures

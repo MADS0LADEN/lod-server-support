@@ -147,7 +147,11 @@ EXCLUSION_RADIUS = 8
 SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBackgroundReadPriority",
                                      # NBT->wire transcode kill switch (round 2, 2026-07-29):
                                      # scenarios may pin it off for object-path A/Bs.
-                                     "useNbtTranscode"})
+                                     "useNbtTranscode",
+                                     # LOD-store backfill opt-in (Phase 4) — the key was
+                                     # missing from this allowlist, so a backfill soak
+                                     # scenario could not be written (4-agent round R4).
+                                     "lodStoreBackfill"})
 SERVER_CONFIG_INT_KEYS = frozenset({
     "lodDistanceChunks", "bytesPerSecondLimitPerPlayer", "diskReaderThreads",
     "sendQueueLimitPerPlayer", "bytesPerSecondLimitGlobal",
@@ -2027,15 +2031,16 @@ def check_paper_store_unfired_event(ctx):
                                   "server.store.errors", "server.store.misses",
                                   "client.received_columns"])
 def check_store_save_storm(ctx):
-    """The Phase 3 gate (lod-store-implementation-plan.md): Fabric save-hook deposits
-    under an autosave storm. The filter must SUPPRESS the storm's metadata re-saves
-    (deposit_drops == 0 — the queue never even pressures), the save-hook path must
-    demonstrably fire (deposits exceed serve-path misses by the loaded set's
-    first-observation margin), the mid-storm edit must re-serve fresh through the
-    dirty pipeline, and after the clearcache the edited column must serve from the
-    STORE byte-identical to its live re-serve (probe 20:0: pre-edit hash != post-edit
-    hash == final hash) — the save-hook deposit IS those bytes; a disk re-read ceiling
-    pins that the fresh row came from the hook, not an NBT read."""
+    """The Phase 3 gate (lod-store-implementation-plan.md), recalibrated for the
+    DELETE-only save hook (4-agent round R2-M2: hook deposits provably never survived
+    the fan-out their own mark triggers, so the hook no longer deposits). The filter
+    must SUPPRESS the storm's metadata re-saves (deposit_drops == 0 — the queue never
+    even pressures), the hook must NOT deposit (deposits <= serve-path misses: every
+    surviving deposit is delivery-path, one miss upstream of each — a positive margin
+    means the doomed write-through crept back), the hook must still PROCESS the wave
+    (marked_total), the mid-storm edit must re-serve fresh through the dirty pipeline,
+    and after the clearcache the edited column must serve fresh (probe 20:0 freshness,
+    disk re-read ceiling = the first-observation invalidation churn)."""
     acts = [a for a in ctx.run_actions.get(1, []) if a["action"] == "clearcache"]
     if len(acts) != 1:
         yield Violation("store-save-storm", "run1",
@@ -2074,17 +2079,18 @@ def check_store_save_storm(ctx):
     if errors:
         yield Violation("store-save-storm", "whole run",
                         "contained store failures fired", {"store.errors": errors})
-    # HOOK-ALIVE margin (methodology-review recalibration: this is AMBIENT evidence,
-    # not storm evidence — the margin accrues from world-load saves during backfill;
-    # the storm itself is almost fully SUPPRESSED, which the next prong pins). Deposits
-    # only come from the delivery path (~= misses) and the hook; store hits never
-    # re-deposit, probe serves never deposit — so margin > 0 means the hook fired.
+    # DELETE-ONLY pin (R2-M2 regression guard, inverting the old HOOK-ALIVE margin):
+    # with the hook depositing nothing, every applied deposit is delivery-path and has
+    # exactly one store miss upstream (store hits never re-deposit, probe serves never
+    # deposit, backfill is off in this scenario) — so cumulative deposits <= misses.
+    # A positive margin means save-hook write-through deposits crept back in; they are
+    # provably dead on arrival (the fan-out tombstones them) and pure queue pressure.
     margin = get_path(srv_final, "store.deposits") - get_path(srv_final, "store.misses")
-    if margin < 300:
+    if margin > 0:
         yield Violation("store-save-storm", "whole run",
-                        "deposits barely exceed serve-path misses — the save-hook "
-                        "deposit path did not fire (Phase 2 shape: deposits ~= misses)",
-                        {"deposits - misses": margin, "expected": ">= 300"})
+                        "deposits exceed serve-path misses — a non-delivery deposit "
+                        "path (the retired save-hook write-through?) is live again",
+                        {"deposits - misses": margin, "expected": "<= 0"})
     # HOOK-AT-SCALE pin (recalibrated on live data: vanilla save-all SKIPS unchanged
     # chunks entirely — suppressed_total stayed 0 through a 10x storm because nothing
     # re-saved, so a suppression floor is unforceable from a scripted timeline; filter
@@ -3730,8 +3736,10 @@ def selftest():
          list(check_paper_store_unfired_event(premise_ctx)),
          "paper-store-unfired-event")
 
-    # --- store-save-storm: save-hook deposits under an autosave storm ---
-    def sst_ctx(edited_pre=555, edited_final=777, deposits=2600, misses=2100,
+    # --- store-save-storm: the delete-only save hook under an autosave storm ---
+    # (deposits default == misses: the delivery path is the ONLY depositor now;
+    #  a positive deposits-misses margin is the R2-M2 write-through regression.)
+    def sst_ctx(edited_pre=555, edited_final=777, deposits=2100, misses=2100,
                 drops=0, errors=0, hits_final=2100, disk_final=2150,
                 control_final=222, marked=441, actions=None):
         srv_first = _srv(20_000, over={"store.deposits": 2000, "store.misses": 2000,
@@ -3761,8 +3769,8 @@ def selftest():
     hits("store-save-storm deposits shed under storm",
          list(check_store_save_storm(sst_ctx(disk_final=2075, drops=7))),
          "store-save-storm")
-    hits("store-save-storm save-hook path never fired (deposits ~= misses)",
-         list(check_store_save_storm(sst_ctx(disk_final=2075, deposits=2110))),
+    hits("store-save-storm write-through deposits crept back (deposits > misses)",
+         list(check_store_save_storm(sst_ctx(disk_final=2075, deposits=2600))),
          "store-save-storm")
     hits("store-save-storm edit never re-served before the action",
          list(check_store_save_storm(sst_ctx(disk_final=2075, edited_pre=111))),

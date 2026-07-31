@@ -18,6 +18,15 @@ class ConfigValidationTest {
         return new LSSServerConfig();
     }
 
+    /** Fabric's resweep default is 0 by DESIGN (the save hook owns within-session
+     *  freshness there) while Paper overrides to 300 (its unfired-event staleness
+     *  bound, pinned in PaperConfigValidationTest) — this half keeps the pair from
+     *  drifting together silently. */
+    @Test
+    void fabricDefaultsTheLodStoreResweepToZero() {
+        assertEquals(0, serverConfig().lodStoreResweepSeconds);
+    }
+
     @Test
     void lodDistanceChunksClamped() {
         var c = serverConfig();

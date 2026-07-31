@@ -275,6 +275,27 @@ class SqliteLodStoreTest {
     }
 
     @Test
+    void registryFingerprintDriftDropsAndRebuildsTheStore() throws Exception {
+        long p = PositionUtil.packPosition(0, 2);
+        writeRegion(OW, 0, 0, Map.of(p, (int) (nowSec() - 1000)));
+        SqliteLodStore store = open(new SqliteLodStore.Environment(storeDir(), "26.2-test",
+                WIRE, this::regionDir, d -> "", 0, Long.MAX_VALUE, "bs1000-bioAAAA"));
+        store.deposit(OW, p, bytes(7, 400), 100);
+        assertNotNull(awaitHit(store, OW, p));
+        store.shutdown();
+
+        // A mod/datapack change shifts the GLOBAL block-state/biome ids the stored wire
+        // bytes embed, while region files stay untouched — no freshness rule can fire,
+        // so the registry fingerprint is the ONLY guard (4-agent round R2-M3).
+        SqliteLodStore shifted = open(new SqliteLodStore.Environment(storeDir(), "26.2-test",
+                WIRE, this::regionDir, d -> "", 0, Long.MAX_VALUE, "bs1002-bioAAAA"));
+        assertNull(shifted.get(OW, p),
+                "rows encoded under the old registry must not survive a registry change");
+        assertEquals(0, shifted.diagnostics().getErrors(), "drop-and-rebuild is not an error");
+        shifted.shutdown();
+    }
+
+    @Test
     void corruptDbFileIsDroppedAndRecreated() throws Exception {
         Files.createDirectories(storeDir());
         Files.write(storeDir().resolve("store.db"), bytes(9, 4096)); // garbage, not SQLite
@@ -390,6 +411,11 @@ class SqliteLodStoreTest {
     void sweepSkipsRegionsWhoseMtimeIsUnchangedSinceItsLastExamination() throws Exception {
         long p = PositionUtil.packPosition(2, 3);
         writeRegion(OW, 0, 0, Map.of(p, (int) (nowSec() - 1000)));
+        // Age the file: seen_mtime is deliberately NOT recorded for a file whose mtime
+        // is in the CURRENT second (the 1 s-granularity race guard, R1) — a real boot
+        // never sweeps regions written this instant, so settle the stamp explicitly.
+        Files.setLastModifiedTime(regionDir(OW).resolve("r.0.0.mca"),
+                FileTime.fromMillis(System.currentTimeMillis() - 5000));
         SqliteLodStore store = open(defaultEnv());
         store.deposit(OW, p, bytes(14, 400), 100);
         assertNotNull(awaitHit(store, OW, p));

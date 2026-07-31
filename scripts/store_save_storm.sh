@@ -38,7 +38,11 @@ log "=== arm: store-save-storm (lodStore=full, gated) ==="
 "$PROJECT_ROOT/scripts/soak.sh" store-save-storm
 ON_DIR="$(latest_results store-save-storm)"
 log "=== arm: store-save-storm-off (lodStore=off, MSPT pair) ==="
-"$PROJECT_ROOT/scripts/soak.sh" store-save-storm-off
+# env -u: the burn-in lever (SOAK_LODSTORE_OVERRIDE=full) rewrites EVERY staged
+# config's lodStore — inherited here it silently turns the off arm into full-vs-full
+# and the CPU pairing measures nothing (4-agent round R4). The on arm may inherit it
+# (full is what it pins anyway); the off arm must not.
+env -u SOAK_LODSTORE_OVERRIDE "$PROJECT_ROOT/scripts/soak.sh" store-save-storm-off
 OFF_DIR="$(latest_results store-save-storm-off)"
 
 log "paired storm-window verdict (process CPU + cadence hold)"
@@ -87,6 +91,28 @@ def storm_cpu_seconds(d):
     return (window[-1]["srv_cpu"] - window[0]["srv_cpu"]) / 100.0
 
 on_dir, off_dir = sys.argv[1], sys.argv[2]
+
+# Arm validity (4-agent round R4): the pairing is meaningless unless the arms actually
+# differ — the on arm must have a live store (deposits accrued) and the off arm must
+# not (an inherited SOAK_LODSTORE_OVERRIDE used to silently make both arms full).
+def final_deposits(d):
+    snaps = rows_of(d, "snapshot")
+    if not snaps:
+        return None
+    store = snaps[-1].get("store") or {}
+    return store.get("deposits", 0)
+
+on_dep, off_dep = final_deposits(on_dir), final_deposits(off_dir)
+if not on_dep:
+    print(f"[save-storm] FAIL: the on arm recorded no store deposits ({on_dep}) — "
+          "lodStore was not full on the arm that must pin it")
+    sys.exit(1)
+if off_dep:
+    print(f"[save-storm] FAIL: the off arm recorded store deposits ({off_dep}) — "
+          "both arms ran with the store on; the CPU pairing measured nothing")
+    sys.exit(1)
+print(f"[save-storm]   arm validity: on deposits={on_dep}, off deposits={off_dep or 0}")
+
 on_cpu, off_cpu = storm_cpu_seconds(on_dir), storm_cpu_seconds(off_dir)
 delta = on_cpu - off_cpu
 bound = max(1.0, 0.25 * off_cpu)

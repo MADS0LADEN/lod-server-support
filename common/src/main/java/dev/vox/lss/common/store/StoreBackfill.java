@@ -1,5 +1,6 @@
 package dev.vox.lss.common.store;
 
+import dev.vox.lss.common.Brand;
 import dev.vox.lss.common.LSSLogger;
 import dev.vox.lss.common.PositionUtil;
 
@@ -90,7 +91,7 @@ public final class StoreBackfill {
     public boolean start() {
         if (!this.running.compareAndSet(false, true)) return false;
         this.stopRequested.set(false);
-        var t = new Thread(this::run, "LSS Store Backfill");
+        var t = new Thread(this::run, Brand.shortName() + " Store Backfill");
         t.setDaemon(true);
         t.setPriority(Thread.MIN_PRIORITY);
         this.worker = t;
@@ -139,6 +140,14 @@ public final class StoreBackfill {
                 this.statusLine = "failed: store sweep never completed";
                 return;
             }
+            if (!this.store.isHealthy()) {
+                // A latched store answers isBackfillRegionDone()=true for everything, so
+                // enumerate() would return an empty plan and the status would read
+                // "complete: 0 regions" — success-shaped output for a dead store (R3).
+                this.statusLine = "aborted: store unhealthy (latched off?)";
+                LSSLogger.warn("Store backfill aborted — store not healthy at start");
+                return;
+            }
             List<RegionRef> plan = enumerate();
             LSSLogger.info("Store backfill: " + plan.size() + " region(s) to process");
             long windowStartNanos = System.nanoTime();
@@ -164,6 +173,14 @@ public final class StoreBackfill {
                     // reads; hasRow is the cheap existence probe, but even it is paced).
                     pauses += pauseWhileRestrained();
                     if (this.stopRequested.get()) break;
+                    if (!this.store.isHealthy()) {
+                        // Mid-region latch (R3): deposit()/hasRow() silently no-op under
+                        // the latch — without this check the rest of the region is up to
+                        // 1024 real disk reads whose results all evaporate.
+                        this.statusLine = "aborted: store unhealthy (latched off?)";
+                        LSSLogger.warn("Store backfill aborted — store no longer healthy");
+                        return;
+                    }
                     int cx = (region.rx() << 5) + (idx & 31);
                     int cz = (region.rz() << 5) + (idx >> 5);
                     long packed = PositionUtil.packPosition(cx, cz);
@@ -172,11 +189,14 @@ public final class StoreBackfill {
                         this.store.diagnostics().recordBackfillSkip();
                     } else {
                         try {
+                            // Acquisition stamp BEFORE the read (R1-M2): a save landing
+                            // while the read runs must not be sweep-invisible.
+                            long acquiredSeconds = System.currentTimeMillis() / 1000L;
                             byte[] bytes = this.columnReader.read(region.dim(), cx, cz);
                             this.store.diagnostics().recordBackfillRead();
                             if (bytes != null) {
                                 this.store.deposit(region.dim(), packed, bytes,
-                                        System.currentTimeMillis() / 1000L);
+                                        System.currentTimeMillis() / 1000L, acquiredSeconds);
                                 deposited++;
                                 this.store.diagnostics().recordBackfillDeposit();
                             } else {
@@ -212,10 +232,18 @@ public final class StoreBackfill {
                 // Done-mark ONLY a cleanly processed region: errors or shed deposits
                 // would otherwise turn transient IO trouble into permanent warm-holes
                 // that resumability never revisits (review MAJOR). An unmarked region
-                // re-walks cheaply (hasRow skips).
+                // re-walks cheaply (hasRow skips). The mark waits for the deposit queue
+                // to DRAIN first (4-agent round R3): the mark rides the priority control
+                // queue, so an undrained mark could commit AHEAD of this region's still-
+                // queued deposits — a crash in that window left a done-marked region
+                // whose columns were never written; and sampling drops before the drain
+                // let a post-sample shed slip under the depositsShed guard. A drain
+                // timeout just skips the mark — the region re-walks next run.
+                boolean drained = this.store.awaitDepositQueueEmpty(5000);
                 boolean depositsShed =
                         this.store.diagnostics().getDepositDrops() > dropsBefore;
-                if (!this.stopRequested.get() && regionErrors == 0 && !depositsShed) {
+                if (!this.stopRequested.get() && regionErrors == 0 && drained
+                        && !depositsShed) {
                     this.store.markBackfillRegionDone(region.dim(), region.rx(), region.rz());
                     regionsDone++;
                 }
@@ -250,7 +278,13 @@ public final class StoreBackfill {
                 continue;
             }
             if (dir == null || !Files.isDirectory(dir)) continue;
-            long[] spawn = this.spawnChunkResolver.apply(dim);
+            long[] spawn;
+            try {
+                spawn = this.spawnChunkResolver.apply(dim);
+            } catch (Throwable t) {
+                spawn = null;
+            }
+            if (spawn == null || spawn.length < 2) spawn = new long[]{0, 0};
             int spawnRx = (int) spawn[0] >> 5;
             int spawnRz = (int) spawn[1] >> 5;
             try (var stream = Files.list(dir)) {

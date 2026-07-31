@@ -256,6 +256,17 @@ def check_store_natives_fabric(jar, problems):
         if f not in declared:
             problems.append(f"{base}: fabric.mod.json 'jars' does not declare {f} — "
                             "the loader will never load it")
+    # The CONVERSE (4-agent round R4): every nested jar must be declared. The 'jars'
+    # array is hand-maintained while slimStoreDepJars emits one jar per RESOLVED
+    # artifact — a future transitive dep would ship undeclared (Fabric Loader ignores
+    # undeclared nested jars), fail only at class-load time on real servers, and every
+    # localRuntime-classpath gate would stay green.
+    actual = {n for n in _names(jar)
+              if n.startswith("META-INF/jars/") and n.endswith(".jar")}
+    undeclared = sorted(actual - declared)
+    if undeclared:
+        problems.append(f"{base}: nested jar(s) not declared in fabric.mod.json 'jars': "
+                        f"{', '.join(undeclared)} — the loader silently ignores them")
     _check_sqlite_natives(base, "nested sqlite-jdbc-slim.jar", set(sq), problems)
     _check_zstd_natives(base, "nested zstd-jni-slim.jar", set(zs), problems)
     _check_native_strip(base, "nested sqlite-jdbc-slim.jar", set(sq), problems)
@@ -711,8 +722,11 @@ def _selftest():
         "META-INF/jars/sqlite-jdbc-slim.jar": _nested_sqlite(),
         "META-INF/jars/zstd-jni-slim.jar": _nested_zstd(),
     }
+    # Mirrors the REAL fabric.mod.json: all three nested jars declared (the converse
+    # check rejects any undeclared nested jar, so the fixture must declare common too).
     STORE_FABRIC_JARS_FIELD = [{"file": "META-INF/jars/sqlite-jdbc-slim.jar"},
-                               {"file": "META-INF/jars/zstd-jni-slim.jar"}]
+                               {"file": "META-INF/jars/zstd-jni-slim.jar"},
+                               {"file": "META-INF/jars/common-0.7.0.jar"}]
 
     def _store_paper_entries():
         out = {"org/sqlite/JDBC.class": "x", "com/github/luben/zstd/Zstd.class": "x"}

@@ -111,11 +111,14 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public boolean lodStoreBackfill = false;
     /**
-     * On-disk size cap for the SQLite LOD store (main DB + WAL, MB). Above it the
-     * batcher evicts oldest-timestamp rows in batches and returns pages via
-     * incremental_vacuum — the store degrades to "warm for the most recently served
-     * terrain", never unbounded growth (the store ≈ doubles a fully-backfilled world
-     * folder otherwise). Evicted columns re-warm on their next serve.
+     * On-disk size cap for the SQLite LOD store (main DB, MB — the transient WAL is
+     * excluded). Above it the batcher evicts oldest-timestamp rows in batches and
+     * returns pages via incremental_vacuum — never unbounded growth (the store ≈
+     * doubles a fully-backfilled world folder otherwise). NOTE the eviction order is
+     * oldest FIRST-DEPOSITED (a row's ts is set when it enters and is not refreshed by
+     * hits), so a capped store sheds its longest-resident terrain, not its
+     * least-recently-served. Evicted columns re-warm on their next serve, and the
+     * affected backfill regions are un-marked so an enabled backfill revisits them.
      */
     public int lodStoreMaxMB = 2048;
     /**

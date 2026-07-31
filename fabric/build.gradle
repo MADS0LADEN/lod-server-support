@@ -274,6 +274,9 @@ jar {
     from(rootProject.file("LICENSE")) {
         rename { "${it}_${inputs.properties.archivesName}" }
     }
+    // zstd-jni's BSD-2 notice must accompany the natives we redistribute (4-agent
+    // round R4 — upstream's slim jar carries no license text of its own).
+    from(rootProject.file("THIRD-PARTY-NOTICES"))
 }
 
 // ---- Voxy Server Side (VSS) branded variant -------------------------------------------

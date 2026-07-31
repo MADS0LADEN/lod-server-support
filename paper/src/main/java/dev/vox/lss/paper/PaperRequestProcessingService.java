@@ -242,9 +242,11 @@ public class PaperRequestProcessingService {
                   PaperOffThreadProcessor offThreadProcessor,
                   DirtyColumnTracker dirtyTracker,
                   PaperDirtyColumnBroadcaster dirtyBroadcaster,
-                  dev.vox.lss.common.store.LodStoreService lodStore) {
+                  dev.vox.lss.common.store.LodStoreService lodStore,
+                  PaperXrayMaskManager xrayMasks) {
 
-        /** Pre-store test-wiring shape (no store attached). */
+        /** Pre-store test-wiring shape (no store attached, no mask manager published —
+         *  a test-wired service must retract nothing at shutdown). */
         Wiring(Map<UUID, PaperPlayerRequestState> players,
                PaperChunkDiskReader diskReader,
                PaperChunkGenerationService generationService,
@@ -252,7 +254,7 @@ public class PaperRequestProcessingService {
                DirtyColumnTracker dirtyTracker,
                PaperDirtyColumnBroadcaster dirtyBroadcaster) {
             this(players, diskReader, generationService, offThreadProcessor,
-                    dirtyTracker, dirtyBroadcaster, null);
+                    dirtyTracker, dirtyBroadcaster, null, null);
         }
     }
 
@@ -260,16 +262,13 @@ public class PaperRequestProcessingService {
     // and probe tests always inject a recording scheduler.
     private Plugin plugin;
     // Null in test wiring (the test ctor never publishes the static mask manager, so its
-    // shutdown must retract nothing) — set by the production ctor only.
+    // shutdown must retract nothing) — published by productionWiring BEFORE the store
+    // Environment snapshots mask fingerprints (R2-M1).
     private PaperXrayMaskManager xrayMasks;
 
     public PaperRequestProcessingService(MinecraftServer server, Plugin plugin, PaperConfig config) {
         this(server, config, productionWiring(server, plugin, config));
         this.plugin = plugin;
-        // Production only (the test-wiring ctor must not publish statics): the per-world
-        // x-ray mask decisions the serializer choke points consult. The reference makes
-        // shutdown's retract guarded — a test-wired service (null here) retracts nothing.
-        this.xrayMasks = PaperXrayMaskManager.activate(config);
     }
 
     /** Test seam: same field wiring as production, collaborators injected. */
@@ -284,9 +283,21 @@ public class PaperRequestProcessingService {
         this.dirtyTracker = wiring.dirtyTracker();
         this.dirtyBroadcaster = wiring.dirtyBroadcaster();
         this.lodStore = wiring.lodStore();
+        // Null in test wiring: the guarded retract at shutdown must clear only a
+        // manager this service actually published.
+        this.xrayMasks = wiring.xrayMasks();
     }
 
     private static Wiring productionWiring(MinecraftServer server, Plugin plugin, PaperConfig config) {
+        // The x-ray mask manager MUST be published before anything below consults it
+        // (4-agent round R2-M1): the store Environment snapshots each level's mask
+        // fingerprint via entryForActive, and Java evaluates this whole method BEFORE
+        // the delegating ctor body runs — the old ctor-body activate left the holder
+        // unset here, every dimension fingerprinted "off", and the mask-drift
+        // drop-and-rebuild permanently inert on Paper (an x-ray leak on any mask
+        // widening). The Fabric twin activates before its Environment for the same
+        // reason.
+        var xrayMasks = PaperXrayMaskManager.activate(config);
         Map<UUID, PaperPlayerRequestState> players = new ConcurrentHashMap<>();
         var diskReader = new PaperChunkDiskReader(config.diskReaderThreads, config.useBackgroundReadPriority,
                 config.useNbtTranscode);
@@ -333,7 +344,8 @@ public class PaperRequestProcessingService {
             var env = new dev.vox.lss.common.store.SqliteLodStore.Environment(
                     worldRoot.resolve("lss-lod"), server.getServerVersion(),
                     LSSConstants.PROTOCOL_VERSION, regionDirs::get, maskFingerprints::get,
-                    config.lodStoreResweepSeconds, config.lodStoreMaxMB * 1024L * 1024L);
+                    config.lodStoreResweepSeconds, config.lodStoreMaxMB * 1024L * 1024L,
+                    storeRegistryFingerprint(server));
             lodStore = dev.vox.lss.common.store.LodStores.createOrNull(
                     storeMode, config.lodStoreMemoryMB * 1024L * 1024L, env);
             if (lodStore == null) {
@@ -351,12 +363,48 @@ public class PaperRequestProcessingService {
         var dirtyBroadcaster = new PaperDirtyColumnBroadcaster(
                 server, players, dirtyTracker, offThreadProcessor);
         return new Wiring(players, diskReader, generationService, offThreadProcessor,
-                dirtyTracker, dirtyBroadcaster, lodStore);
+                dirtyTracker, dirtyBroadcaster, lodStore, xrayMasks);
+    }
+
+    /** Registry identity for the LOD store meta guard (4-agent round R2-M3) — textual
+     *  twin of {@code RequestProcessingService.storeRegistryFingerprint}: block-state
+     *  registry size + id-ordered biome key-list hash; a mod/datapack change shifts
+     *  the global ids the stored wire bytes embed while no freshness rule can fire. */
+    static String storeRegistryFingerprint(MinecraftServer server) {
+        long hash = 0xcbf29ce484222325L;
+        var biomes = server.registryAccess()
+                .lookupOrThrow(net.minecraft.core.registries.Registries.BIOME);
+        for (var biome : biomes) {
+            var key = biomes.getKey(biome);
+            String s = key == null ? "?" : key.toString();
+            for (int i = 0; i < s.length(); i++) {
+                hash ^= s.charAt(i);
+                hash *= 0x100000001b3L;
+            }
+            hash ^= ':';
+            hash *= 0x100000001b3L;
+        }
+        return "bs" + net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size()
+                + "-bio" + Long.toHexString(hash);
     }
 
     /** The live LOD store (null while lodStore=off OR after the codec-probe degrade). */
     public dev.vox.lss.common.store.LodStoreService getLodStore() {
         return this.lodStore;
+    }
+
+    /** Ops (/lsslod store invalidate all) — twin of the Fabric service's method: drop
+     *  every stored row + backfill progress (batcher-side, tombstoned). The tscache is
+     *  deliberately untouched: its stamps describe REGION truth, not store contents —
+     *  re-asks re-resolve via tscache/probe/NBT as normal and re-warm the store. Only
+     *  meaningful for the persistent store. Safe from any thread (Folia command
+     *  dispatch is region-threaded): tombstones + a control-queue offer. */
+    public boolean invalidateStoreAllDimensions() {
+        if (this.lodStore instanceof dev.vox.lss.common.store.SqliteLodStore sqlite) {
+            sqlite.requestDropAllRows();
+            return true;
+        }
+        return false;
     }
 
     public DirtyColumnTracker getDirtyTracker() {

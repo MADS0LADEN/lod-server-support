@@ -82,6 +82,9 @@ shadowJar {
     from(rootProject.file("LICENSE")) {
         rename { "${it}_lod-server-support-paper" }
     }
+    // zstd-jni's BSD-2 notice must accompany the natives we redistribute (4-agent
+    // round R4 — the shadow jar's only inherited LICENSE.txt is SLF4J's leftover).
+    from(rootProject.file("THIRD-PARTY-NOTICES"))
 }
 
 // Dev-only variant of the plugin jar that keeps the soak package; consumed exclusively

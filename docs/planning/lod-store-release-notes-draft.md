@@ -9,13 +9,16 @@
   measured ~18-25× faster per column with ~96% of the disk-path CPU eliminated on
   warm joins. The store is derived data: it rebuilds itself automatically on any
   version/mask change, and deleting `world/lss-lod/` is always safe.
-- **Background store backfill (opt-in)** — `lodStoreBackfill` (default off) or
-  `/lsslod store backfill start|stop|status` walks the whole world at low priority
-  and pre-warms the store, yielding to players and tick health (measured dropping to
-  a third of its rate cap under load). Resumes where it left off across restarts.
+- **Background store backfill (opt-in, Fabric)** — `lodStoreBackfill` (default off)
+  or `/lsslod store backfill start|stop|status` walks the whole world at low
+  priority and pre-warms the store, yielding to players and tick health (measured
+  dropping to a third of its rate cap under load). Resumes where it left off across
+  restarts. Paper does not have the backfill yet.
 - **Store admin commands** — `/lsslod store status` (one-line health) and
-  `/lsslod store invalidate all` (drop every stored row; the remediation lever if
-  LODs ever look stale — the store re-warms from normal serving).
+  `/lsslod store invalidate all` (drop every stored row AND the backfill progress;
+  the remediation lever if LODs ever look stale — the store re-warms from normal
+  serving, and a re-run backfill re-walks the world). Both platforms; the backfill
+  verbs are Fabric-only.
 
 ### Configuration
 
@@ -32,7 +35,12 @@
   (region-header timestamps) and stale entries are dropped at startup.
 - Paper: edits made without Bukkit events (console `setblock`, some plugins) are
   caught by the periodic re-sweep within ~one autosave + one sweep cycle.
-- Folia: the store is NOT yet validated on Folia and stays effectively off there.
+- Adding, removing, or updating mods/datapacks that register blocks or biomes
+  rebuilds the store automatically on the next start (stored data encodes registry
+  ids, which such changes shift) — expect one cold rejoin after a mod change.
+- Folia: the store is UNTESTED on Folia — leave `lodStore` at `"off"` there. (There
+  is no engine-level Folia gate; on this Minecraft version Folia refuses the plugin
+  jar entirely, but do not carry this setting onto a future Folia build.)
 
 (Also carry the standing backlog when tagging: #70 Moonrise retarget note, #73
 `enableIngestBackpressure`, #74 transcode + sendQueue 1024, #75 Moonrise reads.)

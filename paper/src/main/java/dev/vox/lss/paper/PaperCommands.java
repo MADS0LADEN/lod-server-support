@@ -40,7 +40,7 @@ public class PaperCommands implements CommandExecutor, TabCompleter {
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 0) {
-            sender.sendMessage("Usage: /" + label + " <stats|diag>");
+            sender.sendMessage("Usage: /" + label + " <stats|diag|store>");
             return true;
         }
 
@@ -53,10 +53,45 @@ public class PaperCommands implements CommandExecutor, TabCompleter {
         switch (args[0].toLowerCase()) {
             case "stats" -> showStats(sender, service);
             case "diag" -> showDiagnostics(sender, service);
-            default -> sender.sendMessage("Usage: /" + label + " <stats|diag>");
+            case "store" -> storeCommand(sender, label, service, args);
+            default -> sender.sendMessage("Usage: /" + label + " <stats|diag|store>");
         }
 
         return true;
+    }
+
+    /** The store ops verbs (4-agent round R3: Paper shipped the store with no ops
+     *  surface at all — and Paper is the platform whose staleness bound is the
+     *  periodic resweep, so it needs the remediation lever MOST). Backfill verbs stay
+     *  Fabric-only for now (recorded deferral: no Paper backfill wiring). Thread-safe
+     *  from Folia's region-threaded dispatch: diagnostics reads are volatile gauges,
+     *  invalidate-all is tombstones + a control-queue offer. */
+    private void storeCommand(CommandSender sender, String label,
+                              PaperRequestProcessingService service, String[] args) {
+        var store = service.getLodStore();
+        if (args.length >= 2 && args[1].equalsIgnoreCase("status")) {
+            if (store == null) {
+                sender.sendMessage("LOD store: off/unavailable");
+                return;
+            }
+            sender.sendMessage("LOD store: " + store.diagnostics().formatToken(store.mode())
+                    + " db=" + (store.diagnostics().getDbBytes() >> 20) + "MB wal="
+                    + (store.diagnostics().getWalBytes() >> 20) + "MB sweep_drops="
+                    + store.diagnostics().getSweepDrops());
+        } else if (args.length >= 3 && args[1].equalsIgnoreCase("invalidate")
+                && args[2].equalsIgnoreCase("all")) {
+            if (store == null) {
+                sender.sendMessage("LOD store not active");
+                return;
+            }
+            if (!service.invalidateStoreAllDimensions()) {
+                sender.sendMessage("Invalidate-all requires the persistent store (lodStore=full)");
+                return;
+            }
+            sender.sendMessage("LOD store: dropping all rows (background) — re-warms from serves");
+        } else {
+            sender.sendMessage("Usage: /" + label + " store <status|invalidate all>");
+        }
     }
 
     private void showStats(CommandSender sender, PaperRequestProcessingService service) {
@@ -108,9 +143,18 @@ public class PaperCommands implements CommandExecutor, TabCompleter {
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
-            return List.of("stats", "diag").stream()
+            return List.of("stats", "diag", "store").stream()
                     .filter(s -> s.startsWith(args[0].toLowerCase()))
                     .toList();
+        }
+        if (args.length == 2 && args[0].equalsIgnoreCase("store")) {
+            return List.of("status", "invalidate").stream()
+                    .filter(s -> s.startsWith(args[1].toLowerCase()))
+                    .toList();
+        }
+        if (args.length == 3 && args[0].equalsIgnoreCase("store")
+                && args[1].equalsIgnoreCase("invalidate")) {
+            return List.of("all");
         }
         return Collections.emptyList();
     }

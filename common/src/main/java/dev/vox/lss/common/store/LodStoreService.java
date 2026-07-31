@@ -54,8 +54,21 @@ public interface LodStoreService {
      * {@code byte[0]} at this boundary. A full queue sheds the OLDEST entry (counted
      * {@code store.deposit_drops}) — the store is derived data; a shed deposit
      * re-deposits on the next serve.
+     *
+     * <p>{@code srcStampSeconds}: the epoch second the deposited bytes were ACQUIRED
+     * (read start / generation serialization) — the freshness sweep's {@code header >=
+     * src_stamp} comparison needs a stamp no later than acquisition, or a save landing
+     * in the acquisition→deposit gap becomes permanently sweep-invisible (4-agent round
+     * R1-M2). {@code <= 0} = unknown; the store stamps at deposit-call time.
      */
-    void deposit(String dimension, long packed, byte[] sectionBytes, long columnTimestamp);
+    void deposit(String dimension, long packed, byte[] sectionBytes, long columnTimestamp,
+                 long srcStampSeconds);
+
+    /** Legacy 4-arg shape (tests, callers without an acquisition stamp). */
+    default void deposit(String dimension, long packed, byte[] sectionBytes,
+                         long columnTimestamp) {
+        deposit(dimension, packed, sectionBytes, columnTimestamp, 0L);
+    }
 
     /** Synchronously drop the given positions (the dirty/edit invalidation fan-out). */
     void invalidate(String dimension, long[] positions);

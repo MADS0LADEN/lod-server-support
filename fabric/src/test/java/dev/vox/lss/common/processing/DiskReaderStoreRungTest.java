@@ -43,7 +43,7 @@ class DiskReaderStoreRungTest {
             return this.answer;
         }
 
-        @Override public void deposit(String d, long p, byte[] b, long ts) {}
+        @Override public void deposit(String d, long p, byte[] b, long ts, long acq) {}
         @Override public void invalidate(String d, long[] p) {}
         @Override public void delete(String d, long p) {}
         @Override public LodStoreDiagnostics diagnostics() { return this.diag; }

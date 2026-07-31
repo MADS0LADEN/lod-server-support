@@ -174,6 +174,36 @@ class StoreBackfillTest {
         store.shutdown();
     }
 
+    /** R3-M1: the documented remediation pairing is "invalidate all -> re-backfill";
+     *  done-marks surviving the drop made the re-backfill enumerate 0 regions and the
+     *  store only ever re-warmed where players walked. */
+    @Test
+    void invalidateAllResetsBackfillProgressSoTheWalkCanRewarm() throws Exception {
+        writeRegion(0, 0, 5);
+        SqliteLodStore store = openStore();
+        var bf = backfill(store, (dim, cx, cz) -> new byte[]{1},
+                new AtomicBoolean(true), new AtomicBoolean(true));
+        bf.start();
+        awaitDone(bf);
+        for (int i = 0; i < 400 && !store.isBackfillRegionDone(OW, 0, 0); i++) Thread.sleep(25);
+        assertTrue(store.isBackfillRegionDone(OW, 0, 0), "region must be done-marked first");
+
+        store.requestDropAllRows();
+        for (int i = 0; i < 400 && store.isBackfillRegionDone(OW, 0, 0); i++) Thread.sleep(25);
+        assertTrue(!store.isBackfillRegionDone(OW, 0, 0),
+                "invalidate-all must reset the done-marks with the rows they describe");
+
+        var reads = new ConcurrentLinkedQueue<Long>();
+        var bf2 = backfill(store, (dim, cx, cz) -> {
+            reads.add(1L);
+            return new byte[]{1};
+        }, new AtomicBoolean(true), new AtomicBoolean(true));
+        bf2.start();
+        awaitDone(bf2);
+        assertEquals(1, reads.size(), "the dropped column must be re-read and re-warmed");
+        store.shutdown();
+    }
+
     @Test
     void startIsIdempotentWhileRunning() throws Exception {
         writeRegion(0, 0, 1);
