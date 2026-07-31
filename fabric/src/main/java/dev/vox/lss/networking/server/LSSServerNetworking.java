@@ -108,8 +108,33 @@ public class LSSServerNetworking {
         if (service == null || !LSSServerConfig.CONFIG.enabled) return;
         String dimension = DIMENSION_STRINGS.computeIfAbsent(level.dimension(),
                 key -> key.identifier().toString());
-        if (service.getDirtyContentFilter().contentChanged(level, levelChunk, dimension)) {
+        var obs = service.getDirtyContentFilter().observeSave(level, levelChunk, dimension);
+        if (obs.changed()) {
             service.getDirtyTracker().markDirty(dimension, chunk.getPos().x(), chunk.getPos().z());
+            // Phase 3 save-hook write-through: every content-changing save refreshes the
+            // LOD store row with the exact bytes just hashed — the AUTHORITATIVE Fabric
+            // freshness path (the dirty->store invalidation fan-out is disabled on
+            // Fabric in favor of this; see RequestProcessingService). Runs OUTSIDE the
+            // filter monitor; store.deposit is only a queue offer.
+            applySaveObservationToStore(service.getLodStore(), dimension,
+                    chunk.getPos().x(), chunk.getPos().z(), obs);
+        }
+    }
+
+    /** The save-hook -> store bridge, extracted for direct testing. Deposit carries the
+     *  SAVE time as its column timestamp (latest-wins over older serve-time rows); a
+     *  changed-but-undepositable observation (serializer fail-open) DELETES the row —
+     *  a stale pre-edit row must never outlive an edit we could not re-serialize. */
+    static void applySaveObservationToStore(dev.vox.lss.common.store.LodStoreService store,
+                                            String dimension, int cx, int cz,
+                                            DirtyContentFilter.SaveObservation obs) {
+        if (store == null || !obs.changed()) return;
+        long packed = dev.vox.lss.common.PositionUtil.packPosition(cx, cz);
+        if (obs.depositable()) {
+            byte[] bytes = obs.sectionBytes() == null ? new byte[0] : obs.sectionBytes();
+            store.deposit(dimension, packed, bytes, System.currentTimeMillis() / 1000L);
+        } else {
+            store.delete(dimension, packed);
         }
     }
 

@@ -87,6 +87,8 @@ ANOMALY_OPT_INS = {
     "store-offline-populate": frozenset({"saturated"}),
     "store-offline-mutate": frozenset(),
     "store-offline-verify": frozenset({"saturated"}),
+    "store-save-storm": frozenset({"saturated"}),
+    "store-save-storm-off": frozenset({"saturated"}),
     "dimension-rejoin-warm": frozenset({"saturated"}),
     # Paper/Folia (SOAK_PLATFORM=paper|folia): cold-cache disc resync from the base world, like
     # warm-rejoin run 1, so the same load-shaped opt-ins apply.
@@ -126,6 +128,8 @@ MIN_CLIENT_WINDOWS = {
     "store-offline-populate": {(1, 0): 4},
     "store-offline-mutate": {(1, 0): 3},
     "store-offline-verify": {(1, 0): 4},
+    "store-save-storm": {(1, 0): 4, (1, 1): 4},
+    "store-save-storm-off": {(1, 0): 4},
     "dimension-rejoin-warm": {(1, 0): 2, (1, 1): 5, (2, 0): 3, (2, 1): 3},
     "paper-dirty-falling-block": {(1, 0): 3},
     "paper-store-unfired-event": {(1, 0): 4, (1, 1): 4},
@@ -2016,6 +2020,123 @@ def check_paper_store_unfired_event(ctx):
                         {"wallMs": srv_final["wallMs"]})
 
 
+@named_check("store-save-storm", ["server.store.deposits", "server.store.deposit_drops",
+                                  "server.store.errors", "server.store.misses",
+                                  "client.received_columns"])
+def check_store_save_storm(ctx):
+    """The Phase 3 gate (lod-store-implementation-plan.md): Fabric save-hook deposits
+    under an autosave storm. The filter must SUPPRESS the storm's metadata re-saves
+    (deposit_drops == 0 — the queue never even pressures), the save-hook path must
+    demonstrably fire (deposits exceed serve-path misses by the loaded set's
+    first-observation margin), the mid-storm edit must re-serve fresh through the
+    dirty pipeline, and after the clearcache the edited column must serve from the
+    STORE byte-identical to its live re-serve (probe 20:0: pre-edit hash != post-edit
+    hash == final hash) — the save-hook deposit IS those bytes; a disk re-read ceiling
+    pins that the fresh row came from the hook, not an NBT read."""
+    acts = [a for a in ctx.run_actions.get(1, []) if a["action"] == "clearcache"]
+    if len(acts) != 1:
+        yield Violation("store-save-storm", "run1",
+                        "expected exactly one clearcache action row", {"actions": len(acts)})
+        return
+    snaps = ctx.runs.get(1)
+    segs = client_segments(snaps) if snaps else []
+    if len(segs) != 2:
+        yield Violation("store-save-storm", "run1",
+                        "client series must split at the clearcache reset",
+                        {"segments": [s[1] for s in segs]})
+        return
+    d_recv = snaps[segs[1][3]]["received_columns"] - snaps[segs[0][3]]["received_columns"]
+    if d_recv < 500:
+        yield Violation("store-save-storm", "post-action segment",
+                        "the clearcache re-download wave did not happen",
+                        {"expected": ">= 500", "actual": d_recv})
+        return
+    action_wall = acts[0]["wallMs"]
+    srv_pre = None
+    for s in ctx.server_snaps:
+        if s["wallMs"] <= action_wall:
+            srv_pre = s
+        else:
+            break
+    srv_final = ctx.server_snaps[-1] if ctx.server_snaps else None
+    if srv_pre is None or srv_final is None or srv_pre is srv_final:
+        yield Violation("store-save-storm", "server series",
+                        "need server snapshots on both sides of the action", {})
+        return
+    drops = get_path(srv_final, "store.deposit_drops")
+    if drops:
+        yield Violation("store-save-storm", "whole run",
+                        "save-hook deposits were shed under the storm — the filter is "
+                        "not suppressing re-saves or the queue is under-sized",
+                        {"store.deposit_drops": drops})
+    errors = get_path(srv_final, "store.errors")
+    if errors:
+        yield Violation("store-save-storm", "whole run",
+                        "contained store failures fired", {"store.errors": errors})
+    margin = get_path(srv_final, "store.deposits") - get_path(srv_final, "store.misses")
+    if margin < 300:
+        yield Violation("store-save-storm", "whole run",
+                        "deposits barely exceed serve-path misses — the save-hook "
+                        "deposit path did not fire (Phase 2 shape: deposits ~= misses; "
+                        "the hook adds the loaded set's first observations on top)",
+                        {"deposits - misses": margin, "expected": ">= 300"})
+    hits_delta = get_path(srv_final, "store.hits") - get_path(srv_pre, "store.hits")
+    if hits_delta < 800:
+        yield Violation("store-save-storm", "re-serve leg",
+                        "the post-clearcache wave was not served from the store",
+                        {"expected": ">= 800", "actual": hits_delta})
+    disk_delta = get_path(srv_final, "disk.submitted") - get_path(srv_pre, "disk.submitted")
+    ceiling = max(250, int(0.25 * d_recv))
+    if disk_delta > ceiling:
+        yield Violation("store-save-storm", "re-serve leg",
+                        "the re-serve leg re-read region files — save-hook deposits "
+                        "did not keep the store fresh through the storm",
+                        {"disk.submitted delta": disk_delta, "ceiling": ceiling})
+    # Probe story: earliest hash = pre-edit; srv_pre = after the edit's dirty re-serve;
+    # final = the post-clearcache store serve.
+    edited_first = None
+    for s in ctx.server_snaps:
+        h = (s.get("probe_hashes") or {}).get("20:0")
+        if h is not None and h != -1:
+            edited_first = h
+            break
+    pre_hashes = srv_pre.get("probe_hashes") or {}
+    final_hashes = srv_final.get("probe_hashes") or {}
+    edited_pre = pre_hashes.get("20:0")
+    edited_final = final_hashes.get("20:0")
+    control_first = None
+    for s in ctx.server_snaps:
+        h = (s.get("probe_hashes") or {}).get("-20:0")
+        if h is not None and h != -1:
+            control_first = h
+            break
+    control_final = final_hashes.get("-20:0")
+    if None in (edited_first, edited_pre, edited_final, control_first, control_final) \
+            or -1 in (edited_pre, edited_final, control_final):
+        yield Violation("store-save-storm", "probes",
+                        "probes unarmed or unserved on a leg",
+                        {"first": edited_first, "pre": pre_hashes, "final": final_hashes})
+        return
+    if edited_pre == edited_first:
+        yield Violation("store-save-storm", "probe 20:0",
+                        "the mid-storm edit never re-served fresh before the action "
+                        "(dirty pipeline dead?)",
+                        {"pre-edit": edited_first, "pre-action": edited_pre})
+    if edited_final != edited_pre:
+        yield Violation("store-save-storm", "probe 20:0",
+                        "the post-clearcache store serve is not byte-identical to the "
+                        "live re-serve — the save-hook deposit drifted from the served "
+                        "bytes", {"pre-action": edited_pre, "final": edited_final})
+    if control_final != control_first:
+        yield Violation("store-save-storm", "probe -20:0",
+                        "the untouched control column's bytes drifted",
+                        {"first": control_first, "final": control_final})
+    if (len(ctx.server_snaps) - 1) not in ctx.quiescent_server:
+        yield Violation("store-save-storm", "final snapshot",
+                        "last server snapshot is not verified-quiescent",
+                        {"wallMs": srv_final["wallMs"]})
+
+
 @named_check("store-offline-populate", ["server.store.deposits", "server.store.errors"])
 def check_store_offline_populate(ctx):
     """Phase 1 of scripts/store_offline_edit.sh: the backfill must actually charge the
@@ -2387,6 +2508,13 @@ CHECKS = {
     "store-offline-verify": [check_store_offline_verify,
                              make_handshake_check("store-offline-verify"),
                              make_disc_completeness("store-offline-verify")],
+    # Phase 3 gate: the save-hook deposit path under an autosave storm; the -off twin
+    # exists solely as store_save_storm.sh's MSPT pairing arm (laws only).
+    "store-save-storm": [check_store_save_storm,
+                         make_handshake_check("store-save-storm"),
+                         make_disc_completeness("store-save-storm")],
+    "store-save-storm-off": [make_handshake_check("store-save-storm-off"),
+                             make_disc_completeness("store-save-storm-off")],
     "dimension-rejoin-warm": [check_dimension_rejoin_warm,
                               make_handshake_check("dimension-rejoin-warm"),
                               make_disc_completeness("dimension-rejoin-warm", run=1),
@@ -3570,6 +3698,48 @@ def selftest():
     hits("paper-store-unfired-event premise broke (edit fired an event)",
          list(check_paper_store_unfired_event(premise_ctx)),
          "paper-store-unfired-event")
+
+    # --- store-save-storm: save-hook deposits under an autosave storm ---
+    def sst_ctx(edited_pre=555, edited_final=555, deposits=2600, misses=2100,
+                drops=0, errors=0, hits_final=2100, disk_final=2150,
+                control_final=222, actions=None):
+        srv_first = _srv(20_000, over={"store.deposits": 2000, "store.misses": 2000,
+                                       "store.hits": 0, "disk.submitted": 2000})
+        srv_first["probe_hashes"] = {"20:0": 111, "-20:0": 222}
+        srv_pre = _srv(125_000, over={"store.deposits": deposits - 20,
+                                      "store.misses": misses - 20,
+                                      "store.hits": 0, "disk.submitted": 2050})
+        srv_pre["probe_hashes"] = {"20:0": edited_pre, "-20:0": 222}
+        srv_fin = _srv(185_000, over={"store.deposits": deposits, "store.misses": misses,
+                                      "store.hits": hits_final,
+                                      "store.deposit_drops": drops,
+                                      "store.errors": errors,
+                                      "disk.submitted": disk_final})
+        srv_fin["probe_hashes"] = {"20:0": edited_final, "-20:0": control_final}
+        return _ctx(
+            server_snaps=[srv_first, srv_pre, srv_fin],
+            runs={1: [_cli(120_000, seg=0, over={"received_columns": 2200}),
+                      _cli(185_000, seg=1, over={"received_columns": 4300})]},
+            run_actions={1: actions if actions is not None else [
+                {"event": "action", "wallMs": 130_000, "action": "clearcache",
+                 "atSeconds": 130}]},
+            quiescent_server={2})
+    clean("store-save-storm clean save-hook pass", list(check_store_save_storm(sst_ctx())))
+    hits("store-save-storm deposits shed under storm",
+         list(check_store_save_storm(sst_ctx(drops=7))), "store-save-storm")
+    hits("store-save-storm save-hook path never fired (deposits ~= misses)",
+         list(check_store_save_storm(sst_ctx(deposits=2110))), "store-save-storm")
+    hits("store-save-storm edit never re-served before the action",
+         list(check_store_save_storm(sst_ctx(edited_pre=111, edited_final=111))),
+         "store-save-storm")
+    hits("store-save-storm store serve drifted from the live re-serve",
+         list(check_store_save_storm(sst_ctx(edited_final=999))), "store-save-storm")
+    hits("store-save-storm control drifted",
+         list(check_store_save_storm(sst_ctx(control_final=888))), "store-save-storm")
+    hits("store-save-storm re-serve leg re-read regions",
+         list(check_store_save_storm(sst_ctx(disk_final=4000))), "store-save-storm")
+    hits("store-save-storm store errors",
+         list(check_store_save_storm(sst_ctx(errors=1))), "store-save-storm")
 
     # --- dirty-range-filter: drain visible, client silent, follow-up live ---
     drf_cmds = [_cmd(122_000, "setblock -250 310 5 minecraft:stone"),

@@ -277,6 +277,24 @@ class OffThreadProcessorStoreTest {
         rig.shutdown();
     }
 
+    /** Phase 3: on Fabric the save hook deposits fresh bytes with every dirty mark, so
+     *  the dirty->store fan-out is disabled there — an invalidation arriving AFTER the
+     *  save-hook deposit would tombstone the just-deposited row and evict the very
+     *  edit it carries. The timestamp-cache invalidation is deliberately NOT gated. */
+    @Test
+    void storeDirtyInvalidationFlagGatesTheStoreFanOutOnly() {
+        var rig = new Rig(false);
+        rig.proc.setStoreDirtyInvalidation(false);
+        rig.proc.invalidateTimestamps(DIM, new long[]{PositionUtil.packPosition(5, 5)});
+        rig.cycle();
+        assertTrue(rig.store.invalidations.isEmpty(),
+                "with the flag off, dirty invalidations must not reach the store");
+        rig.proc.setStoreDirtyInvalidation(true);
+        rig.proc.invalidateTimestamps(DIM, new long[]{PositionUtil.packPosition(6, 6)});
+        rig.await(() -> !rig.store.invalidations.isEmpty(), "store invalidation (flag on)");
+        rig.shutdown();
+    }
+
     @Test
     void shutdownFlushFansQueuedInvalidationsIntoTheStore() {
         // Invalidations still queued when shutdown lands ride the sentinel take (or the

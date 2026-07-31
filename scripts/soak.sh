@@ -41,7 +41,7 @@ ALL_SCENARIOS=(fresh-backfill warm-rejoin dimension-trip dirty-broadcast
                cold-restart-resync enabled-false teleport-prune
                dirty-range-filter dirty-during-backfill dirty-while-offline
                clearcache-mid-session dimension-rejoin-warm store-second-join
-               store-second-join-full)
+               store-second-join-full store-save-storm)
 # Scenarios ported to Paper. The remaining ones are Fabric-specific for now: the dirty-*
 # family leans on the save-hook + DirtyContentFilter (Paper's dirty detection is
 # event-driven — paper-dirty-falling-block is the Paper-native dirty scenario),
@@ -143,6 +143,7 @@ case "$SCENARIO" in
     dirty-during-backfill|dirty-while-offline|clearcache-mid-session|dimension-rejoin-warm) ;;
     store-second-join|store-second-join-full) ;;
     store-offline-populate|store-offline-mutate|store-offline-verify) ;;
+    store-save-storm|store-save-storm-off) ;;
     paper-dirty-falling-block|paper-store-unfired-event) ;;
     *)
         echo "[soak] ERROR: Unknown scenario '$SCENARIO'"
@@ -208,6 +209,15 @@ case "$SCENARIO" in
     store-offline-populate)     CLIENT_RUNS=1; EXPECTED_SECONDS=280
                                 SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
     store-offline-mutate)       CLIENT_RUNS=1; EXPECTED_SECONDS=160 ;;
+    store-save-storm)           CLIENT_RUNS=1; EXPECTED_SECONDS=320
+                                # Phase 3: save-hook deposits under an autosave storm;
+                                # the clearcache re-serve must come from the store with
+                                # the edit's fresh bytes (see check_store_save_storm).
+                                CLIENT_EXTRA_ARGS=("-Psoak.clientActionAt=130:clearcache")
+                                SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
+    store-save-storm-off)       CLIENT_RUNS=1; EXPECTED_SECONDS=320
+                                # store_save_storm.sh's MSPT pairing arm (lodStore off).
+                                SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
     store-offline-verify)       CLIENT_RUNS=1; EXPECTED_SECONDS=280
                                 SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
     paper-dirty-falling-block)  CLIENT_RUNS=1; EXPECTED_SECONDS=300 ;;

@@ -92,6 +92,53 @@ public class DirtyContentFilter {
         return contentChanged(level, chunk, chunk.getPos().x(), chunk.getPos().z(), dimension);
     }
 
+    /**
+     * One save observation with the serialized bytes handed OUT (Phase 3 save-hook
+     * deposits): {@code changed} mirrors {@link #contentChanged}; when changed AND
+     * {@code depositable}, {@code sectionBytes} are the exact wire bytes just hashed
+     * (null = a changed ALL-AIR column — the store's byte[0] shape). The fail-open
+     * path (serialization error) is changed but NOT depositable: the caller must
+     * DELETE any stored row it cannot refresh, never leave pre-edit bytes behind.
+     * A record return, deliberately not a callback: the deposit runs in the CALLER,
+     * structurally outside this monitor (the hook may run off-main under
+     * C2ME/Moonrise).
+     */
+    public record SaveObservation(boolean changed, boolean depositable, byte[] sectionBytes) {
+        static final SaveObservation UNCHANGED = new SaveObservation(false, false, null);
+        static final SaveObservation FAIL_OPEN = new SaveObservation(true, false, null);
+    }
+
+    public synchronized SaveObservation observeSave(ServerLevel level, LevelChunk chunk,
+                                                    String dimension) {
+        return observeSave(level, chunk, chunk.getPos().x(), chunk.getPos().z(), dimension);
+    }
+
+    /** Position-explicit body (test seam, like contentChanged's). */
+    synchronized SaveObservation observeSave(ServerLevel level, LevelChunk chunk,
+                                             int cx, int cz, String dimension) {
+        byte[] sections;
+        long hash;
+        try {
+            sections = this.serializer.serializeSections(level, chunk, cx, cz);
+            hash = hashContent(sections);
+        } catch (Exception e) {
+            LSSLogger.debug("Dirty-content hash failed for chunk " + cx + "," + cz + ": " + e);
+            return SaveObservation.FAIL_OPEN;
+        }
+        long packed = PositionUtil.packPosition(cx, cz);
+        boolean changed = storeHash(dimension, packed, hash);
+        if (!changed) {
+            this.totalSuppressed++;
+            return SaveObservation.UNCHANGED;
+        }
+        if (Boolean.getBoolean("lss.soak.dirtydebug")) {
+            LSSLogger.info("[DirtyDebug] re-marked " + cx + "," + cz
+                    + " hash=" + Long.toHexString(hash)
+                    + " len=" + (sections == null ? 0 : sections.length));
+        }
+        return new SaveObservation(true, true, sections);
+    }
+
     /** Position-explicit body; package-visible so tests can drive the injected serializer
      *  without constructing MC level/chunk objects. Synchronized (reentrant from the public
      *  overload) so the seam keeps the class's entry-points-hold-the-lock insurance. */
