@@ -1026,3 +1026,40 @@ store-off gate or stay wording-only; (c) merge/release timing (pre-flight requir
 (d) recorded future work: live resolvers, Paper backfill parity, multi-player
 unfired-event, 7.6-vs-5.3 KB/col, backfill-enabled soak scenario (allowlist key now
 in place), lodStore=memory burn-in leg.
+
+### Round closure (2026-07-31, commits 706eae6 + a155341)
+
+Every FIXED disposition above is implemented and validated: Fabric T1 + Paper T1
+green, T2 60/60 gametests green, all four script selftests green (release_check 56,
+check_soak 191, store_gate_check 13, soak_report 20).
+
+- **store-save-storm re-run on the delete-only hook: PASS, 0 violations** — and the
+  counters land exactly on the new invariant: `deposits == misses` at 2154 == 2154
+  (every deposit delivery-path), hits 1935, drops 0, errors 0. This also closes the
+  burn-in count discrepancy: the 0731 `soak.sh all` chain ran 19 scenarios
+  (fresh-backfill T070048 → store-second-join-full T082545 incl. the gauge-fix
+  re-runs); store-save-storm — last in ALL_SCENARIOS — only had standalone green runs
+  from earlier that morning (pre-gauge-fix build). With this re-run on the post-round
+  code, all 20 scenarios have green evidence; the storm scenario's is the freshest of
+  all.
+- **Fabric real-jar boot check: PASS (closes R4-M2).** `test-server.sh update`
+  installed the real 7.6 MB jar (replacing a stale July-30 330 KB pre-store jar);
+  the loader listed both nested mods (`lss-sqlite-jdbc 3.49.1.0`,
+  `lss-zstd-jni 1.5.7-3`), `world/lss-lod/store.db` was created and the sqlite
+  native extracted into the store dir (the `org.sqlite.tmpdir` redirect working from
+  CLASSPATH-resource extraction — the exact never-validated path), with no
+  UnsatisfiedLinkError and no codec-degrade warning — on a dev server with C2ME
+  loaded, as a bonus. Gotcha for future boots: `test-server.sh run-*` REWRITES
+  `lss-server-config.json` at staging (write_lss_config is unconditional), so a
+  store-enabled boot needs the config edited AFTER staging (or launch
+  `fabric-server-launch.jar` directly, as this check did).
+- Correction to the Phase 5 text above: `SOAK_LODSTORE_OVERRIDE` merges ONLY
+  `lodStore` into staged configs — not the `lodStoreResweepSeconds=10` the original
+  sentence claimed (the Paper resweep coverage came from the scenario's own config +
+  the 300 s PaperConfig default, both now test-pinned).
+
+Still open for the USER (final): (a) §0 metric-2-as-written 62.2% vs 70%;
+(b) merge/release timing — the branch needs a fresh full pre-flight before any tag;
+(c) recorded future work: live mask/region resolvers, Paper backfill parity,
+multi-player unfired-event, 7.6-vs-5.3 KB/col, a backfill-enabled soak scenario
+(allowlist key ready), lodStore=memory burn-in leg.
