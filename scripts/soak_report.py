@@ -89,6 +89,9 @@ SERVER_MECHANISM = {
     "store deposit skips": "store.deposit_skips",
     "store memory-tier hits": "store.mem_hits",
     "store sweep drops": "store.sweep_drops",
+    "store backfill reads": "store.backfill_reads",
+    "store backfill deposits": "store.backfill_deposits",
+    "store backfill skips": "store.backfill_skips",
 }
 CLIENT_CONCERNING = {
     "columns dropped": "dropped",

@@ -342,6 +342,9 @@ public final class BenchmarkMetricsExporter {
         storeMap.put("mem_hits", storeDiag.getMemHits());
         storeMap.put("mem_evictions", storeDiag.getMemEvictions());
         storeMap.put("sweep_drops", storeDiag.getSweepDrops());
+        storeMap.put("backfill_reads", storeDiag.getBackfillReads());
+        storeMap.put("backfill_deposits", storeDiag.getBackfillDeposits());
+        storeMap.put("backfill_skips", storeDiag.getBackfillSkips());
         storeMap.put("queue", storeDiag.getQueueDepth());
         storeMap.put("mem_bytes", storeDiag.getMemBytes());
         storeMap.put("db_bytes", storeDiag.getDbBytes());
@@ -593,6 +596,9 @@ public final class BenchmarkMetricsExporter {
         store.put("mem_hits", storeDiag.getMemHits());
         store.put("mem_evictions", storeDiag.getMemEvictions());
         store.put("sweep_drops", storeDiag.getSweepDrops());
+        store.put("backfill_reads", storeDiag.getBackfillReads());
+        store.put("backfill_deposits", storeDiag.getBackfillDeposits());
+        store.put("backfill_skips", storeDiag.getBackfillSkips());
         store.put("queue", storeDiag.getQueueDepth());
         store.put("mem_bytes", storeDiag.getMemBytes());
         store.put("db_bytes", storeDiag.getDbBytes());
