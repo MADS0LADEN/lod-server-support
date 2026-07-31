@@ -883,3 +883,12 @@ amend / miss, implementer recommends accept-with-record), (b) the multi-player
 unfired-event deviation, (c) the 7.6-vs-5.3 KB/col open question, (d) never release
 from this branch without the CLAUDE.md updates (source tag store/src:3, common/store/,
 config keys, scenario list).
+
+**Fabric burn-in (soak.sh all, SOAK_LODSTORE_OVERRIDE=full): 19/19 GREEN** — with one
+real find on the way: two consecutive store-second-join-full reds on a TRULY converged
+system exposed the Phase 3 save hook as a new off-serve producer feeding the
+store.queue drain gauge (vanilla's idle chunk-save trickle → hook deposit → 1-deep
+sub-200 ms flicker visible to the quiescence predicate). Fixed to the documented
+SERVER_DRAINS contract: the gauge is DRAIN-SIDE only (batcher stamps after every
+pass; sustained backlogs still show); the integrity-purge test now polls the DB
+instead of the gauge. Scenario green on re-run. Paper burn-in RUNNING.
