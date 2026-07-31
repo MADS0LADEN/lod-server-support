@@ -830,3 +830,14 @@ Phase 5 burn-in with the design-bound stated; a constrained-restraint evidence r
 (diskReaderThreads=1) is recorded below. Remaining accepted residue: "rate-under-load"
 is cap-bound evidence only; hasRow visits are paced at the same cap as reads (warm
 re-walks are slow-but-gentle — a deliberate trade).
+
+**Constrained-restraint evidence run (no-cache, diskReaderThreads=1, 2026-07-31):**
+with the client actively driving 14,265 player reads through the SINGLE-thread pool,
+the backfill's effective rate fell to 3,942 reads / ~123 s ≈ **32 col/s — one third of
+its 100/s cap** (vs 99/s cap-pinned unconstrained): the restraint genuinely engages
+under contention. Zero errors both sides; 7,858 row-exists skips = live dedup against
+the serve path's concurrent deposits; the exit summary now prints on the interrupt
+path ("stopped (shutdown): 11 regions, 3942 deposited, 7858 skipped, 0 errors").
+**Phase 4 + review CLOSED** — deferred to Phase 5 burn-in: kill -9 leg,
+constrained-box disk.errors leg, Paper backfill parity decision, backfill-enabled
+soak scenario, the 7.6-vs-5.3 KB/col explanation (vacuum work).
