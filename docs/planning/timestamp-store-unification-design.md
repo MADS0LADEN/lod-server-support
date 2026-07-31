@@ -200,7 +200,36 @@ persistence mechanisms for column truth goes from two to one.
 - **Checker:** `tscache.*` snapshot fields keep their meaning (RAM-side counters);
   add a `store.stamp_*` group only if diagnosis demands it — resist schema growth.
 
-## 8. Risks
+## 8. Phase 2 (follow-on): the CLIENT cache is the same shape, simpler
+
+`ColumnCacheStore` (client) is per-server-per-dimension stamp files under
+`config/lss/cache/` — whole-map snapshot saves (temp + atomic rename), hand-rolled
+corruption/plausibility/oversize guards, a 2M-entry cap, and PATH-SANITIZED filenames
+derived from server addresses. It should become the second consumer of this design's
+stamps machinery, as a follow-on phase once the server side proves the pattern:
+
+- One `lss-client-cache.db` with rows keyed `(server, dim, pos) → ts`; the meta
+  version row replaces the v4-header discard dance; WAL replaces the corruption
+  guards; keyed rows DELETE the path-sanitization surface outright; recency eviction
+  replaces the per-file cap AND prunes dead servers' stamps (today: unbounded file
+  accumulation across visited servers).
+- Strictly simpler than the server side: **no sweep** (the client cannot verify
+  freshness locally — that is the server's job via re-declaration), no fan-out, no
+  blob tier. RAM stays authoritative at runtime exactly as today (loaded at join).
+- The win is durability for the crash-prone population: a client crash today loses
+  everything since the last snapshot and re-declares `-1` — a full re-download of
+  terrain it already had (expensive at 256 distance). Deltas shrink that to ~one
+  flush interval. NOTE the one thing this does NOT fix: cache-vs-consumer divergence
+  (LSS stamps claiming data Voxy's own store lost) is `reportIngestFailure`'s
+  domain, identical in any container.
+- Risk profile: the client resync path has THIN automated coverage (one Tier 3 e2e +
+  the soak client) — the refactor risk lives there, not in sqlite. Extract the
+  minimal stamps-writer as a shared `common/store` piece during Phase 1 so the
+  client phase reuses proven code rather than re-implementing it. The sqlite native
+  already ships in the (client+server) Fabric jar; load it lazily on first LSS-server
+  join. `/lss clearcache` covers the lost delete-one-server's-file affordance.
+
+## 9. Risks
 
 - The batcher becomes load-bearing for protocol state on ALL servers (today it is
   opt-in machinery). Its failure latch must degrade stamps to RAM-only, never wedge
