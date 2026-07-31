@@ -73,7 +73,9 @@ import java.util.function.Function;
  */
 public final class SqliteLodStore implements LodStoreService {
 
-    static final int SCHEMA_VERSION = 1;
+    // v2: auto_vacuum=INCREMENTAL (must be set before table creation; the bump
+    // rebuilds every v1 store once — the legal migration for derived data).
+    static final int SCHEMA_VERSION = 2;
     private static final String DB_FILE = "store.db";
     private static final int PAGE_SIZE = 16384;
     private static final int WRITE_TXN_ROWS = 64;
@@ -91,7 +93,17 @@ public final class SqliteLodStore implements LodStoreService {
     public record Environment(Path storeDir, String mcVersion, int wireVersion,
                               Function<String, Path> regionDirResolver,
                               Function<String, String> maskFingerprintResolver,
-                              int resweepSeconds) {}
+                              int resweepSeconds, long maxDbBytes) {
+
+        /** Pre-Phase-5 shape (tests): no size cap. */
+        public Environment(Path storeDir, String mcVersion, int wireVersion,
+                           Function<String, Path> regionDirResolver,
+                           Function<String, String> maskFingerprintResolver,
+                           int resweepSeconds) {
+            this(storeDir, mcVersion, wireVersion, regionDirResolver,
+                    maskFingerprintResolver, resweepSeconds, Long.MAX_VALUE);
+        }
+    }
 
     private sealed interface Op {
         record Deposit(String dim, long packed, byte[] bytes, long ts, long srcStampSeconds,
@@ -99,6 +111,7 @@ public final class SqliteLodStore implements LodStoreService {
         record DeleteRows(String dim, long[] positions) implements Op {}
         record Resweep() implements Op {}
         record BackfillMark(String dim, int rx, int rz) implements Op {}
+        record DropAll() implements Op {}
     }
 
     private final LodStoreMode mode;
@@ -223,6 +236,10 @@ public final class SqliteLodStore implements LodStoreService {
         this.writer = ds.getConnection();
         try (Statement st = this.writer.createStatement()) {
             st.execute("PRAGMA page_size=" + PAGE_SIZE);
+            // Before any table exists (fresh DB) this arms incremental_vacuum for the
+            // Phase 5 eviction; on an existing DB it is a no-op (v1 stores rebuild via
+            // the schema bump instead).
+            st.execute("PRAGMA auto_vacuum=INCREMENTAL");
             st.execute("PRAGMA journal_mode=WAL");
             st.execute("PRAGMA synchronous=NORMAL");
             st.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
@@ -468,6 +485,14 @@ public final class SqliteLodStore implements LodStoreService {
         }
     }
 
+    /** The /lsslod store invalidate-all ops lever (Phase 5): drops every row of every
+     *  dimension on the batcher (tombstoned; counted sweep_drops). Re-warms from
+     *  serves/backfill. Rows read in the sub-second queue window serve what they would
+     *  have a moment earlier — acceptable for a remediation lever. */
+    public void requestDropAllRows() {
+        enqueueControl(new Op.DropAll());
+    }
+
     /** Backfill progress (Phase 4): mark a region fully processed (batcher-written,
      *  dropped with the DB — derived data). */
     public void markBackfillRegionDone(String dimension, int rx, int rz) {
@@ -661,6 +686,21 @@ public final class SqliteLodStore implements LodStoreService {
                 commitTxn();
                 runSweep(false);
             }
+            case Op.DropAll ignored -> {
+                // The /lsslod store invalidate all ops lever: every dimension's rows
+                // tombstoned + dropped (counted sweep_drops — maintenance culls share
+                // that counter); the store re-warms from serves/backfill.
+                commitTxn();
+                long now = System.nanoTime();
+                for (var e : List.copyOf(this.dimIds.entrySet())) {
+                    List<Long> dropped = dropDimensionRows(e.getValue());
+                    var tombs = this.tombstones.computeIfAbsent(e.getKey(),
+                            k -> new ConcurrentHashMap<>());
+                    for (long pos : dropped) tombs.put(pos, now);
+                    notifySweepDrops(e.getKey(), dropped);
+                }
+                LSSLogger.info("LOD store: dropped all rows (admin invalidate)");
+            }
             case Op.BackfillMark mark -> {
                 try (PreparedStatement ps = this.writer.prepareStatement(
                         "INSERT OR REPLACE INTO backfill (dim, rx, rz, done) VALUES (?,?,?,1)")) {
@@ -793,11 +833,53 @@ public final class SqliteLodStore implements LodStoreService {
             if (walBytes > WAL_CHECKPOINT_BYTES) {
                 commitTxn();
                 checkpointTruncate();
-                this.diag.setWalBytes(Files.exists(wal) ? Files.size(wal) : 0);
+                walBytes = Files.exists(wal) ? Files.size(wal) : 0;
+                this.diag.setWalBytes(walBytes);
+            }
+            // Phase 5 size cap: above it, evict the oldest-ts rows in batches and
+            // return the pages (auto_vacuum=INCREMENTAL, armed at DB creation). The
+            // store degrades to most-recently-served warmth; evicted columns re-warm
+            // on their next serve.
+            long total = this.diag.getDbBytes() + walBytes;
+            if (total > this.env.maxDbBytes()) {
+                commitTxn();
+                int evicted = evictOldestBatch();
+                if (evicted > 0) {
+                    try (Statement st = this.writer.createStatement()) {
+                        st.execute("PRAGMA incremental_vacuum");
+                    }
+                    this.writer.commit();
+                    this.diag.setDbBytes(Files.exists(this.dbPath) ? Files.size(this.dbPath) : 0);
+                    LSSLogger.info("LOD store size cap: evicted " + evicted
+                            + " oldest rows (db+wal " + (total >> 20) + " MB > cap "
+                            + (this.env.maxDbBytes() >> 20) + " MB)");
+                }
             }
         } catch (Throwable ignored) {
             // gauge refresh is best-effort; a failed checkpoint retries next interval
         }
+    }
+
+    /** Oldest-ts batch eviction across all dims (512 rows/dim per pass). Evicted
+     *  positions go through the tombstone protocol like any delete so readers cannot
+     *  race a half-removed row. */
+    private int evictOldestBatch() throws SQLException {
+        int evicted = 0;
+        for (var entry : List.copyOf(this.dimIds.entrySet())) {
+            List<Long> oldest = new ArrayList<>();
+            try (Statement st = this.writer.createStatement();
+                 ResultSet rs = st.executeQuery("SELECT pos FROM lods_" + entry.getValue()
+                         + " ORDER BY ts ASC LIMIT 512")) {
+                while (rs.next()) oldest.add(rs.getLong(1));
+            }
+            if (oldest.isEmpty()) continue;
+            var tombs = this.tombstones.computeIfAbsent(entry.getKey(),
+                    k -> new ConcurrentHashMap<>());
+            long now = System.nanoTime();
+            for (long pos : oldest) tombs.put(pos, now);
+            evicted += deleteRows(entry.getValue(), oldest);
+        }
+        return evicted;
     }
 
     private void checkpointTruncate() throws SQLException {

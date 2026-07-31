@@ -571,6 +571,34 @@ class SqliteLodStoreTest {
 
     // ---- misc contract ----
 
+    /** Phase 5 size cap: above maxDbBytes the batcher evicts oldest-ts batches and
+     *  vacuums; newest rows survive, evicted ones read as misses (re-warm on serve). */
+    @Test
+    void sizeCapEvictsOldestRowsAndKeepsNewest() throws Exception {
+        writeRegion(OW, 0, 0, Map.of());
+        var env = new SqliteLodStore.Environment(storeDir(), "26.2-test", WIRE,
+                this::regionDir, d -> "", 0, 200_000L); // ~200 KB cap
+        SqliteLodStore store = SqliteLodStore.createOrNull(LodStoreMode.FULL, env,
+                new LodStoreDiagnostics());
+        assertNotNull(store);
+        assertTrue(store.awaitSweep(10_000));
+        // ~40 x 20 KB (incompressible) rows ≈ 800 KB >> the cap; ts ascending.
+        for (int i = 0; i < 40; i++) {
+            store.deposit(OW, PositionUtil.packPosition(i, 12), bytes(100 + i, 20_000), 1000 + i);
+        }
+        assertNotNull(awaitHit(store, OW, PositionUtil.packPosition(39, 12)));
+        boolean evicted = false;
+        for (int i = 0; i < 600 && !evicted; i++) { // gauge cadence is 5 s
+            evicted = store.get(OW, PositionUtil.packPosition(0, 12)) == null;
+            Thread.sleep(50);
+        }
+        assertTrue(evicted, "the oldest-ts row must be evicted under the size cap");
+        assertNotNull(store.get(OW, PositionUtil.packPosition(39, 12)),
+                "the newest row must survive eviction");
+        assertEquals(0, store.diagnostics().getErrors());
+        store.shutdown();
+    }
+
     @Test
     void unknownDimensionReadsAsMissWithoutError() throws Exception {
         writeRegion(OW, 0, 0, Map.of());

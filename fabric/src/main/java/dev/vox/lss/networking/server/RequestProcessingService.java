@@ -155,7 +155,7 @@ public class RequestProcessingService {
             var env = new dev.vox.lss.common.store.SqliteLodStore.Environment(
                     worldRoot.resolve("lss-lod"), server.getServerVersion(),
                     LSSConstants.PROTOCOL_VERSION, regionDirs::get, maskFingerprints::get,
-                    config.lodStoreResweepSeconds);
+                    config.lodStoreResweepSeconds, config.lodStoreMaxMB * 1024L * 1024L);
             this.lodStore = dev.vox.lss.common.store.LodStores.createOrNull(
                     storeMode, config.lodStoreMemoryMB * 1024L * 1024L, env);
             if (this.lodStore == null) {
@@ -770,6 +770,18 @@ public class RequestProcessingService {
 
     public DirtyColumnTracker getDirtyTracker() {
         return this.dirtyTracker;
+    }
+
+    /** Phase 5 ops (/lsslod store invalidate all): drop every stored row (batcher-side,
+     *  tombstoned). The tscache is deliberately untouched: its stamps describe REGION
+     *  truth, not store contents — re-asks re-resolve via tscache/probe/NBT as normal
+     *  and re-warm the store. Only meaningful for the persistent store. */
+    public boolean invalidateStoreAllDimensions() {
+        if (this.lodStore instanceof dev.vox.lss.common.store.SqliteLodStore sqlite) {
+            sqlite.requestDropAllRows();
+            return true;
+        }
+        return false;
     }
 
     public dev.vox.lss.common.store.StoreBackfill getStoreBackfill() {

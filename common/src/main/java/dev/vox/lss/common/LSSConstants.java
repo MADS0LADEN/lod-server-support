@@ -106,6 +106,11 @@ public final class LSSConstants {
     public static final int MAX_LOD_STORE_MEMORY_MB = 2048;
     // LOD-store periodic freshness re-sweep cadence (0 = off). Paper's stale bound —
     // its unfired-event gaps (walk-in generation etc.) heal within ≈ autosave + sweep.
+    // LOD-store on-disk size cap (Phase 5 eviction): oldest-ts rows are batch-evicted
+    // and pages returned via incremental_vacuum once db+wal exceed the cap.
+    public static final int MIN_LOD_STORE_MAX_MB = 64;
+    public static final int MAX_LOD_STORE_MAX_MB = 32768;
+
     public static final int MIN_LOD_STORE_RESWEEP_SECONDS = 0;
     public static final int MAX_LOD_STORE_RESWEEP_SECONDS = 3600;
 

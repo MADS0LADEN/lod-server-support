@@ -111,6 +111,14 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public boolean lodStoreBackfill = false;
     /**
+     * On-disk size cap for the SQLite LOD store (main DB + WAL, MB). Above it the
+     * batcher evicts oldest-timestamp rows in batches and returns pages via
+     * incremental_vacuum — the store degrades to "warm for the most recently served
+     * terrain", never unbounded growth (the store ≈ doubles a fully-backfilled world
+     * folder otherwise). Evicted columns re-warm on their next serve.
+     */
+    public int lodStoreMaxMB = 2048;
+    /**
      * LOD x-ray masking (docs/planning/antixray-compat-design.md §3). "auto" (default)
      * masks iff an anti-xray engine is detected — Paper's built-in anti-xray config, or the
      * AntiXray mod on Fabric — adopting its per-world hidden list + max-block-height
@@ -178,6 +186,8 @@ public abstract class ServerConfigBase extends JsonConfig {
                 LSSConstants.MIN_LOD_STORE_MEMORY_MB, LSSConstants.MAX_LOD_STORE_MEMORY_MB);
         lodStoreResweepSeconds = Math.clamp(lodStoreResweepSeconds,
                 LSSConstants.MIN_LOD_STORE_RESWEEP_SECONDS, LSSConstants.MAX_LOD_STORE_RESWEEP_SECONDS);
+        lodStoreMaxMB = Math.clamp(lodStoreMaxMB,
+                LSSConstants.MIN_LOD_STORE_MAX_MB, LSSConstants.MAX_LOD_STORE_MAX_MB);
         xrayObfuscation = XrayMaskPolicy.normalizeMode(xrayObfuscation);
         if (xrayHiddenBlocks == null) xrayHiddenBlocks = defaultXrayHiddenBlocks();
         xrayMaxBlockHeight = Math.clamp(xrayMaxBlockHeight, LSSConstants.MIN_XRAY_MAX_BLOCK_HEIGHT, LSSConstants.MAX_XRAY_MAX_BLOCK_HEIGHT);

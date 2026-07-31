@@ -23,6 +23,11 @@ class LSSServerCommands {
                                     .executes(ctx -> showDiagnostics(ctx.getSource()))
                             )
                             .then(Commands.literal("store")
+                                    .then(Commands.literal("status")
+                                            .executes(ctx -> storeStatus(ctx.getSource())))
+                                    .then(Commands.literal("invalidate")
+                                            .then(Commands.literal("all")
+                                                    .executes(ctx -> storeInvalidateAll(ctx.getSource()))))
                                     .then(Commands.literal("backfill")
                                             .then(Commands.literal("start")
                                                     .executes(ctx -> backfill(ctx.getSource(), "start")))
@@ -34,6 +39,48 @@ class LSSServerCommands {
                             )
             );
         });
+    }
+
+    /** Phase 5 ops: one-line store health for "are LODs stale?" triage. */
+    private static int storeStatus(CommandSourceStack source) {
+        var service = LSSServerNetworking.getRequestService();
+        if (service == null) {
+            source.sendFailure(Component.literal(Brand.shortName() + " LOD request processing is not active"));
+            return 0;
+        }
+        var store = service.getLodStore();
+        if (store == null) {
+            source.sendSuccess(() -> Component.literal("LOD store: off/unavailable"), false);
+            return 1;
+        }
+        String line = "LOD store: " + store.diagnostics().formatToken(store.mode())
+                + " db=" + (store.diagnostics().getDbBytes() >> 20) + "MB wal="
+                + (store.diagnostics().getWalBytes() >> 20) + "MB sweep_drops="
+                + store.diagnostics().getSweepDrops();
+        var backfill = service.getStoreBackfill();
+        String bf = backfill == null ? "" : " | backfill: " + backfill.statusLine();
+        source.sendSuccess(() -> Component.literal(line + bf), false);
+        return 1;
+    }
+
+    /** Phase 5 ops: the admin remediation lever for "LODs look stale" — tombstones and
+     *  deletes every stored row in every dimension the service knows; the store re-warms
+     *  from serves (and the backfill, if enabled). Timestamp cache invalidation rides
+     *  the same call so up-to-date answers stay honest. */
+    private static int storeInvalidateAll(CommandSourceStack source) {
+        var service = LSSServerNetworking.getRequestService();
+        if (service == null || service.getLodStore() == null) {
+            source.sendFailure(Component.literal("LOD store not active"));
+            return 0;
+        }
+        if (!service.invalidateStoreAllDimensions()) {
+            source.sendFailure(Component.literal(
+                    "Invalidate-all requires the persistent store (lodStore=full)"));
+            return 0;
+        }
+        source.sendSuccess(() -> Component.literal(
+                "LOD store: dropping all rows (background) — re-warms from serves"), true);
+        return 1;
     }
 
     /** The Phase 4 backfill verbs. Requires lodStore=full with a live SQLite store

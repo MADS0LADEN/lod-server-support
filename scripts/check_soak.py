@@ -165,6 +165,8 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     "lodStoreMemoryMB",
     # LOD-store periodic freshness re-sweep (Paper's stale bound; 0 = off).
     "lodStoreResweepSeconds",
+    # LOD-store on-disk size cap (Phase 5 eviction).
+    "lodStoreMaxMB",
 })
 # X-ray masking tri-state ("auto"/"on"/"off"), the LOD-store switch ("off"/"memory"/
 # "full" — scenarios A/B store gates against it), + hidden-block id list — the only
