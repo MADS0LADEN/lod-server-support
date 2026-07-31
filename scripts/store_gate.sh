@@ -42,9 +42,15 @@ stage_config() { # <lodStore-value>
     # coverage reads as store misses and the gate measures frontier progression, not
     # warm serving (diagnosed live 2026-07-31: 256-distance 60 s cycles red-ded metric 1
     # at 0.87-0.95 with the ratio CLIMBING per rep as the page cache warmed cycle A).
+    # The disc must ALSO be large enough to dilute the constant spawn-annulus artifact:
+    # columns disk-served before vanilla finishes loading them get re-saved at cycle-A
+    # shutdown and conservatively swept (deterministic ~240-500 rows depending on how
+    # fast cycle A wins that race) — at distance 64 that constant was 2.2-3% of the disc
+    # and grazed the 2% disk.submitted ceiling; at 96 (~37k cols, still inside the ~45k
+    # base world) it is ~1%. Pass duration >= 120 for warm so cycle A converges.
     # cold mode keeps the huge disc: sustained-throughput measurement wants no idle tail.
     local distance=256
-    [[ "$MODE" == "warm" ]] && distance=64
+    [[ "$MODE" == "warm" ]] && distance=96
     cat > "$SRV_CFG_DIR/lss-server-config.json" <<EOF
 {
   "enabled": true,

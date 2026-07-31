@@ -40,7 +40,7 @@
     {
       "anchor": 1,
       "at": 70,
-      "cmd": "setblock 328 -60 8 minecraft:glowstone"
+      "cmd": "setblock 328 -64 8 minecraft:stone"
     },
     {
       "anchor": 1,

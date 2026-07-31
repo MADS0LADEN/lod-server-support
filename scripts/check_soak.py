@@ -1958,6 +1958,20 @@ def check_paper_store_unfired_event(ctx):
         yield Violation("paper-store-unfired-event", "server series",
                         "need server snapshots on both sides of the action", {})
         return
+    # Premise guard: the edit must be INVISIBLE to the event-driven dirty pipeline —
+    # that is what makes the resweep the only healer. A neighbor-reaction event firing
+    # on the setblock (seen live: glowstone tripping a configured event racily) marks
+    # the column dirty, the broadcast re-serves it fresh BEFORE the action, and the
+    # pre/final hash comparison then measures the DIRTY pipeline, not the staleness
+    # bound. That run is a premise failure, not a store verdict either way.
+    if get_path(srv_pre, "dirty.marked_total") != 0:
+        yield Violation("paper-store-unfired-event", "premise",
+                        "the edit fired a configured Bukkit event (dirty.marked_total "
+                        "moved before the action) — the scenario measured the dirty "
+                        "pipeline, not the unfired-event staleness bound; use an inert "
+                        "edit (in-ground bedrock replace)",
+                        {"dirty.marked_total": get_path(srv_pre, "dirty.marked_total")})
+        return
     if get_path(srv_final, "store.sweep_drops") < 1:
         yield Violation("paper-store-unfired-event", "resweep",
                         "store.sweep_drops never moved — the periodic resweep did not "
@@ -3546,6 +3560,11 @@ def selftest():
          "paper-store-unfired-event")
     hits("paper-store-unfired-event action never fired",
          list(check_paper_store_unfired_event(psu_ctx(actions=[]))),
+         "paper-store-unfired-event")
+    premise_ctx = psu_ctx()
+    premise_ctx.server_snaps[0]["dirty"]["marked_total"] = 1
+    hits("paper-store-unfired-event premise broke (edit fired an event)",
+         list(check_paper_store_unfired_event(premise_ctx)),
          "paper-store-unfired-event")
 
     # --- dirty-range-filter: drain visible, client silent, follow-up live ---
