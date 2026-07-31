@@ -2066,32 +2066,49 @@ def check_store_save_storm(ctx):
     drops = get_path(srv_final, "store.deposit_drops")
     if drops:
         yield Violation("store-save-storm", "whole run",
-                        "save-hook deposits were shed under the storm — the filter is "
-                        "not suppressing re-saves or the queue is under-sized",
-                        {"store.deposit_drops": drops})
+                        "save-hook deposits were shed", {"store.deposit_drops": drops})
     errors = get_path(srv_final, "store.errors")
     if errors:
         yield Violation("store-save-storm", "whole run",
                         "contained store failures fired", {"store.errors": errors})
+    # HOOK-ALIVE margin (methodology-review recalibration: this is AMBIENT evidence,
+    # not storm evidence — the margin accrues from world-load saves during backfill;
+    # the storm itself is almost fully SUPPRESSED, which the next prong pins). Deposits
+    # only come from the delivery path (~= misses) and the hook; store hits never
+    # re-deposit, probe serves never deposit — so margin > 0 means the hook fired.
     margin = get_path(srv_final, "store.deposits") - get_path(srv_final, "store.misses")
     if margin < 300:
         yield Violation("store-save-storm", "whole run",
                         "deposits barely exceed serve-path misses — the save-hook "
-                        "deposit path did not fire (Phase 2 shape: deposits ~= misses; "
-                        "the hook adds the loaded set's first observations on top)",
+                        "deposit path did not fire (Phase 2 shape: deposits ~= misses)",
                         {"deposits - misses": margin, "expected": ">= 300"})
+    # STORM-SUPPRESSION pin: the 10x save-all storm re-saves the loaded set every 5 s;
+    # the filter must absorb those as suppressed re-saves (this is the pressure that
+    # makes deposit_drops==0 above non-vacuous — without it, zero drops over a handful
+    # of enqueues proves nothing about the path under load).
+    suppressed = get_path(srv_final, "dirty.suppressed_total")         - get_path(ctx.server_snaps[0], "dirty.suppressed_total")
+    if suppressed < 1000:
+        yield Violation("store-save-storm", "storm window",
+                        "the save storm did not pressure the filter — too few "
+                        "suppressed re-saves (storm dead or filter not suppressing)",
+                        {"dirty.suppressed_total delta": suppressed, "expected": ">= 1000"})
     hits_delta = get_path(srv_final, "store.hits") - get_path(srv_pre, "store.hits")
     if hits_delta < 800:
         yield Violation("store-save-storm", "re-serve leg",
                         "the post-clearcache wave was not served from the store",
                         {"expected": ">= 800", "actual": hits_delta})
     disk_delta = get_path(srv_final, "disk.submitted") - get_path(srv_pre, "disk.submitted")
-    ceiling = max(250, int(0.25 * d_recv))
-    if disk_delta > ceiling:
+    if disk_delta != 0:
+        # ZERO, not a ceiling (methodology review: a 25% ceiling let the delete+re-read
+        # corner pass — a broken deposit path whose fail-open DELETE removed the edited
+        # row would serve fresh bytes via ONE NBT re-read and clear any loose ceiling).
+        # With a hook-maintained store every post-clearcache ask is a store hit or a
+        # probe serve; a single disk read here means some row the hook owned is gone.
         yield Violation("store-save-storm", "re-serve leg",
-                        "the re-serve leg re-read region files — save-hook deposits "
-                        "did not keep the store fresh through the storm",
-                        {"disk.submitted delta": disk_delta, "ceiling": ceiling})
+                        "the re-serve leg read region files — a hook-maintained store "
+                        "must serve the whole re-declared disc without a single NBT "
+                        "re-read (a nonzero delta is the delete+re-read escape)",
+                        {"disk.submitted delta": disk_delta, "expected": 0})
     # Probe story: earliest hash = pre-edit; srv_pre = after the edit's dirty re-serve;
     # final = the post-clearcache store serve.
     edited_first = None
@@ -3702,7 +3719,7 @@ def selftest():
     # --- store-save-storm: save-hook deposits under an autosave storm ---
     def sst_ctx(edited_pre=555, edited_final=555, deposits=2600, misses=2100,
                 drops=0, errors=0, hits_final=2100, disk_final=2150,
-                control_final=222, actions=None):
+                control_final=222, suppressed=4200, actions=None):
         srv_first = _srv(20_000, over={"store.deposits": 2000, "store.misses": 2000,
                                        "store.hits": 0, "disk.submitted": 2000})
         srv_first["probe_hashes"] = {"20:0": 111, "-20:0": 222}
@@ -3714,6 +3731,7 @@ def selftest():
                                       "store.hits": hits_final,
                                       "store.deposit_drops": drops,
                                       "store.errors": errors,
+                                      "dirty.suppressed_total": suppressed,
                                       "disk.submitted": disk_final})
         srv_fin["probe_hashes"] = {"20:0": edited_final, "-20:0": control_final}
         return _ctx(
@@ -3724,7 +3742,8 @@ def selftest():
                 {"event": "action", "wallMs": 130_000, "action": "clearcache",
                  "atSeconds": 130}]},
             quiescent_server={2})
-    clean("store-save-storm clean save-hook pass", list(check_store_save_storm(sst_ctx())))
+    clean("store-save-storm clean save-hook pass",
+          list(check_store_save_storm(sst_ctx(disk_final=2050))))
     hits("store-save-storm deposits shed under storm",
          list(check_store_save_storm(sst_ctx(drops=7))), "store-save-storm")
     hits("store-save-storm save-hook path never fired (deposits ~= misses)",
@@ -3736,8 +3755,17 @@ def selftest():
          list(check_store_save_storm(sst_ctx(edited_final=999))), "store-save-storm")
     hits("store-save-storm control drifted",
          list(check_store_save_storm(sst_ctx(control_final=888))), "store-save-storm")
-    hits("store-save-storm re-serve leg re-read regions",
-         list(check_store_save_storm(sst_ctx(disk_final=4000))), "store-save-storm")
+    hits("store-save-storm re-serve leg re-read regions (delete+re-read escape)",
+         list(check_store_save_storm(sst_ctx(disk_final=2051))), "store-save-storm")
+    hits("store-save-storm storm never pressured the filter",
+         list(check_store_save_storm(sst_ctx(disk_final=2050, suppressed=40))),
+         "store-save-storm")
+    hits("store-save-storm store did not serve the wave",
+         list(check_store_save_storm(sst_ctx(disk_final=2050, hits_final=100))),
+         "store-save-storm")
+    hits("store-save-storm action never fired",
+         list(check_store_save_storm(sst_ctx(disk_final=2050, actions=[]))),
+         "store-save-storm")
     hits("store-save-storm store errors",
          list(check_store_save_storm(sst_ctx(errors=1))), "store-save-storm")
 

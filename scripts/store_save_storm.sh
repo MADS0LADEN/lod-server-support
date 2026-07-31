@@ -12,7 +12,11 @@ set -euo pipefail
 # both arms 49.97) — kept only as a cadence-hold overload guard, never the pairing.
 #
 # Usage: ./scripts/store_save_storm.sh
-# CPU bound: on - off <= max(1.0 CPU-s, 25% of off) over the storm window.
+# CPU bound: on - off <= max(1.0 CPU-s, 25% of off) over the save-all-derived storm
+# window. Honesty note (review): this is a gross-regression smoke bound on an n=1
+# pair whose observed noise is ~0.5 s — it catches a hook doing real per-save tick
+# work, not sub-noise drift; the per-column truth lives in the named check's
+# zero-read re-serve leg + suppression pin.
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RESULTS_ROOT="$PROJECT_ROOT/soak-results"
@@ -41,29 +45,42 @@ log "paired storm-window verdict (process CPU + cadence hold)"
 python3 - "$ON_DIR" "$OFF_DIR" <<'VERDICT'
 import json, statistics, sys
 
-def storm_rows(d):
-    rows = [json.loads(l) for l in open(d + "/server.jsonl", encoding="utf-8")
-            if '"snapshot"' in l]
-    return rows, rows[0]["wallMs"]
+def rows_of(d, kind):
+    return [json.loads(l) for l in open(d + "/server.jsonl", encoding="utf-8")
+            if f'"{kind}"' in l]
+
+def storm_window_ms(d):
+    # The storm window is derived from the ACTUAL save-all command rows (join-anchored
+    # timelines drift vs the first snapshot by the join latency — the review found the
+    # old snapshot-anchored window shifted ~15 s and could miss the storm entirely on
+    # a slow join). Bounds: 5 s before the first save-all to 10 s after the last (the
+    # batcher drain tail).
+    saves = [r["wallMs"] for r in rows_of(d, "command")
+             if r.get("cmd", "").startswith("save-all")]
+    if len(saves) < 8:
+        print(f"[save-storm] FAIL: only {len(saves)} save-all command rows in {d} — "
+              "the storm did not run as scripted")
+        sys.exit(1)
+    return min(saves) - 5_000, max(saves) + 10_000
 
 def cadence(d):
-    rows, t0 = storm_rows(d)
-    vals = [r["mspt_avg_window"] for r in rows
-            if 60_000 <= r["wallMs"] - t0 <= 115_000
+    w_lo, w_hi = storm_window_ms(d)
+    vals = [r["mspt_avg_window"] for r in rows_of(d, "snapshot")
+            if w_lo <= r["wallMs"] <= w_hi
             and isinstance(r.get("mspt_avg_window"), (int, float))
             and r["mspt_avg_window"] >= 0]
     return statistics.mean(vals) if len(vals) >= 5 else None
 
 def storm_cpu_seconds(d):
-    # Process-CPU jiffies over the storm wall window from the attached proc sampler.
-    # mspt_avg_window measures tick INTERVAL (pegged at ~50 ms below saturation —
-    # measured 49.97 on both arms), so it cannot see sub-cadence work; CPU is the real
-    # pairing measure and MSPT stays only as a cadence-hold (overload) guard.
+    # Process-CPU jiffies over the save-all-derived storm window from the attached proc
+    # sampler. mspt_avg_window measures tick INTERVAL (pegged at ~50 ms below
+    # saturation — measured 49.97 on both arms), so it cannot see sub-cadence work; CPU
+    # is the real pairing measure and MSPT stays only as a cadence-hold (overload)
+    # guard.
     rows = [json.loads(l) for l in open(d + "/cpu.jsonl", encoding="utf-8") if l.strip()]
     rows = [r for r in rows if isinstance(r.get("srv_cpu"), (int, float))]
-    _, t0 = storm_rows(d)
-    w_lo, w_hi = (t0 + 60_000) / 1000.0, (t0 + 115_000) / 1000.0
-    window = [r for r in rows if w_lo <= r["t"] <= w_hi]
+    w_lo, w_hi = storm_window_ms(d)
+    window = [r for r in rows if w_lo / 1000.0 <= r["t"] <= w_hi / 1000.0]
     if len(window) < 10:
         print(f"[save-storm] FAIL: only {len(window)} CPU samples in the storm window of {d}")
         sys.exit(1)
