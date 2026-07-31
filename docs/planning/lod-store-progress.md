@@ -892,3 +892,19 @@ sub-200 ms flicker visible to the quiescence predicate). Fixed to the documented
 SERVER_DRAINS contract: the gauge is DRAIN-SIDE only (batcher stamps after every
 pass; sustained backlogs still show); the integrity-purge test now polls the DB
 instead of the gauge. Scenario green on re-run. Paper burn-in RUNNING.
+
+**Paper burn-in: 5/5 GREEN** (fresh-backfill, warm-rejoin, dimension-trip,
+paper-dirty-falling-block, paper-store-unfired-event — all under lodStore=full).
+**Kill -9 leg: PASS** — SIGKILL mid-backfill (29,092 rows + 31/64 done-marks
+committed); restart opened WITHOUT drop-and-rebuild, the boot sweep examined 32
+changed regions and dropped 0 rows (WAL recovery + freshness both intact), and the
+backfill resumed at exactly 64−31=33 regions. The ≤-one-txn-tail loss bound held
+with zero visible loss.
+
+## PLAN COMPLETE — every phase implemented, gated, and 2-subagent-reviewed.
+Open items for the USER at this boundary: (a) §0 metric-2-as-written verdict (62.2%
+whole-band cut vs the plan's 70% — accept-with-record recommended; the checker prints
+the honest verdict every warm-gate run); (b) multi-player unfired-event + Paper
+backfill parity + the 7.6-vs-5.3 KB/col explanation remain as future work (recorded);
+(c) release-notes draft at docs/planning/lod-store-release-notes-draft.md; (d) branch
+feat/lod-store is NOT to be released without a fresh pre-flight (CLAUDE.md updated).
