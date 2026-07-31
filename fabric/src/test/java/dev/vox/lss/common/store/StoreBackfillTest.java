@@ -153,6 +153,27 @@ class StoreBackfillTest {
         store.shutdown();
     }
 
+    /** Review MAJOR: a region with read errors must NOT be done-marked — transient IO
+     *  trouble would otherwise become a permanent warm-hole resumability never
+     *  revisits. The unmarked region re-walks (cheaply, via hasRow) next run. */
+    @Test
+    void regionWithReadErrorsIsNotMarkedDone() throws Exception {
+        writeRegion(0, 0, 1, 2);
+        SqliteLodStore store = openStore();
+        var bf = backfill(store, (dim, cx, cz) -> {
+            if (cx == 1) throw new IllegalStateException("io storm");
+            return new byte[]{1};
+        }, new AtomicBoolean(true), new AtomicBoolean(true));
+        bf.start();
+        awaitDone(bf);
+        Thread.sleep(300); // let any (wrong) mark drain through the batcher
+        assertTrue(!store.isBackfillRegionDone(OW, 0, 0),
+                "an errored region must stay unmarked for the next walk");
+        assertTrue(store.diagnostics().getErrors() >= 1,
+                "backfill read failures must count store.errors (operator visibility)");
+        store.shutdown();
+    }
+
     @Test
     void startIsIdempotentWhileRunning() throws Exception {
         writeRegion(0, 0, 1);

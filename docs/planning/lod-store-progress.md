@@ -781,18 +781,52 @@ resumability evidence; (5) Paper wiring parity decision (defer to Phase 5 if the
 review agrees — the Paper service lacks the sync-read seam); then the 2-subagent
 Phase 4 review (task #11).
 
-**Phase 4 gate (warm-join run, 2026-07-31 02:3x): PASS.**
-- Rate-under-load: cycle A backfill_reads 14,796 over ~149 s ≈ 99 col/s — pinned AT
-  the 100 col/s cap WITH the client actively pulling its own disc (the cap, not
-  contention, was binding — the trickle-not-burst intent). disk_reader.errors = 0 in
-  BOTH cycles (the A7/constrained-box pin), store.errors 0.
-- Mid-run-kill resumability LIVE: cycle A ended mid-walk (~11 regions done-marked of
-  ~48; 14,444 backfill + 13,846 serve deposits applied); cycle B enumerated "37
-  region(s) to process" (wholesale-skipped the done ones), column-skipped 3,323 of A's
-  partial coverage, and continued at cap (14,900 reads). The boot sweep between the
-  cycles dropped only 5 conservative rows — A's coverage survived the restart.
-- DB growth curve: 210.8 MB (A end) → 292.0 MB (B end) for ~54k rows ≈ 5.4 KB/col,
-  matching Phase 0's 5.3 KB/col corpus measurement.
-- Deviation for the review: Paper backfill wiring deferred (the Paper service lacks
-  the sync-read seam); traversal anchor is world origin (the 26.2 spawn accessor
-  moved; seam kept). Both flagged for the Phase 4 review round.
+**Phase 4 gate (warm-join run, 2026-07-31 02:3x) — CORRECTED RECORD (the first
+version of this paragraph was written from memory, not recomputed; the methodology
+review caught every number — recomputed from the artifacts below):**
+- Throughput: cycle A backfill_reads 14,796 / ~149 s ≈ 99 col/s, cycle B 14,900 —
+  pinned AT the 100 col/s cap with the client actively pulling its own disc.
+  HONESTY: cap-pinned throughput proves the cap binds, NOT that the restraint gates
+  work under pressure (superflat MSPT ≪ 45 ms and a ~3%-utilized pool meant they
+  provably COULD NOT fire); the restraint evidence is the constrained run below +
+  the pause counter added to statusLine this round.
+- disk_reader.errors = 0 both cycles — on a box that was HEALTHY that night (2.9 ms
+  reads, 22% busy), NOT the plan's "constrained box"; backfill read failures were
+  also invisible to every counter at the time (fixed this round: they count
+  store.errors + always-printed summary). The constrained-box leg rides to Phase 5
+  burn-in.
+- Resumability (RESTART, not kill): cycle A enumerated 64 regions, done-marked 27;
+  cycle B enumerated 37 (= 64 − 27, wholesale skip ✓), the DB held 44 done marks
+  after B; B's "3,323 skips" decompose as ~3,178 null-read skips (unservable/proto
+  chunks, double-counted reads+skips) + ≤145 genuine row-exists skips. The boot
+  sweep dropped 5 rows. Both cycle ends were GRACEFUL shutdowns — abrupt-kill
+  (kill -9) survival of the batched done-marks is bounded-by-design (≤ one 64-op
+  txn tail lost; unmarked regions re-walk idempotently via hasRow) but UNDEMONSTRATED;
+  the kill -9 leg rides to Phase 5 burn-in.
+- DB size: two ENDPOINTS (not a curve): 210.8 MB → 292.0 MB; actual rows 38,268 →
+  ≈ 7.6 KB/col — does NOT match Phase 0's 5.3 KB/col corpus figure (candidates: page
+  slack/WAL/freelist; Phase 5's vacuum work must explain or close the gap; a real
+  growth SERIES should come from the burn-in's snapshot cadence).
+- Deviations (review-endorsed as sound): Paper backfill wiring deferred (plan says
+  "parity if cheap"; exporters already emit inert-zero counters); origin-anchored
+  traversal (order-only; seam kept).
+
+
+### Phase 4 review round (2 subagents, 2026-07-31) — findings + dispositions
+
+Engine (2 MAJOR, 5 MINOR) / methodology (5 MAJOR, 3 MINOR; three gate legs judged
+UNSOUND-as-stated). All engine items fixed same-round: the driver now awaits the
+startup sweep and aborts when the store goes unhealthy/latched (it could previously
+walk a whole world depositing into a latched no-op store while claiming progress);
+done-marks are withheld from regions with read errors OR shed deposits (transient IO
+trouble no longer becomes a permanent warm-hole; pinned by
+regionWithReadErrorsIsNotMarkedDone); the skip rung uses the new cheap
+SqliteLodStore.hasRow (no blob+decompress+hash per skip) and BOTH restraint gates +
+the rate cap now cover every visited column; backfill read failures count
+store.errors; the exit summary prints on every path incl. interrupt; pauses are
+counted into statusLine. Methodology items: the gate record was rewritten from the
+artifacts (above); the kill -9 and constrained-box legs are explicitly deferred to
+Phase 5 burn-in with the design-bound stated; a constrained-restraint evidence run
+(diskReaderThreads=1) is recorded below. Remaining accepted residue: "rate-under-load"
+is cap-bound evidence only; hasRow visits are paced at the same cap as reads (warm
+re-walks are slow-but-gentle — a deliberate trade).

@@ -435,6 +435,39 @@ public final class SqliteLodStore implements LodStoreService {
         return this.diag;
     }
 
+    /** Store health for long-running background users (the backfill driver): serving
+     *  (startup sweep done) and not latched off. A latched store silently no-ops every
+     *  write — a driver that keeps walking would burn IO for nothing and claim
+     *  progress (review MAJOR). */
+    public boolean isHealthy() {
+        return this.serving && !this.latchedOff;
+    }
+
+    /** Row-existence check WITHOUT the blob fetch + decompress + integrity hash a full
+     *  get() pays — the backfill's skip rung (review finding: a warm region walk was
+     *  1024 back-to-back full-row reads). Tombstones honored like get(). */
+    public boolean hasRow(String dimension, long packed) {
+        if (!this.serving || this.latchedOff) return false;
+        var tombs = this.tombstones.get(dimension);
+        if (tombs != null && tombs.containsKey(packed)) return false;
+        Integer dimId = this.dimIdsShared.get(dimension);
+        if (dimId == null) return false;
+        try {
+            Connection c = readerConnection();
+            if (c == null) return false;
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT 1 FROM lods_" + dimId + " WHERE pos=?")) {
+                ps.setLong(1, packed);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next();
+                }
+            }
+        } catch (Throwable t) {
+            this.diag.recordError();
+            return false;
+        }
+    }
+
     /** Backfill progress (Phase 4): mark a region fully processed (batcher-written,
      *  dropped with the DB — derived data). */
     public void markBackfillRegionDone(String dimension, int rx, int rz) {

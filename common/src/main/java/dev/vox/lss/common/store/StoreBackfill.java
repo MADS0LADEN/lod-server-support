@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
@@ -128,49 +129,74 @@ public final class StoreBackfill {
     private record RegionRef(String dim, int rx, int rz, Path mca, int chebFromSpawn) {}
 
     private void run() {
-        long deposited = 0, skipped = 0, errors = 0, regionsDone = 0;
+        long deposited = 0, skipped = 0, errors = 0, regionsDone = 0, pauses = 0;
         try {
+            // The store serves nothing until its startup sweep completes, and get()/
+            // hasRow() read as misses in that window — starting the walk early would
+            // re-read and re-deposit everything already present (review MAJOR: the
+            // config auto-start races the sweep).
+            if (!this.store.awaitSweep(TimeUnit.MINUTES.toMillis(5))) {
+                this.statusLine = "failed: store sweep never completed";
+                return;
+            }
             List<RegionRef> plan = enumerate();
             LSSLogger.info("Store backfill: " + plan.size() + " region(s) to process");
             long windowStartNanos = System.nanoTime();
             int windowCols = 0;
             for (RegionRef region : plan) {
                 if (this.stopRequested.get()) break;
+                if (!this.store.isHealthy()) {
+                    // A latched store no-ops every write while counters would keep
+                    // claiming progress — burning a world's worth of IO for nothing.
+                    this.statusLine = "aborted: store unhealthy (latched off?)";
+                    LSSLogger.warn("Store backfill aborted — store no longer healthy");
+                    return;
+                }
                 int[] present = presentChunks(region.mca());
                 if (present == null) continue; // unreadable header: skip, sweep owns it
+                long regionErrors = 0;
+                long dropsBefore = this.store.diagnostics().getDepositDrops();
                 for (int idx = 0; idx < 1024; idx++) {
                     if (this.stopRequested.get()) break;
                     if (present[idx] == 0) continue;
+                    // Restraint + rate cap cover EVERY visited column — the skip rung
+                    // included (review: a warm region walk was 1024 unpaced full-row
+                    // reads; hasRow is the cheap existence probe, but even it is paced).
+                    pauses += pauseWhileRestrained();
+                    if (this.stopRequested.get()) break;
                     int cx = (region.rx() << 5) + (idx & 31);
                     int cz = (region.rz() << 5) + (idx >> 5);
                     long packed = PositionUtil.packPosition(cx, cz);
-                    if (this.store.get(region.dim(), packed) != null) {
+                    if (this.store.hasRow(region.dim(), packed)) {
                         skipped++;
                         this.store.diagnostics().recordBackfillSkip();
-                        continue;
-                    }
-                    pauseWhileRestrained();
-                    if (this.stopRequested.get()) break;
-                    try {
-                        byte[] bytes = this.columnReader.read(region.dim(), cx, cz);
-                        this.store.diagnostics().recordBackfillRead();
-                        if (bytes != null) {
-                            this.store.deposit(region.dim(), packed, bytes,
-                                    System.currentTimeMillis() / 1000L);
-                            deposited++;
-                            this.store.diagnostics().recordBackfillDeposit();
-                        } else {
-                            skipped++;
-                            this.store.diagnostics().recordBackfillSkip();
+                    } else {
+                        try {
+                            byte[] bytes = this.columnReader.read(region.dim(), cx, cz);
+                            this.store.diagnostics().recordBackfillRead();
+                            if (bytes != null) {
+                                this.store.deposit(region.dim(), packed, bytes,
+                                        System.currentTimeMillis() / 1000L);
+                                deposited++;
+                                this.store.diagnostics().recordBackfillDeposit();
+                            } else {
+                                skipped++;
+                                this.store.diagnostics().recordBackfillSkip();
+                            }
+                        } catch (Exception e) {
+                            errors++;
+                            regionErrors++;
+                            // Visible to operators: backfill failures count store.errors
+                            // (review: the exact A7 failure mode this feature re-enters
+                            // was invisible to every exporter).
+                            this.store.diagnostics().recordError();
+                            if (errors <= 3) {
+                                LSSLogger.warn("Store backfill: read failed at " + region.dim()
+                                        + " [" + cx + "," + cz + "] — skipping", e);
+                            }
                         }
-                    } catch (Exception e) {
-                        errors++;
-                        if (errors <= 3) {
-                            LSSLogger.warn("Store backfill: read failed at " + region.dim()
-                                    + " [" + cx + "," + cz + "] — skipping", e);
-                        }
                     }
-                    // Rate cap: MAX_COLUMNS_PER_SECOND averaged over 1 s windows.
+                    // Rate cap: MAX_COLUMNS_PER_SECOND visited columns per 1 s window.
                     windowCols++;
                     if (windowCols >= MAX_COLUMNS_PER_SECOND) {
                         long elapsed = System.nanoTime() - windowStartNanos;
@@ -180,23 +206,34 @@ public final class StoreBackfill {
                         windowCols = 0;
                     }
                     this.statusLine = "running: " + regionsDone + " regions done, "
-                            + deposited + " deposited, " + skipped + " skipped";
+                            + deposited + " deposited, " + skipped + " skipped, "
+                            + errors + " errors, " + pauses + " pauses";
                 }
-                if (!this.stopRequested.get()) {
+                // Done-mark ONLY a cleanly processed region: errors or shed deposits
+                // would otherwise turn transient IO trouble into permanent warm-holes
+                // that resumability never revisits (review MAJOR). An unmarked region
+                // re-walks cheaply (hasRow skips).
+                boolean depositsShed =
+                        this.store.diagnostics().getDepositDrops() > dropsBefore;
+                if (!this.stopRequested.get() && regionErrors == 0 && !depositsShed) {
                     this.store.markBackfillRegionDone(region.dim(), region.rx(), region.rz());
                     regionsDone++;
                 }
             }
             this.statusLine = (this.stopRequested.get() ? "stopped: " : "complete: ")
                     + regionsDone + " regions, " + deposited + " deposited, "
-                    + skipped + " skipped, " + errors + " errors";
-            LSSLogger.info("Store backfill " + this.statusLine);
+                    + skipped + " skipped, " + errors + " errors, " + pauses + " pauses";
         } catch (InterruptedException e) {
-            this.statusLine = "stopped (shutdown)";
+            this.statusLine = "stopped (shutdown): " + regionsDone + " regions, "
+                    + deposited + " deposited, " + skipped + " skipped, "
+                    + errors + " errors";
         } catch (Throwable t) {
             this.statusLine = "failed: " + t;
             LSSLogger.warn("Store backfill aborted", t);
         } finally {
+            // The summary must print on EVERY exit path (the interrupt path used to
+            // swallow it, so the one line carrying the error count never appeared).
+            LSSLogger.info("Store backfill " + this.statusLine);
             this.running.set(false);
         }
     }
@@ -260,11 +297,16 @@ public final class StoreBackfill {
         }
     }
 
-    private void pauseWhileRestrained() throws InterruptedException {
+    /** Returns the number of pause intervals slept (observability: the status line and
+     *  gate evidence need to show restraint actually FIRING, not just existing). */
+    private long pauseWhileRestrained() throws InterruptedException {
+        long pauses = 0;
         while (!this.stopRequested.get()
                 && (!this.readerHeadroom.getAsBoolean() || !this.tickHealthy.getAsBoolean())) {
             this.statusLine = "paused (yielding to players/tick)";
             Thread.sleep(PAUSE_POLL_MILLIS);
+            pauses++;
         }
+        return pauses;
     }
 }
