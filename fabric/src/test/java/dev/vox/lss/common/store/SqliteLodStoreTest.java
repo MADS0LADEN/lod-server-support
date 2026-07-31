@@ -302,8 +302,15 @@ class SqliteLodStoreTest {
         }
         assertNull(store.get(OW, p), "an integrity failure must read as a miss");
         assertTrue(store.diagnostics().getErrors() >= 1, "…and count store.errors");
-        awaitGone(store, OW, p);
-        assertEquals(0, sqlRowCount(OW), "the poisoned row must be purged so it cannot re-fail");
+        // Poll the DB truth, not the queue gauge: store.queue is drain-side (a queued
+        // purge is invisible until the batcher stamps the next pass).
+        long rows = -1;
+        for (int i = 0; i < 400; i++) {
+            rows = sqlRowCount(OW);
+            if (rows == 0) break;
+            Thread.sleep(25);
+        }
+        assertEquals(0, rows, "the poisoned row must be purged so it cannot re-fail");
         store.shutdown();
     }
 
