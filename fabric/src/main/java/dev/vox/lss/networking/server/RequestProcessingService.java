@@ -162,12 +162,6 @@ public class RequestProcessingService {
             } else {
                 this.diskReader.attachStore(this.lodStore);
                 this.offThreadProcessor.attachStore(this.lodStore);
-                // Fabric is save-hook-authoritative for store freshness (Phase 3):
-                // onChunkSaveData deposits the fresh bytes with every content-changing
-                // save, so the dirty->store invalidation fan-out would only tombstone
-                // those fresh rows (Paper keeps the fan-out — its event marks carry no
-                // bytes).
-                this.offThreadProcessor.setStoreDirtyInvalidation(false);
             }
         } else {
             this.lodStore = null;

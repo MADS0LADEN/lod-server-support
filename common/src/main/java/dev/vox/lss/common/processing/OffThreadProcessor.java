@@ -88,20 +88,15 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     // start(). The processor owns the DELIVERY-PATH side of the store contract: deposits
     // AFTER the stale guard, the invalidation fan-out, and the ghost-guard delete.
     private volatile dev.vox.lss.common.store.LodStoreService store;
-    // Whether dirty-mark invalidations fan into the LOD store. TRUE on Paper (its
-    // event-driven dirty marks carry no fresh bytes — the invalidation is what keeps
-    // the store honest until the resweep). FALSE on Fabric once save-hook deposits are
-    // active (Phase 3): there every dirty mark comes from the save hook, which deposits
-    // the fresh bytes in the same call — invalidating afterwards would tombstone the
-    // just-deposited row and evict the edit it carries. Timestamp-cache invalidation
-    // is NOT gated by this (stamp semantics are independent of the store).
-    private volatile boolean storeDirtyInvalidation = true;
-
-    /** See {@link #storeDirtyInvalidation}. Set by the Fabric service when save-hook
-     *  deposits own store freshness. */
-    public final void setStoreDirtyInvalidation(boolean enabled) {
-        this.storeDirtyInvalidation = enabled;
-    }
+    // NOTE (Phase 3 review): the dirty->store invalidation fan-out stays ON on BOTH
+    // platforms, deliberately. A Fabric gating experiment (save-hook deposits carry the
+    // fresh bytes, so the later drain invalidation looked redundant) opened two real
+    // holes: a stale in-flight disk read completing after the edit's save could
+    // overwrite the hook's fresh row with ts >= save-ts AND a src_stamp the boot sweep
+    // can never catch, and a hook deposit shed at queue capacity stranded the stale row
+    // for the whole session. The fan-out heals both (the edit's drain tombstones the
+    // row; the next serve re-reads the SAVED region). Cost: one NBT re-read per edited
+    // column per session — the hook's warmth still covers everything not just edited.
     private final Path dataDir;
     private int evictionCounter;
     private int saveCounter;
@@ -430,7 +425,7 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                 // across the restart. The store fan-out rides along: moot for the memory
                 // tier, load-bearing once the Phase 2 disk store persists rows.
                 for (var inv : take.invalidations()) {
-                    if (this.store != null && this.storeDirtyInvalidation) {
+                    if (this.store != null) {
                         this.store.invalidate(inv.dimension(), inv.positions());
                     }
                     this.timestampCache.invalidate(inv.dimension(), inv.positions());
@@ -572,9 +567,7 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
         for (var inv : invalidations) {
             // Store fan-out FIRST (plan §1 invalidation fan-out): the store's synchronous
             // removal + tombstone must land before anything can re-read the position.
-            // Gated: on Fabric the save hook deposits the fresh bytes itself (see
-            // storeDirtyInvalidation).
-            if (this.store != null && this.storeDirtyInvalidation) {
+            if (this.store != null) {
                 this.store.invalidate(inv.dimension(), inv.positions());
             }
             int removed = this.timestampCache.invalidate(inv.dimension(), inv.positions());
@@ -674,7 +667,7 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     void flushPendingInvalidationsOnExit() {
         synchronized (this.mailboxLock) {
             for (var inv : this.pendingInvalidations) {
-                if (this.store != null && this.storeDirtyInvalidation) {
+                if (this.store != null) {
                     this.store.invalidate(inv.dimension(), inv.positions());
                 }
                 this.timestampCache.invalidate(inv.dimension(), inv.positions());

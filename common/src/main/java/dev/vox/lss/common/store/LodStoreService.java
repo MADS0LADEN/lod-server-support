@@ -23,15 +23,17 @@ package dev.vox.lss.common.store;
  *     store with pre-edit bytes that then get re-stamped, sealed).</li>
  * </ul>
  *
- * <p>Threading: {@link #get} runs on reader-pool threads; {@link #deposit} enqueues from
- * the processing thread (the write itself happens on the store's own batcher thread);
- * {@link #invalidate}/{@link #delete} are called from the processing thread and must be
- * EFFECTIVE before any subsequent {@code get()} can return the invalidated bytes — the
- * implementation chooses how: the memory tier removes synchronously + tombstones queued
- * deposits (no single-writer constraint); a disk tier may instead close the window with
- * a freshness check on the hit path (the plan §1 ordering paragraph), and must then
- * re-derive the no-stale-hit argument explicitly. Never call anything here from the
- * server thread or a region thread.
+ * <p>Threading: {@link #get} runs on reader-pool threads; {@link #deposit}/{@link
+ * #delete} are MULTI-PRODUCER since Phase 3 — the processing thread (delivery-path
+ * deposits, invalidation fan-out) AND the Fabric save hook, which under C2ME/Moonrise
+ * runs on the main thread or their save threads (the write itself always happens on the
+ * store's own batcher thread; implementations must accept concurrent producers).
+ * {@link #invalidate}/{@link #delete} must be EFFECTIVE before any subsequent
+ * {@code get()} can return the invalidated bytes — the implementation chooses how: the
+ * memory store removes synchronously + tombstones queued deposits (no single-writer
+ * constraint); a disk store may instead close the window with a freshness check on the
+ * hit path (the plan §1 ordering paragraph), and must then re-derive the no-stale-hit
+ * argument explicitly.
  */
 public interface LodStoreService {
 
