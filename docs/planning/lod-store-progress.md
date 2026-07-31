@@ -699,3 +699,37 @@ bridge ×4, fan-out gating ×1.
 - Deviation note: the plan's "SUSPECT/stale-demotion rate stays low" clause is v1
   vocabulary (per-region SUSPECT state) with no v2 analogue — its v2 counterpart is
   deposit_drops=0 + the sweep_drops-at-next-boot economy, both covered.
+
+### Phase 3 review round (2 subagents, 2026-07-31) — findings + dispositions
+
+**Engine agent (2 MAJOR, 2 MINOR):**
+1. MAJOR the Fabric fan-out gating opened a stale-overwrite hole: an in-flight cold
+   read completing after an edit's save deposits PRE-edit bytes with ts >= save-ts and
+   a src_stamp the boot sweep can never catch (poison across restarts). 2. MAJOR a
+   hook deposit shed at queue capacity stranded the pre-edit row all session (the
+   filter baseline advances, so the next identical save deposits nothing).
+   DISPOSITION: **the dirty→store invalidation fan-out is restored ON both platforms**
+   — it is the correctness backstop for both arms (delivery-before-drain healed by the
+   drain tombstone; delivery-after-drain by the staleAgainstEdit deposit gate). Cost
+   accepted: ~one NBT re-read per edited column per session + the session-start
+   first-observation churn (~25 unloaded-subset reads measured). The gating flag,
+   wiring and its test are deleted; LodStoreService's threading javadoc now states the
+   multi-producer reality (MINOR 4). MINOR 3 (CPU window) fixed same-round below.
+**Methodology agent (3 MAJOR, 3 MINOR; mid-gate-rewrite verdict QUESTIONABLE):**
+   The margin measured AMBIENT hook traffic, not the storm; the 25% disk ceiling let
+   the delete+re-read corner escape; the CPU window was snapshot-anchored and missed
+   the join-anchored storm by ~15 s. All fixed: save-all-command-anchored CPU window
+   with a >= 8-row storm-coverage guard; the re-serve leg ceiling is now <= 50 reads
+   (the measured first-observation churn; wholesale still reds); the bound honestly
+   labeled a gross-regression smoke check.
+**The recalibrated checker then RED-DED a fresh run and exposed three wrong premises
+   of mine** (the loop working): vanilla save-all SKIPS unchanged chunks (suppression
+   is unforceable from a timeline — the pin became the marked_total >= 200
+   first-observation wave; suppression stays covered by check_dirty_resave_quiet), the
+   restored fan-out's first-observation churn is the legitimate read source, and the
+   probe byte-identity assertion was invalid under the fan-out (vanilla re-palettizes
+   containers on save — the honest invariant is freshness: final != pre-edit bytes).
+**Final complete pair (061101Z re-judged + 062~Z off arm): PASS** — marked wave
+   present, churn 25 <= 50, freshness held, laws green both arms, storm-window process
+   CPU off 5.33 s -> on 5.33 s (save-all-anchored window), cadence held.
+   **Phase 3 + review CLOSED.**
