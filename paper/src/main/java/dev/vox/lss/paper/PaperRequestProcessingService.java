@@ -312,10 +312,8 @@ public class PaperRequestProcessingService {
             var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
             var regionDirs = new java.util.HashMap<String, java.nio.file.Path>();
             var maskFingerprints = new java.util.HashMap<String, String>();
-            var dimensions = new java.util.ArrayList<String>();
             for (ServerLevel level : server.getAllLevels()) {
                 String dim = level.dimension().identifier().toString();
-                dimensions.add(dim);
                 // Paper 26.x uses the vanilla UNIFIED world layout (one world dir,
                 // dimensions/minecraft/<dim>/region — verified on disk against a live
                 // 26.2 Paper server), so the server worldRoot is the correct
@@ -335,7 +333,7 @@ public class PaperRequestProcessingService {
             var env = new dev.vox.lss.common.store.SqliteLodStore.Environment(
                     worldRoot.resolve("lss-lod"), server.getServerVersion(),
                     LSSConstants.PROTOCOL_VERSION, regionDirs::get, maskFingerprints::get,
-                    dimensions, config.lodStoreResweepSeconds);
+                    config.lodStoreResweepSeconds);
             lodStore = dev.vox.lss.common.store.LodStores.createOrNull(
                     storeMode, config.lodStoreMemoryMB * 1024L * 1024L, env);
             if (lodStore == null) {

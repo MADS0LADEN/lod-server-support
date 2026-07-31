@@ -85,10 +85,12 @@ public final class SqliteLodStore implements LodStoreService {
     private static final byte[] EMPTY = new byte[0];
 
     /** Everything the platform must provide (kept as one bundle so tests can fake it). */
+    // NOTE: no knownDimensions list — the sweep iterates the DIMS TABLE, so every
+    // dimension the store holds rows for gets a freshness pass; a dim the resolver
+    // cannot place fail-safe drops. A caller-frozen list exempted late-created worlds.
     public record Environment(Path storeDir, String mcVersion, int wireVersion,
                               Function<String, Path> regionDirResolver,
                               Function<String, String> maskFingerprintResolver,
-                              List<String> knownDimensions,
                               int resweepSeconds) {}
 
     private sealed interface Op {
@@ -127,10 +129,9 @@ public final class SqliteLodStore implements LodStoreService {
     private volatile boolean serving;
     private final CountDownLatch sweepDone = new CountDownLatch(1);
 
-    // Sweep-drop fan-out: the tiered composition registers the MEMORY tier here, because
-    // a PERIODIC resweep that drops a stale SQLite row must also evict the memory tier's
-    // copy — the front tier answers first, so without this the resweep's staleness bound
-    // (Paper's unfired-event guarantee) silently would not hold for memory-resident rows.
+    // Sweep-drop fan-out: a test/observability seam (fed alongside the store.sweep_drops
+    // counter). Its production consumer was the deleted memory front tier; kept because
+    // any future front cache MUST register here or resweep culls won't reach it.
     private volatile java.util.function.BiConsumer<String, long[]> sweepDropListener;
 
     // The tombstone map (the memory tier's proven protocol, §threading above).
@@ -356,6 +357,7 @@ public final class SqliteLodStore implements LodStoreService {
     private Connection readerConnection() {
         Connection c = this.readerConn.get();
         if (c != null) return c;
+        if (this.shutdown.get()) return null; // closing conns; a new one would leak
         try {
             var ds = new org.sqlite.SQLiteDataSource();
             ds.setUrl("jdbc:sqlite:" + this.dbPath);
@@ -459,6 +461,7 @@ public final class SqliteLodStore implements LodStoreService {
     @Override
     public void shutdown() {
         if (!this.shutdown.compareAndSet(false, true)) return;
+        this.serving = false; // a post-shutdown get() must miss, not race closing conns
         this.batcher.interrupt();
         try {
             this.batcher.join(5000);
@@ -475,7 +478,10 @@ public final class SqliteLodStore implements LodStoreService {
         if (!this.batcher.isAlive()) {
             try {
                 if (this.writer != null) {
-                    recordRegionMtimes(); // shutdown snapshot: spares next boot's sweep
+                    // Deliberately NO mtime snapshot here: seen_mtime is only ever
+                    // written next to an actual header examination (see sweepDimension)
+                    // — a shutdown-time stat would mark unexamined regions as seen and
+                    // let offline edits skip every future sweep.
                     this.writer.commit();
                     checkpointTruncate();
                 }
@@ -491,6 +497,8 @@ public final class SqliteLodStore implements LodStoreService {
     private void batcherLoop() {
         try {
             startupSweep();
+        } catch (InterruptedException e) {
+            // Shutdown mid-sweep: serving simply never turns on — not a failure.
         } catch (Throwable t) {
             latchOff("startup sweep failed", t);
         } finally {
@@ -522,24 +530,40 @@ public final class SqliteLodStore implements LodStoreService {
                     runSweep(false);
                 }
                 maybeRefreshGauges(now);
-                this.writerFailures = 0;
+                // Reset the failure streak only when an op actually applied: idle
+                // iterations are vacuous no-ops and must not launder a broken writer
+                // below the latch under sparse traffic (review finding).
+                if (op != null) this.writerFailures = 0;
             } catch (Throwable t) {
                 this.diag.recordError();
                 try { this.writer.rollback(); this.txnRows = 0; } catch (Throwable ignored) { }
+                // A DELETE must never be lost to a transient failure: its tombstone
+                // expires after TOMBSTONE_TTL_NANOS and the row would resurrect.
+                // Re-queue it — retries are bounded by the failure latch below, and
+                // latchOff() stops serving, so a permanently broken writer can not
+                // serve the undeleted row either.
+                if (op instanceof Op.DeleteRows) this.controlQueue.add(op);
                 if (++this.writerFailures >= WRITE_FAILURE_LATCH) {
                     latchOff("repeated write failures", t);
                 }
             }
             this.diag.setQueueDepth(queueDepth());
         }
-        // Graceful exit: flush queued deletes (never shed — see controlQueue), then the txn.
-        try {
-            Op op;
-            while ((op = this.controlQueue.poll()) != null) {
-                if (op instanceof Op.DeleteRows) apply(op);
+        // Graceful exit: flush queued deletes (never shed — see controlQueue), then the
+        // txn. Containment is PER OP: one failing delete must not abandon the rest
+        // (the boot sweep is the cross-restart backstop for whatever still fails —
+        // an invalidated column's later region save advances its header stamp).
+        Op op;
+        while ((op = this.controlQueue.poll()) != null) {
+            if (op instanceof Op.DeleteRows) {
+                try {
+                    apply(op);
+                } catch (Throwable ignored) {
+                    try { this.writer.rollback(); this.txnRows = 0; } catch (Throwable ignored2) { }
+                }
             }
-            commitTxn();
-        } catch (Throwable ignored) { }
+        }
+        try { commitTxn(); } catch (Throwable ignored) { }
     }
 
     private void latchOff(String why, Throwable t) {
@@ -728,9 +752,20 @@ public final class SqliteLodStore implements LodStoreService {
      * with rows but NO file on disk drops all its rows.
      */
     private void runSweep(boolean startup) throws Exception {
-        for (String dimension : this.env.knownDimensions()) {
-            Integer dimId = this.dimIds.get(dimension);
-            if (dimId == null) continue; // no rows for this dimension yet
+        // Iterate the DIMS TABLE, not a caller-provided list: any dimension the store
+        // has rows for MUST get a freshness pass — a dim deposited at runtime (created
+        // world) but absent from the resolver map resolves null below and fail-safe
+        // drops, never "served but unswept" (review finding: a knownDimensions-frozen
+        // loop silently exempted such dims from every freshness rule).
+        for (var dimEntry : List.copyOf(this.dimIds.entrySet())) {
+            if (this.shutdown.get()) {
+                // Shutdown-abort: leave the sweep INCOMPLETE rather than let the
+                // interrupt turn header reads into ClosedByInterruptException nulls
+                // (which read as unreadable regions and silently drop warm rows).
+                throw new InterruptedException("shutdown during sweep");
+            }
+            String dimension = dimEntry.getKey();
+            int dimId = dimEntry.getValue();
             Path regionDir;
             try {
                 regionDir = this.env.regionDirResolver().apply(dimension);
@@ -768,7 +803,6 @@ public final class SqliteLodStore implements LodStoreService {
             }
             sweepDimension(dimension, dimId, regionDir);
         }
-        recordRegionMtimes();
         this.writer.commit();
     }
 
@@ -804,6 +838,7 @@ public final class SqliteLodStore implements LodStoreService {
         List<Long> droppedPositions = new ArrayList<>();
         int droppedVanished = 0, droppedStale = 0, checkedRegions = 0;
         for (var entry : rowsByRegion.entrySet()) {
+            if (this.shutdown.get()) throw new InterruptedException("shutdown during sweep");
             long rpos = entry.getKey();
             int rx = (int) (rpos >> 32);
             int rz = (int) rpos;
@@ -813,12 +848,20 @@ public final class SqliteLodStore implements LodStoreService {
                 droppedPositions.addAll(entry.getValue());
                 continue;
             }
+            // Capture the mtime BEFORE the header read, and record THAT value as
+            // seen_mtime only after this region's rows were actually judged against
+            // its header. Recording a fresh stat (the old shutdown-time bulk
+            // recordRegionMtimes) marked regions "seen" whose headers were NEVER
+            // examined — a save landing after the last examination was then skipped
+            // by the != compare forever, turning Paper's "save + one sweep" staleness
+            // bound into unbounded cross-restart staleness (review MAJOR).
             long mtime = Files.getLastModifiedTime(mca).toMillis();
             Long seen = seenMtimes.get(rpos);
             if (seen != null && seen == mtime) continue; // unchanged since last sweep
             checkedRegions++;
             int[] headerStamps = readHeaderTimestamps(mca);
             if (headerStamps == null) {
+                if (this.shutdown.get()) throw new InterruptedException("shutdown during sweep");
                 // Unreadable header: fail-safe, drop the region's rows.
                 droppedVanished += deleteRows(dimId, entry.getValue());
                 droppedPositions.addAll(entry.getValue());
@@ -845,6 +888,16 @@ public final class SqliteLodStore implements LodStoreService {
             }
             droppedStale += deleteRows(dimId, stale);
             droppedPositions.addAll(stale);
+            // This region's rows are now judged against the header we read — record
+            // the PRE-read mtime (a save racing the read leaves mtime > recorded, so
+            // the next sweep re-checks; never the reverse).
+            try (PreparedStatement ps = this.writer.prepareStatement(
+                    "INSERT OR REPLACE INTO regions (dim, rpos, seen_mtime) VALUES (?,?,?)")) {
+                ps.setInt(1, dimId);
+                ps.setLong(2, rpos);
+                ps.setLong(3, mtime);
+                ps.executeUpdate();
+            }
         }
         notifySweepDrops(dimension, droppedPositions);
         if (droppedVanished + droppedStale > 0 || checkedRegions > 0) {
@@ -906,45 +959,6 @@ public final class SqliteLodStore implements LodStoreService {
             this.writer.commit();
         }
         return positions;
-    }
-
-    /** Record current region mtimes for every dimension with rows (sweep end + shutdown). */
-    private void recordRegionMtimes() {
-        try (PreparedStatement ps = this.writer.prepareStatement(
-                "INSERT OR REPLACE INTO regions (dim, rpos, seen_mtime) VALUES (?,?,?)")) {
-            for (String dimension : this.env.knownDimensions()) {
-                Integer dimId = this.dimIds.get(dimension);
-                if (dimId == null) continue;
-                Path regionDir;
-                try {
-                    regionDir = this.env.regionDirResolver().apply(dimension);
-                } catch (Throwable t) {
-                    continue;
-                }
-                if (regionDir == null || !Files.isDirectory(regionDir)) continue;
-                try (var stream = Files.list(regionDir)) {
-                    for (Path mca : (Iterable<Path>) stream::iterator) {
-                        String name = mca.getFileName().toString();
-                        if (!name.endsWith(".mca") || !name.startsWith("r.")) continue;
-                        String[] parts = name.split("\\.");
-                        if (parts.length != 4) continue;
-                        long rpos;
-                        try {
-                            rpos = ((long) Integer.parseInt(parts[1]) << 32)
-                                    | (Integer.parseInt(parts[2]) & 0xFFFFFFFFL);
-                        } catch (NumberFormatException e) {
-                            continue;
-                        }
-                        ps.setInt(1, dimId);
-                        ps.setLong(2, rpos);
-                        ps.setLong(3, Files.getLastModifiedTime(mca).toMillis());
-                        ps.executeUpdate();
-                    }
-                }
-            }
-        } catch (Throwable t) {
-            // best-effort: a missed mtime record just means a re-check next sweep
-        }
     }
 
     private static long regionOf(long packedPos) {

@@ -95,8 +95,10 @@ public abstract class ServerConfigBase extends JsonConfig {
      * bound: its dirty detection is event-driven with documented unfired-event gaps
      * (e.g. walk-in generation without ChunkPopulateEvent opted in), so the store
      * re-checks region mtimes/header stamps on this cadence — staleness is bounded by
-     * ≈ one autosave + one sweep. Fabric leaves it 0: the content-hash dirty pipeline
-     * invalidates store rows at runtime, and the startup sweep covers offline edits.
+     * ≈ one autosave + one sweep. PaperConfig overrides the default to 300; the shared
+     * default stays 0 for Fabric, whose content-hash dirty pipeline invalidates store
+     * rows at runtime (a periodic resweep there would only churn-drop rows on
+     * metadata-only re-saves) and whose startup sweep covers offline edits.
      */
     public int lodStoreResweepSeconds = 0;
     /**

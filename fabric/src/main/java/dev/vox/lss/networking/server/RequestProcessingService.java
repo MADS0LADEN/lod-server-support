@@ -139,10 +139,8 @@ public class RequestProcessingService {
             var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
             var regionDirs = new HashMap<String, java.nio.file.Path>();
             var maskFingerprints = new HashMap<String, String>();
-            var dimensions = new ArrayList<String>();
             for (ServerLevel level : server.getAllLevels()) {
                 String dim = level.dimension().identifier().toString();
-                dimensions.add(dim);
                 regionDirs.put(dim, net.minecraft.world.level.dimension.DimensionType
                         .getStorageFolder(level.dimension(), worldRoot)
                         .resolve("region").normalize());
@@ -154,7 +152,7 @@ public class RequestProcessingService {
             var env = new dev.vox.lss.common.store.SqliteLodStore.Environment(
                     worldRoot.resolve("lss-lod"), server.getServerVersion(),
                     LSSConstants.PROTOCOL_VERSION, regionDirs::get, maskFingerprints::get,
-                    dimensions, config.lodStoreResweepSeconds);
+                    config.lodStoreResweepSeconds);
             this.lodStore = dev.vox.lss.common.store.LodStores.createOrNull(
                     storeMode, config.lodStoreMemoryMB * 1024L * 1024L, env);
             if (this.lodStore == null) {

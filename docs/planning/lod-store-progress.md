@@ -595,3 +595,71 @@ the section above):
 - The soak checker is structurally single-server-run (monotonic counters reset), hence
   store_offline_edit.sh = three individually law-checked phases chained by
   SOAK_WORLD_FROM + a wrapper-level cross-phase probe-hash verdict.
+
+### Phase 2 review round (2 subagents, 2026-07-31) — findings + dispositions
+
+**Engine agent (4 MAJOR, 5 MINOR — all fixed same-round):**
+1. MAJOR `recordRegionMtimes` recorded fresh mtimes at sweep-end AND shutdown for
+   regions whose headers were never examined → an in-session region change with no
+   configured resweep was marked "seen" and the stale row served across every future
+   boot (unbounded staleness; the recorded gate runs only escaped it by save-vs-
+   shutdown ordering luck). FIXED: seen_mtime is written ONLY next to an actual header
+   examination, with the PRE-read mtime; the bulk/shutdown snapshots are deleted.
+   Pinned by `shutdownMustNotMarkUnexaminedRegionsSeen` (reds under the old code) and
+   the restructured unchanged-mtime test.
+2. MAJOR a failed DeleteRows apply was consumed and lost → tombstone-expiry
+   resurrection (the exact hazard the controlQueue comment warned about). FIXED:
+   failed deletes re-queue (bounded by the writer-failure latch, which stops serving);
+   graceful-exit flush is per-op contained; `writerFailures` resets only on real
+   applied ops (idle no-ops no longer launder a broken writer).
+3. MAJOR dims present in the DB but absent from the frozen `knownDimensions` list were
+   served but NEVER swept (runtime-created worlds). FIXED: the sweep iterates the DIMS
+   TABLE; `Environment.knownDimensions` deleted; an unresolvable dim fail-safe drops.
+   Pinned by `runtimeDimensionUnknownToTheResolverIsDroppedAtReopen`.
+4. MAJOR/plan-deviation: `lodStoreResweepSeconds` defaulted 0 = Paper's staleness bound
+   OFF by default. FIXED: PaperConfig overrides the default to 300 s (Fabric keeps 0 —
+   its dirty pipeline invalidates at runtime; a resweep there would churn-drop on
+   metadata re-saves).
+5-9. MINORS fixed: shutdown stops serving immediately + no post-shutdown reader conns;
+   shutdown-abort mid-sweep (incomplete sweep, never interrupt-null over-drops);
+   degrade-to-memory now reports mode MEMORY (diag honesty); tombstone tests assert
+   DB-level row deletion (they could pass on the tombstone alone); stale tier-era
+   comments cleaned.
+
+**Methodology agent (3 MAJOR, 5 MINOR):** verdicts on my gate recalibrations were
+SOUND (disc sizing, cold ceiling), QUESTIONABLE (median-only aggregation; unquantified
+"band pollution"), UNSOUND (the whole-band 70→40 floor justified by an exec-share/
+band-share conflation — nbt+serialize was 95.8% OF THE BAND, not 68%). Dispositions:
+- F1 FIXED BY MEASUREMENT: `analyze_profile_jfr` now sub-classifies nbt/serialize
+  samples by stack context (disk-path markers) into addressable vs structural
+  (`serialize-live` = probe serves + save-hook hash, `nbt-other` = vanilla save NBT,
+  excluded from the LSS-attributed aggregate). Re-analysis of the archived final warm
+  stamp: TRUE addressable cut 96.1%/84.9%/98.4% (median 96.1%, floor now 85) — the
+  plan's "bands ≈ 0" holds outright; the pollution claim is now measured, not asserted.
+- **Plan §0 metric-2 AS-WRITTEN (whole-LSS-band CPU/col cut ≥ 70%): FAIL at median
+  62.2%** (refined attribution; reps 52.5-68.3%). The checker now prints this verdict
+  explicitly every run instead of gating a substitute silently; the recalibrated
+  secondary floor is 50%. Decomposition: the store eliminated ~96% of what it can
+  eliminate; the residual is the irreducible serve/send path (~280-430 µs/col of
+  lss-other) + the store's own serve cost. Whole-JVM CPU/col improved ~20%.
+  **PHASE-BOUNDARY FLAG for the user: accept 62.2% + the decomposition as meeting the
+  intent, or amend the plan's 70%, or treat as a real miss — implementer recommends
+  accept-with-record; the number cannot reach 70% without deleting serve-path work
+  outside the store's scope.**
+- F3 FIXED: every gate leg now requires median-within-limit AND a per-rep MAJORITY
+  (2-of-3) — a deterministic 1-in-3 failure can no longer hide; recorded stamps still
+  judge PASS (warm 3/3 or 2/3 per leg; cold 2/3). Bands required on EVERY rep (a lost
+  JFR shrinking the sample now fails). Selftest grown to 13 cases incl. majority,
+  whole-band floor, store.errors, and missing-bands catches.
+- F2 RECORDED DEVIATION: the plan demanded the unfired-event staleness gate on an
+  ACTIVE MULTI-PLAYER Paper run; delivered is single-player with a driver-forced inert
+  edit + premise guard (marked_total==0 proof), which we argue restores
+  falsifiability without multi-client load. The multi-player version moves to the
+  Phase 5 burn-in (lss-multi-test harness). Second half fixed via the resweep default.
+- F7 FIXED: premise guard now reads the FINAL snapshot (post-action heals covered).
+- F8 FIXED: the wrapper's latest_results is freshness-guarded (no stale-dir compare).
+- F6 record corrections: attempt-2 warm stamp is 20260730-232615 (not -230910);
+  final warm stamp 20260731-002336; paper mutate/verify runs 024856Z/030055Z.
+- Deliberately NOT re-run after the engine fixes: the warm/cold GATES (their hot
+  paths — get/deposit — are untouched; only sweep bookkeeping and shutdown changed);
+  re-run: the sweep-gating scenarios (offline-edit fabric, unfired-event paper).

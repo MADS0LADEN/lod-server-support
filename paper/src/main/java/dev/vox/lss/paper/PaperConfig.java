@@ -12,6 +12,16 @@ import java.util.List;
  */
 public class PaperConfig extends ServerConfigBase {
 
+    {
+        // PAPER default override: the periodic resweep is Paper's stale bound for its
+        // documented unfired-event dirty gaps (console setblock, walk-in generation
+        // without ChunkPopulateEvent, plugin edits) — with 0 the "≈ save + one sweep"
+        // staleness guarantee simply doesn't run. 300 s ≈ the autosave cadence. Fabric
+        // keeps the shared 0: its content-hash save hook invalidates at runtime, and a
+        // periodic resweep there would only churn-drop rows on metadata re-saves.
+        lodStoreResweepSeconds = 300;
+    }
+
     // Bukkit events that mark a chunk dirty for LOD re-send. Broadened to better match the
     // Fabric chunk-save hook's coverage (decay, growth, ice/snow, fire, falling blocks).
     // High-frequency fluid flow (BlockFromToEvent) is intentionally NOT a default — admins who

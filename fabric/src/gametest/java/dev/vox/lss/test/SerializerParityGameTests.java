@@ -841,7 +841,7 @@ public class SerializerParityGameTests {
         var env = new dev.vox.lss.common.store.SqliteLodStore.Environment(
                 worldRoot.resolve("lss-lod-gametest-" + UUID.randomUUID()),
                 server.getServerVersion(), LSSConstants.PROTOCOL_VERSION,
-                d -> regionDir, d -> "off", List.of(dim), 0);
+                d -> regionDir, d -> "off", 0);
         var store = dev.vox.lss.common.store.SqliteLodStore.createOrNull(
                 dev.vox.lss.common.store.LodStoreMode.FULL, env,
                 new dev.vox.lss.common.store.LodStoreDiagnostics());

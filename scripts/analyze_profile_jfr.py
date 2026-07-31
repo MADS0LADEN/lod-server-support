@@ -175,16 +175,41 @@ BANDS = [
                    "dev.vox.lss.paper.PaperMemoizedNbtCodec")),
     ("lss-other", ("dev.vox.lss",)),
 ]
+# Stack markers of the DISK serve path — the work the LOD store can eliminate. The
+# nbt/serialize prefix match alone conflates it with STRUCTURAL serializer work that
+# runs store-or-not (probe-rung serves of loaded chunks + the save-hook's dirty-hash
+# re-serialization, both via SectionSerializer, and vanilla's own save-side
+# net.minecraft.nbt building). The Phase 2 methodology review showed that conflation
+# distorted the §0 work-elimination measurement in BOTH directions, so nbt/serialize
+# samples are sub-classified by whole-stack context:
+#   nbt / serialize            -> on the disk path (store-ADDRESSABLE)
+#   nbt-other / serialize-live -> structural (probe serves, save-hook hash, vanilla save)
+DISK_PATH_MARKERS = ("dev.vox.lss.networking.server.NbtSectionSerializer",
+                     "dev.vox.lss.networking.server.MemoizedNbtCodec",
+                     "dev.vox.lss.networking.server.ChunkDiskReader",
+                     "dev.vox.lss.paper.PaperNbtSectionSerializer",
+                     "dev.vox.lss.paper.PaperMemoizedNbtCodec",
+                     "dev.vox.lss.paper.PaperChunkDiskReader")
+DERIVED_BANDS = ("nbt-other", "serialize-live")
 # Bands summed into the "LSS-attributable" aggregate for §0 metric 2 (per-column CPU).
-LSS_ATTRIBUTED_BANDS = ("store", "zip", "nbt", "serialize", "lss-other")
+# serialize-live IS LSS code (probe serves / save-hook) and stays attributed;
+# nbt-other is VANILLA save-pipeline work misattributed before the split — excluded.
+LSS_ATTRIBUTED_BANDS = ("store", "zip", "nbt", "serialize", "serialize-live", "lss-other")
 
 
 def band_for_stack(stack):
-    """Leaf-first first-match band for one exec-sample stack (frames un-shortened)."""
+    """Leaf-first first-match band for one exec-sample stack (frames un-shortened);
+    nbt/serialize sub-classified by disk-path stack context (see DISK_PATH_MARKERS)."""
     for frame in stack:
         for name, prefixes in BANDS:
             for p in prefixes:
                 if frame.startswith(p):
+                    if name in ("nbt", "serialize"):
+                        on_disk_path = any(f.startswith(m) for f in stack
+                                           for m in DISK_PATH_MARKERS)
+                        if name == "nbt":
+                            return "nbt" if on_disk_path else "nbt-other"
+                        return "serialize" if on_disk_path else "serialize-live"
                     return name
     return "unattributed"
 
@@ -267,7 +292,7 @@ def analyze_jfr(run_dir, jfr_tool):
         "window_s": round(t_last - t_first, 1),
         "total_exec_samples": total_exec,
         "bands": {name: bands.get(name, 0)
-                  for name in [b[0] for b in BANDS] + ["unattributed"]},
+                  for name in [b[0] for b in BANDS] + list(DERIVED_BANDS) + ["unattributed"]},
         "lss_attributed_samples": sum(bands.get(b, 0) for b in LSS_ATTRIBUTED_BANDS),
     }
     with open(os.path.join(run_dir, "bands.json"), "w") as f:
@@ -308,7 +333,7 @@ def render_report(r):
     lines.append("### Band attribution (leaf-first stack-prefix buckets; store gates read these)")
     for name, n in r["bands"]["bands"].items():
         lines.append(f"- {name}: {n} ({100 * n / tot:.1f}%)")
-    lines.append(f"- lss_attributed (store+zip+nbt+serialize+lss-other): "
+    lines.append(f"- lss_attributed (store+zip+nbt+serialize+serialize-live+lss-other): "
                  f"{r['bands']['lss_attributed_samples']} "
                  f"({100 * r['bands']['lss_attributed_samples'] / tot:.1f}%)")
     lines.append("")

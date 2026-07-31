@@ -61,7 +61,7 @@ class SqliteLodStoreTest {
                                            Function<String, Path> regionResolver,
                                            int resweepSeconds) {
         return new SqliteLodStore.Environment(storeDir(), "26.2-test", wireVersion,
-                regionResolver, d -> fps.getOrDefault(d, ""), dims, resweepSeconds);
+                regionResolver, d -> fps.getOrDefault(d, ""), resweepSeconds);
     }
 
     private SqliteLodStore.Environment defaultEnv() {
@@ -224,6 +224,10 @@ class SqliteLodStoreTest {
         awaitGone(store, OW, p);
         assertNull(store.get(OW, p), "and stays a miss after the batcher applies the delete");
         store.shutdown();
+        // DB-level: the ROW must be gone, not just tombstone-masked — a tombstone
+        // expires after 10 s and a surviving row would resurrect (review finding: the
+        // old assertions could pass on the tombstone alone).
+        assertEquals(0, sqlRowCount(OW), "the row itself must be deleted, not just masked");
     }
 
     /** The deposit-racing-invalidate window: whatever the interleaving with the batcher,
@@ -243,6 +247,9 @@ class SqliteLodStoreTest {
             assertNull(store.get(OW, p), "poisoned row resurrected at i=" + i);
         }
         store.shutdown();
+        // DB-level: every racing deposit's row must be physically gone (tombstones
+        // expire; only the delete keeps them dead).
+        assertEquals(0, sqlRowCount(OW), "racing deposits left rows that would resurrect");
     }
 
     // ---- derived-data lifecycle ----
@@ -326,8 +333,54 @@ class SqliteLodStoreTest {
         reopened.shutdown();
     }
 
+    /** The review-MAJOR regression pin: shutdown must NOT record mtimes for regions
+     *  whose headers were never examined. An in-session region change that the (never-
+     *  scheduled) sweep did not see must be caught by the NEXT boot's sweep — the old
+     *  shutdown-time bulk mtime snapshot marked it "seen" and the stale row served
+     *  forever. */
     @Test
-    void sweepSkipsRegionsWhoseMtimeIsUnchanged() throws Exception {
+    void shutdownMustNotMarkUnexaminedRegionsSeen() throws Exception {
+        long p = PositionUtil.packPosition(3, 3);
+        writeRegion(OW, 0, 0, Map.of(p, (int) (nowSec() - 1000)));
+        SqliteLodStore store = open(defaultEnv());
+        store.deposit(OW, p, bytes(31, 400), 100);
+        assertNotNull(awaitHit(store, OW, p));
+        // The region changes IN-SESSION with no resweep configured (the Paper
+        // unfired-event shape with the sweep off): only the next boot can catch it.
+        writeRegion(OW, 0, 0, Map.of(p, (int) (nowSec() + 100)));
+        store.shutdown();
+
+        SqliteLodStore reopened = open(defaultEnv());
+        assertNull(reopened.get(OW, p),
+                "a region changed after its last examination must be re-checked at boot"
+                        + " — shutdown must never stamp unexamined regions as seen");
+        reopened.shutdown();
+    }
+
+    /** The dims-TABLE iteration pin: a dimension deposited at runtime (created world)
+     *  that the platform resolver cannot place must be fail-safe swept at reopen —
+     *  never served unswept (the old knownDimensions-frozen loop exempted it from
+     *  every freshness rule). */
+    @Test
+    void runtimeDimensionUnknownToTheResolverIsDroppedAtReopen() throws Exception {
+        String runtimeDim = "multiverse:custom_world";
+        writeRegion(OW, 0, 0, Map.of());
+        SqliteLodStore store = open(defaultEnv());
+        long p = PositionUtil.packPosition(0, 10);
+        store.deposit(runtimeDim, p, bytes(32, 300), 100);
+        assertNotNull(awaitHit(store, runtimeDim, p));
+        store.shutdown();
+
+        // defaultEnv's resolver maps ANY name to a path, but runtimeDim's dir does not
+        // exist -> unresolvable -> the dims-table sweep must drop its rows.
+        SqliteLodStore reopened = open(defaultEnv());
+        assertNull(reopened.get(runtimeDim, p),
+                "a stored dimension the resolver cannot place must fail-safe drop");
+        reopened.shutdown();
+    }
+
+    @Test
+    void sweepSkipsRegionsWhoseMtimeIsUnchangedSinceItsLastExamination() throws Exception {
         long p = PositionUtil.packPosition(2, 3);
         writeRegion(OW, 0, 0, Map.of(p, (int) (nowSec() - 1000)));
         SqliteLodStore store = open(defaultEnv());
@@ -335,16 +388,23 @@ class SqliteLodStoreTest {
         assertNotNull(awaitHit(store, OW, p));
         store.shutdown();
 
-        // Rewrite the header with a FUTURE stamp but restore the recorded mtime: the
+        // Session 2's startup sweep EXAMINES the region (no seen entry yet), keeps the
+        // fresh row, and records the pre-read mtime — seen_mtime only ever exists next
+        // to an actual examination (the review-MAJOR semantics).
+        SqliteLodStore examined = open(defaultEnv());
+        assertNotNull(examined.get(OW, p), "fresh row must survive its first examination");
+        examined.shutdown();
+
+        // Rewrite the header with a FUTURE stamp but restore the examined mtime: the
         // != mtime gate must short-circuit the header read entirely (this is the
         // optimization that makes the sweep one stat per unchanged region).
         Path mca = regionDir(OW).resolve("r.0.0.mca");
-        FileTime recorded = Files.getLastModifiedTime(mca);
+        FileTime examinedMtime = Files.getLastModifiedTime(mca);
         writeRegion(OW, 0, 0, Map.of(p, (int) (nowSec() + 100)));
-        Files.setLastModifiedTime(mca, recorded);
+        Files.setLastModifiedTime(mca, examinedMtime);
         SqliteLodStore reopened = open(defaultEnv());
         assertNotNull(reopened.get(OW, p),
-                "unchanged mtime must skip the header check (one stat per region)");
+                "unchanged mtime since the last EXAMINATION must skip the header check");
         reopened.shutdown();
     }
 

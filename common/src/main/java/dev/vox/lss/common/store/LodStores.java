@@ -37,7 +37,9 @@ public final class LodStores {
             LSSLogger.warn("lodStore=full requested but the SQLite store is unavailable —"
                     + " degrading to the in-memory store (warm joins survive kicks, not"
                     + " restarts)");
-            return new MemoryLodStore(mode, codec, memoryMaxBytes, diag);
+            // MEMORY, not FULL: mode() feeds the diag token, which must report what is
+            // actually RUNNING (store=memory), never the configured aspiration.
+            return new MemoryLodStore(LodStoreMode.MEMORY, codec, memoryMaxBytes, diag);
         }
         return sqlite;
     }

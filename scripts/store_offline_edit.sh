@@ -36,8 +36,18 @@ cleanup() { rm -rf "$CARRY_DIR"; }
 trap cleanup EXIT
 
 latest_results() { # <scenario>
-    ls -1d "$RESULTS_ROOT/$1-$TAG"2* 2>/dev/null | sort | tail -1
+    # Freshness-guarded: only dirs created after this wrapper started qualify — a
+    # zero-exit phase that somehow wrote no results dir must fail here, never silently
+    # compare a previous run's recording (review finding).
+    local d
+    d="$(ls -1d "$RESULTS_ROOT/$1-$TAG"2* 2>/dev/null | sort | tail -1)"
+    if [[ -z "$d" || "$(stat -c %Y "$d")" -lt "$WRAPPER_START_EPOCH" ]]; then
+        echo "[store-offline] ERROR: no fresh results dir for $1 (latest: ${d:-none})" >&2
+        exit 1
+    fi
+    echo "$d"
 }
+WRAPPER_START_EPOCH="$(date +%s)"
 
 carry_world() {
     rm -rf "$CARRY_DIR"
