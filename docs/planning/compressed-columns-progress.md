@@ -250,11 +250,31 @@ Bandwidth: 20.9 MB/s / 300.0 MB/s global (1000.8 MB total, 157.1 MB wire,
 DiskReader: … store=full h=31933 m=139 dep=139 drop=0 err=0 avg_read=31us
 ```
 
-- **Wire ratio 6.37:1** (1000.8 MB raw-counted → 157.1 MB actually shipped) — within
-  0.6% of the Phase 0 corpus prediction for zstd-1 (6.33:1). The design's headline
-  observability goal is met: `wire` is the number that matches the host's bandwidth
-  graph, `total` is the raw-denominated limiter charge, and the gap between them IS
-  the compression.
+**Full-session figures at convergence** (20 min, one player, LOD load completed):
+
+```
+Throughput: sent=283731 (8.63 GB), rate=236 sections/s
+Sources (total): in_mem=1110, disk=2808, up_to_date=198572, gen=0, grace_skipped=24042
+DiskReader: submitted=2808, errors=0, saturated=0, avg_read=2.2ms, read_path=moonrise-low
+            store=full h=280273 m=2808 dep=2808 drop=0 err=0 avg_read=25us
+Bandwidth:  (8.63 GB total, 1.38 GB wire, cols zstd=284021 raw=0)
+```
+
+- **Wire ratio 6.25:1 over the full session** (8.63 GB raw → 1.38 GB shipped; 6.37:1
+  measured mid-session at the 1 GB mark) — within ~1% of the Phase 0 corpus prediction
+  for zstd-1 (6.33:1). The design's headline observability goal is met: `wire` is the
+  number that matches the host's bandwidth graph, `total` is the raw-denominated
+  limiter charge, and the gap between them IS the compression.
+- **284,021 columns shipped, 100% codec 1, zero raw.**
+- **98.8% store-hit serve rate** (280,273 hits / 2,808 real disk reads) — so nearly
+  every column took the verbatim-frame path: no reader-pool decompress, no deflate over
+  33 KB of raw bytes. Store frames read at **25 µs** vs 2.2 ms for real disk reads.
+- **User-reported server CPU "super low"** through the whole load — the qualitative
+  confirmation of the gates' −43% (warm) / −27% (cold) CPU-per-column measurements,
+  on a workload dominated by exactly the store-hit path the warm gate isolated.
+- Convergence behaves: two diag reads minutes apart returned identical `sent` counts
+  with `Sources (tick): sent=0` and `qpeak=0` — the converged client sends nothing and
+  nothing queues behind the serve path.
 - **cols zstd=32312 / raw=0** — every single column negotiated codec 1 end-to-end
   through a real client. The capability handshake, the codec byte, and the client
   decompress drain all work live.
