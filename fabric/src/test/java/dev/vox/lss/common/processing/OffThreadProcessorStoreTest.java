@@ -85,9 +85,9 @@ class OffThreadProcessorStoreTest {
         @Override
         protected boolean buildAndEnqueueColumnPayload(TestState state, int cx, int cz,
                                                        String dimension, long columnTimestamp,
-                                                       long submissionOrder, byte[] sectionBytes,
+                                                       long submissionOrder, ColumnBytes bytes,
                                                        int estimatedBytes, byte source) {
-            this.enqueued.add(new EnqueuedColumn(cx, cz, columnTimestamp, sectionBytes, source));
+            this.enqueued.add(new EnqueuedColumn(cx, cz, columnTimestamp, bytes.raw(), source));
             return true;
         }
     }

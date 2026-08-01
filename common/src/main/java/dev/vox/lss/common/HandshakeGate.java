@@ -40,8 +40,10 @@ public final class HandshakeGate {
      * stays identical for legacy and current clients.
      */
     public enum WireDialect {
-        /** Current protocol ({@link LSSConstants#PROTOCOL_VERSION}) — canonical shapes. */
-        V18,
+        /** Current protocol ({@link LSSConstants#PROTOCOL_VERSION}) — canonical shapes.
+         *  (Named V18 through protocol 18; renamed so version bumps stop renaming the
+         *  dialect.) */
+        CURRENT,
         /**
          * Legacy protocol 16 under {@code enableV16Compat}: the reply must be the 6-field
          * SessionConfig ECHOING VERSION 16 (the old client's codec hard-gates on that leading
@@ -84,12 +86,12 @@ public final class HandshakeGate {
                                     boolean v16CompatEnabled) {
         WireDialect dialect;
         if (clientProtocolVersion == LSSConstants.PROTOCOL_VERSION) {
-            dialect = WireDialect.V18;
+            dialect = WireDialect.CURRENT;
         } else if (clientProtocolVersion == LSSConstants.V16_COMPAT_PROTOCOL_VERSION
                 && v16CompatEnabled) {
             dialect = WireDialect.V16;
         } else {
-            return new Decision(Outcome.VERSION_MISMATCH, false, WireDialect.V18);
+            return new Decision(Outcome.VERSION_MISMATCH, false, WireDialect.CURRENT);
         }
         boolean effectiveEnabled = configEnabled && servicePresent;
         if ((clientCapabilities & LSSConstants.CAPABILITY_VOXEL_COLUMNS) == 0) {

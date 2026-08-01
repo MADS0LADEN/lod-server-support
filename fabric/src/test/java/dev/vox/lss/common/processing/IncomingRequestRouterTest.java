@@ -82,8 +82,8 @@ class IncomingRequestRouterTest {
         @Override
         protected boolean buildAndEnqueueColumnPayload(TestState state, int cx, int cz, String dimension,
                                                      long columnTimestamp, long submissionOrder,
-                                                     byte[] sectionBytes, int estimatedBytes, byte source) {
-            this.payloads.add(new CapturedPayload(cx, cz, dimension, columnTimestamp, sectionBytes));
+                                                     ColumnBytes bytes, int estimatedBytes, byte source) {
+            this.payloads.add(new CapturedPayload(cx, cz, dimension, columnTimestamp, bytes.raw()));
             return !this.dropPayloads;
         }
     }

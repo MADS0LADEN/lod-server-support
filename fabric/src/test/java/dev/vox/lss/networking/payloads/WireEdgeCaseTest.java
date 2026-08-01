@@ -266,6 +266,7 @@ class WireEdgeCaseTest {
         b.writeUtf(LSSConstants.DIM_STR_OVERWORLD, LSSConstants.MAX_DIMENSION_STRING_LENGTH);
         b.writeLong(0L);
         b.writeByte(1); // serve-source
+        b.writeByte(0); // codec (raw)
         b.writeVarInt(LSSConstants.MAX_SECTIONS_SIZE + 1);
         b.writeBytes(new byte[LSSConstants.MAX_SECTIONS_SIZE + 1]);
         try {
@@ -286,10 +287,10 @@ class WireEdgeCaseTest {
         try {
             VoxelColumnS2CPayload.CODEC.encode(b, original);
             var decoded = VoxelColumnS2CPayload.CODEC.decode(b);
-            assertEquals(LSSConstants.MAX_SECTIONS_SIZE, decoded.decompressedSections().length,
+            assertEquals(LSSConstants.MAX_SECTIONS_SIZE, decoded.shippedSections().length,
                     "a legitimate column at exactly the cap must survive (guard is >, not >=)");
-            assertEquals(42, decoded.decompressedSections()[0]);
-            assertEquals(7, decoded.decompressedSections()[sections.length - 1]);
+            assertEquals(42, decoded.shippedSections()[0]);
+            assertEquals(7, decoded.shippedSections()[sections.length - 1]);
             assertEquals(0, b.readableBytes());
         } finally {
             b.release();
@@ -400,6 +401,7 @@ class WireEdgeCaseTest {
         // same stance as unknown response types) — this doubles as the only decode-side pin
         // of the source VALUE, so a regression that reads-and-discards the byte fails here.
         b.writeByte(77);
+        b.writeByte(LSSConstants.COLUMN_CODEC_RAW);
         b.writeByteArray(emptyColumn());
         try {
             var decoded = VoxelColumnS2CPayload.CODEC.decode(b);
@@ -407,7 +409,7 @@ class WireEdgeCaseTest {
             assertEquals("minecraft:overworld", decoded.dimension().identifier().toString());
             assertEquals((byte) 77, decoded.source(),
                     "unknown serve-source values must pass through untouched");
-            assertArrayEquals(emptyColumn(), decoded.decompressedSections(),
+            assertArrayEquals(emptyColumn(), decoded.shippedSections(),
                     "section bytes must decode intact after the source byte");
             assertEquals(0, b.readableBytes());
         } finally {

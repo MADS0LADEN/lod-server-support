@@ -12,7 +12,12 @@ public final class LSSConstants {
     // diagnostic attribution for the client trace. Still the "v17 want-set" design line;
     // the bump makes a mismatched pair fail safe (silent no-session) instead of
     // misaligning the column decode by one byte.
-    public static final int PROTOCOL_VERSION = 18;
+    // 19: VoxelColumn carries a one-byte codec tag after the source tag
+    // (COLUMN_CODEC_RAW/ZSTD — docs/planning/compressed-columns-design.md): capability
+    // sessions ship the section bytes as a zstd-1 frame end-to-end instead of raw bytes
+    // under netty deflate. Same fail-safe rationale as 17->18: the layout must be
+    // version-agreed, the capability bit only carries ABILITY.
+    public static final int PROTOCOL_VERSION = 19;
 
     // VoxelColumn serve-source tag values (one wire byte; unknown values are kept verbatim
     // client-side — same forward-safety stance as the retired response byte 0)
@@ -223,6 +228,25 @@ public final class LSSConstants {
 
     // Capabilities bitmask
     public static final int CAPABILITY_VOXEL_COLUMNS = 1;
+    /** Client can decode zstd-framed column payloads (declared only when its zstd native
+     *  probe succeeds — see the client-side StoreCodec.zstdOrNull holder). The bit carries
+     *  ABILITY only; the v19 layout (codec byte present) is version-agreed regardless. */
+    public static final int CAPABILITY_ZSTD_COLUMNS = 2;
+
+    // VoxelColumn codec tag values (one wire byte, protocol 19+, after the source tag).
+    // Unlike the source tag, unknown values are NOT passed through verbatim client-side:
+    // the codec byte changes how the section bytes must be read, so the decode drain
+    // treats anything outside {0,1} as a decode failure (ingest-failure re-serve).
+    public static final byte COLUMN_CODEC_RAW = 0;
+    public static final byte COLUMN_CODEC_ZSTD = 1;
+
+    /** Columns whose raw section bytes are below this never compress (codec 0): the frame
+     *  header wins nothing on tiny bodies and the 0-section clear must stay raw (the
+     *  client's clear detection reads the leading varint without a decompress). A safety
+     *  floor, not corpus-tuned — the Phase 0 corpus (compressed-columns-design.md §10)
+     *  contains no real column under 4 KiB; ColumnBytes' non-shrinking fallback covers
+     *  everything else. */
+    public static final int COLUMN_COMPRESS_MIN_BYTES = 512;
 
     // Dimension resource location strings (common/ has no MC deps, so plain strings)
     public static final String DIM_STR_OVERWORLD = "minecraft:overworld";

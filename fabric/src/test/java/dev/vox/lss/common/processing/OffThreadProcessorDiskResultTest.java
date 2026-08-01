@@ -116,14 +116,14 @@ class OffThreadProcessorDiskResultTest {
         @Override
         protected boolean buildAndEnqueueColumnPayload(TestState state, int cx, int cz, String dimension,
                                                      long columnTimestamp, long submissionOrder,
-                                                     byte[] sectionBytes, int estimatedBytes, byte source) {
+                                                     ColumnBytes bytes, int estimatedBytes, byte source) {
             if (throwOnPayloadBuildForPacked == PositionUtil.packPosition(cx, cz)) {
                 throw new RuntimeException("injected payload-build failure for " + cx + "," + cz);
             }
             if (rejectEnqueue) return false;
-            if (rejectOversizedOnly && sectionBytes.length > LSSConstants.MAX_SEND_SECTIONS_SIZE) return false;
+            if (rejectOversizedOnly && bytes.raw().length > LSSConstants.MAX_SEND_SECTIONS_SIZE) return false;
             enqueuedColumns.add(new EnqueuedColumn(state.getPlayerUUID(), cx, cz, dimension,
-                    columnTimestamp, sectionBytes));
+                    columnTimestamp, bytes.raw()));
             return true;
         }
     }

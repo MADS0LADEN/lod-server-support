@@ -35,6 +35,7 @@ public abstract class AbstractPlayerRequestState<T> {
     private final UUID playerUuid;
     private volatile boolean hasHandshake = false;
     private volatile int capabilities = 0;
+    private volatile boolean wantsCompressedColumns;
     // The dimension this state was REGISTERED under — invariant for the state's lifetime
     // (a dimension change replaces the state via removePlayer+registerPlayer). The router
     // uses it to reject a stale snapshot's dimension: a multi-tick processing cycle can
@@ -166,6 +167,23 @@ public abstract class AbstractPlayerRequestState<T> {
 
     public boolean supportsVoxelColumns() {
         return (this.capabilities & LSSConstants.CAPABILITY_VOXEL_COLUMNS) != 0;
+    }
+
+    /**
+     * True when this session's column payloads may ship zstd frames (codec 1). Derived
+     * ONCE at registration by the service — the AND of four terms (plan §2): the client
+     * declared {@link LSSConstants#CAPABILITY_ZSTD_COLUMNS}, {@code useCompressedColumns},
+     * the server-side codec probe succeeded, and the session is NOT the v16 dialect (a
+     * v16 handshake maliciously setting the bit must never get a codec byte — its wire
+     * layout has nowhere to carry one). Volatile: written at registration on the
+     * registering thread, read by the processing-thread payload builds.
+     */
+    public boolean wantsCompressedColumns() {
+        return this.wantsCompressedColumns;
+    }
+
+    public void setWantsCompressedColumns(boolean wants) {
+        this.wantsCompressedColumns = wants;
     }
 
     public void markHandshakeComplete() {
@@ -549,6 +567,10 @@ public abstract class AbstractPlayerRequestState<T> {
                 this.bandwidth.recordSend(queued.estimatedBytes());
                 globalLimiter.recordSend(queued.estimatedBytes());
                 diag.recordSectionSent(queued.estimatedBytes());
+                // Shipped size (frame for codec-1 payloads) — the wire_bytes gauge that
+                // makes /lsslod diag match observed bandwidth (design §5: the limiter
+                // keeps charging raw; this counter is the observability half).
+                diag.recordWireSent(queued.wireBytes());
             } catch (Exception e) {
                 LSSLogger.error("Failed to send queued payload to " + getPlayerName()
                         + ", dropping remaining queue (" + this.sendQueue.size() + " entries)", e);

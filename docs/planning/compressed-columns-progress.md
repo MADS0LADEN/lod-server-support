@@ -9,7 +9,7 @@ Branch: `feat/compressed-columns` (off `feat/lod-store`).
 | Phase | State | Notes |
 |-------|-------|-------|
 | 0 — premise measurement | **DONE 2026-08-01** | all premises confirmed; numbers below |
-| 1 — protocol v19 + capability + live-path compression | not started | |
+| 1 — protocol v19 + capability + live-path compression | **DONE 2026-08-01** | T1 green both platforms (Fabric ~1040+, Paper ~330+), T2 60 gametests green |
 | 2 — store frame serving (fhash, getFrame, deposit reuse) | not started | |
 | 3 — observability (wire_bytes, exporters, soak schema) | not started | |
 | 4 — validation (tests, soak, compress_gate.sh) | not started | |
@@ -61,7 +61,40 @@ Results (2026-08-01, 45,589 columns / 42,589 timed after warmup, 64 regions,
 
 ## Phase 1 — protocol v19 + capability + live-path compression
 
-Not started. Work list tracked in plan §2.
+DONE 2026-08-01. Landed exactly per plan §2:
+
+- **common**: PROTOCOL_VERSION 19, `CAPABILITY_ZSTD_COLUMNS`, `COLUMN_CODEC_RAW/ZSTD`,
+  `COLUMN_COMPRESS_MIN_BYTES=512`; `useCompressedColumns` (ServerConfigBase, default
+  true); `StoreCodec.declaredContentSize` + dual-role javadoc; `WireDialect.V18` →
+  `CURRENT`; `ColumnBytes` holder (lazy raw↔frame, memoized, non-shrinking fallback);
+  `OffThreadProcessor.attachWireCodec` + one-holder-per-drained-result plumbing through
+  `buildAndEnqueueColumnPayload(… ColumnBytes …)`; `wantsCompressedColumns` on
+  `AbstractPlayerRequestState`; `QueuedPayload.wireBytes` + `TickDiagnostics`
+  `wire_bytes` counter at send success; `ProcessingDiagnostics` cols_zstd/cols_raw.
+- **fabric**: payload v19 layout (source, codec, array; v16Wire skips both; read
+  memoizes the §0.5 charge `max(shipped, clamp(declared, 0, MAX))`);
+  `ZstdWireSupport` (client probe holder + decompress); handshake declares 0x2 on
+  probe success (both send sites); `isClearColumn` codec-gated; drain decompress with
+  bomb guard + unknown-codec containment; stored-charge release symmetry; build-side
+  per-recipient codec choice + probe-hash-raw via `armed()` gate; service wire-codec
+  latch + four-term flag at registration; v16 egress codec-0 warn-drop guard.
+- **paper**: encode codec overload (twin layout); splice removes TWO bytes + THROWS on
+  codec-1; build twin; `Wiring.wireCompressionLive` + latch in productionWiring +
+  registration flag; probe bridge `armed()`.
+- **New tests**: `ColumnBytesTest`, `CompressedColumnWireTest` (layout golden +
+  charge-rule quartet), `ClientColumnDecompressTest` (bomb trio + charge symmetry),
+  `CompressedColumnBuildTest` (codec choice, latch, clear pin, mixed fan-out
+  compress-once, wire_bytes vs raw charge), `CompressedColumnPaperWireTest` (layout
+  twin + splice pins), Paper session-flag four-term AND (in
+  `PaperRequestProcessingServiceTest`), HandshakeGate bit-agnostic pin. Existing
+  fixture updates: parity ref layouts + protocol pins 18→19 + v16 decode fixtures +
+  Paper client-guard sim gained the codec byte.
+- **Deferred/noted**: Fabric asV16-seam guard is implemented but pinned only via the
+  Paper splice twin (the Fabric seam needs a MinecraftServer; unreachable by
+  construction — the session flag forces raw for v16). Fabric registration-flag
+  derivation likewise pinned via the Paper twin + Tier 3 (Fabric service has no test
+  ctor). `isClearColumn` codec-gating is structural (one line); a wrongly-compressed
+  clear decodes correctly at the drain minus the resync flag.
 
 ## Phase 2 — store frame serving
 

@@ -3,9 +3,15 @@ package dev.vox.lss.common.store;
 import com.github.luben.zstd.Zstd;
 
 /**
- * The store's blob codec: zstd level 1 — the Phase 0 decision (dominates deflate-1 on
- * both deciding metrics: 24 vs 60 µs decompress and 5,342 vs 5,732 B/col on the
- * benchmark corpus, and 3× cheaper compress protecting the cold-path deposit gate).
+ * The shared store + wire blob codec: zstd level 1 — the store Phase 0 decision
+ * (dominates deflate-1 on both deciding metrics: 24 vs 60 µs decompress and 5,342 vs
+ * 5,732 B/col on the benchmark corpus, and 3× cheaper compress protecting the
+ * cold-path deposit gate). Since protocol 19 (compressed-columns-design.md) the SAME
+ * codec frames column payloads on the wire — both sides calling the same
+ * {@code compress(raw)} at the same level is what makes the store-frame == wire-frame
+ * invariant structural rather than pinned-by-test alone. The client's capability probe
+ * and decode reuse {@link #zstdOrNull()}/{@link #decompress}; the bomb guard and the
+ * decode-queue charge read {@link #declaredContentSize}.
  *
  * <p>Native containment: {@link #zstdOrNull()} PROBES a real round-trip at creation, so
  * an unsupported platform (a native outside the shipped matrix) fails HERE, once, at
@@ -43,5 +49,22 @@ public final class StoreCodec {
     /** {@code usize} is the stored uncompressed size — zstd needs the exact output size. */
     public byte[] decompress(byte[] compressed, int usize) {
         return Zstd.decompress(compressed, usize);
+    }
+
+    /**
+     * The frame's self-declared decompressed size, or a non-positive value when the frame
+     * is malformed or does not declare one. Single-shot {@link #compress} frames ALWAYS
+     * declare it (Phase 0: 0 violations over 42,589 corpus frames), so a non-positive
+     * return from a peer is hostile/corrupt by construction. Callers must clamp before
+     * trusting it (the wire bomb guard rejects &gt; MAX_SECTIONS_SIZE; the client
+     * decode-queue charge clamps into [0, MAX_SECTIONS_SIZE] and never charges below the
+     * shipped length).
+     */
+    public long declaredContentSize(byte[] frame) {
+        try {
+            return Zstd.getFrameContentSize(frame);
+        } catch (Throwable t) {
+            return -1; // malformed header — callers treat like "not declared"
+        }
     }
 }

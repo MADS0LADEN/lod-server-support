@@ -199,6 +199,7 @@ class WireParityTest {
                 b.writeUtf(dim);
                 b.writeLong(-1L);
                 b.writeByte(-1); // serve-source: unknown (source-less convenience path)
+                b.writeByte(LSSConstants.COLUMN_CODEC_RAW);
                 b.writeByteArray(sections);
             });
             assertArrayEquals(expected, PaperPayloadHandler.encodeVoxelColumnPreEncoded(
@@ -215,6 +216,7 @@ class WireParityTest {
             b.writeUtf("lsstest:custom");
             b.writeLong(42L);
             b.writeByte(-1); // serve-source: unknown (source-less convenience path)
+            b.writeByte(LSSConstants.COLUMN_CODEC_RAW);
             b.writeByteArray(sections);
         });
         assertArrayEquals(expected, PaperPayloadHandler.encodeVoxelColumnPreEncoded(
@@ -232,6 +234,7 @@ class WireParityTest {
             b.writeUtf("minecraft:overworld");
             b.writeLong(5L);
             b.writeByte(-1); // serve-source: unknown (source-less convenience path)
+            b.writeByte(LSSConstants.COLUMN_CODEC_RAW);
             b.writeByteArray(new byte[0]);
         });
         byte[] encoded = PaperPayloadHandler.encodeVoxelColumnPreEncoded(
@@ -259,7 +262,8 @@ class WireParityTest {
         assertEquals(6, distinct.size(), "channel ids must be pairwise distinct");
         // Bump the literal only with a deliberate wire change reviewed on both platforms.
         // 16 -> 17: the declarative want-set model retires the rate-limited bounce (byte 0).
-        assertEquals(18, LSSConstants.PROTOCOL_VERSION); // 18: VoxelColumn serve-source byte
+        // 18: serve-source byte; 19: codec byte (zstd column frames).
+        assertEquals(19, LSSConstants.PROTOCOL_VERSION);
     }
 
     @Test

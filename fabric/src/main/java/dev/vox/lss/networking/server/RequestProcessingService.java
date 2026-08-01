@@ -55,6 +55,10 @@ public class RequestProcessingService {
 
     private final DirtyColumnTracker dirtyTracker;
     private final DirtyContentFilter dirtyContentFilter = new DirtyContentFilter();
+    // Compressed-column shipping is live: useCompressedColumns AND the server-side zstd
+    // native probe succeeded (latched once in the ctor — plan §0.11). A term of every
+    // session's wantsCompressedColumns derivation at registration.
+    private final boolean wireCompressionLive;
 
     private final long startTimeNanos = System.nanoTime();
 
@@ -127,6 +131,26 @@ public class RequestProcessingService {
                 config.perDimensionTimestampCacheSizeMB, config.missMemoTtlSeconds,
                 config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
                         + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS);
+
+        // Compressed-column shipping (protocol 19, plan §0.11): the server-side native
+        // probe latches ONCE here. Probe failure (musl servers — zstd-jni publishes no
+        // musl natives) degrades to raw sessions with one warning; without this term a
+        // capable client against a natives-less default-on server would throw at every
+        // payload build, forever. Independent of the store's own probe below.
+        boolean wireCompressionLive = false;
+        if (config.useCompressedColumns) {
+            var wireCodec = dev.vox.lss.common.store.StoreCodec.zstdOrNull();
+            if (wireCodec == null) {
+                LSSLogger.warn("useCompressedColumns is enabled but the "
+                        + dev.vox.lss.common.store.StoreCodec.NAME + " native cannot load"
+                        + " on this platform — LOD columns will ship uncompressed for"
+                        + " every session");
+            } else {
+                this.offThreadProcessor.attachWireCodec(wireCodec);
+                wireCompressionLive = true;
+            }
+        }
+        this.wireCompressionLive = wireCompressionLive;
 
         // LOD store (docs/planning/lod-store-implementation-plan.md): memory tier for
         // "memory", memory + SQLite for "full". Attached to BOTH consumers before any
@@ -246,6 +270,13 @@ public class RequestProcessingService {
         });
         this.diskReader.registerPlayer(player.getUUID());
         state.setCapabilities(capabilities);
+        // The four-term AND (plan §2): capability bit x config+native latch x NOT-v16.
+        // The v16 manager is marked BEFORE registerPlayer on the handshake path (and a
+        // dimension-change re-registration re-derives), so the dialect term is reliable
+        // here — a v16 handshake maliciously setting 0x2 never gets a codec byte.
+        state.setWantsCompressedColumns(this.wireCompressionLive
+                && (capabilities & LSSConstants.CAPABILITY_ZSTD_COLUMNS) != 0
+                && !this.v16Compat.isV16(player.getUUID()));
         state.markHandshakeComplete();
         return state;
     }
@@ -500,6 +531,22 @@ public class RequestProcessingService {
                     this.v16UnconvertibleWarned = true;
                     LSSLogger.warn("v16-compat: dropping unconvertible column-queue payload "
                             + payload.getClass().getName() + " for " + state.getPlayerName()
+                            + " (further drops are silent)");
+                }
+                return;
+            }
+            if (col.codec() != LSSConstants.COLUMN_CODEC_RAW) {
+                // Codec-0 assert at the seam (plan review A6): the legacy layout has
+                // nowhere to carry a codec, so a framed payload converted here would
+                // ship a zstd body the old client decodes as garbage (hard-kick class).
+                // Unreachable by construction — a v16 session's flag is derived false at
+                // registration — so any hit is a session-flag bug; drop (self-heals by
+                // re-declaration) and warn through the same latch.
+                if (!this.v16UnconvertibleWarned) {
+                    this.v16UnconvertibleWarned = true;
+                    LSSLogger.warn("v16-compat: dropping codec-" + col.codec()
+                            + " column for v16 session " + state.getPlayerName()
+                            + " — the session flag should have forced raw"
                             + " (further drops are silent)");
                 }
                 return;

@@ -88,6 +88,10 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     // start(). The processor owns the DELIVERY-PATH side of the store contract: deposits
     // AFTER the stale guard, the invalidation fan-out, and the ghost-guard delete.
     private volatile dev.vox.lss.common.store.LodStoreService store;
+    // The wire codec for compressed column shipping (protocol 19). Null = raw for
+    // everyone (useCompressedColumns off, or the server-side zstd native probe failed).
+    // Attached once at service init before start(); read by the processing thread.
+    private volatile dev.vox.lss.common.store.StoreCodec wireCodec;
     // NOTE (Phase 3 review + 4-agent round R2-M2): the dirty->store invalidation
     // fan-out stays ON on BOTH platforms, deliberately. A Fabric gating experiment
     // (save-hook deposits looked like they made the drain invalidation redundant)
@@ -371,22 +375,29 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
             this.timestampCache.put(dimension, packed, columnTimestamp, this.cycleNow);
         }
 
+        // One holder per call: the probe path has no dedup group, so two players wanting
+        // the same loaded chunk compress the same bytes twice — accepted (plan §0.4);
+        // the generation path is single-recipient by construction.
         return buildAndEnqueueColumnPayload(state, column.cx(), column.cz(), dimension,
                 columnTimestamp, submissionOrder,
-                column.serializedSections(), estimatedBytes, source);
+                ColumnBytes.ofRaw(this.wireCodec, column.serializedSections()),
+                estimatedBytes, source);
     }
 
     /**
-     * Build platform-specific payload from serialized section bytes and enqueue to the
-     * player's ready queue. Returns false when the column cannot go on the wire (oversized
-     * payload) — every caller then answers up-to-date so the position resolves terminally
-     * instead of dropping silently (the old silent drop left diskReadDone set with no
-     * response, and the client retried an unserveable position forever).
+     * Build platform-specific payload from the column-bytes holder and enqueue to the
+     * player's ready queue. The holder decides raw-vs-frame per recipient (the platform
+     * build consults {@code state.wantsCompressedColumns()}); {@code estimatedBytes}
+     * stays RAW-denominated (bandwidth-limiter semantics — design §5). Returns false
+     * when the column cannot go on the wire (oversized payload) — every caller then
+     * answers up-to-date so the position resolves terminally instead of dropping
+     * silently (the old silent drop left diskReadDone set with no response, and the
+     * client retried an unserveable position forever).
      */
     protected abstract boolean buildAndEnqueueColumnPayload(PlayerState state, int cx, int cz,
                                                              String dimension,
                                                              long columnTimestamp, long submissionOrder,
-                                                             byte[] sectionBytes, int estimatedBytes,
+                                                             ColumnBytes bytes, int estimatedBytes,
                                                              byte source);
 
     // ---- Processing loop ----
@@ -834,8 +845,15 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                 // re-request re-resolves from disk instead of drawing a false up_to_date.
                 boolean staleAgainstEdit = consumeInvalidatedInFlight(dimension, packed);
 
-                deliverDiskResult(playerUuid, state, result, result.submissionOrder(), dimension,
-                        staleAgainstEdit);
+                // ONE holder per drained result (plan §0.4): every dedup recipient's build
+                // and the store deposit share it, so a mixed-capability group costs one
+                // compress, never one per recipient. Null for non-data results (all-air /
+                // not-found / saturated).
+                ColumnBytes columnBytes = result.sectionBytes() == null ? null
+                        : ColumnBytes.ofRaw(this.wireCodec, result.sectionBytes());
+
+                deliverDiskResult(playerUuid, state, result, columnBytes,
+                        result.submissionOrder(), dimension, staleAgainstEdit);
 
                 if (!staleAgainstEdit && !result.saturated() && !result.notFound()) {
                     // Store timestamp so reconnecting clients get up-to-date responses
@@ -887,7 +905,8 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                         if (attachedRegistered != null
                                 && !attachedRegistered.equals(result.dimension())) continue;
                         deliverDiskResult(attachment.playerUuid(), attachedState, result,
-                                attachment.submissionOrder(), dimension, staleAgainstEdit);
+                                columnBytes, attachment.submissionOrder(), dimension,
+                                staleAgainstEdit);
                     }
                 }
             }
@@ -901,6 +920,7 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
      * Shared by the primary requester and every dedup-attached player.
      */
     private void deliverDiskResult(UUID playerUuid, PlayerState state, ChunkReadResult result,
+                                    ColumnBytes columnBytes,
                                     long submissionOrder, String dimension,
                                     boolean staleAgainstEdit) {
         int cx = result.chunkX();
@@ -930,11 +950,11 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                 // (client trace src:3), the NBT path stays COLUMN_SOURCE_DISK.
                 byte source = result.fromStore()
                         ? LSSConstants.COLUMN_SOURCE_STORE : LSSConstants.COLUMN_SOURCE_DISK;
-                boolean allAir = result.sectionBytes() == null;
+                boolean allAir = columnBytes == null;
                 boolean sent = !allAir
                         && buildAndEnqueueColumnPayload(state, cx, cz, result.dimension(),
                                 result.columnTimestamp(), submissionOrder,
-                                result.sectionBytes(), result.estimatedBytes(),
+                                columnBytes, result.estimatedBytes(),
                                 source);
                 if (!sent) {
                     // All-air chunk (no visible sections): a resync client (claimsData) may hold
@@ -979,8 +999,12 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     boolean sendEmptiedColumn(PlayerState state, int cx, int cz, String dimension,
                               long columnTimestamp, long submissionOrder, byte source) {
         int est = ZERO_SECTION_COLUMN.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
+        // Clears are ALWAYS codec 0 (the ONE common pin, plan §0.8): the 1-byte body is
+        // far below COLUMN_COMPRESS_MIN_BYTES, so the holder refuses a frame
+        // structurally and the client's clear detection keeps its decompress-free read.
         return buildAndEnqueueColumnPayload(state, cx, cz, dimension, columnTimestamp,
-                submissionOrder, ZERO_SECTION_COLUMN, est, source);
+                submissionOrder, ColumnBytes.ofRaw(this.wireCodec, ZERO_SECTION_COLUMN),
+                est, source);
     }
 
     /**
@@ -1301,6 +1325,23 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     public dev.vox.lss.common.store.LodStoreDiagnostics getStoreDiagnostics() {
         var s = this.store;
         return s != null ? s.diagnostics() : this.storeDiagnostics;
+    }
+
+    /**
+     * Attach the wire codec for compressed column shipping (protocol 19,
+     * useCompressedColumns). Null (never attached) means every session ships raw —
+     * the config-off AND natives-unavailable degrade path (plan §0.11: the service
+     * probes {@code StoreCodec.zstdOrNull()} once at start and warns when config
+     * wants compression but the native cannot serve it). Volatile: attached once at
+     * service init, read by the processing thread.
+     */
+    public final void attachWireCodec(dev.vox.lss.common.store.StoreCodec codec) {
+        this.wireCodec = codec;
+    }
+
+    /** The attached wire codec, or null while compression is off/unavailable. */
+    protected final dev.vox.lss.common.store.StoreCodec wireCodec() {
+        return this.wireCodec;
     }
 
     /** Attach the LOD store (lodStore != off). Must happen before {@link #start()}. */

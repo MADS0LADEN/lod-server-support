@@ -1,0 +1,164 @@
+package dev.vox.lss.networking.server;
+
+import dev.vox.lss.common.LSSConstants;
+import dev.vox.lss.common.SharedBandwidthLimiter;
+import dev.vox.lss.common.processing.ColumnBytes;
+import dev.vox.lss.common.processing.TickDiagnostics;
+import dev.vox.lss.common.store.StoreCodec;
+import dev.vox.lss.networking.payloads.VoxelColumnS2CPayload;
+import net.minecraft.SharedConstants;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.server.Bootstrap;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+/**
+ * The Fabric build's per-recipient codec choice (compressed-columns plan §2): a capable
+ * session ships the holder's frame as codec 1, every other session — flag off, no codec
+ * attached (the server-side latch, §0.11), sub-threshold clears — ships codec 0 raw; a
+ * mixed dedup fan-out compresses ONCE off the shared holder; and the wire_bytes counter
+ * records shipped size at send success while the limiter keeps charging raw.
+ */
+class CompressedColumnBuildTest {
+
+    private static final long BIG_ALLOCATION = 1_000_000_000L;
+    private static StoreCodec codec;
+
+    @BeforeAll
+    static void setup() {
+        SharedConstants.tryDetectVersion();
+        Bootstrap.bootStrap();
+        codec = StoreCodec.zstdOrNull();
+        assumeTrue(codec != null, "zstd native unavailable on this platform");
+    }
+
+    private record Harness(FabricOffThreadProcessor processor, PlayerRequestState state) {}
+
+    private static Harness harness(boolean attachCodec, boolean sessionWants) {
+        var state = new PlayerRequestState(UUID.randomUUID(), 4, 4);
+        state.setWantsCompressedColumns(sessionWants);
+        var players = new ConcurrentHashMap<UUID, PlayerRequestState>();
+        players.put(state.getPlayerUUID(), state);
+        var proc = new FabricOffThreadProcessor(players, null, false, null, 1, 0);
+        if (attachCodec) proc.attachWireCodec(codec);
+        return new Harness(proc, state);
+    }
+
+    private static List<CustomPacketPayload> flush(PlayerRequestState state, TickDiagnostics diag)
+            throws InterruptedException {
+        Thread.sleep(50);
+        var sent = new ArrayList<CustomPacketPayload>();
+        state.flushSendQueue(BIG_ALLOCATION, new SharedBandwidthLimiter(BIG_ALLOCATION),
+                diag, sent::add);
+        return sent;
+    }
+
+    private static byte[] compressibleRaw() {
+        return new byte[8192]; // zeros — compresses far below raw
+    }
+
+    @Test
+    void capableSessionShipsCodec1Frame() throws InterruptedException {
+        var h = harness(true, true);
+        byte[] raw = compressibleRaw();
+        var holder = ColumnBytes.ofRaw(codec, raw);
+        assertTrue(h.processor().buildAndEnqueueColumnPayload(h.state(), 1, 2,
+                LSSConstants.DIM_STR_OVERWORLD, 5L, 1L, holder,
+                raw.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                LSSConstants.COLUMN_SOURCE_DISK));
+        var diag = new TickDiagnostics();
+        var sent = flush(h.state(), diag);
+        var col = (VoxelColumnS2CPayload) sent.get(0);
+        assertEquals(LSSConstants.COLUMN_CODEC_ZSTD, col.codec());
+        assertSame(holder.frame(), col.shippedSections(),
+                "the shipped frame IS the holder's memoized frame — no copy, no recompress");
+        assertEquals(raw.length, col.rawSize());
+        // Limiter charge stays RAW-denominated; wire counter records shipped size.
+        assertEquals(raw.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                diag.getTotalBytesSent());
+        assertEquals(holder.frame().length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                diag.getTotalWireBytesSent());
+        assertEquals(1, h.processor().getDiagnostics().getTotalColumnsCompressed());
+        assertEquals(0, h.processor().getDiagnostics().getTotalColumnsRaw());
+    }
+
+    @Test
+    void nonCapableSessionShipsRawEvenWithCodecAttached() throws InterruptedException {
+        var h = harness(true, false);
+        byte[] raw = compressibleRaw();
+        var holder = ColumnBytes.ofRaw(codec, raw);
+        assertTrue(h.processor().buildAndEnqueueColumnPayload(h.state(), 1, 2,
+                LSSConstants.DIM_STR_OVERWORLD, 5L, 1L, holder,
+                raw.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                LSSConstants.COLUMN_SOURCE_DISK));
+        var col = (VoxelColumnS2CPayload) flush(h.state(), new TickDiagnostics()).get(0);
+        assertEquals(LSSConstants.COLUMN_CODEC_RAW, col.codec());
+        assertSame(raw, col.shippedSections());
+        assertFalse(holder.frameMaterialized(), "no compress ran for a raw-only recipient");
+        assertEquals(1, h.processor().getDiagnostics().getTotalColumnsRaw());
+    }
+
+    @Test
+    void noCodecAttachedShipsRawForAWantingSession() throws InterruptedException {
+        // The server-side latch (plan §0.11): natives unavailable / config off attaches no
+        // codec, and even a capability-declaring session ships raw — never a build throw.
+        var h = harness(false, true);
+        byte[] raw = compressibleRaw();
+        assertTrue(h.processor().buildAndEnqueueColumnPayload(h.state(), 1, 2,
+                LSSConstants.DIM_STR_OVERWORLD, 5L, 1L, ColumnBytes.ofRaw(null, raw),
+                raw.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                LSSConstants.COLUMN_SOURCE_DISK));
+        var col = (VoxelColumnS2CPayload) flush(h.state(), new TickDiagnostics()).get(0);
+        assertEquals(LSSConstants.COLUMN_CODEC_RAW, col.codec());
+    }
+
+    @Test
+    void zeroSectionClearShipsRawForACapableSession() throws InterruptedException {
+        // The §0.8 pin through the real build: the 1-byte clear body is sub-threshold, so
+        // the holder refuses a frame and the client's decompress-free clear detection holds.
+        var h = harness(true, true);
+        byte[] clear = {0};
+        assertTrue(h.processor().buildAndEnqueueColumnPayload(h.state(), 0, 0,
+                LSSConstants.DIM_STR_OVERWORLD, 5L, 1L, ColumnBytes.ofRaw(codec, clear),
+                clear.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                LSSConstants.COLUMN_SOURCE_DISK));
+        var col = (VoxelColumnS2CPayload) flush(h.state(), new TickDiagnostics()).get(0);
+        assertEquals(LSSConstants.COLUMN_CODEC_RAW, col.codec());
+        assertArrayEquals(clear, col.shippedSections());
+    }
+
+    @Test
+    void mixedFanOutCompressesOnceOffTheSharedHolder() throws InterruptedException {
+        var capable = harness(true, true);
+        var legacy = new PlayerRequestState(UUID.randomUUID(), 4, 4); // wants=false
+        capable.processor().getClass(); // (same processor builds for both recipients)
+        byte[] raw = compressibleRaw();
+        var holder = ColumnBytes.ofRaw(codec, raw);
+
+        assertTrue(capable.processor().buildAndEnqueueColumnPayload(capable.state(), 1, 2,
+                LSSConstants.DIM_STR_OVERWORLD, 5L, 1L, holder,
+                raw.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                LSSConstants.COLUMN_SOURCE_DISK));
+        assertTrue(capable.processor().buildAndEnqueueColumnPayload(legacy, 1, 2,
+                LSSConstants.DIM_STR_OVERWORLD, 5L, 2L, holder,
+                raw.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                LSSConstants.COLUMN_SOURCE_DISK));
+
+        var capCol = (VoxelColumnS2CPayload) flush(capable.state(), new TickDiagnostics()).get(0);
+        var rawCol = (VoxelColumnS2CPayload) flush(legacy, new TickDiagnostics()).get(0);
+        assertEquals(LSSConstants.COLUMN_CODEC_ZSTD, capCol.codec());
+        assertEquals(LSSConstants.COLUMN_CODEC_RAW, rawCol.codec());
+        assertSame(capCol.shippedSections(), holder.frame(), "one compress, shared frame");
+        assertSame(raw, rawCol.shippedSections(), "the raw recipient shares the original array");
+        assertEquals(1, capable.processor().getDiagnostics().getTotalColumnsCompressed());
+        assertEquals(1, capable.processor().getDiagnostics().getTotalColumnsRaw());
+    }
+}

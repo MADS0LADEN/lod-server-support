@@ -30,6 +30,7 @@ public class TickDiagnostics {
     // teardown on kick and dimension change (single-writer: main thread)
     private long totalSectionsSent;
     private long totalBytesSent;
+    private long totalWireBytesSent;
 
     // Sliding window bandwidth rate (~5s at 20 TPS)
     private static final int WINDOW_TICKS = 100;
@@ -87,8 +88,16 @@ public class TickDiagnostics {
         this.totalBytesSent += estimatedBytes;
     }
 
+    /** Shipped payload size at send success (frame for codec-1 columns) — the counted
+     *  wire volume that matches observed bandwidth, next to the raw-denominated
+     *  {@link #getTotalBytesSent} the limiter charges (compressed-columns plan §4). */
+    public void recordWireSent(int wireBytes) {
+        this.totalWireBytesSent += wireBytes;
+    }
+
     public long getTotalSectionsSent() { return this.totalSectionsSent; }
     public long getTotalBytesSent() { return this.totalBytesSent; }
+    public long getTotalWireBytesSent() { return this.totalWireBytesSent; }
 
     public void updateQueuePeak(int queueSize) {
         this.curTickQueuePeak = Math.max(this.curTickQueuePeak, queueSize);

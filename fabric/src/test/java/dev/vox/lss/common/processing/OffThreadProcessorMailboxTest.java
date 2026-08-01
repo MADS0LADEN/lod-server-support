@@ -63,7 +63,7 @@ class OffThreadProcessorMailboxTest {
         @Override
         protected boolean buildAndEnqueueColumnPayload(TestState state, int cx, int cz, String dimension,
                                                      long columnTimestamp, long submissionOrder,
-                                                     byte[] sectionBytes, int estimatedBytes, byte source) {
+                                                     ColumnBytes bytes, int estimatedBytes, byte source) {
             // no-op: tests only observe send actions and slot counts
             return true;
         }
@@ -219,7 +219,7 @@ class OffThreadProcessorMailboxTest {
         var proc = new TestProcessor(players) {
             @Override
             protected boolean buildAndEnqueueColumnPayload(TestState s, int cx, int cz, String dim,
-                                                           long ts, long order, byte[] bytes, int est,
+                                                           long ts, long order, ColumnBytes bytes, int est,
                                                            byte source) {
                 delivered.add(PositionUtil.packPosition(cx, cz));
                 return true;

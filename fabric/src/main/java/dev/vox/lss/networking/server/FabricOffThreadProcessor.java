@@ -3,6 +3,7 @@ package dev.vox.lss.networking.server;
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.LSSLogger;
 import dev.vox.lss.common.PositionUtil;
+import dev.vox.lss.common.processing.ColumnBytes;
 import dev.vox.lss.common.processing.OffThreadProcessor;
 import dev.vox.lss.common.processing.QueuedPayload;
 import dev.vox.lss.networking.payloads.VoxelColumnS2CPayload;
@@ -78,11 +79,14 @@ public class FabricOffThreadProcessor extends OffThreadProcessor<PlayerRequestSt
     protected boolean buildAndEnqueueColumnPayload(PlayerRequestState state, int cx, int cz,
                                                     String dimension,
                                                     long columnTimestamp, long submissionOrder,
-                                                    byte[] sectionBytes, int estimatedBytes,
+                                                    ColumnBytes bytes, int estimatedBytes,
                                                     byte source) {
-        if (sectionBytes.length > LSSConstants.MAX_SEND_SECTIONS_SIZE) {
+        // The guard checks RAW size (the client decode cap is raw-denominated; a codec-1
+        // frame is strictly smaller than its raw or the holder refuses it) — load-bearing
+        // for store-frame hits too, whose rows can legally exceed the send cap (plan §3).
+        if (bytes.rawSize() > LSSConstants.MAX_SEND_SECTIONS_SIZE) {
             LSSLogger.warn("Dropping oversized column [" + cx + ", " + cz + "] in " + dimension
-                    + ": " + sectionBytes.length + " bytes exceeds send limit "
+                    + ": " + bytes.rawSize() + " bytes exceeds send limit "
                     + LSSConstants.MAX_SEND_SECTIONS_SIZE + " (netty frame cap would kill the connection)");
             return false;
         }
@@ -96,14 +100,23 @@ public class FabricOffThreadProcessor extends OffThreadProcessor<PlayerRequestSt
         }
         var dimensionKey = this.dimensionKeyCache.computeIfAbsent(dimension,
                 d -> ResourceKey.create(Registries.DIMENSION, Identifier.parse(d)));
+        // Per-recipient codec choice off the shared holder (plan §0.3/§0.4): frame() is
+        // asked only for capable sessions and memoizes across the dedup fan-out; null
+        // means "ship raw" (no codec, below threshold, or the frame didn't shrink).
+        byte[] frame = state.wantsCompressedColumns() ? bytes.frame() : null;
+        byte codecTag = frame != null ? LSSConstants.COLUMN_CODEC_ZSTD
+                : LSSConstants.COLUMN_CODEC_RAW;
+        byte[] shipped = frame != null ? frame : bytes.raw();
         var payload = new VoxelColumnS2CPayload(cx, cz, dimensionKey, columnTimestamp,
-                source, sectionBytes);
-        state.addReadyPayload(new QueuedPayload<>(payload, estimatedBytes, submissionOrder,
-                PositionUtil.packPosition(cx, cz)));
-        // Soak probe hashes (dev-only, no-op unless -Dlss.soak.probes): the EXACT wire
-        // bytes, at the one choke point every serve source (probe/disk/store/gen) passes
-        // through — the store byte-parity gate compares these across serve legs.
-        SoakProbeBridge.recordServed(cx, cz, sectionBytes);
+                source, codecTag, shipped, bytes.rawSize());
+        int wireBytes = shipped.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
+        state.addReadyPayload(new QueuedPayload<>(payload, estimatedBytes, wireBytes,
+                submissionOrder, PositionUtil.packPosition(cx, cz)));
+        getDiagnostics().incrementColumnCodec(frame != null);
+        // Soak probe hashes (dev-only, no-op unless -Dlss.soak.probes): the RAW bytes —
+        // pinned (plan §0.6): probes compare CONTENT across serve legs, and the armed()
+        // gate keeps the unarmed production path from ever materializing raw for it.
+        if (SoakProbeBridge.armed()) SoakProbeBridge.recordServed(cx, cz, bytes.raw());
         return true;
     }
 

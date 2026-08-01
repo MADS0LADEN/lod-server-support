@@ -65,8 +65,13 @@ class ClientColumnProcessor {
      * so a consumer overwrites ghost terrain the server cleared (WorldEdit-style clears and
      * fully-emptied columns). Captured on the main thread at offer time — the decode thread
      * must not touch ColumnStateMap.
+     *
+     * <p>{@code charge} is the byte-gauge charge this column took at offer — stored so
+     * every release path (drain, clear, shutdown, undispatched sweep) returns EXACTLY what
+     * was charged, never re-derived (plan §0.5). Raw-work-denominated: the payload's
+     * {@code rawSize()} under the max(shipped, clamp(declared)) rule for codec-1 frames.
      */
-    private record QueuedColumn(VoxelColumnS2CPayload payload, boolean resync) {}
+    private record QueuedColumn(VoxelColumnS2CPayload payload, boolean resync, int charge) {}
 
     private final ConcurrentLinkedQueue<QueuedColumn> columnQueue = new ConcurrentLinkedQueue<>();
     private final AtomicInteger queueSize = new AtomicInteger();
@@ -100,8 +105,15 @@ class ClientColumnProcessor {
         return mc != null ? mc.level : null;
     }
 
-    private static int sectionBytesOf(VoxelColumnS2CPayload payload) {
-        return payload.decompressedSections() == null ? 0 : payload.decompressedSections().length;
+    /**
+     * The byte-gauge charge for one payload: raw-work-denominated (the backpressure-halt
+     * and scanner pressure gates are calibrated in raw bytes), floored at the SHIPPED
+     * length so a lying codec-1 header can never under-charge below resident bytes
+     * (plan §0.5 — the payload's {@code rawSize()} already applies the
+     * max(shipped, clamp(declared, 0, MAX)) rule at read).
+     */
+    private static int chargeOf(VoxelColumnS2CPayload payload) {
+        return payload.shippedSections() == null ? 0 : payload.rawSize();
     }
 
     /** Queue admission: bounded by count AND bytes (either alone admits multi-GiB retention). */
@@ -113,9 +125,9 @@ class ClientColumnProcessor {
     void offer(VoxelColumnS2CPayload payload, boolean resync) {
         // Null/corrupt section bytes still traverse the queue (the drain reports them):
         // count them as zero rather than NPE here.
-        int payloadBytes = sectionBytesOf(payload);
+        int payloadBytes = chargeOf(payload);
         if (admits(this.queueSize.get(), this.queuedBytes.get(), payloadBytes)) {
-            this.columnQueue.add(new QueuedColumn(payload, resync));
+            this.columnQueue.add(new QueuedColumn(payload, resync, payloadBytes));
             this.queueSize.incrementAndGet();
             this.queuedBytes.addAndGet(payloadBytes);
         } else {
@@ -175,7 +187,7 @@ class ClientColumnProcessor {
         QueuedColumn queued;
         while ((queued = this.columnQueue.poll()) != null) {
             this.queueSize.decrementAndGet();
-            this.queuedBytes.addAndGet(-sectionBytesOf(queued.payload()));
+            this.queuedBytes.addAndGet(-queued.charge());
             var payload = queued.payload();
             this.failureReporter.report(payload.dimension(),
                     payload.chunkX(), payload.chunkZ());
@@ -205,12 +217,12 @@ class ClientColumnProcessor {
         QueuedColumn queued;
         while (epoch == this.sessionEpoch && (queued = this.columnQueue.poll()) != null) {
             this.queueSize.decrementAndGet();
-            this.queuedBytes.addAndGet(-sectionBytesOf(queued.payload()));
+            this.queuedBytes.addAndGet(-queued.charge());
             var payload = queued.payload();
             if (!levelDimension.equals(payload.dimension())) continue;
 
-            byte[] decompressed = payload.decompressedSections();
-            if (decompressed == null || decompressed.length == 0) {
+            byte[] shipped = payload.shippedSections();
+            if (shipped == null || shipped.length == 0) {
                 // Defensive (a compliant server always writes at least the section-count
                 // varint) — but the position was stamped received at arrival, so a silent
                 // drop here would be a permanent false stamp.
@@ -220,6 +232,13 @@ class ClientColumnProcessor {
             }
 
             try {
+                // Codec dispatch (protocol 19): codec 0 decodes the shipped bytes as-is;
+                // codec 1 decompresses first, inside this try — a bomb-guard rejection or
+                // any zstd throw reports through the same ingest-failure path as a decode
+                // throw (the server re-serves). Codec values outside {0,1} are decode
+                // failures too — NOT the source tag's pass-through rule; the byte changes
+                // how these bytes must be read (plan §0.7).
+                byte[] decompressed = decompressForDecode(payload.codec(), shipped);
                 var sections = decodeSections(decompressed, levelSectionCount, factory);
                 if (ClientTraceLog.enabled()) {
                     // Per-section light presence — the boundary-lighting instrument (black
@@ -366,6 +385,36 @@ class ClientColumnProcessor {
     }
 
     /**
+     * Resolve the shipped bytes to raw section bytes for decode. Codec 0 returns them
+     * as-is. Codec 1 runs the decompression-bomb guard FIRST — the frame's declared
+     * content size must be in {@code (0, MAX_SECTIONS_SIZE]} before any allocation —
+     * then an exact-size zstd decompress whose output length must match the declaration
+     * (the store's own integrity discipline). Anything else — unknown codec, undeclared
+     * or lying size, truncated/corrupt frame, missing native — throws, which the drain
+     * converts into an ingest-failure report for the column.
+     */
+    private static byte[] decompressForDecode(byte codec, byte[] shipped) {
+        if (codec == dev.vox.lss.common.LSSConstants.COLUMN_CODEC_RAW) return shipped;
+        if (codec != dev.vox.lss.common.LSSConstants.COLUMN_CODEC_ZSTD) {
+            throw new IllegalStateException("unknown column codec " + codec);
+        }
+        long declared = dev.vox.lss.networking.payloads.ZstdWireSupport
+                .declaredContentSize(shipped);
+        if (declared <= 0 || declared > dev.vox.lss.common.LSSConstants.MAX_SECTIONS_SIZE) {
+            throw new IllegalStateException("column frame declares " + declared
+                    + " bytes (bomb guard: allowed 1.."
+                    + dev.vox.lss.common.LSSConstants.MAX_SECTIONS_SIZE + ")");
+        }
+        byte[] raw = dev.vox.lss.networking.payloads.ZstdWireSupport
+                .decompress(shipped, (int) declared);
+        if (raw.length != declared) {
+            throw new IllegalStateException("column frame decompressed to " + raw.length
+                    + " bytes, declared " + declared);
+        }
+        return raw;
+    }
+
+    /**
      * True if these column bytes carry ZERO sections — the wire form of an authoritative
      * content-&gt;air CLEAR (the server sends it only to a data-claiming client). Reads just the
      * leading section-count varint. A malformed header reads as not-a-clear; the decode path
@@ -440,7 +489,7 @@ class ClientColumnProcessor {
         QueuedColumn queued;
         while ((queued = this.columnQueue.poll()) != null) {
             this.queueSize.decrementAndGet();
-            this.queuedBytes.addAndGet(-sectionBytesOf(queued.payload()));
+            this.queuedBytes.addAndGet(-queued.charge());
             var payload = queued.payload();
             manager.onIngestFailure(payload.dimension(),
                     PositionUtil.packPosition(payload.chunkX(), payload.chunkZ()));
@@ -458,7 +507,7 @@ class ClientColumnProcessor {
         QueuedColumn drained;
         while ((drained = this.columnQueue.poll()) != null) {
             this.queueSize.decrementAndGet();
-            this.queuedBytes.addAndGet(-sectionBytesOf(drained.payload()));
+            this.queuedBytes.addAndGet(-drained.charge());
         }
     }
 

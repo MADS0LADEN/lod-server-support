@@ -71,6 +71,17 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public boolean useNbtTranscode = true;
     /**
+     * When true (default), columns for capability-declaring protocol-19 clients ship as
+     * zstd-1 frames end-to-end (docs/planning/compressed-columns-design.md): store hits
+     * ship their stored frame verbatim, live/disk/generation serves compress once on the
+     * processing thread — removing the netty deflate over raw bytes (~520 us/col on store
+     * hits, Phase 0) at the cost of ~+12% wire bytes. Requires the server-side zstd
+     * native (probed at service start; unavailable => raw for everyone, one warning).
+     * Set false as the rollback lever: codec 0 for everyone, capability ignored. No
+     * clamp: a boolean has no out-of-range value.
+     */
+    public boolean useCompressedColumns = true;
+    /**
      * When true (default), clients running the legacy protocol-16 mod (v0.6.x) get a
      * translated LOD session through the v16 compat shim (docs/planning/v16-compat-design.md)
      * instead of the silent version-mismatch no-session. Inert for current-protocol clients;

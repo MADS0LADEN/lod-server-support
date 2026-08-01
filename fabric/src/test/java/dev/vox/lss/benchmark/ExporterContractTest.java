@@ -4,6 +4,7 @@ import dev.vox.lss.common.SharedBandwidthLimiter;
 import dev.vox.lss.common.processing.AbstractChunkDiskReader;
 import dev.vox.lss.common.processing.AbstractPlayerRequestState;
 import dev.vox.lss.common.processing.LoadedColumnData;
+import dev.vox.lss.common.processing.ColumnBytes;
 import dev.vox.lss.common.processing.OffThreadProcessor;
 import dev.vox.lss.common.processing.TickDiagnostics;
 import dev.vox.lss.common.tracking.DirtyColumnTracker;
@@ -60,7 +61,7 @@ class ExporterContractTest {
         @Override
         protected boolean buildAndEnqueueColumnPayload(TestState state, int cx, int cz, String dimension,
                                                        long columnTimestamp, long submissionOrder,
-                                                       byte[] sectionBytes, int estimatedBytes,
+                                                       ColumnBytes bytes, int estimatedBytes,
                                                        byte source) {
             return true;
         }

@@ -7,6 +7,7 @@ import dev.vox.lss.common.processing.LoadedColumnData;
 import dev.vox.lss.common.processing.OffThreadProcessor;
 import dev.vox.lss.common.processing.QueuedPayload;
 import dev.vox.lss.common.processing.TickSnapshot;
+import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.tracking.DirtyColumnTracker;
 import net.minecraft.SharedConstants;
 import net.minecraft.network.chat.Component;
@@ -993,5 +994,55 @@ class PaperRequestProcessingServiceTest {
         }
         service.tick();
         assertEquals(n, service.getPlayers().size(), "all foreign-thread registers must apply");
+    }
+
+    // ---- Compressed-column session flag (plan §2: the four-term AND at registration) ----
+
+    /** A second service over the same rig collaborators with wire compression LIVE. */
+    private PaperRequestProcessingService liveCompressionService() {
+        return new PaperRequestProcessingService(server, config,
+                new PaperRequestProcessingService.Wiring(
+                        players, diskReader, genService, processor, new DirtyColumnTracker(),
+                        broadcaster, null, null, true));
+    }
+
+    @Test
+    void compressedFlagSetForCapableClientWhenLive() {
+        var svc = liveCompressionService();
+        var player = playerIn(UUID.randomUUID(), level(Level.OVERWORLD));
+        var state = svc.registerPlayer(player,
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS | LSSConstants.CAPABILITY_ZSTD_COLUMNS);
+        assertTrue(state.wantsCompressedColumns());
+    }
+
+    @Test
+    void compressedFlagClearWithoutTheCapabilityBit() {
+        var svc = liveCompressionService();
+        var state = svc.registerPlayer(playerIn(UUID.randomUUID(), level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        assertFalse(state.wantsCompressedColumns());
+    }
+
+    @Test
+    void compressedFlagClearWhenCompressionNotLive() {
+        // The rig's default service wires wireCompressionLive=false (config off or the
+        // server-side native probe failed — plan §0.11): the capability bit alone must
+        // never enable framing.
+        var state = service.registerPlayer(playerIn(UUID.randomUUID(), level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS | LSSConstants.CAPABILITY_ZSTD_COLUMNS);
+        assertFalse(state.wantsCompressedColumns());
+    }
+
+    @Test
+    void compressedFlagClearForAV16DialectSessionEvenWithTheBit() {
+        // A v16 handshake maliciously setting 0x2 must never get a codec byte — its wire
+        // layout has nowhere to carry one. The manager is marked before registration on
+        // the real handshake path; mirror that ordering here.
+        var svc = liveCompressionService();
+        var uuid = UUID.randomUUID();
+        svc.getV16CompatManager().onHandshake(uuid);
+        var state = svc.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS | LSSConstants.CAPABILITY_ZSTD_COLUMNS);
+        assertFalse(state.wantsCompressedColumns());
     }
 }

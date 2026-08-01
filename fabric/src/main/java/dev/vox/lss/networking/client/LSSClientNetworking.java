@@ -1,6 +1,7 @@
 package dev.vox.lss.networking.client;
 
 import dev.vox.lss.common.LSSConstants;
+import dev.vox.lss.networking.payloads.ZstdWireSupport;
 import dev.vox.lss.common.LSSLogger;
 import dev.vox.lss.common.PositionUtil;
 import dev.vox.lss.api.LSSApi;
@@ -27,7 +28,8 @@ public class LSSClientNetworking {
     private static final ClientSessionGate sessionGate = new ClientSessionGate(
             columnProcessor,
             version -> ClientPlayNetworking.send(new HandshakeC2SPayload(
-                    version, LSSConstants.CAPABILITY_VOXEL_COLUMNS)),
+                    version, LSSConstants.CAPABILITY_VOXEL_COLUMNS
+                            | ZstdWireSupport.capabilityBit())),
             LSSClientNetworking::createRequestManager);
 
     public static boolean isServerEnabled() {
@@ -102,7 +104,8 @@ public class LSSClientNetworking {
             if (!LSSApi.hasVoxelConsumers()) return; // no LOD consumer -> stay silent
             try {
                 ClientPlayNetworking.send(new HandshakeC2SPayload(
-                        LSSConstants.PROTOCOL_VERSION, LSSConstants.CAPABILITY_VOXEL_COLUMNS));
+                        LSSConstants.PROTOCOL_VERSION, LSSConstants.CAPABILITY_VOXEL_COLUMNS
+                                | ZstdWireSupport.capabilityBit()));
             } catch (Exception e) {
                 LSSLogger.debug("LAN host handshake send failed: " + e.getMessage());
             }
@@ -210,7 +213,12 @@ public class LSSClientNetworking {
                                   VoxelColumnS2CPayload payload) {
         long packed = PositionUtil.packPosition(payload.chunkX(), payload.chunkZ());
         boolean resync = manager != null && manager.heldContentBefore(packed);
-        boolean clear = ClientColumnProcessor.isClearColumn(payload.decompressedSections());
+        // Codec-gated (plan §0.8): only raw bytes can be varint-peeked here. A compliant
+        // server always ships clears raw (1-byte body, far below the compress threshold);
+        // a compressed "clear" from a non-compliant server reads as not-a-clear —
+        // fail-safe, it still decodes correctly at the drain.
+        boolean clear = payload.codec() == LSSConstants.COLUMN_CODEC_RAW
+                && ClientColumnProcessor.isClearColumn(payload.shippedSections());
         if (manager != null && !manager.onColumnReceived(packed, payload.columnTimestamp(),
                 payload.dimension(), clear, payload.source())) {
             // Out-of-range unsolicited drop: the state map refused the stamp, and the

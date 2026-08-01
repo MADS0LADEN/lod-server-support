@@ -243,7 +243,21 @@ public class PaperRequestProcessingService {
                   DirtyColumnTracker dirtyTracker,
                   PaperDirtyColumnBroadcaster dirtyBroadcaster,
                   dev.vox.lss.common.store.LodStoreService lodStore,
-                  PaperXrayMaskManager xrayMasks) {
+                  PaperXrayMaskManager xrayMasks,
+                  boolean wireCompressionLive) {
+
+        /** Pre-compression full shape (no wire codec attached) — store-era test wirings. */
+        Wiring(Map<UUID, PaperPlayerRequestState> players,
+               PaperChunkDiskReader diskReader,
+               PaperChunkGenerationService generationService,
+               PaperOffThreadProcessor offThreadProcessor,
+               DirtyColumnTracker dirtyTracker,
+               PaperDirtyColumnBroadcaster dirtyBroadcaster,
+               dev.vox.lss.common.store.LodStoreService lodStore,
+               PaperXrayMaskManager xrayMasks) {
+            this(players, diskReader, generationService, offThreadProcessor,
+                    dirtyTracker, dirtyBroadcaster, lodStore, xrayMasks, false);
+        }
 
         /** Pre-store test-wiring shape (no store attached, no mask manager published —
          *  a test-wired service must retract nothing at shutdown). */
@@ -254,7 +268,7 @@ public class PaperRequestProcessingService {
                DirtyColumnTracker dirtyTracker,
                PaperDirtyColumnBroadcaster dirtyBroadcaster) {
             this(players, diskReader, generationService, offThreadProcessor,
-                    dirtyTracker, dirtyBroadcaster, null, null);
+                    dirtyTracker, dirtyBroadcaster, null, null, false);
         }
     }
 
@@ -265,6 +279,11 @@ public class PaperRequestProcessingService {
     // shutdown must retract nothing) — published by productionWiring BEFORE the store
     // Environment snapshots mask fingerprints (R2-M1).
     private PaperXrayMaskManager xrayMasks;
+    // Compressed-column shipping is live: useCompressedColumns AND the server-side zstd
+    // native probe succeeded (latched in productionWiring — plan §0.11). A term of every
+    // session's wantsCompressedColumns derivation at registration; false in test wirings
+    // unless injected.
+    private final boolean wireCompressionLive;
 
     public PaperRequestProcessingService(MinecraftServer server, Plugin plugin, PaperConfig config) {
         this(server, config, productionWiring(server, plugin, config));
@@ -286,6 +305,7 @@ public class PaperRequestProcessingService {
         // Null in test wiring: the guarded retract at shutdown must clear only a
         // manager this service actually published.
         this.xrayMasks = wiring.xrayMasks();
+        this.wireCompressionLive = wiring.wireCompressionLive();
     }
 
     private static Wiring productionWiring(MinecraftServer server, Plugin plugin, PaperConfig config) {
@@ -310,6 +330,24 @@ public class PaperRequestProcessingService {
                 config.perDimensionTimestampCacheSizeMB, config.missMemoTtlSeconds,
                 config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
                         + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS);
+
+        // Compressed-column shipping (protocol 19, plan §0.11) — twin of the Fabric
+        // service's latch: one server-side native probe; failure degrades to raw
+        // sessions with one warning (zstd-jni publishes no musl natives, and musl
+        // servers are common). Independent of the store's own probe below.
+        boolean wireCompressionLive = false;
+        if (config.useCompressedColumns) {
+            var wireCodec = dev.vox.lss.common.store.StoreCodec.zstdOrNull();
+            if (wireCodec == null) {
+                LSSLogger.warn("useCompressedColumns is enabled but the "
+                        + dev.vox.lss.common.store.StoreCodec.NAME + " native cannot load"
+                        + " on this platform — LOD columns will ship uncompressed for"
+                        + " every session");
+            } else {
+                offThreadProcessor.attachWireCodec(wireCodec);
+                wireCompressionLive = true;
+            }
+        }
 
         // LOD store: memory tier for "memory", memory + SQLite for "full" — attached to
         // both consumers BEFORE the processor starts / any submit. Environment resolved
@@ -363,7 +401,7 @@ public class PaperRequestProcessingService {
         var dirtyBroadcaster = new PaperDirtyColumnBroadcaster(
                 server, players, dirtyTracker, offThreadProcessor);
         return new Wiring(players, diskReader, generationService, offThreadProcessor,
-                dirtyTracker, dirtyBroadcaster, lodStore, xrayMasks);
+                dirtyTracker, dirtyBroadcaster, lodStore, xrayMasks, wireCompressionLive);
     }
 
     /** Registry identity for the LOD store meta guard (4-agent round R2-M3) — textual
@@ -487,6 +525,12 @@ public class PaperRequestProcessingService {
         });
         this.diskReader.registerPlayer(player.getUUID());
         state.setCapabilities(capabilities);
+        // The four-term AND (plan §2) — twin of the Fabric derivation. The v16 manager is
+        // marked before the register event is enqueued (handshake path), and the drain
+        // runs registerPlayer before the deferred reply, so no serve precedes the flag.
+        state.setWantsCompressedColumns(this.wireCompressionLive
+                && (capabilities & LSSConstants.CAPABILITY_ZSTD_COLUMNS) != 0
+                && !this.v16Compat.isV16(player.getUUID()));
         state.markHandshakeComplete();
         return state;
     }

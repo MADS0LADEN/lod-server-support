@@ -32,7 +32,13 @@ final class PaperSoakProbeBridge {
         }
     }
 
-    /** Record one served column's exact wire bytes (no-op unless probes are armed). */
+    /** True when probes are armed — callers gate expensive argument materialization
+     *  (e.g. decompressing a store frame to raw) behind this. */
+    static boolean armed() {
+        return RECORD != null;
+    }
+
+    /** Record one served column's exact RAW section bytes (no-op unless probes are armed). */
     static void recordServed(int cx, int cz, byte[] wireBytes) {
         var h = RECORD;
         if (h == null) return;
