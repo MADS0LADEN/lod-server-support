@@ -193,7 +193,10 @@ BACKWARD. v2:
   but safe-biased). `lodStoreMaxSizeMB` default **nonzero** (4096) once eviction
   exists — v1's 0=unlimited default meant the eviction code would never run in
   production (unexercised complexity, and §4's disk numbers make unlimited a real
-  operational surprise).
+  operational surprise). **[SUPERSEDED 2026-07-31, user decision: the default is now
+  0 = uncapped after live evidence that a capped default treadmills a pregenerated
+  world — see store-cap-behavior-plan.md; the nonzero-default rationale above is
+  historical. The eviction code stays exercised by the opt-in cap + its unit pins.]**
 
 ## 2. Schema (v2 — rowid tables; v1's WITHOUT ROWID on `lods` was the anti-pattern)
 

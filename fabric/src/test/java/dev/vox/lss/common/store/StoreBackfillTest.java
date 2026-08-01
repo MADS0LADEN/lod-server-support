@@ -204,6 +204,113 @@ class StoreBackfillTest {
         store.shutdown();
     }
 
+    /** Wiring pin (store-backfill-tuning-plan.md §3): the ctor's columnsPerSecond value
+     *  actually paces the walk — cps=2 over a 6-chunk region must complete >= 2 rate
+     *  windows. Asserts on the driver's window COUNTER, never wall-clock (timing
+     *  asserts flake on loaded boxes; the counter increments deterministically every
+     *  cps visited columns regardless of how long the sleeps really took). */
+    @Test
+    void columnsPerSecondCtorValuePacesTheWalkInRateWindows() throws Exception {
+        writeRegion(0, 0, 1, 2, 3, 4, 5, 6);
+        SqliteLodStore store = openStore();
+        var bf = new StoreBackfill(store, d -> regionDir(), d -> new long[]{0, 0},
+                List.of(OW), (dim, cx, cz) -> new byte[]{1},
+                () -> true, () -> true, 2);
+        assertTrue(bf.start());
+        awaitDone(bf);
+        assertTrue(bf.rateWindowCount() >= 2,
+                "6 visited columns at 2 col/s must complete >= 2 rate windows, got "
+                        + bf.rateWindowCount());
+        assertEquals(6, store.diagnostics().getBackfillDeposits(),
+                "pacing must slow the walk, never drop columns");
+        store.shutdown();
+    }
+
+    /** Cap-behavior §3 estimate arithmetic (the log prose is deliberately unpinned):
+     *  planned region-file bytes x the measured 0.72 LOD/region ratio. */
+    @Test
+    void estimateLodBytesAppliesTheMeasuredRatio() {
+        assertEquals(0, StoreBackfill.estimateLodBytes(0));
+        assertEquals(720_000L, StoreBackfill.estimateLodBytes(1_000_000L));
+    }
+
+    /** Cap-behavior §3's other estimate half (review MINOR: the ratio alone let a
+     *  refactor drop the estimate from the walk-start line unnoticed): describePlan
+     *  must sum the PLANNED region files into the line, carry the cap|uncapped token,
+     *  and append the stop consequence exactly when the estimate exceeds an active
+     *  cap. Asserts computed numbers via the same package-visible helpers, not prose. */
+    @Test
+    void describePlanSumsPlannedRegionFilesAndFlagsACapExceedingEstimate() throws Exception {
+        writeRegion(0, 0, 1);   // two 4096-byte header files
+        writeRegion(1, 0, 1);
+        SqliteLodStore store = openStore();
+        var bf = backfill(store, (dim, cx, cz) -> null,
+                new AtomicBoolean(true), new AtomicBoolean(true));
+        var plan = List.of(
+                new StoreBackfill.RegionRef(OW, 0, 0, regionDir().resolve("r.0.0.mca"), 0),
+                new StoreBackfill.RegionRef(OW, 1, 0, regionDir().resolve("r.1.0.mca"), 1));
+        String expectedSize = StoreBackfill.formatSize(StoreBackfill.estimateLodBytes(8192));
+
+        String uncapped = bf.describePlan(plan, Long.MAX_VALUE);
+        assertTrue(uncapped.contains("2 region(s)"), uncapped);
+        assertTrue(uncapped.contains("~" + expectedSize), uncapped);
+        assertTrue(uncapped.contains("(uncapped)"), uncapped);
+        assertTrue(!uncapped.contains("STOP"), "no stop warning without a cap: " + uncapped);
+
+        String capped = bf.describePlan(plan, 1024L); // estimate (5898) > cap
+        assertTrue(capped.contains("cap: "), capped);
+        assertTrue(capped.contains("STOP at the cap"),
+                "estimate above an active cap must warn up front: " + capped);
+        store.shutdown();
+    }
+
+    /** Cap-behavior §3: a walk against a store at >= 95% of an ACTIVE cap hard-stops
+     *  BEFORE reading anything (each deposit into a capped store evicts an OLDER,
+     *  nearer-spawn row — provably wasted work), leaves the region unmarked, and a
+     *  re-run after raising the cap resumes exactly there. */
+    @Test
+    void walkHardStopsAtAnActiveCapAndResumesAfterRaisingIt() throws Exception {
+        writeRegion(0, 0, 5);
+        // 1 KB active cap — the fresh store DB alone exceeds 95% of it after the first
+        // gauge refresh (production caps floor at 64 MB via config; the raw
+        // Environment is the test seam for "store already at its cap").
+        var cappedEnv = new SqliteLodStore.Environment(this.tmp.resolve("store"),
+                "26.2-test", 18, d -> regionDir(), d -> "", 0, 1024L);
+        SqliteLodStore store = SqliteLodStore.createOrNull(LodStoreMode.FULL, cappedEnv,
+                new LodStoreDiagnostics());
+        assertNotNull(store);
+        assertTrue(store.awaitSweep(10_000));
+        for (int i = 0; i < 400 && store.diagnostics().getDbBytes() == 0; i++) Thread.sleep(25);
+        assertTrue(store.diagnostics().getDbBytes() > 0, "gauge must refresh before the walk");
+
+        var reads = new ConcurrentLinkedQueue<Long>();
+        var bf = new StoreBackfill(store, d -> regionDir(), d -> new long[]{0, 0},
+                List.of(OW), (dim, cx, cz) -> {
+                    reads.add(1L);
+                    return new byte[]{1};
+                }, () -> true, () -> true);
+        assertTrue(bf.start());
+        awaitDone(bf);
+        assertTrue(bf.statusLine().startsWith("capped:"),
+                "walk must hard-stop at the cap: " + bf.statusLine());
+        assertEquals(0, reads.size(), "no reads may happen against a store at its cap");
+        assertTrue(!store.isBackfillRegionDone(OW, 0, 0),
+                "the unwalked region must stay unmarked (the resume point)");
+        store.shutdown();
+
+        SqliteLodStore raised = openStore(); // uncapped env, SAME store dir
+        var bf2 = backfill(raised, (dim, cx, cz) -> {
+            reads.add(1L);
+            return new byte[]{1};
+        }, new AtomicBoolean(true), new AtomicBoolean(true));
+        bf2.start();
+        awaitDone(bf2);
+        assertEquals(1, reads.size(), "raising the cap must resume the walk exactly there");
+        for (int i = 0; i < 400 && !raised.isBackfillRegionDone(OW, 0, 0); i++) Thread.sleep(25);
+        assertTrue(raised.isBackfillRegionDone(OW, 0, 0));
+        raised.shutdown();
+    }
+
     @Test
     void startIsIdempotentWhileRunning() throws Exception {
         writeRegion(0, 0, 1);

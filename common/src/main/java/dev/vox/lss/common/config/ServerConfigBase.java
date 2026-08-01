@@ -111,16 +111,45 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public boolean lodStoreBackfill = false;
     /**
-     * On-disk size cap for the SQLite LOD store (main DB, MB — the transient WAL is
-     * excluded). Above it the batcher evicts oldest-timestamp rows in batches and
-     * returns pages via incremental_vacuum — never unbounded growth (the store ≈
-     * doubles a fully-backfilled world folder otherwise). NOTE the eviction order is
-     * oldest FIRST-DEPOSITED (a row's ts is set when it enters and is not refreshed by
-     * hits), so a capped store sheds its longest-resident terrain, not its
-     * least-recently-served. Evicted columns re-warm on their next serve, and the
-     * affected backfill regions are un-marked so an enabled backfill revisits them.
+     * Backfill pace: visited columns per second (docs/planning/store-backfill-tuning-plan.md).
+     * Every visited column counts against the window — deposits, hasRow skips, and errors
+     * alike — so the value bounds the walk's total footprint, not just its read rate.
+     * The restraint gates (reader headroom, tick health, MIN_PRIORITY, one read at a
+     * time) are deliberately NOT tunable; this knob only trades walk duration against
+     * idle-server IO pressure. Inert on Paper until it grows a backfill (same recorded
+     * stance as lodStoreBackfill).
      */
-    public int lodStoreMaxMB = 2048;
+    public int lodStoreBackfillColumnsPerSecond = 100;
+    /**
+     * Backfill tick-health ceiling (smoothed MSPT): the walk pauses while the server
+     * tick is over this. Clamped to stay meaningfully below the 50 ms tick — a ceiling
+     * >= 50 would never pause, one <= 20 would never run on a busy server.
+     */
+    public int lodStoreBackfillTickCeilingMillis = 45;
+    /**
+     * On-disk size cap for the SQLite LOD store (main DB, MB). <b>0 = UNCAPPED — the
+     * default</b> (user decision, docs/planning/store-cap-behavior-plan.md: admins
+     * should simply know the store roughly DOUBLES the world folder when fully warmed
+     * — ~7.6 KB/col vs ~10.6 KB/chunk of region data; a silent partial-warmth cap
+     * surprises more than disk growth does, and at the old 2048 default a
+     * pregenerated world entered a backfill<->eviction treadmill forever). A nonzero
+     * value (clamped 64..32768) opts into the bound for quota-limited hosts: above it
+     * the batcher evicts oldest-timestamp rows in batches and returns pages via
+     * incremental_vacuum. NOTE the eviction order is oldest FIRST-DEPOSITED (a row's
+     * ts is set when it enters and is not refreshed by hits), so a capped store sheds
+     * its longest-resident terrain, not its least-recently-served. Evicted columns
+     * re-warm on their next serve, and the affected backfill regions are un-marked so
+     * an enabled backfill revisits them; the backfill also hard-stops near an active
+     * cap rather than churn it.
+     */
+    public int lodStoreMaxMB = 0;
+
+    /** The store's byte cap for {@code Environment.maxDbBytes}: 0 (or a validated-away
+     *  negative) means uncapped = Long.MAX_VALUE. Both platforms wire through this so
+     *  the 0-semantics cannot drift. */
+    public long lodStoreMaxBytes() {
+        return lodStoreMaxMB <= 0 ? Long.MAX_VALUE : lodStoreMaxMB * 1024L * 1024L;
+    }
     /**
      * LOD x-ray masking (docs/planning/antixray-compat-design.md §3). "auto" (default)
      * masks iff an anti-xray engine is detected — Paper's built-in anti-xray config, or the
@@ -189,8 +218,15 @@ public abstract class ServerConfigBase extends JsonConfig {
                 LSSConstants.MIN_LOD_STORE_MEMORY_MB, LSSConstants.MAX_LOD_STORE_MEMORY_MB);
         lodStoreResweepSeconds = Math.clamp(lodStoreResweepSeconds,
                 LSSConstants.MIN_LOD_STORE_RESWEEP_SECONDS, LSSConstants.MAX_LOD_STORE_RESWEEP_SECONDS);
-        lodStoreMaxMB = Math.clamp(lodStoreMaxMB,
+        // 0 (and negative nonsense) = uncapped — the resweepSeconds 0-means-off
+        // pattern; only a nonzero opt-in cap gets the 64..32768 floor/ceiling.
+        lodStoreMaxMB = lodStoreMaxMB <= 0 ? 0 : Math.clamp(lodStoreMaxMB,
                 LSSConstants.MIN_LOD_STORE_MAX_MB, LSSConstants.MAX_LOD_STORE_MAX_MB);
+        lodStoreBackfillColumnsPerSecond = Math.clamp(lodStoreBackfillColumnsPerSecond,
+                LSSConstants.MIN_LOD_STORE_BACKFILL_CPS, LSSConstants.MAX_LOD_STORE_BACKFILL_CPS);
+        lodStoreBackfillTickCeilingMillis = Math.clamp(lodStoreBackfillTickCeilingMillis,
+                LSSConstants.MIN_LOD_STORE_BACKFILL_TICK_CEILING_MS,
+                LSSConstants.MAX_LOD_STORE_BACKFILL_TICK_CEILING_MS);
         xrayObfuscation = XrayMaskPolicy.normalizeMode(xrayObfuscation);
         if (xrayHiddenBlocks == null) xrayHiddenBlocks = defaultXrayHiddenBlocks();
         xrayMaxBlockHeight = Math.clamp(xrayMaxBlockHeight, LSSConstants.MIN_XRAY_MAX_BLOCK_HEIGHT, LSSConstants.MAX_XRAY_MAX_BLOCK_HEIGHT);

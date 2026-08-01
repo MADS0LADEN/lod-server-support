@@ -56,7 +56,10 @@ class LSSServerCommands {
         String line = "LOD store: " + store.diagnostics().formatToken(store.mode())
                 + " db=" + (store.diagnostics().getDbBytes() >> 20) + "MB wal="
                 + (store.diagnostics().getWalBytes() >> 20) + "MB sweep_drops="
-                + store.diagnostics().getSweepDrops();
+                + store.diagnostics().getSweepDrops()
+                // The one-shot cap log (§2) points here — the ongoing capped
+                // steady-state must stay diagnosable without any log line.
+                + " evicted=" + store.diagnostics().getSqlEvictions();
         var backfill = service.getStoreBackfill();
         String bf = backfill == null ? "" : " | backfill: " + backfill.statusLine();
         source.sendSuccess(() -> Component.literal(line + bf), false);

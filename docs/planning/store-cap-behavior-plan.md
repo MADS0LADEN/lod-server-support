@@ -1,6 +1,7 @@
 # Store size-cap behavior — uncapped default, one-shot eviction log, cap-aware backfill
 
-**Status: PLAN, user-directed (2026-08-01)** — born from live evidence on the Modrinth
+**Status: IMPLEMENTED 2026-07-31 (all of §1-§4; §4's live observation pending the next
+Modrinth restart).** — born from live evidence on the Modrinth
 test server: `lodStoreMaxMB` default (2048) ≈ one 256-distance disc, so a
 Chunky-pregenerated world + the backfill hit the cap and entered a
 **backfill↔eviction treadmill** — deposits (~800 KB/s) and 512-row evictions

@@ -632,6 +632,68 @@ class SqliteLodStoreTest {
         store.shutdown();
     }
 
+    /** Cap-behavior §2: the size-cap eviction INFO latches after its FIRST emission —
+     *  a capped store evicts as steady state (every ~5 s gauge refresh) and the line
+     *  was permanent spam on a treadmilling store. Two observed eviction rounds must
+     *  produce exactly one log call (counted via the emission counter — LSSLogger has
+     *  no injection seam); the running totals stay observable via the diagnostics
+     *  counter behind the status line's evicted= token. */
+    @Test
+    void sizeCapEvictionLogsExactlyOncePerSession() throws Exception {
+        writeRegion(OW, 0, 0, Map.of());
+        var env = new SqliteLodStore.Environment(storeDir(), "26.2-test", WIRE,
+                this::regionDir, d -> "", 0, 200_000L); // ~200 KB cap
+        SqliteLodStore store = SqliteLodStore.createOrNull(LodStoreMode.FULL, env,
+                new LodStoreDiagnostics());
+        assertNotNull(store);
+        assertTrue(store.awaitSweep(10_000));
+        for (int i = 0; i < 40; i++) {
+            store.deposit(OW, PositionUtil.packPosition(i, 12), bytes(100 + i, 20_000), 1000 + i);
+        }
+        long firstRound = 0;
+        for (int i = 0; i < 600 && firstRound == 0; i++) { // gauge cadence is 5 s
+            firstRound = store.diagnostics().getSqlEvictions();
+            Thread.sleep(50);
+        }
+        assertTrue(firstRound > 0, "first eviction round must fire under the cap");
+        // Refill over the cap so a LATER gauge refresh must evict again — a second
+        // entry into the exact branch that used to log every time.
+        for (int i = 0; i < 40; i++) {
+            store.deposit(OW, PositionUtil.packPosition(100 + i, 12), bytes(200 + i, 20_000), 2000 + i);
+        }
+        long total = firstRound;
+        for (int i = 0; i < 600 && total <= firstRound; i++) {
+            total = store.diagnostics().getSqlEvictions();
+            Thread.sleep(50);
+        }
+        assertTrue(total > firstRound, "second eviction round must fire after the refill");
+        assertEquals(1, store.capLogEmissionCount(),
+                "two eviction rounds, ONE cap log line (latched per session)");
+        store.shutdown();
+    }
+
+    /** Cap-behavior §1: an UNCAPPED store (maxDbBytes = Long.MAX_VALUE — what the
+     *  0-config default wires) never enters the eviction arm: rows persist, the
+     *  eviction counter stays 0, and the cap line never fires. */
+    @Test
+    void uncappedStoreNeverEvictsAndNeverLogsTheCapLine() throws Exception {
+        writeRegion(OW, 0, 0, Map.of());
+        SqliteLodStore store = open(defaultEnv()); // no-cap env shape = uncapped
+        for (int i = 0; i < 20; i++) {
+            store.deposit(OW, PositionUtil.packPosition(i, 12), bytes(100 + i, 20_000), 1000 + i);
+        }
+        assertNotNull(awaitHit(store, OW, PositionUtil.packPosition(19, 12)));
+        // Prove the gauge arm actually RAN before asserting the negative — dbBytes is
+        // written only by the gauge refresh.
+        for (int i = 0; i < 400 && store.diagnostics().getDbBytes() == 0; i++) Thread.sleep(25);
+        assertTrue(store.diagnostics().getDbBytes() > 0, "gauge refresh must have run");
+        assertNotNull(store.get(OW, PositionUtil.packPosition(0, 12)),
+                "no row may be evicted from an uncapped store");
+        assertEquals(0, store.diagnostics().getSqlEvictions());
+        assertEquals(0, store.capLogEmissionCount());
+        store.shutdown();
+    }
+
     @Test
     void unknownDimensionReadsAsMissWithoutError() throws Exception {
         writeRegion(OW, 0, 0, Map.of());

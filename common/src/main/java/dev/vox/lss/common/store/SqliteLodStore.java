@@ -150,6 +150,10 @@ public final class SqliteLodStore implements LodStoreService {
     private volatile boolean latchedOff;
     private final AtomicBoolean latchWarned = new AtomicBoolean();
     private final AtomicBoolean readErrorWarned = new AtomicBoolean();
+    /** One cap-eviction INFO per session (store-cap-behavior-plan §2); the volatile
+     *  emission count is the latch pin's proxy (batcher-written, read after quiesce). */
+    private final AtomicBoolean capLogLatch = new AtomicBoolean();
+    private volatile int capLogEmissions;
     private int writerFailures;
 
     // Serving gate: false until the startup sweep completes — a not-yet-swept stale row
@@ -957,19 +961,69 @@ public final class SqliteLodStore implements LodStoreService {
                 commitTxn();
                 int evicted = evictOldestBatch();
                 if (evicted > 0) {
+                    // Count + (once) log BEFORE the vacuum: evictOldestBatch has
+                    // already committed its deletions, and a vacuum/commit throw is
+                    // swallowed by this method's containment — the counter and the one
+                    // cap line must not vanish with it (review: a store that evicts
+                    // fine but cannot vacuum would treadmill with evicted=0 and no
+                    // line, the exact observability hole §2 closes).
+                    this.diag.recordSqlEvictions(evicted);
+                    // Exactly ONE cap line per server session (store-cap-behavior-plan
+                    // §2, user decision): once a store is at its cap, eviction is a
+                    // steady-state fact, not news — the ~5 s gauge cadence turned this
+                    // line into permanent spam on a treadmilling store. The single
+                    // emission carries the durable context + where the ongoing state
+                    // stays observable.
+                    if (this.capLogLatch.compareAndSet(false, true)) {
+                        this.capLogEmissions++;
+                        LSSLogger.info("LOD store size cap: evicted " + evicted
+                                + " oldest rows (db " + (dbBytes >> 20) + " MB > cap "
+                                + (this.env.maxDbBytes() >> 20) + " MB) — the store is at "
+                                + "its size cap and will keep evicting silently; running "
+                                + "totals in '/lsslod store status' (evicted=), raise or "
+                                + "zero lodStoreMaxMB (0 = uncapped) for full retention");
+                    }
                     try (Statement st = this.writer.createStatement()) {
                         st.execute("PRAGMA incremental_vacuum");
                     }
                     this.writer.commit();
                     this.diag.setDbBytes(Files.exists(this.dbPath) ? Files.size(this.dbPath) : 0);
-                    LSSLogger.info("LOD store size cap: evicted " + evicted
-                            + " oldest rows (db " + (dbBytes >> 20) + " MB > cap "
-                            + (this.env.maxDbBytes() >> 20) + " MB)");
                 }
             }
         } catch (Throwable ignored) {
             // gauge refresh is best-effort; a failed checkpoint retries next interval
         }
+    }
+
+    /** The active size cap in bytes (Long.MAX_VALUE = uncapped); the backfill's
+     *  cap-stop gate reads these two rather than re-deriving gauge accounting. */
+    long sizeCapBytes() {
+        return this.env.maxDbBytes();
+    }
+
+    /** Cap-accounted current size: db + WAL contribution bounded at the checkpoint
+     *  threshold — the SAME accounting the eviction check uses, so the backfill's
+     *  stop gate and the evictor cannot disagree about "at the cap". Statted LIVE
+     *  (called once per backfill region — negligible) rather than read from the
+     *  ~5 s gauge: a fast walk deposits up to ~40 MB per gauge interval at max
+     *  pace, which ate the stop gate's 5% margin at small caps (review MINOR).
+     *  Falls back to the gauges if the stat fails. */
+    long approxSizeBytes() {
+        try {
+            long db = Files.exists(this.dbPath) ? Files.size(this.dbPath) : 0;
+            Path wal = this.dbPath.resolveSibling(DB_FILE + "-wal");
+            long walBytes = Files.exists(wal) ? Files.size(wal) : 0;
+            return db + Math.min(walBytes, WAL_CHECKPOINT_BYTES);
+        } catch (Exception e) {
+            return this.diag.getDbBytes()
+                    + Math.min(this.diag.getWalBytes(), WAL_CHECKPOINT_BYTES);
+        }
+    }
+
+    /** Cap-log one-shot emissions (package-visible: the §2 latch pin counts CALLS —
+     *  two eviction batches must produce exactly one log line). */
+    int capLogEmissionCount() {
+        return this.capLogEmissions;
     }
 
     /** Oldest-ts batch eviction across all dims (512 rows/dim per pass). Evicted

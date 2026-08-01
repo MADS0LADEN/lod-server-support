@@ -31,8 +31,9 @@ import java.util.function.Function;
  *       spare capacity (the same self-restraint gate the want-set router obeys);</li>
  *   <li>{@code tickHealthy} — pauses while the server tick is over the ceiling (the
  *       plan's MSPT gate; the platform wires its own tick-time source);</li>
- *   <li>a column-rate cap ({@value #MAX_COLUMNS_PER_SECOND}/s) so an idle server
- *       still trickles rather than bursts.</li>
+ *   <li>a column-rate cap ({@code lodStoreBackfillColumnsPerSecond}, default
+ *       {@value #DEFAULT_COLUMNS_PER_SECOND}/s) so an idle server still trickles
+ *       rather than bursts.</li>
  * </ul>
  *
  * <p><b>Resumability:</b> finished regions are marked in the store's {@code backfill}
@@ -46,9 +47,17 @@ import java.util.function.Function;
  */
 public final class StoreBackfill {
 
-    /** Rate cap; also the pause-check cadence denominator. */
-    static final int MAX_COLUMNS_PER_SECOND = 100;
+    /** Default rate cap (docs/planning/store-backfill-tuning-plan.md: the config knob's
+     *  default and the package-visible ctor's value — existing tests stay untouched). */
+    static final int DEFAULT_COLUMNS_PER_SECOND = 100;
     private static final long PAUSE_POLL_MILLIS = 500;
+    /** Measured LOD-bytes / region-file-bytes ratio for the walk-size estimate
+     *  (store-cap-behavior-plan §3 — no extra IO, ±30% is plenty for a warning). */
+    static final double LOD_BYTES_PER_REGION_BYTE = 0.72;
+    /** Hard-stop threshold against an ACTIVE cap: depositing into a capped store is
+     *  provably wasted work (each deposit evicts an OLDER, nearer-spawn row), and the
+     *  5% margin absorbs the ~5 s gauge staleness. */
+    static final double CAP_STOP_FRACTION = 0.95;
 
     /** Platform seam: synchronously read + serialize one column's wire bytes from
      *  region NBT (the SAME path serves use); null = not servable (absent/all-air is
@@ -65,11 +74,27 @@ public final class StoreBackfill {
     private final ColumnReader columnReader;
     private final BooleanSupplier readerHeadroom;
     private final BooleanSupplier tickHealthy;
+    private final int columnsPerSecond;
 
     private final AtomicBoolean running = new AtomicBoolean();
     private final AtomicBoolean stopRequested = new AtomicBoolean();
     private volatile Thread worker;
     private volatile String statusLine = "idle";
+    /** Rate-cap windows completed (worker-written, read after join — the wiring pin's
+     *  counter: pacing asserts on this, never wall-clock). */
+    private volatile long rateWindows;
+
+    /** Package-visible default-rate ctor (tests). */
+    StoreBackfill(SqliteLodStore store,
+                  Function<String, Path> regionDirResolver,
+                  Function<String, long[]> spawnChunkResolver,
+                  List<String> dimensions,
+                  ColumnReader columnReader,
+                  BooleanSupplier readerHeadroom,
+                  BooleanSupplier tickHealthy) {
+        this(store, regionDirResolver, spawnChunkResolver, dimensions, columnReader,
+                readerHeadroom, tickHealthy, DEFAULT_COLUMNS_PER_SECOND);
+    }
 
     public StoreBackfill(SqliteLodStore store,
                          Function<String, Path> regionDirResolver,
@@ -77,7 +102,8 @@ public final class StoreBackfill {
                          List<String> dimensions,
                          ColumnReader columnReader,
                          BooleanSupplier readerHeadroom,
-                         BooleanSupplier tickHealthy) {
+                         BooleanSupplier tickHealthy,
+                         int columnsPerSecond) {
         this.store = store;
         this.regionDirResolver = regionDirResolver;
         this.spawnChunkResolver = spawnChunkResolver;
@@ -85,12 +111,14 @@ public final class StoreBackfill {
         this.columnReader = columnReader;
         this.readerHeadroom = readerHeadroom;
         this.tickHealthy = tickHealthy;
+        this.columnsPerSecond = Math.max(1, columnsPerSecond);
     }
 
     /** Idempotent start; returns false if already running. */
     public boolean start() {
         if (!this.running.compareAndSet(false, true)) return false;
         this.stopRequested.set(false);
+        this.rateWindows = 0; // per-run counter — a stop/start cycle must not accumulate
         var t = new Thread(this::run, Brand.shortName() + " Store Backfill");
         t.setDaemon(true);
         t.setPriority(Thread.MIN_PRIORITY);
@@ -114,6 +142,12 @@ public final class StoreBackfill {
         return this.statusLine;
     }
 
+    /** Rate-cap windows completed so far (package-visible: the wiring pin asserts
+     *  pacing on this counter, not wall-clock — timing asserts flake on loaded boxes). */
+    long rateWindowCount() {
+        return this.rateWindows;
+    }
+
     public void shutdown() {
         stop();
         var t = this.worker;
@@ -127,7 +161,8 @@ public final class StoreBackfill {
         }
     }
 
-    private record RegionRef(String dim, int rx, int rz, Path mca, int chebFromSpawn) {}
+    /** Package-visible: the describePlan estimate pin builds fake plans from these. */
+    record RegionRef(String dim, int rx, int rz, Path mca, int chebFromSpawn) {}
 
     private void run() {
         long deposited = 0, skipped = 0, errors = 0, regionsDone = 0, pauses = 0;
@@ -149,11 +184,24 @@ public final class StoreBackfill {
                 return;
             }
             List<RegionRef> plan = enumerate();
-            LSSLogger.info("Store backfill: " + plan.size() + " region(s) to process");
+            long capBytes = this.store.sizeCapBytes();
+            LSSLogger.info(describePlan(plan, capBytes));
             long windowStartNanos = System.nanoTime();
             int windowCols = 0;
-            for (RegionRef region : plan) {
+            for (int ri = 0; ri < plan.size(); ri++) {
+                RegionRef region = plan.get(ri);
                 if (this.stopRequested.get()) break;
+                // Hard stop at an active cap (store-cap-behavior-plan §3) — never a
+                // pause: a full store does not un-fill itself, and each further
+                // deposit evicts an OLDER (nearer-spawn) row, inverting the walk's
+                // own value order. Unwalked regions stay unmarked, so an admin who
+                // raises the cap and re-runs resumes exactly here.
+                if (capBytes != Long.MAX_VALUE && this.store.approxSizeBytes()
+                        >= (long) (capBytes * CAP_STOP_FRACTION)) {
+                    this.statusLine = "capped: store at size cap, " + regionsDone
+                            + " regions done, " + (plan.size() - ri) + " unwalked";
+                    return;
+                }
                 if (!this.store.isHealthy()) {
                     // A latched store no-ops every write while counters would keep
                     // claiming progress — burning a world's worth of IO for nothing.
@@ -216,9 +264,10 @@ public final class StoreBackfill {
                             }
                         }
                     }
-                    // Rate cap: MAX_COLUMNS_PER_SECOND visited columns per 1 s window.
+                    // Rate cap: columnsPerSecond visited columns per 1 s window.
                     windowCols++;
-                    if (windowCols >= MAX_COLUMNS_PER_SECOND) {
+                    if (windowCols >= this.columnsPerSecond) {
+                        this.rateWindows++;
                         long elapsed = System.nanoTime() - windowStartNanos;
                         long remain = 1_000_000_000L - elapsed;
                         if (remain > 0) Thread.sleep(remain / 1_000_000L + 1);
@@ -310,6 +359,45 @@ public final class StoreBackfill {
         }
         plan.sort(Comparator.comparingInt(RegionRef::chebFromSpawn));
         return plan;
+    }
+
+    /** The §3 start-of-walk line: region count + size estimate + cap consequence.
+     *  The admin learns the disk outcome in second one, not from eviction spam an
+     *  hour later. "New deposits", not "total" — a resumed walk plans only the
+     *  not-yet-done regions. Package-visible: the estimate pin asserts the computed
+     *  size lands in this line (a refactor dropping it must red, review MINOR). */
+    String describePlan(List<RegionRef> plan, long capBytes) {
+        long regionFileBytes = 0;
+        for (RegionRef r : plan) {
+            try {
+                regionFileBytes += Files.size(r.mca());
+            } catch (Exception ignored) {
+                // unreadable file: the walk itself skips it via presentChunks
+            }
+        }
+        long estimate = estimateLodBytes(regionFileBytes);
+        String line = "Store backfill: " + plan.size() + " region(s) to process, estimated ~"
+                + formatSize(estimate) + " of new deposits ("
+                + (capBytes == Long.MAX_VALUE ? "uncapped" : "cap: " + formatSize(capBytes)) + ")";
+        if (capBytes != Long.MAX_VALUE && estimate > capBytes) {
+            line += " — the walk will STOP at the cap; nearest-spawn terrain is warmed "
+                    + "first, raise lodStoreMaxMB (0 = uncapped) for full coverage";
+        }
+        return line;
+    }
+
+    /** Walk-size estimate: planned region file bytes x the measured LOD/region ratio
+     *  (package-visible: the test pins the arithmetic, not the prose). */
+    static long estimateLodBytes(long regionFileBytes) {
+        return (long) (regionFileBytes * LOD_BYTES_PER_REGION_BYTE);
+    }
+
+    /** Locale-pinned (comma-decimal locales would log "1,5 GB"), with an MB rung so
+     *  sub-GB values never print "0.0 GB". */
+    static String formatSize(long bytes) {
+        if (bytes < (1L << 30)) return (bytes >> 20) + " MB";
+        return String.format(java.util.Locale.ROOT, "%.1f GB",
+                bytes / (1024.0 * 1024.0 * 1024.0));
     }
 
     /** The region header's location table: nonzero = chunk present. Null = unreadable. */

@@ -171,6 +171,11 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     "lodStoreResweepSeconds",
     # LOD-store on-disk size cap (Phase 5 eviction).
     "lodStoreMaxMB",
+    # LOD-store backfill pace + MSPT ceiling (store-backfill-tuning-plan.md) — added
+    # with the knobs themselves (the R4 lesson: a key missing from this allowlist
+    # means no scenario can ever set it).
+    "lodStoreBackfillColumnsPerSecond",
+    "lodStoreBackfillTickCeilingMillis",
 })
 # X-ray masking tri-state ("auto"/"on"/"off"), the LOD-store switch ("off"/"memory"/
 # "full" — scenarios A/B store gates against it), + hidden-block id list — the only

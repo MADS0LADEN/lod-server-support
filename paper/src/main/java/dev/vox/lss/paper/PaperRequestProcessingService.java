@@ -344,7 +344,7 @@ public class PaperRequestProcessingService {
             var env = new dev.vox.lss.common.store.SqliteLodStore.Environment(
                     worldRoot.resolve("lss-lod"), server.getServerVersion(),
                     LSSConstants.PROTOCOL_VERSION, regionDirs::get, maskFingerprints::get,
-                    config.lodStoreResweepSeconds, config.lodStoreMaxMB * 1024L * 1024L,
+                    config.lodStoreResweepSeconds, config.lodStoreMaxBytes(),
                     storeRegistryFingerprint(server));
             lodStore = dev.vox.lss.common.store.LodStores.createOrNull(
                     storeMode, config.lodStoreMemoryMB * 1024L * 1024L, env);

@@ -149,6 +149,88 @@ class ConfigValidationTest {
         assertEquals(256, c.perDimensionTimestampCacheSizeMB);
     }
 
+    /** The cap-behavior user decision (store-cap-behavior-plan.md §1): the store ships
+     *  UNCAPPED — 0 means no size cap, and it is the default. A silent revert to a
+     *  nonzero default would re-enter the backfill<->eviction treadmill. */
+    @Test
+    void lodStoreMaxMBDefaultsToUncappedZero() {
+        assertEquals(0, serverConfig().lodStoreMaxMB);
+    }
+
+    /** The 0-or-64..32768 clamp: 0 (and negative nonsense) stays uncapped; a nonzero
+     *  opt-in cap keeps the 64 floor (a tiny accidental cap would evict constantly). */
+    @Test
+    void lodStoreMaxMBZeroStaysUncappedAndNonzeroFloorsAt64() {
+        var c = serverConfig();
+        c.lodStoreMaxMB = 0;
+        c.validate();
+        assertEquals(0, c.lodStoreMaxMB);
+
+        c.lodStoreMaxMB = -7;
+        c.validate();
+        assertEquals(0, c.lodStoreMaxMB, "negative nonsense must mean uncapped, not a 64 MB cap");
+
+        c.lodStoreMaxMB = 1;
+        c.validate();
+        assertEquals(LSSConstants.MIN_LOD_STORE_MAX_MB, c.lodStoreMaxMB);
+
+        c.lodStoreMaxMB = 63;
+        c.validate();
+        assertEquals(LSSConstants.MIN_LOD_STORE_MAX_MB, c.lodStoreMaxMB);
+
+        c.lodStoreMaxMB = 999_999;
+        c.validate();
+        assertEquals(LSSConstants.MAX_LOD_STORE_MAX_MB, c.lodStoreMaxMB);
+    }
+
+    /** lodStoreMaxBytes(): the 0-semantics both platforms wire into the store env.
+     *  Negatives map to uncapped too — the helper must be robust even on a config
+     *  validate() never touched. */
+    @Test
+    void lodStoreMaxBytesMapsZeroAndNegativesToUncappedAndMBToBytes() {
+        var c = serverConfig();
+        c.lodStoreMaxMB = 0;
+        assertEquals(Long.MAX_VALUE, c.lodStoreMaxBytes());
+        c.lodStoreMaxMB = -3;
+        assertEquals(Long.MAX_VALUE, c.lodStoreMaxBytes());
+        c.lodStoreMaxMB = 100;
+        assertEquals(100L * 1024 * 1024, c.lodStoreMaxBytes());
+    }
+
+    /** Drift guards for the backfill-tuning defaults (store-backfill-tuning-plan.md §3
+     *  — the same shape as the resweep-default pins): 100 col/s pace, 45 ms MSPT gate. */
+    @Test
+    void backfillTuningDefaultsAre100ColumnsPerSecondAnd45MsCeiling() {
+        assertEquals(100, serverConfig().lodStoreBackfillColumnsPerSecond);
+        assertEquals(45, serverConfig().lodStoreBackfillTickCeilingMillis);
+    }
+
+    @Test
+    void lodStoreBackfillColumnsPerSecondClamped() {
+        var c = serverConfig();
+        c.lodStoreBackfillColumnsPerSecond = 1;
+        c.validate();
+        assertEquals(LSSConstants.MIN_LOD_STORE_BACKFILL_CPS, c.lodStoreBackfillColumnsPerSecond);
+
+        c.lodStoreBackfillColumnsPerSecond = 99999;
+        c.validate();
+        assertEquals(LSSConstants.MAX_LOD_STORE_BACKFILL_CPS, c.lodStoreBackfillColumnsPerSecond);
+    }
+
+    @Test
+    void lodStoreBackfillTickCeilingMillisClamped() {
+        var c = serverConfig();
+        c.lodStoreBackfillTickCeilingMillis = 0;
+        c.validate();
+        assertEquals(LSSConstants.MIN_LOD_STORE_BACKFILL_TICK_CEILING_MS,
+                c.lodStoreBackfillTickCeilingMillis);
+
+        c.lodStoreBackfillTickCeilingMillis = 999;
+        c.validate();
+        assertEquals(LSSConstants.MAX_LOD_STORE_BACKFILL_TICK_CEILING_MS,
+                c.lodStoreBackfillTickCeilingMillis);
+    }
+
     // --- X-ray masking keys (docs/planning/antixray-compat-design.md §3) ---
 
     @Test
@@ -227,10 +309,11 @@ class ConfigValidationTest {
             f.setInt(c, Integer.MIN_VALUE);
             c.validate();
             // missMemoTtlSeconds and lodStoreResweepSeconds have a legal floor of 0
-            // (each 0 is that feature's kill switch); xrayMaxBlockHeight's floor is a
-            // world Y and deliberately negative — every other numeric floor is >= 1.
+            // (each 0 is that feature's kill switch), as does lodStoreMaxMB (0 =
+            // uncapped, the default); xrayMaxBlockHeight's floor is a world Y and
+            // deliberately negative — every other numeric floor is >= 1.
             int floor = switch (f.getName()) {
-                case "missMemoTtlSeconds", "lodStoreResweepSeconds" -> 0;
+                case "missMemoTtlSeconds", "lodStoreResweepSeconds", "lodStoreMaxMB" -> 0;
                 case "xrayMaxBlockHeight" -> LSSConstants.MIN_XRAY_MAX_BLOCK_HEIGHT;
                 default -> 1;
             };

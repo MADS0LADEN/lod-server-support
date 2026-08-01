@@ -85,13 +85,29 @@ case "$LSS_LODSTORE" in
 esac
 # Background store population (Fabric only — Paper has no backfill wiring yet, the key
 # is inert there): lodStoreBackfill=true auto-starts a low-priority region walk that
-# pre-warms the store, yielding to players and tick health (100 col/s cap, pauses under
-# load). run-fabric-store forces it on; '/lsslod store backfill status|stop' to steer.
+# pre-warms the store, yielding to players and tick health (default 100 col/s cap —
+# LSS_LODSTORE_BACKFILL_CPS below overrides — pauses under load). run-fabric-store
+# forces it on; '/lsslod store backfill status|stop' to steer.
 LSS_LODSTORE_BACKFILL="${LSS_LODSTORE_BACKFILL:-false}"
 case "$LSS_LODSTORE_BACKFILL" in
     true|false) ;;
     *) echo "LSS_LODSTORE_BACKFILL must be true or false (got '$LSS_LODSTORE_BACKFILL')" >&2; exit 1 ;;
 esac
+# Optional backfill pace override (columns/second, server clamps 10..1000). UNSET means
+# the key is omitted from the staged config so the server default (100) rules —
+# run-fabric-store deliberately keeps the default.
+LSS_LODSTORE_BACKFILL_CPS="${LSS_LODSTORE_BACKFILL_CPS:-}"
+if [ -n "$LSS_LODSTORE_BACKFILL_CPS" ]; then
+    case "$LSS_LODSTORE_BACKFILL_CPS" in
+        ''|*[!0-9]*) echo "LSS_LODSTORE_BACKFILL_CPS must be a positive integer (got '$LSS_LODSTORE_BACKFILL_CPS')" >&2; exit 1 ;;
+    esac
+    # Bound the digits too: an int-overflowing value staged into the JSON makes GSON
+    # throw on load and JsonConfig's whole-file fallback silently resets EVERY key to
+    # its default — the store/backfill run asked for would quietly not happen.
+    if [ "${#LSS_LODSTORE_BACKFILL_CPS}" -gt 4 ]; then
+        echo "LSS_LODSTORE_BACKFILL_CPS too large — server clamps to 1000 (got '$LSS_LODSTORE_BACKFILL_CPS')" >&2; exit 1
+    fi
+fi
 
 # ============================================================
 # Helpers
@@ -226,7 +242,10 @@ write_lss_config() {
   "generationConcurrencyLimitGlobal": 40,
   "generationTimeoutSeconds": 60,
   "lodStore": "${LSS_LODSTORE}",
-  "lodStoreBackfill": ${LSS_LODSTORE_BACKFILL}
+  "lodStoreBackfill": ${LSS_LODSTORE_BACKFILL}$(
+    if [ -n "$LSS_LODSTORE_BACKFILL_CPS" ]; then
+        printf ',\n  "lodStoreBackfillColumnsPerSecond": %s' "$LSS_LODSTORE_BACKFILL_CPS"
+    fi)
 }
 EOF
 }
@@ -696,6 +715,9 @@ case "${1:-run}" in
         echo "  LSS_LODSTORE_BACKFILL - lodStoreBackfill written the same way (true|false,"
         echo "                 default: false; run-fabric-store forces true). Fabric-only —"
         echo "                 the key is inert on Paper/Folia."
+        echo "  LSS_LODSTORE_BACKFILL_CPS - optional backfill pace (columns/second, server"
+        echo "                 clamps 10..1000). Unset = key omitted, server default (100)"
+        echo "                 rules; run-fabric-store keeps the default."
         exit 1
         ;;
 esac

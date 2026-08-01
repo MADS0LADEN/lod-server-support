@@ -32,6 +32,7 @@ public final class LodStoreDiagnostics {
     private final AtomicLong errors = new AtomicLong();
     private final AtomicLong memHits = new AtomicLong();
     private final AtomicLong memEvictions = new AtomicLong();
+    private final AtomicLong sqlEvictions = new AtomicLong();
     // Rows the freshness sweep dropped (stale header / vanished region / absent chunk /
     // mask drift / unresolvable dim). The ONLY live observable that a sweep actually
     // culled something — the Paper unfired-event soak gates on it moving.
@@ -71,6 +72,9 @@ public final class LodStoreDiagnostics {
     public void recordError() { this.errors.incrementAndGet(); }
     public void recordMemHit() { this.memHits.incrementAndGet(); }
     public void recordMemEviction() { this.memEvictions.incrementAndGet(); }
+    /** Size-cap SQL rows evicted (total; the one-shot cap log points here — the
+     *  ongoing capped steady-state stays observable via '/lsslod store status'). */
+    public void recordSqlEvictions(int rows) { this.sqlEvictions.addAndGet(rows); }
     public void recordSweepDrops(long rows) { this.sweepDrops.addAndGet(rows); }
     public void recordBackfillRead() { this.backfillReads.incrementAndGet(); }
     public void recordBackfillDeposit() { this.backfillDeposits.incrementAndGet(); }
@@ -92,6 +96,7 @@ public final class LodStoreDiagnostics {
     public long getErrors() { return this.errors.get(); }
     public long getMemHits() { return this.memHits.get(); }
     public long getMemEvictions() { return this.memEvictions.get(); }
+    public long getSqlEvictions() { return this.sqlEvictions.get(); }
     public long getSweepDrops() { return this.sweepDrops.get(); }
     public long getBackfillReads() { return this.backfillReads.get(); }
     public long getBackfillDeposits() { return this.backfillDeposits.get(); }

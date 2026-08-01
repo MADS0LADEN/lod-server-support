@@ -77,7 +77,10 @@ public class PaperCommands implements CommandExecutor, TabCompleter {
             sender.sendMessage("LOD store: " + store.diagnostics().formatToken(store.mode())
                     + " db=" + (store.diagnostics().getDbBytes() >> 20) + "MB wal="
                     + (store.diagnostics().getWalBytes() >> 20) + "MB sweep_drops="
-                    + store.diagnostics().getSweepDrops());
+                    + store.diagnostics().getSweepDrops()
+                    // The one-shot cap log (§2) points here — the ongoing capped
+                    // steady-state must stay diagnosable without any log line.
+                    + " evicted=" + store.diagnostics().getSqlEvictions());
         } else if (args.length >= 3 && args[1].equalsIgnoreCase("invalidate")
                 && args[2].equalsIgnoreCase("all")) {
             if (store == null) {

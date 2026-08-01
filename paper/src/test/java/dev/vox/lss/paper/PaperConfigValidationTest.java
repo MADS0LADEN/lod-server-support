@@ -44,6 +44,22 @@ class PaperConfigValidationTest {
         assertEquals(List.of(), c.updateEvents);                 // Paper-only null guard
     }
 
+    /** Paper twin of the cap-behavior pins (store-cap-behavior-plan.md §1): the
+     *  inherited default is 0 = uncapped, and the 64 floor binds only nonzero caps. */
+    @Test
+    void lodStoreMaxMBInheritsUncappedZeroDefaultAndNonzeroFloor() {
+        assertEquals(0, new PaperConfig().lodStoreMaxMB,
+                "Paper must inherit the uncapped-by-default store");
+        PaperConfig c = new PaperConfig();
+        c.lodStoreMaxMB = 1;
+        c.validate();
+        assertEquals(LSSConstants.MIN_LOD_STORE_MAX_MB, c.lodStoreMaxMB,
+                "a nonzero opt-in cap must keep the 64 MB floor through the Paper subclass");
+        c.lodStoreMaxMB = 63; // the boundary just under the floor (plan §4: 1..63 -> 64)
+        c.validate();
+        assertEquals(LSSConstants.MIN_LOD_STORE_MAX_MB, c.lodStoreMaxMB);
+    }
+
     /** Paper inherits the shared read-priority default: LOD reads yield to gameplay out of the box. */
     @Test
     void backgroundReadPriorityDefaultsOn() {
@@ -93,11 +109,19 @@ class PaperConfigValidationTest {
                     new Bounds(LSSConstants.MIN_TIMESTAMP_CACHE_SIZE_MB, LSSConstants.MAX_TIMESTAMP_CACHE_SIZE_MB)),
             Map.entry("lodStoreMemoryMB",
                     new Bounds(LSSConstants.MIN_LOD_STORE_MEMORY_MB, LSSConstants.MAX_LOD_STORE_MEMORY_MB)),
+            // lodStoreMaxMB's legal floor is 0 (= uncapped, the default); the 64 floor
+            // applies only to nonzero opt-in caps, pinned by the named test below.
             Map.entry("lodStoreMaxMB",
-                    new Bounds(LSSConstants.MIN_LOD_STORE_MAX_MB, LSSConstants.MAX_LOD_STORE_MAX_MB)),
+                    new Bounds(0, LSSConstants.MAX_LOD_STORE_MAX_MB)),
             Map.entry("lodStoreResweepSeconds",
                     new Bounds(LSSConstants.MIN_LOD_STORE_RESWEEP_SECONDS,
                             LSSConstants.MAX_LOD_STORE_RESWEEP_SECONDS)),
+            Map.entry("lodStoreBackfillColumnsPerSecond",
+                    new Bounds(LSSConstants.MIN_LOD_STORE_BACKFILL_CPS,
+                            LSSConstants.MAX_LOD_STORE_BACKFILL_CPS)),
+            Map.entry("lodStoreBackfillTickCeilingMillis",
+                    new Bounds(LSSConstants.MIN_LOD_STORE_BACKFILL_TICK_CEILING_MS,
+                            LSSConstants.MAX_LOD_STORE_BACKFILL_TICK_CEILING_MS)),
             Map.entry("xrayMaxBlockHeight",
                     new Bounds(LSSConstants.MIN_XRAY_MAX_BLOCK_HEIGHT, LSSConstants.MAX_XRAY_MAX_BLOCK_HEIGHT)));
 

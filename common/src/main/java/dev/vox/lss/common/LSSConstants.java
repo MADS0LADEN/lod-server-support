@@ -107,12 +107,26 @@ public final class LSSConstants {
     // LOD-store periodic freshness re-sweep cadence (0 = off). Paper's stale bound —
     // its unfired-event gaps (walk-in generation etc.) heal within ≈ autosave + sweep.
     // LOD-store on-disk size cap (Phase 5 eviction): oldest-ts rows are batch-evicted
-    // and pages returned via incremental_vacuum once db+wal exceed the cap.
+    // and pages returned via incremental_vacuum once db+wal exceed the cap. 0 =
+    // UNCAPPED (the default since store-cap-behavior-plan.md); the 64-floor applies
+    // only to a nonzero opt-in cap — a tiny accidental cap would evict constantly.
     public static final int MIN_LOD_STORE_MAX_MB = 64;
     public static final int MAX_LOD_STORE_MAX_MB = 32768;
 
     public static final int MIN_LOD_STORE_RESWEEP_SECONDS = 0;
     public static final int MAX_LOD_STORE_RESWEEP_SECONDS = 3600;
+
+    /** Backfill rate-cap clamp (docs/planning/store-backfill-tuning-plan.md §1): below
+     *  ~10 col/s the walk cannot finish a large world in useful time (worse than off —
+     *  it holds the thread and the hasRow probes for nothing); above ~1000 the
+     *  single-threaded synchronous read (~1-2 ms healthy) is the limiter anyway and the
+     *  value would only mislead. */
+    public static final int MIN_LOD_STORE_BACKFILL_CPS = 10;
+    public static final int MAX_LOD_STORE_BACKFILL_CPS = 1000;
+    /** Backfill MSPT-ceiling clamp: keeps the tick-health gate meaningfully below the
+     *  50 ms tick (a ceiling >= 50 never pauses; one <= 20 never runs on a busy server). */
+    public static final int MIN_LOD_STORE_BACKFILL_TICK_CEILING_MS = 20;
+    public static final int MAX_LOD_STORE_BACKFILL_TICK_CEILING_MS = 50;
 
     /** X-ray mask height clamp (docs/planning/antixray-compat-design.md §3): comfortably
      *  outside any MC build height so any real world Y is expressible, while bounding

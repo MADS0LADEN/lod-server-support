@@ -760,6 +760,17 @@ Design decisions (pre-implementation):
 - Command surface: /lsslod store backfill start|stop|status (permission-gated like
   the existing admin verbs), Fabric first; Paper parity if cheap.
 
+(2026-07-31 note: the 100 col/s pace and 45 ms tick ceiling referenced throughout this
+phase are now config knobs — `lodStoreBackfillColumnsPerSecond` /
+`lodStoreBackfillTickCeilingMillis`, docs/planning/store-backfill-tuning-plan.md. The
+measurements below were taken at the defaults, which are unchanged. Same-day sibling,
+store-cap-behavior-plan.md: `lodStoreMaxMB` now defaults 0 = UNCAPPED (the "default
+2048" statements below are historical), eviction totals got the `sqlEvictions`
+counter behind `/lsslod store status`'s `evicted=` token — superseding the "new
+counter avoided deliberately" decision below — the cap log latches to one line per
+session, and the backfill estimates its walk size up front and hard-stops near an
+active cap.)
+
 Phase 4 status (mid-implementation checkpoint): LANDED + COMPILING + Tier1 green —
 StoreBackfill driver (common/store: MIN_PRIORITY thread, spawn-ordered region walk,
 present-chunk header scan, skip-if-row-exists, hasHeadroom + tick-health (<45ms

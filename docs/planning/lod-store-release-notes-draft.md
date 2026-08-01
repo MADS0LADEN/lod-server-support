@@ -23,10 +23,18 @@
 ### Configuration
 
 - **`lodStore`** ("off") — off / memory / full. **`lodStoreMemoryMB`** (64) — the
-  memory-mode cache size. **`lodStoreMaxMB`** (2048) — on-disk size cap; above it the
-  oldest entries are evicted automatically. **`lodStoreBackfill`** (false).
-  **`lodStoreResweepSeconds`** (0 on Fabric, 300 on Paper) — Paper's periodic
-  freshness re-check for edits its events cannot see.
+  memory-mode cache size. **`lodStoreMaxMB`** (0 = **no cap, the default**) — expect
+  the store to grow to ≈2× your world folder when fully warmed; set a value in MB
+  (64..32768) to bound it instead — above the cap the oldest entries are evicted
+  automatically (one log notice per boot; running totals in `/lsslod store status`)
+  and the background backfill stops at the cap rather than churn it.
+  **`lodStoreBackfill`** (false, Fabric).
+  **`lodStoreBackfillColumnsPerSecond`** (100, clamped 10..1000, Fabric) — how fast
+  the background backfill walks the world; raise it on idle servers to warm the
+  store sooner, lower it to reduce IO pressure. **`lodStoreBackfillTickCeilingMillis`**
+  (45, clamped 20..50, Fabric) — the backfill pauses whenever the server's average
+  tick time exceeds this. **`lodStoreResweepSeconds`** (0 on Fabric, 300 on Paper) —
+  Paper's periodic freshness re-check for edits its events cannot see.
 
 ### Notes for admins
 
