@@ -151,7 +151,10 @@ SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBac
                                      # LOD-store backfill opt-in (Phase 4) — the key was
                                      # missing from this allowlist, so a backfill soak
                                      # scenario could not be written (4-agent round R4).
-                                     "lodStoreBackfill"})
+                                     "lodStoreBackfill",
+                                     # Compressed-columns kill switch (protocol 19):
+                                     # scenarios pin it off for the raw-path A/B arm.
+                                     "useCompressedColumns"})
 SERVER_CONFIG_INT_KEYS = frozenset({
     "lodDistanceChunks", "bytesPerSecondLimitPerPlayer", "diskReaderThreads",
     "sendQueueLimitPerPlayer", "bytesPerSecondLimitGlobal",

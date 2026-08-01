@@ -203,6 +203,26 @@ The "parity-or-better" cold gate is a clean WIN: zstd-1 + deflate-over-frame cos
 Phase 0 live-serve premise (551→101 µs in-band). Both §5.2 arms are now green —
 the CPU-reduction claim is PROVEN under the review-hardened gates.
 
+### §5.1 correctness — Fabric soaks: **ALL PASS** (2026-08-01)
+
+Chain (compression on, the default): fresh-backfill, warm-rejoin, store-second-join,
+store-second-join-full, dirty-broadcast — every conservation law (A1–A7, B2),
+quiescence, and the store byte-parity gates green under compressed serving.
+
+**Kill-switch A/B** (`"useCompressedColumns": false` staged into the
+store-second-join scenario config; the key added to check_soak's config allowlist):
+raw arm PASS, 0 violations, columns identical (4472 == 4472) — decoded-content
+parity across the flag holds.
+
+**RTT rider (plan §5.1 / R6), measured 2v2**: ON 275/265 ms vs OFF 231/231 ms p50 on
+the scenario's cold-generation tail (~+17%, reproducible — ON-ON spread 4%). This is
+the anticipated R6 mechanism: the processing thread now pays ~50 µs/col compressing
+gen serves (~0.2 s total across the 4.5k-column burst), visible on the tail answer of
+a 3-minute cold-join storm. Bounded, all laws green, columns equal, and the paired
+CPU gates show the server saving 27–43% whole-process CPU for it — recorded as the
+accepted trade, not a regression. (The warm/store path shows no such stretch: store
+frames ship verbatim with ZERO processing-thread compress.)
+
 ## Decisions log
 
 - 2026-08-01: branch created off `feat/lod-store` (Phase 2 depends on the store).

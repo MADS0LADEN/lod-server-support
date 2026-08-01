@@ -1,0 +1,16 @@
+=========================================
+ LSS Soak: platform=paper, scenario=fresh-backfill, client runs=1, budget=540s
+=========================================
+[soak] Validating scenario...
+VALIDATE PASS: fresh-backfill
+[soak] Building mod...
+[soak] Staging world for scenario: fresh-backfill
+[soak] Client cache was populated on platform 'fabric' — clearing for paper
+[soak] Clearing client column cache
+[soak] Starting server...
+[soak] Server PID: 1165122
+[soak] Waiting for server to be ready...
+[soak] Server ready after 7s
+[soak] Client run 1/1
+[soak] Starting client...
+[soak] Client PID: 1165378
