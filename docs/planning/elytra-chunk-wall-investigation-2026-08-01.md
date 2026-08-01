@@ -345,6 +345,50 @@ Note the incident sustained **21–25 MB/s** while the current session settles l
 comparison is not throughput-for-throughput; a hard flight over cold terrain is what the
 trace should capture.
 
+### 8.6.2 The new ceiling is the request loop, not a resource (client diag, 19:05)
+
+Client-side diagnostics 5 s into a fresh join, alongside the server's:
+
+```
+client  Queue: queued=0/8000                     <- decode queue EMPTY
+        Budget: used=792/792, ingest_backlog=497 <- want-set 100% used; backlog 8% of the 6144 halt
+        Throughput: received=5505 (172.2 MB), dropped=0, recv_rate=1.0K/s, req_rate=1.1K/s
+        Requests: send_cycles=8, total_requested=5968
+        Scan: confirmed=37, scanning=40/256, fast=5
+server  Voximus_Maximus: sq=0/2000, psync=0, pgen=0
+        saturated=0, pending=0, store h=456597 m=16608 avg_read=24us
+```
+
+Every backpressure gauge on both sides is idle — decode queue empty, ingest backlog at 8%
+of its halt threshold (the taper it produces is 800 → 792, ~1%), zero drops, zero ingest
+failures, empty server send queue, no disk saturation. **Nothing is exhausted.** The one
+saturated number is `used=792/792`: the want-set budget itself.
+
+Throughput therefore decomposes as `budget × re-declaration cadence`:
+**792 × ~1.6 Hz ≈ 1270 columns/s**, against an observed 1100/s. The 8 send cycles in 5 s
+put the cadence at ~1.6 Hz against the adaptive ceiling of 4 Hz, so the fast path is
+firing (`fast=5`) but not at its 250 ms floor.
+
+Two levers, and they are very unequal:
+
+- **budget** — `WANT_SET_BUDGET` is 800, wire-capped by `MAX_BATCH_CHUNK_REQUESTS` at
+  1024: **+28% at most** without a protocol change.
+- **cadence** — 1.6 Hz against a 4 Hz ceiling: **+150%**. This is the lever worth pulling.
+
+What holds the cadence below 4 Hz is the ≥95%-answered gate, and the likely reason is
+architectural rather than accidental: **silently-dropped asks never leave the client's
+awaiting set** (CLAUDE.md's want-set section states this explicitly — drops above the 5%
+threshold hold the cadence at 1 Hz by design). The server shows `order_gated=67645`
+generation-admission refusals against only 160 generations submitted, fed by
+`memo_hits=72280` — a large population of declared positions that miss, get refused by the
+frontier/pacing gate, and are never answered. Those stragglers sit in `InFlightTracker`
+holding the completion ratio under 95%.
+
+**Unverified — this is a 5 s join snapshot against 19 min of cumulative server counters.**
+The `net` event's `inflight` series is the direct test: if it plateaus at a nonzero floor
+while `q` and `ingest` stay near zero, the straggler hold is confirmed and the cadence
+gate is the thing to fix.
+
 ## 8.7 Experiment 4 — packet count vs byte volume
 
 A **warm** flight (client cache populated ⇒ the server answers `up_to_date`) has the same
