@@ -120,8 +120,9 @@ public class LSSClientCommands {
         int scanRing = manager.getScanRing();
         int maxRing = manager.getEffectiveLodDistanceChunks();
         source.sendFeedback(Component.literal(String.format(
-                "Scan: confirmed=%d, scanning=%d/%d, missing_vanilla=%d",
-                confirmedRing, scanRing, maxRing, manager.getMissingVanillaChunks()
+                "Scan: confirmed=%d, scanning=%d/%d, missing_vanilla=%d, fast=%d",
+                confirmedRing, scanRing, maxRing, manager.getMissingVanillaChunks(),
+                manager.getFastScans()
         )).withStyle(ChatFormatting.GRAY));
 
         // Budget line (ingest_backlog: the consumer-reported pending sections driving the

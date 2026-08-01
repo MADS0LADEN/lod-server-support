@@ -33,6 +33,14 @@ public class LSSClientConfig extends JsonConfig {
     // strict load-only (Tier A). No effect unless enableV16ServerCompat is also on, and never on a
     // v18 session. See docs/planning/v16-client-compat-design.md §4 (Tier B).
     public boolean enableV16Generation = true;
+    // Adaptive scan cadence (docs/planning/adaptive-scan-cadence-design.md): when the
+    // current want-set declaration is ≥95% answered and the pipeline is at most mildly
+    // loaded, declare again after 250 ms instead of waiting out the full second (max 4 Hz;
+    // the 1 Hz cadence stays as the fallback and remains the sole self-heal for silent
+    // server-side drops). Removes the "map fills in one-second spurts" pattern against
+    // fast/warm servers. Kill switch: false restores the fixed 1 Hz cadence everywhere.
+    // No effect on legacy (protocol-16) server sessions — those always keep 1 Hz.
+    public boolean enableAdaptiveScanCadence = true;
     // Ingest-pressure request pacing (issue #71, docs/planning/ingest-backpressure-design.md):
     // scale the want-set budget down — and halt declarations entirely at a threshold — when a
     // registered LOD consumer reports a pending ingest backlog (Voxy's ingest queue depth via

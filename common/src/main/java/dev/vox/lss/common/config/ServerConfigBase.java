@@ -45,9 +45,10 @@ public abstract class ServerConfigBase extends JsonConfig {
     /**
      * Miss-memo TTL (docs/planning/miss-memo-design.md): an authoritative disk miss is
      * remembered for this many seconds, so a position waiting for a generation slot skips
-     * the redundant ~1 Hz not-found re-reads and falls through to the generation decision
-     * directly. 0 disables the memo (the kill switch — restores the pre-memo re-read
-     * churn, which remains fully correct behavior).
+     * the redundant not-found re-reads (arriving at the client's scan cadence — 1 Hz, up
+     * to 4 Hz under its adaptive fast re-scan) and falls through to the generation
+     * decision directly. 0 disables the memo (the kill switch — restores the pre-memo
+     * re-read churn, which remains fully correct behavior).
      */
     public int missMemoTtlSeconds = 30;
     /**

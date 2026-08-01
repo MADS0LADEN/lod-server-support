@@ -246,8 +246,12 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
                 // re-ask almost certainly crossed its own delivery in flight. Same
                 // disposition as the enqueued rung: silent skip, done-bit KEPT, and
                 // never up_to_date — the client claims nothing. Termination is
-                // guaranteed: the stamp is written only at departure, so the next 1 Hz
-                // re-declaration outlives the grace and re-resolves honestly below.
+                // structural: the stamp is written ONCE at departure and never refreshed
+                // by a re-ask, so some later re-declaration always outlives the grace
+                // and re-resolves honestly below. (Under the client's adaptive cadence
+                // — as fast as 250 ms — one or two re-asks may land inside the window
+                // and be absorbed here before that happens; at the 1 Hz fallback it is
+                // the very next one.)
                 this.ctx.diagnostics().incrementGraceSkipped();
                 return Duplicate.IN_FLIGHT;
             }

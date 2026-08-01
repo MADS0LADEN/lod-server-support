@@ -96,8 +96,12 @@ class LodRequestManagerTest {
     private final long[] scanTs = new long[LSSConstants.MAX_BATCH_CHUNK_REQUESTS];
 
     /**
-     * One maybeScan call against the manager's own collaborators with viewDistance covering
-     * the lod distance, so a fired scan declares nothing — pure cadence observation.
+     * One maybeScan call against the manager's own collaborators — pure cadence observation.
+     * NOTE: at vd == lod == 64 a fired scan is NOT empty (the corner annulus outside
+     * vanilla's rounded view is correctly declared — see fireScanAtOrigin's comment), but
+     * this helper bypasses tickScanPhase, so nothing is sent, the tracker is never
+     * replaced, and the adaptive fast cadence never ARMS (arming is tickScanPhase's job):
+     * the 19-silent-tick cadence pins below stay exact.
      */
     private int maybeScanOnce() {
         return manager.scannerForTest().maybeScan(0, 0, 64, 0, 1000, -1, LodRequestManager.INGEST_BACKLOG_HALT_SECTIONS, () -> 0,

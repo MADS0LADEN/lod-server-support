@@ -90,6 +90,13 @@ public class LodRequestManager {
     // Last polled backlog — trace + /lss diag observability.
     private int lastIngestBacklog = -1;
 
+    public LodRequestManager() {
+        // Adaptive cadence: the scanner's fast trigger reads the awaiting-set size each
+        // tick. Same main-client-thread contract as every other tracker consumer — every
+        // mutation arrives via client.execute tasks on the thread that ticks maybeScan.
+        this.scanner.setOutstandingSupplier(this.tracker::size);
+    }
+
     public void onSessionConfig(SessionConfigS2CPayload config, String serverAddress) {
         this.sessionConfig = config;
         this.serverAddress = serverAddress;
@@ -323,6 +330,7 @@ public class LodRequestManager {
             }
             ClientTraceLog.event("scan", "\"center\":[" + playerCx + "," + playerCz
                     + "],\"confirmed\":" + this.scanner.getConfirmedRing()
+                    + ",\"fast\":" + this.scanner.wasLastScanFast()
                     + ",\"declared\":" + scanned
                     + ",\"budget\":" + this.scanner.getLastBudget()
                     + ",\"ingest_backlog\":" + ingestBacklogSections
@@ -332,6 +340,11 @@ public class LodRequestManager {
         }
         if (scanned >= 0) {
             this.tracker.replaceWith(this.sendPositionBuffer, scanned);
+            // Arm/disarm the adaptive fast cadence beside the tracker replace, so
+            // "lastSentCount == what the awaiting set holds" is true by construction
+            // (a 0-count converged walk disarms; sendRequests' catch re-disarms a
+            // failed send before the next tick's predicate can read it).
+            this.scanner.noteDeclared(scanned);
             if (scanned > 0) {
                 sendRequests(this.sendPositionBuffer, this.sendTimestampBuffer, scanned);
             }
@@ -377,8 +390,11 @@ public class LodRequestManager {
             // Nothing is consumed at send any more (marks are answer-consumed), and the next
             // scan re-declares the identical set, so no mark restoration is needed. Just drop
             // the awaiting entries so late-status gating doesn't credit a batch that never
-            // reached the wire.
+            // reached the wire — and disarm the fast cadence, or the emptied awaiting set
+            // would read as "all answered" and turn a dying connection into a 4 Hz retry
+            // hammer (it must retry at the 1 Hz fallback, exactly as before).
             this.tracker.replaceWith(positions, 0);
+            this.scanner.noteDeclared(0);
         }
         this.metrics.recordSendCycle(count); // counts attempts — a failed batch still counts
     }
@@ -617,6 +633,10 @@ public class LodRequestManager {
 
     public void disconnect() {
         this.tracker.clear();
+        // Defensive disarm: the manager is normally dropped right after, but the session
+        // gate's teardown is deliberately self-sufficient — an armed scanner over a
+        // cleared tracker would satisfy the fast trigger trivially.
+        this.scanner.noteDeclared(0);
     }
 
     public void saveCache() {
@@ -715,6 +735,8 @@ public class LodRequestManager {
     public int getConfirmedRing() { return this.scanner.getConfirmedRing(); }
     public int getScanRing() { return this.scanner.getScanRing(); }
     public int getMissingVanillaChunks() { return this.scanner.getMissingVanillaChunks(); }
+    /** Fast (completion-triggered) scan fires this session — the adaptive-cadence liveness signal. */
+    public long getFastScans() { return this.scanner.getFastScans(); }
 
     // Response counters
     public long getTotalColumnsReceived() { return this.metrics.getTotalColumnsReceived(); }

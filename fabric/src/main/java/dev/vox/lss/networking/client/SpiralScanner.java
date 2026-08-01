@@ -6,21 +6,55 @@ import dev.vox.lss.compat.ModCompat;
 import dev.vox.lss.config.LSSClientConfig;
 import dev.vox.lss.networking.payloads.SessionConfigS2CPayload;
 
+import java.util.function.BooleanSupplier;
 import java.util.function.IntSupplier;
 
 /**
  * Expanding Chebyshev ring scanner that produces the client's want-set: every position it
  * still wants, closest-first, written straight into {@link LodRequestManager}'s send buffers
- * and shipped whole in the same tick. Owns the scan policy — the 20-tick cadence and the
+ * and shipped whole in the same tick. Owns the scan policy — the adaptive cadence (a 20-tick
+ * fallback plus the completion-triggered fast re-scan, see {@link #fastRescanDue}) and the
  * budget with its queue-pressure scale (the vanilla-load scale is retired: server-side
  * priority/throttling owns that protection under v17).
  *
  * <p>The scan does NOT suppress in-flight positions: under want-set semantics the server may
- * silently supersede any not-yet-admitted ask, and the 1 Hz re-declare is the only thing that
- * heals it. An awaited position is therefore an ordinary unsatisfied want-set member, which
- * also means it blocks ring confirmation until its data actually lands.
+ * silently supersede any not-yet-admitted ask, and the periodic re-declare is the only thing
+ * that heals it. An awaited position is therefore an ordinary unsatisfied want-set member,
+ * which also means it blocks ring confirmation until its data actually lands. The adaptive
+ * fast trigger reads the awaiting-set SIZE as a cadence input — it never filters what the
+ * walk declares.
  */
 class SpiralScanner {
+
+    /**
+     * Adaptive cadence (docs/planning/adaptive-scan-cadence-design.md): minimum ticks
+     * between consecutive fires — 5 ticks = 250 ms, capping the fast cadence at 4 Hz. Bounds
+     * the worst-case C2S declaration rate (and its ~12.8 KB/batch upstream cost) and the
+     * render-thread walk rate.
+     */
+    static final int FAST_RESCAN_MIN_INTERVAL_TICKS = 5;
+    /**
+     * Fast fires require ≥95% of the last declared batch answered:
+     * {@code outstanding <= lastSentCount / 20}. Integer math — declares under 20 degenerate
+     * to "outstanding == 0", the strictest (correct) form for tiny tails. Also bounds the
+     * redundant in-flight re-asks a fast batch can carry at 5%, and makes straggler chatter
+     * self-limiting: a fast walk that declares only the stragglers shrinks the next
+     * threshold 20-fold (geometric tightening).
+     */
+    static final int FAST_RESCAN_OUTSTANDING_DIVISOR = 20;
+    /**
+     * Fast fires require MILD downstream pressure at most: each pipe signal below 1/4 of its
+     * halt threshold (decode queue &lt; 1500 columns, consumer ingest backlog &lt; 1536
+     * sections at the production constants). Deliberately proportional, NOT strict zero: a
+     * received column leaves the awaiting set and enters the decode queue in the same
+     * network-handler statement pair, so at the instant outstanding reaches 5% the queue
+     * holds that batch's peak — a strict-zero gate would suppress the fast path in exactly
+     * the data-bearing warm-backfill case it exists for. Under a sustained decode
+     * bottleneck the cadence bang-bangs around this line, i.e. rate-matches the decoder;
+     * deeper pressure (including the tick recovering out of a backpressure halt) stays at
+     * the 1 Hz fallback where the budget taper + halt own regulation.
+     */
+    static final int FAST_RESCAN_PRESSURE_DIVISOR = 4;
 
     private SessionConfigS2CPayload sessionConfig;
 
@@ -29,11 +63,36 @@ class SpiralScanner {
     private int scanTickCounter = LSSConstants.TICKS_PER_SECOND - 1; // starts at max so first scan fires immediately on join
     private int missingVanillaChunks = Integer.MAX_VALUE;
 
+    // --- Adaptive-cadence state (see fastRescanDue) ---
+    /**
+     * The armed state: the count of the last want-set batch the manager DECLARED (tracker
+     * replaced + send attempted). Written only by {@link #noteDeclared} from
+     * {@link LodRequestManager#tickScanPhase} beside {@code tracker.replaceWith} — so
+     * "lastSentCount == what the awaiting set was replaced with" holds by construction —
+     * and re-zeroed by the send-failure catch, {@code disconnect()}, {@link #reset()} and
+     * {@link #resetScanCounter()}. 0 = disarmed: a converged client (0-count walk) must
+     * fall back to the 1 Hz re-walk, never a 250 ms walk loop, and a dying connection must
+     * not retry at 4 Hz. Rigs that drive {@link #maybeScan} directly without
+     * {@code tickScanPhase} never arm and see pre-adaptive behavior bit-identically.
+     */
+    private int lastSentCount;
+    /** The awaiting-set size ({@code tracker::size} in production; main-client-thread only).
+     *  Null = fast path off (bare test rigs). */
+    private IntSupplier outstandingSupplier;
+    /** Config seam ({@code enableAdaptiveScanCadence} kill switch) — injectable so tests
+     *  don't mutate the global CONFIG (the ingestBacklogSupplier pattern). */
+    BooleanSupplier adaptiveCadenceEnabled =
+            () -> LSSClientConfig.CONFIG.enableAdaptiveScanCadence;
+    private boolean lastScanWasFast;
+    private long fastScans; // session-scoped diagnostic counter (reset() zeroes it)
+
     // Last scan budget tracking
     private int lastBudget;
     private int lastQueued;
 
-    // Cached Voxy view distance — rechecked once per second (20 ticks)
+    // Cached Voxy view distance — rechecked every 20 walk invocations (~20 s at the 1 Hz
+    // fallback, as fast as ~5 s under sustained fast cadence; the lookup is a cheap
+    // MethodHandle call, so fresher is fine)
     private int cachedVoxyDistance = -1; // -1 = not present
     private int voxyDistanceStaleness = 0;
 
@@ -46,7 +105,8 @@ class SpiralScanner {
      * Advance the scan cadence and, when it fires with a nonzero budget, walk the rings
      * and write the complete want-set (closest-first) into {@code posOut}/{@code tsOut}.
      *
-     * @param missingVanilla evaluated only when the cadence fires (diagnostics only)
+     * @param missingVanilla evaluated only on PERIODIC fires (diagnostics only — fast fires
+     *        keep the last value rather than 4×-ing an O((2·vd+1)²) hasChunk sweep)
      * @return -1 when no walk happened this tick (cadence not fired); otherwise the
      *         number of want-set entries written
      *         (0 = walked and found nothing — the converged case; the caller must then
@@ -58,10 +118,19 @@ class SpiralScanner {
                   IntSupplier missingVanilla,
                   ColumnStateMap columns,
                   long[] posOut, long[] tsOut) {
-        if (++this.scanTickCounter < LSSConstants.TICKS_PER_SECOND) return -1;
+        int ticksSinceFire = ++this.scanTickCounter;
+        boolean fast = ticksSinceFire < LSSConstants.TICKS_PER_SECOND;
+        if (fast && !fastRescanDue(ticksSinceFire, columnQueueSize, columnQueueHaltThreshold,
+                ingestBacklogSections, ingestBacklogHaltThreshold)) {
+            return -1;
+        }
+        // Either fire resets the counter: the 20-tick fallback measures from the LAST batch
+        // ("more than 1 s since the last declaration ⇒ fire regardless"), which bounds any
+        // position a fast walk omitted (budget/center shift under movement) at
+        // TICKS_PER_SECOND + FAST_RESCAN_MIN_INTERVAL_TICKS - 1 = 39 ticks to re-declaration.
         this.scanTickCounter = 0;
 
-        this.missingVanillaChunks = missingVanilla.getAsInt();
+        if (!fast) this.missingVanillaChunks = missingVanilla.getAsInt();
 
         // Compute scan budget: base × pressure-scale. The base is
         // the ONE want-set budget — a constant; no client budget derives from any server cap
@@ -99,7 +168,64 @@ class SpiralScanner {
 
         if (budget <= 0) return -1;
 
+        // Counted after the budget guard: a non-walk must not read as a fast scan (the
+        // guard is unreachable in production — the taper floors at 1 and the buffers are
+        // batch-cap length — but a zero-length test buffer reaches it).
+        this.lastScanWasFast = fast;
+        if (fast) this.fastScans++;
+
         return scan(playerCx, playerCz, viewDistance, columns, posOut, tsOut, budget);
+    }
+
+    /**
+     * The adaptive-cadence fast trigger (docs/planning/adaptive-scan-cadence-design.md):
+     * between 20-tick fallback fires, fire early — at most every
+     * {@link #FAST_RESCAN_MIN_INTERVAL_TICKS} — once the last declared batch is ≥95%
+     * answered and the downstream pipeline is at most mildly loaded. Conditions cheap-first;
+     * the supplier read comes last so non-firing ticks stay O(1).
+     *
+     * <p>The v16 gate is non-optional, not merely polite: besides the legacy server's real
+     * rate limiter, Tier B's onColumnNotGenerated removes a bounced position from the
+     * awaiting set before its transient-heal early return, so every legacy gen-slot bounce
+     * drops outstanding — a v16 session would fast-fire on exactly that churn loop and
+     * hammer the old server's gen slots at 4 Hz. ClientSessionGate admits only the current
+     * and the v16 protocol versions, so {@code != 16} is exact today and stays conservative
+     * if an intermediate legacy dialect ever lands.
+     *
+     * <p>The {@code confirmedRing > 0} term is the walk-cost gate: movement
+     * ({@link #recenter}), dirty re-opens ({@link #resetConfirmedRing}) and actionable
+     * retries all zero the confirmed prefix, and a zero-prefix walk re-walks from ring 0
+     * (the render-thread-hitch shape documented at the 2048 ceiling above) — those walks
+     * stay at the 1 Hz fallback; only cheap frontier walks run fast.
+     */
+    private boolean fastRescanDue(int ticksSinceFire, int columnQueueSize, int columnQueueHaltThreshold,
+                                  int ingestBacklogSections, int ingestBacklogHaltThreshold) {
+        if (ticksSinceFire < FAST_RESCAN_MIN_INTERVAL_TICKS) return false;
+        if (this.lastSentCount <= 0) return false; // disarmed: converged, send-failed, or never declared
+        if (this.outstandingSupplier == null || !this.adaptiveCadenceEnabled.getAsBoolean()) return false;
+        if (this.sessionConfig == null
+                || this.sessionConfig.protocolVersion() == LSSConstants.V16_COMPAT_PROTOCOL_VERSION) {
+            return false;
+        }
+        if (this.confirmedRing <= 0) return false;
+        if (columnQueueSize >= columnQueueHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR) return false;
+        if (ingestBacklogSections >= ingestBacklogHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR) return false;
+        return this.outstandingSupplier.getAsInt()
+                <= this.lastSentCount / FAST_RESCAN_OUTSTANDING_DIVISOR;
+    }
+
+    /**
+     * Arm/disarm the fast cadence with the count the manager just declared (awaiting set
+     * replaced + send attempted). See {@link #lastSentCount} for the contract; called with
+     * 0 by the converged walk, the send-failure catch, and {@code disconnect()}.
+     */
+    void noteDeclared(int count) {
+        this.lastSentCount = count;
+    }
+
+    /** Production: {@code tracker::size}. Absent (null) in bare rigs ⇒ fast path off. */
+    void setOutstandingSupplier(IntSupplier supplier) {
+        this.outstandingSupplier = supplier;
     }
 
     /**
@@ -225,11 +351,18 @@ class SpiralScanner {
         this.missingVanillaChunks = Integer.MAX_VALUE;
         this.cachedVoxyDistance = -1;
         this.voxyDistanceStaleness = 0;
+        this.lastSentCount = 0; // disarm the fast cadence with the rest of the session state
+        this.lastScanWasFast = false;
+        this.fastScans = 0;
     }
 
     void resetScanCounter() {
         this.confirmedRing = 0;
         this.scanTickCounter = 0;
+        // Disarm too: this is the deliberate post-dimension-change 20-tick wait, and the
+        // fresh dimension's empty awaiting set would otherwise satisfy the fast trigger
+        // trivially against a stale armed count.
+        this.lastSentCount = 0;
     }
 
     /** Movement re-center: re-walk from ring 0 at the new center WITHOUT touching the
@@ -300,4 +433,6 @@ class SpiralScanner {
     int getMissingVanillaChunks() { return this.missingVanillaChunks; }
     int getLastBudget() { return this.lastBudget; }
     int getLastQueued() { return this.lastQueued; }
+    boolean wasLastScanFast() { return this.lastScanWasFast; }
+    long getFastScans() { return this.fastScans; }
 }

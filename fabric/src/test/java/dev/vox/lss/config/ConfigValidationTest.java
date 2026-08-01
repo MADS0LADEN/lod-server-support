@@ -302,6 +302,31 @@ class ConfigValidationTest {
     }
 
     @Test
+    void adaptiveScanCadenceDefaultsOn() {
+        // The adaptive cadence (docs/planning/adaptive-scan-cadence-design.md) ships ON —
+        // a silent default-off revert would pass CI green (unit rigs set the seam
+        // explicitly) while quietly restoring the 1 Hz spurt fill on every client.
+        var c = clientConfig();
+        assertTrue(c.enableAdaptiveScanCadence, "adaptive scan cadence must default ON");
+        c.validate();
+        assertTrue(c.enableAdaptiveScanCadence, "validate() must not touch the boolean");
+    }
+
+    @Test
+    void adaptiveScanCadenceRoundTripsThroughJson() {
+        // The GSON leg: the field serializes under its exact key (a rename would silently
+        // orphan every saved kill-switch choice) and a saved false binds back as false.
+        var gson = new com.google.gson.Gson();
+        String saved = gson.toJson(clientConfig());
+        assertTrue(saved.contains("\"enableAdaptiveScanCadence\":true"),
+                "a fresh config must persist the default under the exact key: " + saved);
+        var loaded = gson.fromJson(saved.replace(
+                "\"enableAdaptiveScanCadence\":true", "\"enableAdaptiveScanCadence\":false"),
+                LSSClientConfig.class);
+        assertFalse(loaded.enableAdaptiveScanCadence, "a saved false must bind back as false");
+    }
+
+    @Test
     void ingestBackpressureRoundTripsThroughJson() {
         // The GSON leg of the save/load contract: the field serializes under its exact key
         // (a rename would silently orphan every saved kill-switch choice) and a saved false

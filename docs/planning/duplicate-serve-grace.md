@@ -102,9 +102,13 @@ When `decrementEnqueued` fires **on the send-success path only**
 (`AbstractPlayerRequestState` — the post-`sender.send()` decrement), stamp
 `packed → departedAtNanos` in a per-player map. In `resolvedAsDuplicate`, a ts≤0 re-ask
 within GRACE (~300–500 ms) of the stamp is treated like the enqueued rung: **silent skip,
-done-bit kept**. After the grace, today's clear-and-re-resolve applies unchanged. The
-client re-declares at 1 Hz regardless, so a genuinely lost payload heals at most ~1 scan
-later than today.
+done-bit kept**. After the grace, today's clear-and-re-resolve applies unchanged.
+Termination is **structural**: the stamp is written once at departure and never refreshed
+by a re-ask, so some later re-declaration always outlives the grace — a genuinely lost
+payload heals at most one scan past grace expiry. (Written 2026-07 against the fixed 1 Hz
+cadence; since the client's adaptive scan cadence — docs/planning/adaptive-scan-cadence-design.md
+— re-declarations can arrive as fast as every 250 ms, so one or two re-asks may be absorbed
+inside the window before the healing one lands; wall-clock heal time only improves.)
 
 ## Side effects and implementation traps (from the 2026-07-23 analysis)
 

@@ -461,4 +461,115 @@ class LodRequestManagerTickTest {
                         + " distinct positions");
         assertEquals(2, manager.getTotalSendCycles());
     }
+
+    // ---- adaptive cadence through the production tick path ----
+    // (docs/planning/adaptive-scan-cadence-design.md — the wiring pins: tracker::size
+    // supplier from the constructor, arming in tickScanPhase beside the tracker replace.)
+
+    /** One plain tick at (0,0)/vd 0 with no pressure signals. */
+    private void plainTick(ResourceKey<Level> dim) {
+        manager.tickWithContext(0, 0, dim, 0, 0, 0L, -1, () -> 0);
+    }
+
+    /** Answer count positions of the batch as received column data. */
+    private void answer(SentBatch batch, ResourceKey<Level> dim, int count) {
+        for (int i = 0; i < count; i++) {
+            manager.onColumnReceived(batch.positions()[i], 5000L, dim);
+        }
+    }
+
+    /** Ticks until a batch beyond {@code already} ships; returns the 1-based tick count. */
+    private int ticksToNextBatch(ResourceKey<Level> dim, int already) {
+        for (int t = 1; t <= LSSConstants.TICKS_PER_SECOND; t++) {
+            plainTick(dim);
+            if (sent.size() > already) return t;
+        }
+        throw new AssertionError("no further batch within a fallback window");
+    }
+
+    @Test
+    void nearlyAnsweredBatchFastFiresThroughTheRealTickPath() {
+        var overworld = dim("overworld");
+        plainTick(overworld); // primed scan: the 24-position lod-2/vd-0 annulus
+        assertEquals(1, sent.size());
+        answer(sent.get(0), overworld, 23); // 1 of 24 outstanding <= threshold 24/20 = 1
+
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, ticksToNextBatch(overworld, 1),
+                "the production wiring (constructor supplier + tickScanPhase arming) fast-fires"
+                        + " at the floor once the batch is >=95% answered");
+        assertEquals(1, sent.get(1).count(),
+                "the fast walk re-declares exactly the one still-unanswered position");
+    }
+
+    @Test
+    void partiallyAnsweredBatchStaysPeriodic() {
+        // The supplier-wiring pin (the #71 pattern): if the scanner consulted anything but
+        // the live tracker::size, the 12 unanswered positions would read as drained and
+        // this would fast-fire at tick 5.
+        var overworld = dim("overworld");
+        plainTick(overworld);
+        assertEquals(1, sent.size());
+        answer(sent.get(0), overworld, 12); // 12 of 24 outstanding — far above threshold 1
+
+        assertEquals(LSSConstants.TICKS_PER_SECOND, ticksToNextBatch(overworld, 1),
+                "a half-answered batch rides the 20-tick fallback");
+    }
+
+    @Test
+    void sendFailureDisarmsTheFastCadence() {
+        var overworld = dim("overworld");
+        // The first scan's send THROWS: sendRequests empties the tracker (replaceWith 0),
+        // which without the catch's disarm would read as "all answered" and turn a dying
+        // connection into a 4 Hz retry hammer.
+        manager.setBatchSenderForTest(p -> { throw new RuntimeException("wire down"); });
+        plainTick(overworld);
+        assertEquals(0, sent.size(), "the batch never reached the wire");
+
+        manager.setBatchSenderForTest(p -> sent.add(new SentBatch(
+                Arrays.copyOf(p.packedPositions(), p.count()),
+                Arrays.copyOf(p.clientTimestamps(), p.count()),
+                p.count())));
+        assertEquals(LSSConstants.TICKS_PER_SECOND, ticksToNextBatch(overworld, 0),
+                "the retry rides the 1 Hz fallback, exactly as before the adaptive cadence");
+    }
+
+    @Test
+    void disconnectDisarmsTheFastCadence() {
+        var overworld = dim("overworld");
+        plainTick(overworld);
+        assertEquals(1, sent.size());
+        manager.disconnect(); // clears the tracker: outstanding reads 0 against an armed count
+
+        assertEquals(LSSConstants.TICKS_PER_SECOND, ticksToNextBatch(overworld, 1),
+                "disconnect() disarms — the defensive teardown must not leave a fast trigger"
+                        + " armed over an emptied awaiting set");
+    }
+
+    @Test
+    void haltRecoveryTickCannotFastFire() {
+        var overworld = dim("overworld");
+        plainTick(overworld); // primed scan
+        answer(sent.get(0), overworld, 23); // fast-eligible by outstanding (1 <= 24/20)
+
+        // Climb past the floor without firing, then halt: the halt path returns before the
+        // scan phase, freezing the cadence counter. Entering the halt ships the one
+        // edge-triggered EMPTY clear batch (the designed backpressure clear) — count it.
+        for (int t = 0; t < SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS - 1; t++) plainTick(overworld);
+        for (int t = 0; t < 3; t++) {
+            manager.tickWithContext(0, 0, overworld, 0, LodRequestManager.haltThreshold(), 0L, -1, () -> 0);
+        }
+        assertEquals(2, sent.size(), "halted ticks never scan — only the one clear ships");
+        assertEquals(0, sent.get(1).count(), "...and it is the empty backpressure clear");
+
+        // The recovery tick: queue just under the halt line — far above the 1/4 fast line.
+        manager.tickWithContext(0, 0, overworld, 0, LodRequestManager.haltThreshold() - 1, 0L, -1, () -> 0);
+        assertEquals(2, sent.size(),
+                "the tick recovering out of a halt is above the mild-pressure line and must"
+                        + " not fast-fire (load-bearing now that the gate is proportional)");
+
+        // With the queue actually drained the held-up fast fire proceeds.
+        plainTick(overworld);
+        assertEquals(3, sent.size(), "with pressure gone the fast fire lands");
+        assertEquals(1, sent.get(2).count(), "declaring the one still-unanswered position");
+    }
 }
