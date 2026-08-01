@@ -46,6 +46,8 @@
 - Adding, removing, or updating mods/datapacks that register blocks or biomes
   rebuilds the store automatically on the next start (stored data encodes registry
   ids, which such changes shift) — expect one cold rejoin after a mod change.
+  Upgrading from an earlier in-development store build also rebuilds once (the
+  registry fingerprint format changed to close a same-size mod-swap blind spot).
 - Folia: the store is UNTESTED on Folia — leave `lodStore` at `"off"` there. (There
   is no engine-level Folia gate; on this Minecraft version Folia refuses the plugin
   jar entirely, but do not carry this setting onto a future Folia build.)

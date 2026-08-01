@@ -148,9 +148,20 @@ public class RequestProcessingService {
                         .getStorageFolder(level.dimension(), worldRoot)
                         .resolve("region").normalize());
                 var maskEntry = XrayMaskManager.entryForActive(level);
-                maskFingerprints.put(dim, maskEntry == null ? "off"
+                String maskFp = maskEntry == null ? "off"
                         : maskEntry.sourceLabel() + ":"
-                                + Long.toHexString(maskEntry.mask().fingerprint()));
+                                + Long.toHexString(maskEntry.mask().fingerprint());
+                // Review B11: a NON-TERMINAL AntiXray probe (controller not yet
+                // registered at SERVER_STARTED) serves an uncached config fallback
+                // that later serves may replace with the engine mask — snapshotting
+                // it could KEEP engine-masked rows under a config label across two
+                // transient boots. A per-boot nonce never matches across boots, so
+                // the affected dimension drops-and-re-warms instead (the safe
+                // direction; churn only while the engine keeps resolving late).
+                if (!XrayMaskManager.isTerminalForActive(level)) {
+                    maskFp = "transient:" + Long.toHexString(System.nanoTime());
+                }
+                maskFingerprints.put(dim, maskFp);
             }
             var env = new dev.vox.lss.common.store.SqliteLodStore.Environment(
                     worldRoot.resolve("lss-lod"), server.getServerVersion(),
@@ -177,11 +188,23 @@ public class RequestProcessingService {
                 }
                 this.storeBackfill = new dev.vox.lss.common.store.StoreBackfill(
                         sqlite, regionDirs::get,
-                        // Traversal anchor: world origin. The 26.2 spawn accessor
-                        // moved (respawn-data rework) and the anchor only ORDERS the
-                        // walk — origin == spawn on every test world and nearly all
-                        // servers; the seam stays so a real spawn can be wired later.
-                        dim -> new long[]{0, 0},
+                        // Traversal anchor: the real shared spawn via the 26.2
+                        // respawn-data accessor (review B7 — the cap-stop made
+                        // "nearest-spawn first" load-bearing: a far-spawn world with
+                        // an opt-in cap warmed the wrong terrain, then stopped).
+                        // Origin fallback on any shape drift: the anchor only ORDERS
+                        // the walk.
+                        dim -> {
+                            try {
+                                var level = levelByDim.get(dim);
+                                var pos = level == null ? null
+                                        : level.getRespawnData().pos();
+                                return pos == null ? new long[]{0, 0}
+                                        : new long[]{pos.getX() >> 4, pos.getZ() >> 4};
+                            } catch (Throwable t) {
+                                return new long[]{0, 0};
+                            }
+                        },
                         List.copyOf(levelByDim.keySet()),
                         (dim, cx, cz) -> {
                             var level = levelByDim.get(dim);
@@ -769,28 +792,26 @@ public class RequestProcessingService {
     /** Registry identity for the LOD store meta guard (4-agent round R2-M3): stored
      *  wire bytes embed GLOBAL block-state ids and biome ids, both assignment-order
      *  dependent — a mod or datapack change shifts them while region files stay
-     *  untouched, so only this fingerprint can trigger the rebuild. Block states are
-     *  captured by registry SIZE (any add/remove shifts every id above it); biomes by
-     *  an id-ordered key-list hash (a dynamic registry — datapacks re-shape it).
-     *  Accepted gap: a same-count block-state reorder with an identical biome list —
-     *  no realistic mod swap keeps the exact state count. Textual twin in
-     *  PaperRequestProcessingService. */
+     *  untouched, so only this fingerprint can trigger the rebuild. BOTH halves are
+     *  id-ordered identity hashes (review A3: the old block half was a bare COUNT, so
+     *  an id-permuting registry change of identical total size — a mod swap landing
+     *  on the same state count — served every warm column as the wrong blocks with no
+     *  self-heal; state iteration order of BLOCK_STATE_REGISTRY IS global-id order,
+     *  and BlockState toString carries block id + property values). Textual twin in
+     *  PaperRequestProcessingService; format pinned by StoreEnvironmentWiringTest. */
     static String storeRegistryFingerprint(MinecraftServer server) {
-        long hash = 0xcbf29ce484222325L;
+        var states = new java.util.ArrayList<String>();
+        for (var state : net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY) {
+            states.add(String.valueOf(state));
+        }
+        var biomeKeys = new java.util.ArrayList<String>();
         var biomes = server.registryAccess()
                 .lookupOrThrow(net.minecraft.core.registries.Registries.BIOME);
         for (var biome : biomes) {
             var key = biomes.getKey(biome);
-            String s = key == null ? "?" : key.toString();
-            for (int i = 0; i < s.length(); i++) {
-                hash ^= s.charAt(i);
-                hash *= 0x100000001b3L;
-            }
-            hash ^= ':';
-            hash *= 0x100000001b3L;
+            biomeKeys.add(key == null ? "?" : key.toString());
         }
-        return "bs" + net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size()
-                + "-bio" + Long.toHexString(hash);
+        return dev.vox.lss.common.store.RegistryFingerprint.of(states, biomeKeys);
     }
 
     /** The live LOD store (null while lodStore=off OR after the codec-probe degrade). */

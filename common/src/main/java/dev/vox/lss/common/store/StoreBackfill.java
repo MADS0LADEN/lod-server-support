@@ -116,9 +116,15 @@ public final class StoreBackfill {
 
     /** Idempotent start; returns false if already running. */
     public boolean start() {
-        if (!this.running.compareAndSet(false, true)) return false;
+        // Clear stop-intent BEFORE the running CAS publishes (review B14): a stop()
+        // landing between the CAS and the clear was acknowledged to the operator and
+        // then silently discarded. The pre-check keeps a failed concurrent start from
+        // clearing a stop aimed at the live run.
+        if (this.running.get()) return false;
         this.stopRequested.set(false);
+        if (!this.running.compareAndSet(false, true)) return false;
         this.rateWindows = 0; // per-run counter — a stop/start cycle must not accumulate
+        this.statusLine = "starting"; // not last run's terminal line (review B10)
         var t = new Thread(this::run, Brand.shortName() + " Store Backfill");
         t.setDaemon(true);
         t.setPriority(Thread.MIN_PRIORITY);
@@ -171,6 +177,7 @@ public final class StoreBackfill {
             // hasRow() read as misses in that window — starting the walk early would
             // re-read and re-deposit everything already present (review MAJOR: the
             // config auto-start races the sweep).
+            this.statusLine = "starting: awaiting store sweep"; // review B10 — not "idle"
             if (!this.store.awaitSweep(TimeUnit.MINUTES.toMillis(5))) {
                 this.statusLine = "failed: store sweep never completed";
                 return;
@@ -212,7 +219,14 @@ public final class StoreBackfill {
                 int[] present = presentChunks(region.mca());
                 if (present == null) continue; // unreadable header: skip, sweep owns it
                 long regionErrors = 0;
-                long dropsBefore = this.store.diagnostics().getDepositDrops();
+                // B9: fence against a concurrent `invalidate all` — a region judged
+                // before the drop must not be done-marked after it.
+                long dropGenAtStart = this.store.dropGeneration();
+                // B8: only THIS walk's sheds veto the done-mark (the old global
+                // deposit-drop snapshot let any serve-path shed anywhere deny every
+                // region durable progress — a busy server re-walked the world each
+                // restart).
+                boolean regionShed = false;
                 for (int idx = 0; idx < 1024; idx++) {
                     if (this.stopRequested.get()) break;
                     if (present[idx] == 0) continue;
@@ -243,14 +257,23 @@ public final class StoreBackfill {
                             byte[] bytes = this.columnReader.read(region.dim(), cx, cz);
                             this.store.diagnostics().recordBackfillRead();
                             if (bytes != null) {
-                                this.store.deposit(region.dim(), packed, bytes,
-                                        System.currentTimeMillis() / 1000L, acquiredSeconds);
+                                if (!this.store.deposit(region.dim(), packed, bytes,
+                                        System.currentTimeMillis() / 1000L, acquiredSeconds)) {
+                                    regionShed = true;
+                                }
                                 deposited++;
                                 this.store.diagnostics().recordBackfillDeposit();
                             } else {
                                 skipped++;
                                 this.store.diagnostics().recordBackfillSkip();
                             }
+                        } catch (InterruptedException ie) {
+                            // Shutdown interrupt mid-read (review B14): restore the
+                            // flag and stop — not an error, no phantom store.errors,
+                            // and the interrupt must not be swallowed.
+                            Thread.currentThread().interrupt();
+                            this.stopRequested.set(true);
+                            break;
                         } catch (Exception e) {
                             errors++;
                             regionErrors++;
@@ -289,10 +312,9 @@ public final class StoreBackfill {
                 // let a post-sample shed slip under the depositsShed guard. A drain
                 // timeout just skips the mark — the region re-walks next run.
                 boolean drained = this.store.awaitDepositQueueEmpty(5000);
-                boolean depositsShed =
-                        this.store.diagnostics().getDepositDrops() > dropsBefore;
                 if (!this.stopRequested.get() && regionErrors == 0 && drained
-                        && !depositsShed) {
+                        && !regionShed
+                        && this.store.dropGeneration() == dropGenAtStart) {
                     this.store.markBackfillRegionDone(region.dim(), region.rx(), region.rz());
                     regionsDone++;
                 }
@@ -308,6 +330,9 @@ public final class StoreBackfill {
             this.statusLine = "failed: " + t;
             LSSLogger.warn("Store backfill aborted", t);
         } finally {
+            // Close THIS worker thread's reader connection (review B6): each start()
+            // thread otherwise leaks its ThreadLocal conn until store shutdown.
+            this.store.closeReaderConnForCurrentThread();
             // The summary must print on EVERY exit path (the interrupt path used to
             // swallow it, so the one line carrying the error count never appeared).
             LSSLogger.info("Store backfill " + this.statusLine);

@@ -1,6 +1,6 @@
 # Store backfill tuning — `lodStoreBackfillColumnsPerSecond` (+ the MSPT ceiling)
 
-**Status: PLAN — small, self-contained; can land on any post-`feat/lod-store` branch.**
+**Status: IMPLEMENTED 2026-07-31 (commit 239b368; §3's live gate = the Modrinth 500 col/s deploy).**
 Written 2026-07-31 after the live Modrinth deploy raised "is the background worker
 tunable at all?" (answer today: on/off + start/stop only; the pace is hardcoded).
 

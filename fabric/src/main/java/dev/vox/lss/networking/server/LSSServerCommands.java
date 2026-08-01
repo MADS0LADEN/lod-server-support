@@ -54,12 +54,22 @@ class LSSServerCommands {
             return 1;
         }
         String line = "LOD store: " + store.diagnostics().formatToken(store.mode())
+                // Review B1: a latched store must LOOK dead in the triage tool —
+                // "latched" / "sweeping" / "ok", never a healthy token with frozen
+                // counters.
+                + " state=" + store.stateToken()
                 + " db=" + (store.diagnostics().getDbBytes() >> 20) + "MB wal="
                 + (store.diagnostics().getWalBytes() >> 20) + "MB sweep_drops="
                 + store.diagnostics().getSweepDrops()
                 // The one-shot cap log (§2) points here — the ongoing capped
                 // steady-state must stay diagnosable without any log line.
-                + " evicted=" + store.diagnostics().getSqlEvictions();
+                + " evicted=" + store.diagnostics().getSqlEvictions()
+                // Memory-tier visibility (review B1): db/wal/evicted are SQL-only and
+                // rendered a thrashing memory store as all-zero.
+                + (store.diagnostics().getMemBytes() > 0
+                        ? " mem=" + (store.diagnostics().getMemBytes() >> 20) + "MB"
+                                + " mem_evicted=" + store.diagnostics().getMemEvictions()
+                        : "");
         var backfill = service.getStoreBackfill();
         String bf = backfill == null ? "" : " | backfill: " + backfill.statusLine();
         source.sendSuccess(() -> Component.literal(line + bf), false);
@@ -80,7 +90,7 @@ class LSSServerCommands {
         }
         if (!service.invalidateStoreAllDimensions()) {
             source.sendFailure(Component.literal(
-                    "Invalidate-all requires the persistent store (lodStore=full)"));
+                    "Invalidate-all requires the persistent store — this session runs the memory tier (lodStore=memory, or full degraded at boot)"));
             return 0;
         }
         source.sendSuccess(() -> Component.literal(

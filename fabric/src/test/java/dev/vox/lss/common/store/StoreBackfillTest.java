@@ -58,7 +58,9 @@ class StoreBackfillTest {
     }
 
     private static void awaitDone(StoreBackfill bf) throws Exception {
-        for (int i = 0; i < 400 && bf.isRunning(); i++) Thread.sleep(25);
+        // 20 s budget (review T7): the pacing test's worst case (~3 s of rate-window
+        // sleeps + per-region drain awaits) sat at 1.25x inside the old 10 s.
+        for (int i = 0; i < 800 && bf.isRunning(); i++) Thread.sleep(25);
         assertTrue(!bf.isRunning(), "backfill must finish; status: " + bf.statusLine());
     }
 
@@ -166,7 +168,10 @@ class StoreBackfillTest {
         }, new AtomicBoolean(true), new AtomicBoolean(true));
         bf.start();
         awaitDone(bf);
-        Thread.sleep(300); // let any (wrong) mark drain through the batcher
+        // Await the QUEUE, not wall-clock (review T6): a fixed sleep let a wrongly
+        // enqueued mark drain after the assert on a loaded box — a silent false PASS
+        // for a confirmed review MAJOR.
+        assertTrue(store.awaitDepositQueueEmpty(5000), "batcher must drain");
         assertTrue(!store.isBackfillRegionDone(OW, 0, 0),
                 "an errored region must stay unmarked for the next walk");
         assertTrue(store.diagnostics().getErrors() >= 1,
@@ -309,6 +314,56 @@ class StoreBackfillTest {
         for (int i = 0; i < 400 && !raised.isBackfillRegionDone(OW, 0, 0); i++) Thread.sleep(25);
         assertTrue(raised.isBackfillRegionDone(OW, 0, 0));
         raised.shutdown();
+    }
+
+    /** C2 (review-fixes round): backfill deposits carry an ACQUISITION-time src_stamp,
+     *  stamped BEFORE the read (R1-M2) — deposit-time stamping would make a save
+     *  landing mid-read permanently sweep-invisible. The slow reader makes the two
+     *  stampings ~2.5 s apart, far beyond the 1 s stamp granularity. */
+    @Test
+    void backfillDepositSrcStampPredatesTheRead() throws Exception {
+        writeRegion(0, 0, 5);
+        SqliteLodStore store = openStore();
+        var readStartSecond = new java.util.concurrent.atomic.AtomicLong();
+        var bf = backfill(store, (dim, cx, cz) -> {
+            readStartSecond.set(System.currentTimeMillis() / 1000L);
+            Thread.sleep(2500); // a region save could land here
+            return new byte[]{1};
+        }, new AtomicBoolean(true), new AtomicBoolean(true));
+        bf.start();
+        awaitDone(bf);
+        assertTrue(store.awaitDepositQueueEmpty(5000));
+        // Poll: the shared-txn COMMIT lands on the batcher's next idle tick (~200 ms
+        // after the queue empties), and raw SQL sees only committed data.
+        Long srcStamp = null;
+        for (int i = 0; i < 400 && srcStamp == null; i++) {
+            srcStamp = sqlSrcStampOrNull(PositionUtil.packPosition(5, 0));
+            if (srcStamp == null) Thread.sleep(25);
+        }
+        assertNotNull(srcStamp, "deposited row must commit");
+        assertTrue(srcStamp <= readStartSecond.get(),
+                "src_stamp must predate the read (deposit-time stamping is ~2.5 s later): "
+                        + srcStamp + " vs read-start " + readStartSecond.get());
+        store.shutdown();
+    }
+
+    /** Raw src_stamp for one overworld row (bypasses get() so nothing masks it);
+     *  null while the row is missing or not yet committed. */
+    private Long sqlSrcStampOrNull(long pos) throws Exception {
+        var ds = new org.sqlite.SQLiteDataSource();
+        ds.setUrl("jdbc:sqlite:" + this.tmp.resolve("store").resolve("store.db"));
+        try (var c = ds.getConnection(); var st = c.createStatement()) {
+            st.execute("PRAGMA busy_timeout=3000");
+            int dimId;
+            try (var rs = st.executeQuery("SELECT id FROM dims WHERE name='" + OW + "'")) {
+                if (!rs.next()) return null;
+                dimId = rs.getInt(1);
+            }
+            try (var rs = st.executeQuery(
+                    "SELECT src_stamp FROM lods_" + dimId + " WHERE pos=" + pos)) {
+                return rs.next() ? rs.getLong(1) : null;
+            }
+        }
     }
 
     @Test

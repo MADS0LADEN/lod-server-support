@@ -367,25 +367,25 @@ public class PaperRequestProcessingService {
     }
 
     /** Registry identity for the LOD store meta guard (4-agent round R2-M3) — textual
-     *  twin of {@code RequestProcessingService.storeRegistryFingerprint}: block-state
-     *  registry size + id-ordered biome key-list hash; a mod/datapack change shifts
-     *  the global ids the stored wire bytes embed while no freshness rule can fire. */
+     *  twin of {@code RequestProcessingService.storeRegistryFingerprint}: BOTH halves
+     *  are id-ordered identity hashes (review A3 — the old block half was a bare
+     *  COUNT, so an id-permuting registry change of identical total size served every
+     *  warm column as the wrong blocks with no self-heal); a mod/datapack change
+     *  shifts the global ids the stored wire bytes embed while no freshness rule can
+     *  fire. */
     static String storeRegistryFingerprint(MinecraftServer server) {
-        long hash = 0xcbf29ce484222325L;
+        var states = new java.util.ArrayList<String>();
+        for (var state : net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY) {
+            states.add(String.valueOf(state));
+        }
+        var biomeKeys = new java.util.ArrayList<String>();
         var biomes = server.registryAccess()
                 .lookupOrThrow(net.minecraft.core.registries.Registries.BIOME);
         for (var biome : biomes) {
             var key = biomes.getKey(biome);
-            String s = key == null ? "?" : key.toString();
-            for (int i = 0; i < s.length(); i++) {
-                hash ^= s.charAt(i);
-                hash *= 0x100000001b3L;
-            }
-            hash ^= ':';
-            hash *= 0x100000001b3L;
+            biomeKeys.add(key == null ? "?" : key.toString());
         }
-        return "bs" + net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size()
-                + "-bio" + Long.toHexString(hash);
+        return dev.vox.lss.common.store.RegistryFingerprint.of(states, biomeKeys);
     }
 
     /** The live LOD store (null while lodStore=off OR after the codec-probe degrade). */

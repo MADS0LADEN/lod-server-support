@@ -434,6 +434,11 @@ DEADLINE_EPOCH=$(( $(date +%s) + RUNTIME_BUDGET ))
 PROC_SAMPLER_SRV_PATTERN='Dlss\.soak\.scenario' \
     "$PROJECT_ROOT/scripts/lib/proc_sampler.sh" "$RUN_RESULTS_DIR/cpu.jsonl" $((RUNTIME_BUDGET + 300)) &
 SAMPLER_PID=$!
+# Kill the sampler on ANY exit (review B14): a set -e exit between here and the
+# Step 12 kill left it alive for RUNTIME_BUDGET+300 s, and its pattern matches any
+# soak server — an orphan latched onto the NEXT scenario's JVM and appended to the
+# previous run's cpu.jsonl.
+trap 'kill "$SAMPLER_PID" 2>/dev/null || true; mc_cleanup' EXIT
 
 # Step 10: Client runs (the server kicks the client between runs / halts at scenario end)
 for (( run=1; run<=CLIENT_RUNS; run++ )); do

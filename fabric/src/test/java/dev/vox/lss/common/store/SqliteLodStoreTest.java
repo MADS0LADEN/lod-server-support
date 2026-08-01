@@ -672,6 +672,123 @@ class SqliteLodStoreTest {
         store.shutdown();
     }
 
+    /** C2 (review-fixes round): the sweep judges rows by their ACQUISITION stamp (the
+     *  5-arg deposit), not deposit-call time — the R1-M2 property, previously unpinned
+     *  (every sweep test used the 4-arg legacy shape = the pre-fix semantics). The
+     *  B13 deposit-clears-seen_mtime rule is what makes each reopen re-judge. */
+    @Test
+    void sweepJudgesRowsByAcquisitionStampNotDepositTime() throws Exception {
+        long p = PositionUtil.packPosition(3, 0);
+        long headerStamp = nowSec() - 100;
+        writeRegion(OW, 0, 0, Map.of(p, (int) headerStamp));
+        SqliteLodStore store = open(defaultEnv());
+        // Acquired BEFORE the save that stamped the header -> stale at the next sweep.
+        store.deposit(OW, p, bytes(1, 64), 1000, headerStamp - 50);
+        assertNotNull(awaitHit(store, OW, p));
+        store.shutdown();
+
+        SqliteLodStore second = open(defaultEnv()); // boot sweep judges the region
+        assertNull(second.get(OW, p), "acq older than the header stamp must sweep");
+        // Acquired AFTER the header stamp -> fresh, must survive the next sweep.
+        second.deposit(OW, p, bytes(2, 64), 2000, headerStamp + 50);
+        assertNotNull(awaitHit(second, OW, p));
+        second.shutdown();
+
+        SqliteLodStore third = open(defaultEnv());
+        assertNotNull(third.get(OW, p), "acq newer than the header stamp must survive");
+        third.shutdown();
+    }
+
+    /** C3a: an applied DeleteRows survives a LATER op's rollback — the R1-M1
+     *  immediate-commit rule, asserted at raw SQL so the 10 s tombstone window cannot
+     *  mask a resurrection. Folding deletes back into the shared txn reds here. */
+    @Test
+    void appliedDeleteSurvivesALaterOpsRollback() throws Exception {
+        writeRegion(OW, 0, 0, Map.of());
+        SqliteLodStore store = open(defaultEnv());
+        long p = PositionUtil.packPosition(5, 0);
+        store.deposit(OW, p, bytes(1, 64), 1000);
+        assertNotNull(awaitHit(store, OW, p));
+        store.invalidate(OW, new long[]{p});
+        for (int i = 0; i < 400 && sqlRowCount(OW) > 0; i++) Thread.sleep(25);
+        assertEquals(0, sqlRowCount(OW), "the delete must apply");
+        store.failNextOpsForTest(1);
+        store.deposit(OW, PositionUtil.packPosition(6, 0), bytes(2, 64), 1001); // throws -> rollback
+        for (int i = 0; i < 200 && store.diagnostics().getErrors() == 0; i++) Thread.sleep(25);
+        assertTrue(store.diagnostics().getErrors() >= 1, "the injected failure must count");
+        assertEquals(0, sqlRowCount(OW),
+                "the committed delete must survive the later rollback (R1-M1)");
+        store.shutdown();
+    }
+
+    /** C3b: a DeleteRows whose apply THROWS is re-queued and applies on retry — a
+     *  lost delete would resurrect the stale row when its tombstone expires. */
+    @Test
+    void failedDeleteRequeuesAndAppliesOnRetry() throws Exception {
+        writeRegion(OW, 0, 0, Map.of());
+        SqliteLodStore store = open(defaultEnv());
+        long p = PositionUtil.packPosition(7, 0);
+        store.deposit(OW, p, bytes(1, 64), 1000);
+        assertNotNull(awaitHit(store, OW, p));
+        store.failNextOpsForTest(1);
+        store.invalidate(OW, new long[]{p});
+        for (int i = 0; i < 400 && sqlRowCount(OW) > 0; i++) Thread.sleep(25);
+        assertEquals(0, sqlRowCount(OW), "the re-queued delete must apply on retry");
+        store.shutdown();
+    }
+
+    /** C3c: WRITE_FAILURE_LATCH consecutive writer failures latch the store off —
+     *  writes refused, reads miss, and the status surface renders "latched" (review
+     *  B1: a dead store must LOOK dead), with isHealthy() false so the backfill's
+     *  abort rungs fire. */
+    @Test
+    void writerFailureStreakLatchesTheStoreOff() throws Exception {
+        writeRegion(OW, 0, 0, Map.of());
+        SqliteLodStore store = open(defaultEnv());
+        long p = PositionUtil.packPosition(8, 0);
+        store.deposit(OW, p, bytes(1, 64), 1000);
+        assertNotNull(awaitHit(store, OW, p));
+        assertEquals("ok", store.stateToken(), "a serving store renders ok");
+        store.failNextOpsForTest(1000);
+        for (int i = 0; i < 25; i++) { // > WRITE_FAILURE_LATCH (20) consecutive failures
+            store.deposit(OW, PositionUtil.packPosition(100 + i, 0), bytes(i, 64), 2000 + i);
+        }
+        for (int i = 0; i < 400 && !"latched".equals(store.stateToken()); i++) Thread.sleep(25);
+        assertEquals("latched", store.stateToken(), "the failure streak must latch");
+        assertTrue(!store.isHealthy(), "the backfill's health probe must read dead");
+        assertNull(store.get(OW, p), "a latched store must read as miss");
+        assertTrue(!store.deposit(OW, PositionUtil.packPosition(200, 0), bytes(9, 64), 3000),
+                "a latched store must refuse deposits");
+        store.shutdown();
+    }
+
+    /** C5: cap eviction un-marks the evicted rows' backfill regions (R3-M1's eviction
+     *  half, previously unpinned) — and post-B4 the un-mark is durable BEFORE the row
+     *  deletes, so a crash between them cannot leave a done-marked hole. */
+    @Test
+    void sizeCapEvictionUnmarksTheAffectedBackfillRegions() throws Exception {
+        writeRegion(OW, 0, 0, Map.of());
+        var env = new SqliteLodStore.Environment(storeDir(), "26.2-test", WIRE,
+                this::regionDir, d -> "", 0, 200_000L); // ~200 KB cap
+        SqliteLodStore store = SqliteLodStore.createOrNull(LodStoreMode.FULL, env,
+                new LodStoreDiagnostics());
+        assertNotNull(store);
+        assertTrue(store.awaitSweep(10_000));
+        for (int i = 0; i < 40; i++) {
+            store.deposit(OW, PositionUtil.packPosition(i, 12), bytes(100 + i, 20_000), 1000 + i);
+        }
+        assertNotNull(awaitHit(store, OW, PositionUtil.packPosition(39, 12)));
+        store.markBackfillRegionDone(OW, 0, 0);
+        for (int i = 0; i < 400 && !store.isBackfillRegionDone(OW, 0, 0); i++) Thread.sleep(25);
+        assertTrue(store.isBackfillRegionDone(OW, 0, 0), "region must be done-marked first");
+        for (int i = 0; i < 600 && store.diagnostics().getSqlEvictions() == 0; i++) Thread.sleep(50);
+        assertTrue(store.diagnostics().getSqlEvictions() > 0, "eviction must fire under the cap");
+        for (int i = 0; i < 400 && store.isBackfillRegionDone(OW, 0, 0); i++) Thread.sleep(25);
+        assertTrue(!store.isBackfillRegionDone(OW, 0, 0),
+                "eviction must un-mark the affected region (R3-M1's second half)");
+        store.shutdown();
+    }
+
     /** Cap-behavior §1: an UNCAPPED store (maxDbBytes = Long.MAX_VALUE — what the
      *  0-config default wires) never enters the eviction arm: rows persist, the
      *  eviction counter stays 0, and the cap line never fires. */

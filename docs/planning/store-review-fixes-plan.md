@@ -1,6 +1,6 @@
 # Store review fixes — sweep rework, fingerprint hash, ops honesty, invariant pins
 
-**Status: PLAN (2026-08-01).** Source: the 4-agent Opus full-branch review of
+**Status: IMPLEMENTED 2026-08-01 (phases A-C; the big-store sweep timing A/B and the store soak legs are the remaining live gates).** Source: the 4-agent Opus full-branch review of
 `feat/lod-store` vs main (store-engine / serve-path / backfill-ops / tests-docs
 lenses). Every item below was verified against the code by the reviewing agent and
 cross-checked against the progress doc's recorded decisions; none re-litigates a

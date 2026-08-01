@@ -27,9 +27,10 @@ class SaveHookStoreBridgeTest {
         final List<Call> calls = new ArrayList<>();
         @Override public LodStoreMode mode() { return LodStoreMode.FULL; }
         @Override public StoreHit get(String dimension, long packed) { return null; }
-        @Override public void deposit(String dimension, long packed, byte[] sectionBytes,
-                                      long columnTimestamp, long acquiredEpochSeconds) {
+        @Override public boolean deposit(String dimension, long packed, byte[] sectionBytes,
+                                         long columnTimestamp, long acquiredEpochSeconds) {
             this.calls.add(new Call("deposit", dimension, packed));
+            return true;
         }
         @Override public void invalidate(String dimension, long[] positions) {
             this.calls.add(new Call("invalidate", dimension, positions[0]));

@@ -83,6 +83,22 @@ public final class XrayMaskManager {
         return active;
     }
 
+    /** Store-snapshot rung (review B11): whether this level's mask outcome is TERMINAL
+     *  (cached for the session). During the transient probe window {@link
+     *  #entryForActive} serves an UNCACHED config fallback that a later serve may
+     *  replace with the engine's mask — fingerprinting it into the store Environment
+     *  either churns the dimension every boot (safe) or, on two transient boots in a
+     *  row, KEEPS engine-masked rows under a config label (the R2-M1 leak class
+     *  re-entered through probe transience). Callers snapshot a per-boot nonce when
+     *  this returns false. Drives one probe first so an already-available engine
+     *  resolves immediately. */
+    public static boolean isTerminalForActive(ServerLevel level) {
+        var manager = active;
+        if (manager == null) return true; // no manager: "off" is a stable answer
+        manager.entryFor(level);
+        return manager.byDimension.containsKey(level.dimension().identifier().toString());
+    }
+
     public MaskEntry entryFor(ServerLevel level) {
         return entryFor(level.dimension().identifier().toString(),
                 () -> AntiXrayCompat.engineForLevel(level));

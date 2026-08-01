@@ -82,6 +82,8 @@ public final class SqliteLodStore implements LodStoreService {
     private static final int QUEUE_CAPACITY = 1024;
     private static final long WAL_CHECKPOINT_BYTES = 64L << 20; // TRUNCATE above 64 MB
     private static final long GAUGE_REFRESH_NANOS = TimeUnit.SECONDS.toNanos(5);
+    /** Firm-cap runaway stop (review B12): max eviction batches per gauge tick. */
+    private static final int MAX_EVICTION_PASSES_PER_TICK = 8;
     /** Writer-side failures within one session before the one-way off latch. */
     private static final int WRITE_FAILURE_LATCH = 20;
     /** Sanity ceiling on a row's self-declared uncompressed size (real columns are
@@ -154,6 +156,13 @@ public final class SqliteLodStore implements LodStoreService {
      *  emission count is the latch pin's proxy (batcher-written, read after quiesce). */
     private final AtomicBoolean capLogLatch = new AtomicBoolean();
     private volatile int capLogEmissions;
+    /** Regions whose seen_mtime a deposit cleared since the last sweep pass (review
+     *  B13 memo — batcher-thread only, reset by runSweep). */
+    private final Map<Integer, java.util.HashSet<Long>> sweepReopened = new HashMap<>();
+    /** Bumped by every applied DropAll (review B9): the backfill snapshots it per
+     *  region and skips the done-mark when it changed — a region judged before the
+     *  drop must not be marked done after it (permanent warm hole otherwise). */
+    private volatile long dropGeneration;
     private int writerFailures;
 
     // Serving gate: false until the startup sweep completes — a not-yet-swept stale row
@@ -334,6 +343,17 @@ public final class SqliteLodStore implements LodStoreService {
                 this.dimIdsShared.put(rs.getString(2), rs.getInt(1));
             }
         }
+        // Migrate pre-index stores in place (review A2): IF NOT EXISTS is additive and
+        // idempotent — DELIBERATELY not a SCHEMA_VERSION bump, which would drop every
+        // warm row for the sake of an index a one-time build provides. On a large
+        // legacy store the build is a single pass at first boot.
+        try (Statement st = this.writer.createStatement()) {
+            for (int id : this.dimIds.values()) {
+                st.execute("CREATE INDEX IF NOT EXISTS lods_" + id + "_ts ON lods_"
+                        + id + " (ts)");
+            }
+        }
+        this.writer.commit();
     }
 
     private void deleteDbFiles() throws java.io.IOException {
@@ -451,9 +471,9 @@ public final class SqliteLodStore implements LodStoreService {
     }
 
     @Override
-    public void deposit(String dimension, long packed, byte[] sectionBytes, long columnTimestamp,
-                        long acquiredEpochSeconds) {
-        if (this.shutdown.get() || this.latchedOff) return;
+    public boolean deposit(String dimension, long packed, byte[] sectionBytes, long columnTimestamp,
+                           long acquiredEpochSeconds) {
+        if (this.shutdown.get() || this.latchedOff) return false;
         byte[] normalized = sectionBytes == null || sectionBytes.length == 0 ? EMPTY : sectionBytes;
         // src_stamp: the byte-ACQUISITION wall second (read start / gen serialization),
         // never the column timestamp — the column ts of an untouched row can EQUAL its
@@ -470,9 +490,13 @@ public final class SqliteLodStore implements LodStoreService {
         // serve); the oldest DEPOSIT in the queue is shed to admit the newest.
         Op.Deposit op = new Op.Deposit(dimension, packed, normalized, columnTimestamp,
                 srcStampSeconds, System.nanoTime());
+        boolean shed = false;
         while (!this.queue.offer(op)) {
-            if (this.shutdown.get() || this.latchedOff) return;
-            if (this.queue.poll() != null) this.diag.recordDepositDrop();
+            if (this.shutdown.get() || this.latchedOff) return false;
+            if (this.queue.poll() != null) {
+                this.diag.recordDepositDrop();
+                shed = true;
+            }
         }
         // Deliberately NO gauge write here: store.queue is a DRAIN-SIDE gauge (the
         // documented SERVER_DRAINS contract) — producer-side writes made sub-200 ms
@@ -480,10 +504,16 @@ public final class SqliteLodStore implements LodStoreService {
         // hook's idle-save trickle red-ded converged runs on a 1-deep flicker. The
         // batcher stamps the depth after every drain pass; sustained backlogs still
         // show.
+        return !shed;
     }
 
     @Override
     public void invalidate(String dimension, long[] positions) {
+        // Guard BEFORE the tombstone stamp (review B2): a latched store's batcher has
+        // exited, so nothing ever sweeps tombstones again — the dirty fan-out would
+        // grow the map for the rest of the session while the store serves nothing the
+        // stamps could protect.
+        if (this.shutdown.get() || this.latchedOff) return;
         long now = System.nanoTime();
         var tombs = this.tombstones.computeIfAbsent(dimension, k -> new ConcurrentHashMap<>());
         for (long packed : positions) {
@@ -494,6 +524,7 @@ public final class SqliteLodStore implements LodStoreService {
 
     @Override
     public void delete(String dimension, long packed) {
+        if (this.shutdown.get() || this.latchedOff) return; // see invalidate()
         this.tombstones.computeIfAbsent(dimension, k -> new ConcurrentHashMap<>())
                 .put(packed, System.nanoTime());
         enqueueControl(new Op.DeleteRows(dimension, new long[]{packed}));
@@ -671,6 +702,9 @@ public final class SqliteLodStore implements LodStoreService {
         } catch (InterruptedException e) {
             // Shutdown mid-sweep: serving simply never turns on — not a failure.
         } catch (Throwable t) {
+            // The one latch path that never counted an error (review B1): without this
+            // a boot-dead store shows err=0 in every status surface.
+            this.diag.recordError();
             latchOff("startup sweep failed", t);
         } finally {
             this.sweepDone.countDown();
@@ -710,6 +744,11 @@ public final class SqliteLodStore implements LodStoreService {
                 // below the latch under sparse traffic (review finding).
                 if (op != null) this.writerFailures = 0;
             } catch (Throwable t) {
+                // Shutdown-abort of a periodic resweep is a clean exit, not a writer
+                // failure (review B5): runSweep signals it with InterruptedException,
+                // which used to land here as a store.error + a latch strike — a latent
+                // soak false-positive (store.errors == 0 checks) on shutdown timing.
+                if (t instanceof InterruptedException && this.shutdown.get()) break;
                 this.diag.recordError();
                 try { this.writer.rollback(); this.txnRows = 0; } catch (Throwable ignored) { }
                 // A DELETE must never be lost to a transient failure: its tombstone
@@ -753,7 +792,20 @@ public final class SqliteLodStore implements LodStoreService {
         this.diag.setQueueDepth(0);
     }
 
+    /** TEST-ONLY fault seam (review C3): the next N applied ops throw before any of
+     *  their writes, exercising the rollback + re-queue + failure-latch paths that had
+     *  zero coverage (the invariants whose comments explain why they exist). */
+    private volatile int failOpsForTest;
+
+    void failNextOpsForTest(int n) {
+        this.failOpsForTest = n;
+    }
+
     private void apply(Op op) throws Exception {
+        if (this.failOpsForTest > 0) {
+            this.failOpsForTest--;
+            throw new SQLException("test-injected writer failure");
+        }
         switch (op) {
             case Op.Deposit dep -> applyDeposit(dep);
             case Op.DeleteRows del -> {
@@ -801,6 +853,9 @@ public final class SqliteLodStore implements LodStoreService {
                     st.executeUpdate("DELETE FROM backfill");
                 }
                 this.writer.commit();
+                // Review B9: fence in-flight backfill done-marks — a region judged
+                // before this drop must not be marked done after it.
+                this.dropGeneration++;
                 LSSLogger.info("LOD store: dropped all rows + backfill progress"
                         + " (admin invalidate)");
             }
@@ -856,6 +911,22 @@ public final class SqliteLodStore implements LodStoreService {
             this.diag.recordDepositSkip(); // lost latest-wins to a newer-stamped row
         }
         bumpTxn(1);
+        // A deposit re-opens its region's sweep judgement (review B13): a deposit
+        // QUEUED while the sweep judged its region applies after seen_mtime was
+        // recorded and would never be re-examined (`==` skip) — clear the record so
+        // the next sweep re-judges. Memoized per region until the next sweep pass so
+        // steady deposit traffic costs one indexed delete per region, not per column.
+        long rpos = regionOf(dep.packed());
+        if (this.sweepReopened.computeIfAbsent(dimId, k -> new java.util.HashSet<>())
+                .add(rpos)) {
+            try (PreparedStatement ps = this.writer.prepareStatement(
+                    "DELETE FROM regions WHERE dim=? AND rpos=?")) {
+                ps.setInt(1, dimId);
+                ps.setLong(2, rpos);
+                ps.executeUpdate();
+            }
+            bumpTxn(1);
+        }
         // Tombstone re-check after the write (the memory tier's proven interleaving
         // guard): an invalidate between the first check and the write must win.
         tombs = this.tombstones.get(dep.dim());
@@ -867,7 +938,12 @@ public final class SqliteLodStore implements LodStoreService {
                     ps.setLong(1, dep.packed());
                     ps.executeUpdate();
                 }
-                bumpTxn(1);
+                // Commit IMMEDIATELY (review B3, the R1-M1 rule's last uncovered
+                // path): for tombstones stamped by DropAll/eviction this re-check is
+                // the ONLY delete — riding the shared txn lets a later op's rollback
+                // resurrect a row the admin explicitly dropped.
+                this.txnRows++;
+                commitTxn();
             }
         }
     }
@@ -887,6 +963,10 @@ public final class SqliteLodStore implements LodStoreService {
             st.execute("CREATE TABLE IF NOT EXISTS lods_" + next + " ("
                     + "pos INTEGER PRIMARY KEY, ts INTEGER NOT NULL, chash INTEGER NOT NULL,"
                     + " usize INTEGER NOT NULL, src_stamp INTEGER NOT NULL, blob BLOB NOT NULL)");
+            // ts index (review A2): eviction's ORDER BY ts and the sweep's index-only
+            // key scan both need it — without it each is a full scan of the blob pages.
+            st.execute("CREATE INDEX IF NOT EXISTS lods_" + next + "_ts ON lods_"
+                    + next + " (ts)");
         }
         this.writer.commit();
         this.dimIds.put(dimension, next);
@@ -959,8 +1039,15 @@ public final class SqliteLodStore implements LodStoreService {
                     + Math.min(walBytes, WAL_CHECKPOINT_BYTES);
             if (dbBytes > this.env.maxDbBytes()) {
                 commitTxn();
-                int evicted = evictOldestBatch();
-                if (evicted > 0) {
+                // Firm cap (review B12): ONE 512-row/dim batch per 5 s tick
+                // (~780 KB/s) is out-runnable by deposits — the backfill default alone
+                // approaches it — so the cap silently did not bind. Loop batches
+                // within this tick until under cap; the pass bound is a runaway stop,
+                // and with the ts index each pass is an index walk, not a table scan.
+                for (int pass = 0; pass < MAX_EVICTION_PASSES_PER_TICK
+                        && dbBytes > this.env.maxDbBytes(); pass++) {
+                    int evicted = evictOldestBatch();
+                    if (evicted == 0) break;
                     // Count + (once) log BEFORE the vacuum: evictOldestBatch has
                     // already committed its deletions, and a vacuum/commit throw is
                     // swallowed by this method's containment — the counter and the one
@@ -988,6 +1075,8 @@ public final class SqliteLodStore implements LodStoreService {
                     }
                     this.writer.commit();
                     this.diag.setDbBytes(Files.exists(this.dbPath) ? Files.size(this.dbPath) : 0);
+                    long walNow = Files.exists(wal) ? Files.size(wal) : 0;
+                    dbBytes = this.diag.getDbBytes() + Math.min(walNow, WAL_CHECKPOINT_BYTES);
                 }
             }
         } catch (Throwable ignored) {
@@ -999,6 +1088,33 @@ public final class SqliteLodStore implements LodStoreService {
      *  cap-stop gate reads these two rather than re-deriving gauge accounting. */
     long sizeCapBytes() {
         return this.env.maxDbBytes();
+    }
+
+    /** DropAll fence for the backfill's done-marks (review B9). */
+    long dropGeneration() {
+        return this.dropGeneration;
+    }
+
+    /** Closes and unregisters the CURRENT thread's reader connection — the backfill
+     *  worker's exit hook (review B6: each start() thread otherwise leaks its
+     *  ThreadLocal connection until store shutdown). */
+    void closeReaderConnForCurrentThread() {
+        Connection c = this.readerConn.get();
+        if (c == null) return;
+        this.readerConn.remove();
+        synchronized (this.allReaderConns) {
+            this.allReaderConns.remove(c);
+        }
+        try { c.close(); } catch (Exception ignored) { }
+    }
+
+    /** One-word health state for status surfaces (review B1): a latched store must
+     *  LOOK dead in the triage tool, not render a healthy token with frozen counters. */
+    @Override
+    public String stateToken() {
+        if (this.latchedOff) return "latched";
+        if (!this.serving) return "sweeping";
+        return "ok";
     }
 
     /** Cap-accounted current size: db + WAL contribution bounded at the checkpoint
@@ -1043,11 +1159,12 @@ public final class SqliteLodStore implements LodStoreService {
                     k -> new ConcurrentHashMap<>());
             long now = System.nanoTime();
             for (long pos : oldest) tombs.put(pos, now);
-            evicted += deleteRows(entry.getValue(), oldest);
-            // Un-mark the affected backfill regions (R3-M1's eviction half): a
-            // done-marked region is never re-walked, so evicted columns inside one
-            // would otherwise be permanent warm-holes on a capped store. The re-walk
-            // is cheap (hasRow skips the survivors).
+            // Un-mark the affected backfill regions BEFORE deleting their rows
+            // (R3-M1's eviction half + review B4 crash ordering): a done-marked
+            // region is never re-walked, so a crash between row-deletes and a LATER
+            // un-mark left permanent warm-holes; un-mark-first makes the crash window
+            // harmless — an unmarked region with surviving rows re-walks cheaply
+            // (hasRow skips).
             var regions = new java.util.HashSet<Long>();
             for (long pos : oldest) regions.add(regionOf(pos));
             try (PreparedStatement ps = this.writer.prepareStatement(
@@ -1060,6 +1177,7 @@ public final class SqliteLodStore implements LodStoreService {
                 }
             }
             this.writer.commit();
+            evicted += deleteRows(entry.getValue(), oldest);
         }
         return evicted;
     }
@@ -1150,6 +1268,9 @@ public final class SqliteLodStore implements LodStoreService {
             }
             sweepDimension(dimension, dimId, regionDir);
         }
+        // Reset the B13 memo: seen_mtime records written by THIS pass are current, so
+        // the next deposit per region must clear them again.
+        this.sweepReopened.clear();
         this.writer.commit();
     }
 
@@ -1164,16 +1285,13 @@ public final class SqliteLodStore implements LodStoreService {
     }
 
     private void sweepDimension(String dimension, int dimId, Path regionDir) throws Exception {
-        // Regions that HAVE rows: derive from the stored positions (region of pos).
-        Map<Long, List<Long>> rowsByRegion = new HashMap<>();
-        try (Statement st = this.writer.createStatement();
-             ResultSet rs = st.executeQuery("SELECT pos, src_stamp FROM lods_" + dimId)) {
-            while (rs.next()) {
-                long pos = rs.getLong(1);
-                long rpos = regionOf(pos);
-                rowsByRegion.computeIfAbsent(rpos, k -> new ArrayList<>()).add(pos);
-            }
-        }
+        // Stat-driven (review A1): candidate regions come from an index-only key scan
+        // + the filesystem — NEVER a full row scan. The old shape opened with
+        // `SELECT pos, src_stamp FROM lods_<dim>` which, with ~5 KB blobs inline at
+        // 16 KiB pages, read every page of the DB on every boot (gating serving) and
+        // every Paper resweep, on the batcher with no IO restraint. Now an UNCHANGED
+        // region costs one stat; only changed regions read their own rows back via
+        // indexed pos-range seeks (regionRows).
         Map<Long, Long> seenMtimes = new HashMap<>();
         try (PreparedStatement ps = this.writer.prepareStatement(
                 "SELECT rpos, seen_mtime FROM regions WHERE dim=?")) {
@@ -1182,17 +1300,28 @@ public final class SqliteLodStore implements LodStoreService {
                 while (rs.next()) seenMtimes.put(rs.getLong(1), rs.getLong(2));
             }
         }
+        // Regions that HOLD rows: scan only the ts-index pages (~9 B/row, not the
+        // blob pages — INDEXED BY pins the covering index; a bare pos scan would walk
+        // the table b-tree, whose leaves ARE the blobs). Region keys are few, so the
+        // transient boxing is irrelevant; the old per-region ArrayList<Long> of every
+        // position is gone.
+        java.util.HashSet<Long> rowRegions = new java.util.HashSet<>();
+        try (Statement st = this.writer.createStatement();
+             ResultSet rs = st.executeQuery("SELECT pos FROM lods_" + dimId
+                     + " INDEXED BY lods_" + dimId + "_ts")) {
+            while (rs.next()) rowRegions.add(regionOf(rs.getLong(1)));
+        }
         List<Long> droppedPositions = new ArrayList<>();
         int droppedVanished = 0, droppedStale = 0, checkedRegions = 0;
-        for (var entry : rowsByRegion.entrySet()) {
+        for (long rpos : rowRegions) {
             if (this.shutdown.get()) throw new InterruptedException("shutdown during sweep");
-            long rpos = entry.getKey();
             int rx = (int) (rpos >> 32);
             int rz = (int) rpos;
             Path mca = regionDir.resolve("r." + rx + "." + rz + ".mca");
             if (!Files.exists(mca)) {
-                droppedVanished += deleteRows(dimId, entry.getValue());
-                droppedPositions.addAll(entry.getValue());
+                List<Long> rows = new ArrayList<>(regionRows(dimId, rpos).keySet());
+                droppedVanished += deleteRows(dimId, rows);
+                droppedPositions.addAll(rows);
                 continue;
             }
             // Capture the mtime BEFORE the header read, and record THAT value as
@@ -1204,33 +1333,28 @@ public final class SqliteLodStore implements LodStoreService {
             // bound into unbounded cross-restart staleness (review MAJOR).
             long mtime = Files.getLastModifiedTime(mca).toMillis();
             Long seen = seenMtimes.get(rpos);
-            if (seen != null && seen == mtime) continue; // unchanged since last sweep
+            if (seen != null && seen == mtime) continue; // unchanged: zero row IO
             checkedRegions++;
             int[] headerStamps = readHeaderTimestamps(mca);
+            Map<Long, Long> rows = regionRows(dimId, rpos);
             if (headerStamps == null) {
                 if (this.shutdown.get()) throw new InterruptedException("shutdown during sweep");
                 // Unreadable header: fail-safe, drop the region's rows.
-                droppedVanished += deleteRows(dimId, entry.getValue());
-                droppedPositions.addAll(entry.getValue());
+                List<Long> all = new ArrayList<>(rows.keySet());
+                droppedVanished += deleteRows(dimId, all);
+                droppedPositions.addAll(all);
                 continue;
             }
             List<Long> stale = new ArrayList<>();
-            try (PreparedStatement ps = this.writer.prepareStatement(
-                    "SELECT src_stamp FROM lods_" + dimId + " WHERE pos=?")) {
-                for (long pos : entry.getValue()) {
-                    int cx = PositionUtil.unpackX(pos);
-                    int cz = PositionUtil.unpackZ(pos);
-                    int idx = (cx & 31) + ((cz & 31) << 5);
-                    ps.setLong(1, pos);
-                    try (ResultSet rs = ps.executeQuery()) {
-                        if (!rs.next()) continue;
-                        long srcStamp = rs.getLong(1);
-                        // >= : a save in the SAME second as the deposit may postdate it
-                        // (1 s granularity) — conservative drop, never a stale serve.
-                        if (headerStamps[idx] >= srcStamp) {
-                            stale.add(pos);
-                        }
-                    }
+            for (var row : rows.entrySet()) {
+                long pos = row.getKey();
+                int cx = PositionUtil.unpackX(pos);
+                int cz = PositionUtil.unpackZ(pos);
+                int idx = (cx & 31) + ((cz & 31) << 5);
+                // >= : a save in the SAME second as the deposit may postdate it
+                // (1 s granularity) — conservative drop, never a stale serve.
+                if (headerStamps[idx] >= row.getValue()) {
+                    stale.add(pos);
                 }
             }
             droppedStale += deleteRows(dimId, stale);
@@ -1314,6 +1438,27 @@ public final class SqliteLodStore implements LodStoreService {
             this.writer.commit();
         }
         return positions;
+    }
+
+    /** One region's rows via 32 indexed range seeks on the pos PRIMARY KEY (review A1):
+     *  each cx column of the region is one contiguous packed interval — cz within a
+     *  region never crosses the sign flip, so the low word is contiguous and the
+     *  signed-long BETWEEN is exact. Returns pos -> src_stamp. */
+    private Map<Long, Long> regionRows(int dimId, long rpos) throws SQLException {
+        int rx = (int) (rpos >> 32);
+        int rz = (int) rpos;
+        Map<Long, Long> rows = new HashMap<>();
+        try (PreparedStatement ps = this.writer.prepareStatement(
+                "SELECT pos, src_stamp FROM lods_" + dimId + " WHERE pos BETWEEN ? AND ?")) {
+            for (int cx = rx << 5; cx <= (rx << 5) + 31; cx++) {
+                ps.setLong(1, PositionUtil.packPosition(cx, rz << 5));
+                ps.setLong(2, PositionUtil.packPosition(cx, (rz << 5) + 31));
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) rows.put(rs.getLong(1), rs.getLong(2));
+                }
+            }
+        }
+        return rows;
     }
 
     private static long regionOf(long packedPos) {

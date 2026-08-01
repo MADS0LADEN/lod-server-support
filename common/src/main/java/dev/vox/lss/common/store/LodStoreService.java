@@ -24,10 +24,11 @@ package dev.vox.lss.common.store;
  * </ul>
  *
  * <p>Threading: {@link #get} runs on reader-pool threads; {@link #deposit}/{@link
- * #delete} are MULTI-PRODUCER since Phase 3 — the processing thread (delivery-path
- * deposits, invalidation fan-out) AND the Fabric save hook, which under C2ME/Moonrise
- * runs on the main thread or their save threads (the write itself always happens on the
- * store's own batcher thread; implementations must accept concurrent producers).
+ * #delete} are MULTI-PRODUCER — the processing thread (delivery-path deposits,
+ * invalidation fan-out) AND the backfill worker (Phase 4; the Fabric save hook is
+ * DELETE-only since R2-M2, and its deletes ride the same multi-producer contract from
+ * the main thread or C2ME/Moonrise save threads). The write itself always happens on
+ * the store's own batcher thread; implementations must accept concurrent producers.
  * {@link #invalidate}/{@link #delete} must be EFFECTIVE before any subsequent
  * {@code get()} can return the invalidated bytes — the implementation chooses how: the
  * memory store removes synchronously + tombstones queued deposits (no single-writer
@@ -60,14 +61,20 @@ public interface LodStoreService {
      * src_stamp} comparison needs a stamp no later than acquisition, or a save landing
      * in the acquisition→deposit gap becomes permanently sweep-invisible (4-agent round
      * R1-M2). {@code <= 0} = unknown; the store stamps at deposit-call time.
+     *
+     * @return true if the deposit was queued WITHOUT shedding anything; false when the
+     *     store refused it (shutdown/latched) or another queued deposit was shed to
+     *     admit it. The backfill's done-mark guard keys on this (review B8 — the old
+     *     global drop-counter snapshot let any serve-path shed anywhere veto every
+     *     region's durable progress); serve-path callers may ignore it.
      */
-    void deposit(String dimension, long packed, byte[] sectionBytes, long columnTimestamp,
-                 long srcStampSeconds);
+    boolean deposit(String dimension, long packed, byte[] sectionBytes, long columnTimestamp,
+                    long srcStampSeconds);
 
     /** Legacy 4-arg shape (tests, callers without an acquisition stamp). */
-    default void deposit(String dimension, long packed, byte[] sectionBytes,
-                         long columnTimestamp) {
-        deposit(dimension, packed, sectionBytes, columnTimestamp, 0L);
+    default boolean deposit(String dimension, long packed, byte[] sectionBytes,
+                            long columnTimestamp) {
+        return deposit(dimension, packed, sectionBytes, columnTimestamp, 0L);
     }
 
     /** Synchronously drop the given positions (the dirty/edit invalidation fan-out). */
@@ -80,6 +87,15 @@ public interface LodStoreService {
 
     /** The store's counter family (the same instance the exporters read). */
     LodStoreDiagnostics diagnostics();
+
+    /** One-word health state for status surfaces: "ok" (serving), "sweeping" (startup
+     *  freshness pass running — reads miss by design), "latched" (disabled for the
+     *  session — writes no-op, reads miss). Review B1: the status command is the
+     *  documented "are LODs stale?" triage tool and must not render a dead store as a
+     *  healthy one with frozen counters. */
+    default String stateToken() {
+        return "ok";
+    }
 
     /** Stop the batcher thread; the memory tier discards content (derived data). */
     void shutdown();

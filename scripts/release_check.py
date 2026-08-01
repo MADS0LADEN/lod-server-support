@@ -289,6 +289,30 @@ def check_store_natives_paper(jar, problems):
     _check_native_strip(base, "shadow jar", names, problems)
 
 
+def check_third_party_notices(jar, is_fabric, problems):
+    """C6 (review-fixes round): the release jars redistribute two third-party native
+    binaries (sqlite-jdbc, zstd-jni); the notices file shipped only by grace of a
+    build.gradle resources line — a resources refactor dropped it with every gate
+    green. Presence + non-empty at the top level of every release jar, and the Fabric
+    nested sqlite-jdbc-slim.jar must retain its in-jar Apache-2.0 text (the slim
+    repack must not strip it — the notices file DELEGATES sqlite's license to it)."""
+    base = os.path.basename(jar)
+    names = set(_names(jar))
+    if "THIRD-PARTY-NOTICES" not in names:
+        problems.append(f"{base}: THIRD-PARTY-NOTICES missing — the jar redistributes "
+                        "sqlite-jdbc/zstd-jni binaries and must carry their notices")
+        return
+    if len(_read_raw(jar, "THIRD-PARTY-NOTICES")) < 100:
+        problems.append(f"{base}: THIRD-PARTY-NOTICES is (near-)empty")
+    if is_fabric:
+        nested = dict(_nested_jars(jar))
+        sq = nested.get("META-INF/jars/sqlite-jdbc-slim.jar")
+        if sq is not None and "META-INF/maven/org.xerial/sqlite-jdbc/LICENSE" not in set(sq):
+            problems.append(f"{base}: nested sqlite-jdbc-slim.jar lost its in-jar LICENSE "
+                            "— the slim task must not strip it (THIRD-PARTY-NOTICES "
+                            "delegates sqlite's license text to it)")
+
+
 def check_vss_fabric_identity(jar, problems):
     """The VSS Fabric jar is a branded byte-copy of the LSS jar. Rebranding may touch ONLY
     name/description/icon/contact — the mod `id` MUST stay `lss` (a forked id breaks
@@ -577,9 +601,11 @@ def discover(problems, expected_version=None, root=ROOT):
     for jar in fab:
         check_fabric_jar(jar, problems)
         check_store_natives_fabric(jar, problems)
+        check_third_party_notices(jar, True, problems)
     for jar in pap:
         check_paper_jar(jar, problems)
         check_store_natives_paper(jar, problems)
+        check_third_party_notices(jar, False, problems)
     # The vss jars ship to real users → identical safety gate, plus the identity guardrail
     # that pins them as branded byte-copies (mod id `lss` / plugin name LodServerSupport),
     # plus a descriptor pair-diff against the LSS jar they were repackaged from (only the
@@ -591,6 +617,7 @@ def discover(problems, expected_version=None, root=ROOT):
     for jar in vfab:
         check_fabric_jar(jar, problems)
         check_store_natives_fabric(jar, problems)
+        check_third_party_notices(jar, True, problems)
         check_vss_fabric_identity(jar, problems)
         check_brand_properties(jar, _BRAND_VSS, problems)
         src = _vss_counterpart(jar, fab, "voxy-server-side-fabric", "lod-server-support-fabric")
@@ -603,6 +630,7 @@ def discover(problems, expected_version=None, root=ROOT):
     for jar in vpap:
         check_paper_jar(jar, problems)
         check_store_natives_paper(jar, problems)
+        check_third_party_notices(jar, False, problems)
         check_vss_paper_identity(jar, problems)
         check_brand_properties(jar, _BRAND_VSS, problems)
         src = _vss_counterpart(jar, pap, "voxy-server-side-paper", "lod-server-support-paper")
@@ -697,10 +725,12 @@ def _selftest():
             z.writestr("dev/vox/lss/common/PositionUtil.class", "x")
         return buf.getvalue()
 
-    def _nested_sqlite():
+    def _nested_sqlite(with_license=True):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as z:
             z.writestr("org/sqlite/JDBC.class", "x")
+            if with_license:  # C6: the notices check pins this entry's survival
+                z.writestr("META-INF/maven/org.xerial/sqlite-jdbc/LICENSE", "Apache-2.0 ...")
             for native in SQLITE_NATIVES:
                 z.writestr(native, "elf")
         return buf.getvalue()
@@ -1264,6 +1294,31 @@ def _selftest():
         check(any("outside the supported matrix" in m for m in p),
               f"regressed native strip not caught: {p}")
 
+        # ---- third-party notices (review-fixes C6) ----
+        tp_ok = os.path.join(td, "tp-ok.jar")
+        _make_jar(tp_ok, {
+            "THIRD-PARTY-NOTICES": "zstd-jni BSD-2 ... Zstandard BSD-3 ... " + "x" * 100,
+            "META-INF/jars/sqlite-jdbc-slim.jar": _nested_sqlite(),
+        })
+        p = []
+        check_third_party_notices(tp_ok, True, p)
+        check(p == [], f"clean notices jar flagged: {p}")
+        tp_missing = os.path.join(td, "tp-missing.jar")
+        _make_jar(tp_missing, {"some.class": "x"})
+        p = []
+        check_third_party_notices(tp_missing, False, p)
+        check(any("THIRD-PARTY-NOTICES missing" in m for m in p),
+              f"missing notices not caught: {p}")
+        tp_stripped = os.path.join(td, "tp-stripped-license.jar")
+        _make_jar(tp_stripped, {
+            "THIRD-PARTY-NOTICES": "x" * 200,
+            "META-INF/jars/sqlite-jdbc-slim.jar": _nested_sqlite(with_license=False),
+        })
+        p = []
+        check_third_party_notices(tp_stripped, True, p)
+        check(any("lost its in-jar LICENSE" in m for m in p),
+              f"stripped nested sqlite license not caught: {p}")
+
         # ---- discover(): end-to-end wiring over a synthetic build tree ----
         # The leaf checks above prove each check works; these prove discover() actually
         # CALLS them (presence, pair wiring, identity) — a refactor that drops a call
@@ -1304,6 +1359,7 @@ def _selftest():
                 "META-INF/jars/common-0.7.0.jar": _nested_common("0.7.0"),
                 "lss-brand.properties": brand,
                 "LICENSE_lod-server-support-fabric": "MIT",
+                "THIRD-PARTY-NOTICES": "sqlite-jdbc / zstd-jni notices " + "x" * 100,
             }
             entries.update(STORE_FABRIC_ENTRIES)
             entries.update(extra or {})
@@ -1315,6 +1371,7 @@ def _selftest():
                 "lss-brand.properties": brand,
                 "dev/vox/lss/paper/LSSPaperPlugin.class": "x",
                 "dev/vox/lss/common/PositionUtil.class": "x",
+                "THIRD-PARTY-NOTICES": "sqlite-jdbc / zstd-jni notices " + "x" * 100,
             }
             entries.update(_store_paper_entries())
             _make_jar(os.path.join(dpap, name), entries, manifest=pap_manifest)

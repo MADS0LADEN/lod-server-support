@@ -35,7 +35,7 @@ class OffThreadProcessorStoreTest {
     private static final long TS = 1_700_000_000L;
 
     private static final class RecordingStore implements LodStoreService {
-        record Dep(String dim, long packed, byte[] bytes, long ts) {}
+        record Dep(String dim, long packed, byte[] bytes, long ts, long acq) {}
         final LodStoreDiagnostics diag = new LodStoreDiagnostics();
         final ConcurrentLinkedQueue<Dep> deposits = new ConcurrentLinkedQueue<>();
         final ConcurrentLinkedQueue<Long> deletes = new ConcurrentLinkedQueue<>();
@@ -43,8 +43,9 @@ class OffThreadProcessorStoreTest {
 
         @Override public LodStoreMode mode() { return LodStoreMode.MEMORY; }
         @Override public StoreHit get(String dimension, long packed) { return null; }
-        @Override public void deposit(String d, long p, byte[] b, long ts, long acq) {
-            this.deposits.add(new Dep(d, p, b, ts));
+        @Override public boolean deposit(String d, long p, byte[] b, long ts, long acq) {
+            this.deposits.add(new Dep(d, p, b, ts, acq));
+            return true;
         }
         @Override public void invalidate(String d, long[] p) { this.invalidations.add(p); }
         @Override public void delete(String d, long p) { this.deletes.add(p); }
@@ -164,6 +165,26 @@ class OffThreadProcessorStoreTest {
         assertEquals(TS, dep.ts(), "the deposit carries the result's columnTimestamp");
         assertEquals(4, dep.bytes().length);
         assertNull(rig.store.deposits.poll(), "exactly one deposit per drained result");
+        rig.shutdown();
+    }
+
+    /** C2 (review-fixes round): the processor passes the result's ACQUISITION stamp
+     *  through to the deposit verbatim — never re-stamping at deposit time (R1-M2: a
+     *  save landing in the acquisition→deposit gap must stay sweep-visible). The
+     *  plumbing was previously unpinned: the test double DISCARDED the 5th arg. */
+    @Test
+    void depositCarriesTheResultsAcquisitionStampVerbatim() {
+        var rig = new Rig(false);
+        rig.admit(9, 9, -1);
+        long acquired = 1_234_567L; // a distinctive stamp no clock could produce now
+        rig.reader.getPlayerQueue(rig.uuid).add(new ChunkReadResult(rig.uuid, 9, 9,
+                new byte[]{1, 2}, DIM, 2 + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                TS, false, false, false, false, 7, acquired));
+        rig.await(() -> !rig.store.deposits.isEmpty(), "deposit");
+        var dep = rig.store.deposits.poll();
+        assertEquals(acquired, dep.acq(),
+                "the deposit's srcStampSeconds must be the result's acquisition stamp,"
+                        + " untouched — re-stamping re-opens the sweep-invisible gap");
         rig.shutdown();
     }
 
