@@ -265,13 +265,22 @@ DiskReader: … store=full h=31933 m=139 dep=139 drop=0 err=0 avg_read=31us
 - Note the per-player cap is charged in RAW bytes by design (§5): the session ran at
   the 20.9 MB/s configured cap while using only ~3.3 MB/s of actual network.
 
-Loose end (benign, worth one glance later): no `schema/wire/version drift — dropping
-and rebuilding` line appears in ANY of today's logs, yet the store answers frame reads
-(which require the v3 `fhash` column) with zero errors — so the DB and the code
-demonstrably agree. Most consistent explanation is the store was already schema-3 from
-an earlier deploy of this branch. Also: `Store backfill: 0 region(s) to process` shows
-on EVERY boot including old-jar ones, so that line is not evidence of a re-walk and the
-region-dir resolver on that host deserves a look.
+**The schema-v3 upgrade + full re-backfill are live-verified end to end** (traced
+through the rotated log archives; each restart rotates `latest.log`, so the history
+spans four files):
+
+| Boot | Event |
+|---|---|
+| 21:11 | New jar → `LOD store: schema/wire/version drift — dropping and rebuilding` → backfill plans **676 regions / ~3.6 GB** → walks 487, then shutdown |
+| 21:35 | Backfill **RESUMES at the 200 remaining** regions off the done-marks → **completes all 200** (72,501 deposited, 1 MSPT pause) |
+| 21:51 | `0 region(s) to process` — genuinely complete |
+| 21:54 | Meta matches (3/19) → no rebuild, 0 regions — correct steady state |
+
+So the drop-and-rebuild convention, the resume-from-marks walk, and the ~3.8 GB
+re-warm all worked as designed on a real 676-region world — the one live behavior no
+test tier covers. (Trap for future triage: `0 region(s) to process` on the CURRENT
+boot says nothing about whether a re-walk happened; the evidence is in the dated
+`logs/*.log.gz` archives, one per restart.)
 
 ## 4-agent implementation review (2026-08-01) — folded
 
