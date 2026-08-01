@@ -238,6 +238,38 @@ frame rung).
 LSS↔VSS wire-identity pin — the compressed-columns wire surface is brand-invariant
 for free, as plan §6 predicted). Stale 0.9.0 jars from earlier local builds deleted.
 
+## 4-agent implementation review (2026-08-01) — folded
+
+Four parallel lenses over the full branch diff (wire/client, server pipeline,
+store/schema, tests/tooling): **zero product-code MAJORs**; the two MAJORs were
+promised-pin gaps, both closed same-day. Fixes applied (commit `fix: 4-agent review
+round …`):
+
+- **Probe-path per-delivery containment** (pipeline F1): a `frame()` throw in the
+  router's probe serve no longer fails the whole processing cycle (counted
+  superseded, pass continues).
+- **Frame-rung contract belt** (store F1): a data-claiming `FrameHit` with no frame
+  reads as an errored miss, never a fabricated all-air clear.
+- **Non-shrinking store frames refused** (wire F1): pre-built frames now honor the
+  shipped<raw invariant — law A2's exactness holds for degenerate stored frames.
+- **Tier 3 C7b read-order** (wire F2) + `wireEstimatedBytes` null-safety + v16-guard
+  comments now state the reachable downgrade window + benchmark client key unified.
+- **Promised-pin MAJORs closed**: the oversized-usize FRAME-shape refuse pin
+  (refuses on `rawSize()` alone, no decompress — `CompressedColumnBuildTest`), and
+  the probe-hash-raw discriminating soak — `store_offline_edit.sh` run under
+  compression: **PASS** (edited probe re-served fresh, control probe byte-identical
+  across the raw-NBT and store-frame legs).
+- Gate-tooling hardening: compress_gate_check selftest 8 cases incl. the 3-rep
+  majority rule; RSS + empty-client-JFR report lines; NativeMethodSample caveats
+  documented in analyze_profile_jfr.py; plan-text corrections (getFrame default =
+  plain miss, threshold strictly-below).
+- Post-fix re-validation: Tier 1 both platforms + Tier 2 green.
+- Recorded-not-fixed (reviewer-accepted): store frames bypass the live path's
+  sub-512 floor (bytes-only, within all caps); MemoryLodStore frame aliasing note;
+  v16-downgrade drops book send-success accounting (bounded to the downgrade
+  instant); usize-rotted-to-0 all-air short-circuit (pre-existing get() parity);
+  window-logic triplication in the gate scripts; G2 zero-falsiness laxity.
+
 ## Remaining (deployment-gated, pending user action)
 
 - **§5.3 live acceptance**: deploy a feat/compressed-columns build to the tracked
