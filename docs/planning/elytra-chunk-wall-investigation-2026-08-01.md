@@ -389,6 +389,65 @@ The `net` event's `inflight` series is the direct test: if it plateaus at a nonz
 while `q` and `ingest` stay near zero, the straggler hold is confirmed and the cadence
 gate is the thing to fix.
 
+### 8.6.3 ANSWER — 26 s flight trace: movement disarms the adaptive cadence
+
+`lss-trace-20260801-190539.jsonl`, 26 s of sustained elytra flight at ~33 blocks/s
+(26 `net`, 30 `scan`, 67 `move`, 23,935 `col`).
+
+**The straggler hypothesis in §8.6.2 is WRONG.** `inflight` is **0** at 18 of 26 samples —
+the client answers its whole batch and then sits idle waiting for the next scan. Nothing
+is held.
+
+**Transport is healthy.** `ping` 20–26 ms for the entire flight, two blips (39 ms, 57 ms).
+A queued or congested shared connection reads in the hundreds of ms. **H1 and H2 are
+conclusively dead**, not merely inactive.
+
+**Nothing is saturated.** `q` 0 (transient spikes ≤ 203 of 8000), `qb` ≤ 7 MB of 48 MiB,
+`ingest` 0 for most samples (peak 3379 in the first 3 s), `fps` 60 flat, `dcpt` a constant
+3.500 — vanilla's chunk-apply capacity never wavers, so **H3 is not active either**.
+`runway` holds 9–14 chunks (4.4–6.8 s of clear terrain ahead) the whole time: **no wall**.
+
+**The limiter is the scan cadence, and the trace shows exactly what pins it:**
+
+```
+ms=269   center=[-1,0]  confirmed=60  fast=true   ring 60..61
+ms=618   center=[-1,0]  confirmed=61  fast=true   ring 61..63
+ms=1119  center=[-1,0]  confirmed=63  fast=true   ring 63..64
+ms=1617  center=[-1,0]  confirmed=64  fast=true   ring 64..66
+ms=2619  center=[-2,-2] confirmed=9   fast=false  ring  9..67   <-- first movement
+ms=3618  center=[-3,-4] confirmed=9   fast=false  ring  9..68
+...      every subsequent scan: confirmed=9, fast=false, gap exactly 1.000 s
+```
+
+Scan gaps: `0.35, 0.5, 0.5` while stationary, then `1.0` twenty times over. Stationary the
+fast path runs at **2–3 Hz**; the instant the player moves it drops to the **1 Hz fallback
+and never recovers for the rest of the flight**.
+
+**Mechanism (verified in code, not inferred).** `SpiralScanner.recenter()` sets
+`confirmedRing = 0` on every chunk-boundary crossing — deliberate and correct, since the
+confirmed prefix was derived for the old center (its comment says so). But
+`fastRescanDue()` requires `confirmedRing > 0`, and nothing re-derives the prefix until the
+next *walk*. At 33 blocks/s the player crosses a chunk every ~360 ms while scans run every
+1000 ms, so the first crossing after each scan zeroes the prefix and the fast path is dead
+until the next 1 Hz scan re-walks. The fast window is the ~110 ms between the 250 ms floor
+and the next crossing — and the batch is rarely 95% answered that early.
+
+**Consequence: the adaptive scan cadence is structurally inert during sustained
+movement** — precisely the regime the elytra wall lives in. It only ever runs fast while
+standing still.
+
+**Throughput follows directly:** 800 positions × 1 Hz ≈ 800 columns/s; the trace measures
+920 columns/s and **25–27 MB/s raw / ~4 MB/s wire (6.2:1)**. That is why raising the cap
+from 20.9 to 100 MB/s changed nothing — the client only ever asks for ~26 MB/s while
+flying.
+
+**Do not "fix" this without care.** 26 MB/s sits exactly in the 21–25 MB/s band that
+produced the original wall. The cadence gate is currently the thing holding flight
+throughput at a level this client handles smoothly; lifting it to the stationary 2–3 Hz
+would put the flight regime at 50–75 MB/s and walk straight back toward the wall. Any
+change here should be paired with the §8.3 outbound-buffer gauge and the §8.9 writability
+gate, so the system has a real backpressure signal before it is allowed to go faster.
+
 ## 8.7 Experiment 4 — packet count vs byte volume
 
 A **warm** flight (client cache populated ⇒ the server answers `up_to_date`) has the same
