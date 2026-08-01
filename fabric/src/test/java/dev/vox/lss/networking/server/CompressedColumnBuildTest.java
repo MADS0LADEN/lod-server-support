@@ -136,6 +136,27 @@ class CompressedColumnBuildTest {
     }
 
     @Test
+    void oversizedUsizeStoreFrameRefusesOnRawSizeAloneWithoutADecompress() {
+        // The review-A5 guard in FRAME shape (4-agent round, tooling F1): getFrame's
+        // bound is MAX_ROW_USIZE (16 MiB), so store rows over the send cap are legal —
+        // and every raw-shaped oversize pin has rawSize == raw.length, so only this
+        // case reds a guard rewritten to bytes.raw().length (which would also pay a
+        // 16 MiB decompress per re-ask of the same unserveable row).
+        var h = harness(true, true);
+        byte[] smallFrame = codec.compress(new byte[1024]); // frame size is irrelevant
+        var holder = ColumnBytes.ofFrame(codec, smallFrame,
+                LSSConstants.MAX_SEND_SECTIONS_SIZE + 1);
+        assertFalse(h.processor().buildAndEnqueueColumnPayload(h.state(), 1, 2,
+                LSSConstants.DIM_STR_OVERWORLD, 5L, 1L, holder,
+                LSSConstants.MAX_SEND_SECTIONS_SIZE + 1 + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                LSSConstants.COLUMN_SOURCE_STORE),
+                "an over-cap store row must refuse (the !sent caller answers up_to_date)");
+        assertFalse(holder.rawMaterialized(),
+                "the refusal fires on rawSize() alone — never a decompress");
+        assertEquals(0, h.state().getSendQueueSize());
+    }
+
+    @Test
     void mixedFanOutCompressesOnceOffTheSharedHolder() throws InterruptedException {
         var capable = harness(true, true);
         var legacy = new PlayerRequestState(UUID.randomUUID(), 4, 4); // wants=false

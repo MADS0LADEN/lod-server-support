@@ -283,9 +283,25 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
 
         long order = this.ctx.sequence().next();
         boolean allAir = probe.serializedSections() == null || probe.serializedSections().length == 0;
-        boolean sent = !allAir
-                && this.processor.enqueueLoadedColumn(state, probe, this.cycleNow, order, dimension,
-                        dev.vox.lss.common.LSSConstants.COLUMN_SOURCE_IN_MEMORY);
+        boolean sent;
+        try {
+            sent = !allAir
+                    && this.processor.enqueueLoadedColumn(state, probe, this.cycleNow, order, dimension,
+                            dev.vox.lss.common.LSSConstants.COLUMN_SOURCE_IN_MEMORY);
+        } catch (Throwable t) {
+            // Per-delivery containment for the probe path (4-agent round, pipeline F1):
+            // compression added a real throw source to this build (ColumnBytes.frame() ->
+            // native zstd), and before this catch a throw here failed the WHOLE processing
+            // cycle — this pass's polled entries lost uncounted (a latent law-A1 imbalance)
+            // and a deterministic throw tripped the cycle backoff for all players. Contain
+            // as the standard transient: counted superseded, no done-bit (the client
+            // re-declares within <=1 s), the rest of the pass continues.
+            dev.vox.lss.common.LSSLogger.error("Failed to serve probe column "
+                    + req.cx() + ", " + req.cz(), t);
+            this.ctx.diagnostics().addSuperseded(1);
+            this.ctx.diagnostics().incrementInMemory();
+            return true;
+        }
         if (!sent) {
             if (allAir) {
                 // Stamp the all-air resolution (the data path stamps inside enqueueLoadedColumn)

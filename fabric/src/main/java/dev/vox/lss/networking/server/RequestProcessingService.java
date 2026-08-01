@@ -542,9 +542,12 @@ public class RequestProcessingService {
                 // Codec-0 assert at the seam (plan review A6): the legacy layout has
                 // nowhere to carry a codec, so a framed payload converted here would
                 // ship a zstd body the old client decodes as garbage (hard-kick class).
-                // Unreachable by construction — a v16 session's flag is derived false at
-                // registration — so any hit is a session-flag bug; drop (self-heals by
-                // re-declaration) and warn through the same latch.
+                // REACHABLE in one narrow window (4-agent round, pipeline F2): an
+                // established v19+0x2 session downgrading to v16 (discovery re-handshake)
+                // can drain already-queued codec-1 payloads into this guard. The drop
+                // self-heals by re-declaration; note it books send-success accounting
+                // (bytes/wire/grace) for a payload that never shipped — bounded to the
+                // downgrade instant, same shape as the unconvertible-payload drop above.
                 if (!this.v16UnconvertibleWarned) {
                     this.v16UnconvertibleWarned = true;
                     LSSLogger.warn("v16-compat: dropping codec-" + col.codec()

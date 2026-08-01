@@ -268,6 +268,16 @@ public abstract class AbstractChunkDiskReader {
                 s.diagnostics().recordMiss();
                 return false;
             }
+            if (hit.usize() > 0 && (hit.frame() == null || hit.frame().length == 0)) {
+                // Contract-violation belt, twin of the raw rung's null-sectionBytes
+                // guard (4-agent round, store F1): a data-claiming FrameHit with no
+                // frame would flow downstream as a null-bytes holder and read as
+                // ALL-AIR — an authoritative clearing column fabricated over real
+                // terrain. Contain as an errored miss; the NBT ladder serves truth.
+                s.diagnostics().recordError();
+                s.diagnostics().recordMiss();
+                return false;
+            }
             s.diagnostics().recordHit(System.nanoTime() - t0);
             if (hit.usize() == 0) {
                 // All-air: same result shape as the raw rung (null section bytes,

@@ -233,7 +233,8 @@ deflate over raw bytes) from EVERY serve path and lands the whole wire/compat su
 - **Server codec latch seam** (§0.11): injected unavailable codec ⇒ raw session for a
   capable client, one WARN, no per-column errors.
 - Clears always raw (ONE common pin); threshold edge + non-shrinking-frame fallback
-  (at/below `COLUMN_COMPRESS_MIN_BYTES` or frame ≥ raw ⇒ codec 0).
+  (below `COLUMN_COMPRESS_MIN_BYTES` or frame ≥ raw ⇒ codec 0 — strictly-below, as
+  the constant's javadoc states).
 - Unknown codec byte containment; `isClearColumn` codec gating.
 - Dedup fan-out: mixed capable + non-capable recipients get codec 1 / codec 0 from ONE
   holder; compression ran once (holder memo pin).
@@ -253,7 +254,7 @@ deflate over raw bytes) from EVERY serve path and lands the whole wire/compat su
   `fnv1a(frame) == fhash`; integrity throw takes the existing row-poison purge ladder;
   `usize == 0` returns the all-air shape exactly like `get()`. `get()` (raw) remains
   for every other caller.
-- `LodStoreService`: `getFrame` default null (⇒ callers fall back to `get()`);
+- `LodStoreService`: `getFrame` default null — CORRECTED post-implementation (4-agent round, store F2): null is a PLAIN MISS, callers never fall back to `get()` within the rung (exactly one read form per submit); an impl that leaves the default loses its hit rate while compression is live;
   `MemoryLodStore` returns its resident frame — deliberately unvalidated (review A8:
   session-lifetime RAM, accepted; a step below its current round-trip length check,
   stated here so it isn't rediscovered).

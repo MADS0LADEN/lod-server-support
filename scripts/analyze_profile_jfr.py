@@ -240,6 +240,14 @@ def analyze_jfr(run_dir, jfr_tool):
     # native methods — Deflater.deflateBytes, zstd-jni — is NOT in jdk.ExecutionSample,
     # which made the `zip` band read 0.5% while deflate-6 provably cost ~15-20% of the
     # serve path. Counted into the same band/self-method attribution as exec samples.
+    # Quantitative caveats (4-agent round, tooling F5): (a) profile.jfc samples Java
+    # @10ms but native @20ms, so 1:1 merged counts UNDER-weight native time ~2x —
+    # A/B CUTS are unaffected (both arms native-dominated in zip), absolute us/col
+    # understates; (b) NativeMethodSample also catches threads BLOCKED in native
+    # (epoll waits) — the large `unattributed` share dilutes every band share;
+    # (c) this change re-denominates the band metrics store_gate_check's floors were
+    # calibrated against pre-change (2026-07-31) — cut-based gates mostly cancel it,
+    # but never compare post-change absolutes to calibration-era numbers.
     events = ["jdk.ExecutionSample", "jdk.NativeMethodSample",
               "jdk.ObjectAllocationSample", "jdk.GCPhasePause",
               "jdk.FileRead", "jdk.ThreadCPULoad"]

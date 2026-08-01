@@ -653,7 +653,7 @@ public final class BenchmarkMetricsExporter {
 
         result.put("columns_received", LSSClientNetworking.getColumnsReceived());
         result.put("bytes_received", LSSClientNetworking.getBytesReceived());
-        result.put("wire_bytes_received", LSSClientNetworking.getWireBytesReceived());
+        result.put("wire_received_bytes", LSSClientNetworking.getWireBytesReceived());
 
         LodRequestManager manager = LSSClientNetworking.getRequestManager();
         if (manager != null) {

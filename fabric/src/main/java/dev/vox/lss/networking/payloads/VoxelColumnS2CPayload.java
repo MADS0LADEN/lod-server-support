@@ -138,9 +138,11 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         return rawSize + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
     }
 
-    /** Shipped-size estimate — the {@code wire_bytes} counter's input. */
+    /** Shipped-size estimate — the {@code wire_bytes} counter's input. Null-tolerant
+     *  like its raw sibling (the null-bytes rig shape the raw ctor documents). */
     public int wireEstimatedBytes() {
-        return sectionBytes.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
+        return (sectionBytes == null ? 0 : sectionBytes.length)
+                + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
     }
 
     private static void write(FriendlyByteBuf buf, VoxelColumnS2CPayload payload) {

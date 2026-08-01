@@ -82,7 +82,16 @@ public final class ColumnBytes {
      * not shrink the input. Compresses on first call, memoized (including the refusal).
      */
     public byte[] frame() {
-        if (this.frame != null) return this.frame;
+        if (this.frame != null) {
+            // Store frames enter pre-built (ofFrame) and skip the compress-side refusals
+            // below — but the non-shrinking rule must hold for THEM too, or codec-1
+            // loses the "shipped < raw" invariant law A2's exact equality rides on
+            // (4-agent round, wire F1: the batcher compresses every deposit
+            // unconditionally, so a degenerate stored frame CAN be non-shrinking).
+            // Refusal ships raw instead — one lazy decompress, only on this
+            // near-unreachable shape (zstd worst case ~raw + raw/255 + header).
+            return this.frame.length >= this.rawSize ? null : this.frame;
+        }
         if (this.frameRefused || this.codec == null
                 || this.rawSize < LSSConstants.COLUMN_COMPRESS_MIN_BYTES) {
             return null;

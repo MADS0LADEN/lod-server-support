@@ -183,6 +183,20 @@ def check(mode, stamp_dir):
         else:
             print(f"  [G3x] WARN: counted-wire cross-check inputs missing (counted={cw})")
 
+        # Report-only riders (reviews B7c/B5): RSS deltas (holder dual-residency) and
+        # a loud note when the client JFR is empty (the client evidence leg needs it).
+        for arm_name, run in (("off", off), ("on", on)):
+            rows = [r for r in sgc.load_jsonl(os.path.join(run.dir, "cpu.jsonl"))
+                    if isinstance(r.get("srv_rss"), (int, float))]
+            if rows:
+                print(f"  [rss] {arm_name}: srv peak {max(r['srv_rss'] for r in rows) >> 20} MiB"
+                      + (f", cli peak {max((r.get('cli_rss') or 0) for r in rows) >> 20} MiB"
+                         if any(r.get("cli_rss") for r in rows) else ""))
+            cjfr = os.path.join(run.dir, "client-benchmark.jfr")
+            if os.path.exists(cjfr) and os.path.getsize(cjfr) == 0:
+                print(f"  [warn] {arm_name}: client-benchmark.jfr is EMPTY — the client"
+                      " JVM died before the JFR dump; the G2 evidence leg is unavailable")
+
         # G4 riders
         if off.columns and on.columns:
             par = abs(on.columns - off.columns) / max(1, off.columns)
@@ -289,6 +303,25 @@ def selftest():
                400, 10_000, 6 * 30_000_000, counted_wire=39_000_000)
         check_case(check("warm", td) == 1, "wire ratio over ceiling is caught by G3")
 
+        # Majority rule (review B3's hardening) actually exercised: 3 reps, one
+        # deliberately failing G1 — median still passes (2 good reps), majority 2/3
+        # passes; then TWO failing reps must fail on the majority leg.
+        for rep in (1, 2, 3):
+            mk_run(os.path.join(td, f"off-rep{rep}"), 10_000, 100, 50, 1_000_000,
+                   2000, 10_000, 6 * 30_000_000, counted_wire=180_000_000)
+            mk_run(os.path.join(td, f"on-rep{rep}"), 10_000, 80, 50, 1_120_000,
+                   400, 10_000, 6 * 30_000_000, counted_wire=33_600_000)
+        mk_run(os.path.join(td, "on-rep3"), 10_000, 99, 50, 1_120_000,
+               400, 10_000, 6 * 30_000_000, counted_wire=33_600_000)  # rep3: flat CPU
+        check_case(check("warm", td) == 0, "1 bad rep of 3 passes median+majority")
+        mk_run(os.path.join(td, "on-rep2"), 10_000, 99, 50, 1_120_000,
+               400, 10_000, 6 * 30_000_000, counted_wire=33_600_000)  # rep2 also flat
+        check_case(check("warm", td) == 1, "2 bad reps of 3 fail the majority rule")
+        import shutil
+        for rep in (2, 3):
+            shutil.rmtree(os.path.join(td, f"off-rep{rep}"))
+            shutil.rmtree(os.path.join(td, f"on-rep{rep}"))
+
         # cold mode: parity CPU passes; +10% regression fails.
         mk_run(os.path.join(td, "on-rep1"), 10_000, 100, 50, 1_120_000,
                400, 10_000, 6 * 30_000_000, counted_wire=33_600_000)
@@ -302,7 +335,7 @@ def selftest():
         for f in failures:
             print(f"  - {f}")
         return 1
-    print("compress_gate_check selftest OK: 6 cases")
+    print("compress_gate_check selftest OK: 8 cases")
     return 0
 
 

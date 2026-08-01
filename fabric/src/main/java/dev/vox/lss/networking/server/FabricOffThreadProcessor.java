@@ -82,7 +82,8 @@ public class FabricOffThreadProcessor extends OffThreadProcessor<PlayerRequestSt
                                                     ColumnBytes bytes, int estimatedBytes,
                                                     byte source) {
         // The guard checks RAW size (the client decode cap is raw-denominated; a codec-1
-        // frame is strictly smaller than its raw or the holder refuses it) — load-bearing
+        // frame is strictly smaller than its raw or the holder refuses it — INCLUDING
+        // pre-built store frames, whose non-shrinking degenerates ship raw) — load-bearing
         // for store-frame hits too, whose rows can legally exceed the send cap (plan §3).
         if (bytes.rawSize() > LSSConstants.MAX_SEND_SECTIONS_SIZE) {
             LSSLogger.warn("Dropping oversized column [" + cx + ", " + cz + "] in " + dimension

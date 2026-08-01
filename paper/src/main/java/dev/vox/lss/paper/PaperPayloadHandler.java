@@ -144,9 +144,10 @@ public final class PaperPayloadHandler {
      * v16 client hard-kicks it (the old decode reads the source byte as the section-array
      * length VarInt), so the per-player column egress converts UNCONDITIONALLY for v16
      * sessions. THROWS on a non-RAW codec (plan review A6): the legacy layout has nowhere
-     * to carry a codec and a spliced zstd body decodes as garbage on the old client —
-     * unreachable by construction (a v16 session's flag forces raw at build), so the
-     * egress guard's warn-drop is the correct containment for what would be a flag bug.
+     * to carry a codec and a spliced zstd body decodes as garbage on the old client.
+     * Reachable in the v19->v16 downgrade window (queued codec-1 payloads draining after
+     * the manager flips — 4-agent round, pipeline F2); the egress guard's warn-drop
+     * contains it and the ts<=0 re-declaration heals the dropped column.
      */
     public static byte[] rewriteColumnToV16(byte[] frame) {
         return withReadBuffer(frame, buf -> {
