@@ -15,13 +15,21 @@ serve today therefore does:
 SQLite row (zstd frame) → zstd DECOMPRESS → raw payload → netty zlib DEFLATE → wire
 ```
 
-Two compression passes per served column, both discarded value: the zstd frame we
-started with is smaller than the deflate output we ship. Measured on the live server
-(2026-08-01, real overworld terrain, 26.2): raw:wire ratio through connection zlib is
-**~6–7:1** (5 MiB/s counted ≈ 6 Mbps observed; 2.96 GB counted over 2m23s during the
-incident ≈ ~4 MB/s on the wire). zstd-1 on the same corpus achieves equal or better
-ratios at a fraction of the CPU (store Phase 0 measurements), and for store hits the
-compression cost is **already sunk**.
+Two compression passes per served column, both discarded value. Measured on the live
+server (2026-08-01, real overworld terrain, 26.2): raw:wire ratio through connection
+zlib is **~6–7:1** (5 MiB/s counted ≈ 6 Mbps observed; 2.96 GB counted over 2m23s
+during the incident ≈ ~4 MB/s on the wire).
+
+**CORRECTION (2026-08-01 plan review, finding B1):** the original premise sentence
+here claimed the zstd frame is *smaller* than the deflate output we ship. The store's
+own Phase 0 codec table says otherwise: deflate-6 (vanilla netty's level) = 4,776
+B/col vs zstd-1 = 5,342 B/col on the same corpus — the frame is ~**+12% larger**. The
+win of shipping it end-to-end is **CPU on both ends** (no deflate over raw bytes, no
+decompress on store hits, cheap zstd instead of inflate client-side — store Phase 0:
+zstd-1 dominates deflate on both compress and decompress CPU, and for store hits the
+compression cost is **already sunk**), at the cost of ~+5–12% wire bytes. See the
+implementation plan (`compressed-columns-implementation-plan.md`) header note and
+gate G3.
 
 Secondary irritation, same root: the bandwidth limiter charges raw bytes
 (`sectionBytes.length + ESTIMATED_COLUMN_OVERHEAD_BYTES`), so the configured cap is
@@ -144,7 +152,8 @@ change". So:
   (checker schema bump).
 - **Benchmark**: before/after CPU/column and bytes/column on the fresh + no-cache
   scenarios; expect store-hit serve CPU to drop (no decompress+deflate) and wire
-  bytes to drop vs zlib.
+  bytes to RISE ~5–12% vs deflate-6 (the accepted trade — see the §1 correction;
+  the implementation plan's gate G3 bounds it).
 
 ## 9. Open questions
 
@@ -155,3 +164,22 @@ change". So:
 3. Interaction with the serve-path efficiency ideas (v19 dedup etc., branch
    `feat/lod-store` brainstorm doc) — this capability is independent but should
    share the protocol bump if both land in one release.
+
+## 10. Phase 0 measurements (2026-08-01 — implementation-plan §1 deliverable)
+
+Benchmark-world corpus (45,589 columns, 64 regions) through the production
+NBT→wire path; `CompressedColumnsExperimentTool`; full JSON in
+`profile-results/compressed-columns-experiment/`.
+
+| Per column (mean) | OFF (today) | ON (v19) | Delta |
+|---|---|---|---|
+| Server store-hit serve | 573.9 µs | 54.1 µs | −520 µs (−91%) |
+| Server live/disk/gen serve | 551.0 µs | 101.0 µs | −450 µs (−82%) |
+| Client decompress side | 61.3 µs | 26.7 µs | −35 µs |
+| Wire bytes (deflate6 output) | 4,776 B | 5,351 B | ×1.12 |
+
+`Zstd.getFrameContentSize` == raw size on all 42,589 timed frames (0 violations).
+Corpus floor is >4 KiB/column, so §9.1's threshold is a safety constant
+(`COLUMN_COMPRESS_MIN_BYTES = 512`), not corpus-tuned. The §1 correction's +5–12%
+wire expectation lands at +12%; the CPU claim lands at −82…−91% of the
+compression-band cost.
