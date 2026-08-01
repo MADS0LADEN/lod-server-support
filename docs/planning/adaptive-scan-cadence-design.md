@@ -496,3 +496,23 @@ Also folded:
 Still open when this round closed (deliberate): the §9 soak gauntlet + the §8 live
 `fastScans` acceptance measurement on a store-warm backfill — evidence to gather before
 merge, not code changes.
+
+## 15. Soak evidence (2026-08-01, post-fix commit)
+
+Four load-bearing scenarios, all green on the first run:
+- **`fresh-backfill`** — all laws pass; `scan.fast == 1` at end: gen-bound backfill keeps
+  outstanding high and the fast path structurally inactive, exactly as designed (the
+  server-side profile is unchanged where the churn ceilings were calibrated).
+- **`warm-rejoin`** — all laws pass, 51/51 quiescent client windows. Run 2 (warm resync):
+  `scan.fast == 3` and then FLAT across every remaining snapshot. At soak scale the whole
+  warm disc is ~4 batches, so effectively every post-join scan was a fast fire (the
+  acceptance criterion §8 — the feature engages in the warm case), and the flat counter
+  across 51 quiescent snapshots is the live proof of the converged disarm (§5.1): no
+  250 ms walk loop exists at convergence.
+- **`rate-limit-storm`** — passed at `superseded == 742` vs the 800 ceiling (1 Hz-era
+  measurement: 370). The plan-review M4 prediction landed: the converging tail re-declares
+  at up to 4 Hz. Re-baselined per §9's rule (check + selftest fixtures + derivation
+  docstring together): ceiling 1500 = ~2× the new measurement, storm peak unchanged
+  (outstanding stays high there, cadence stays 1 Hz). `--selftest` 144 cases green.
+- **`dirty-range-filter`** — passed: `requested_total` exactly flat through the far-edit
+  suppression window (the zero-tolerance live pin of converged silence), `scan.fast == 5`.
