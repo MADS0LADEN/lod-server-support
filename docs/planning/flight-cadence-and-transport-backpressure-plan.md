@@ -1,7 +1,13 @@
 # Flight-cadence unlock + transport backpressure — implementation plan
 
-Status: **PLAN** (2026-08-01). Follows directly from
+Status: **PLAN, review round 1 folded** (2026-08-01). Follows directly from
 `elytra-chunk-wall-investigation-2026-08-01.md` §8.6.3, which measured the cause.
+
+> **§11 records the 3-agent review round.** Where §2–§10 below disagree with §11, §11 wins —
+> it is the as-built decision. The headline changes: D is **cut**, C ships **default-off**,
+> A's gate becomes **predictive** (no new field, no hot-loop counter), the threshold moves
+> 262144 → 65536 because the original refused the very case it claimed to admit, and the
+> netty pending-bytes formula was **wrong** for the netty actually on the classpath.
 
 ## 0. Evidence this plan is built on
 
@@ -349,3 +355,209 @@ reverts C; B and D are diagnostics with no behavioural effect.
 **scripts**
 - `check_soak.py` — optional `players[].obuf` / `obuf_hw` passthrough; storm ceiling
   re-baseline if it trips
+
+---
+
+# 11. Review round 1 (3 agents: correctness / regression-risk / scope) — folded
+
+Three independent reviews. They converged on cutting a third of the plan and found one
+shipped bug, one falsified formula, and one arithmetic error that inverted a threshold.
+
+## 11.1 Decisions
+
+| Change | Decision | Why |
+|---|---|---|
+| **A** | **Keep, re-specified** | Premise confirmed by all three; instrument replaced (§11.2) |
+| **B** | **Keep, formula corrected** | The measurement that retires this line of investigation; §3.1's identity was wrong (§11.3) |
+| **C** | **Keep, DEFAULT OFF** (`outboundBufferCeilingKB = 0`) | Guards a mechanism measured absent; armed-by-default makes the live A/B uninterpretable (§11.4) |
+| **D** | **CUT** | Its signal cannot discriminate, and the one that can already ships (§11.5) |
+
+## 11.2 Change A — predict the walk, don't remember it
+
+**Defect (2 of 3 reviewers, independently).** `lastWalkCost` records the walk that *already
+ran* and gates the walk that *has not*. Those differ precisely in the case A exists to
+unlock: after `recenter()` the next walk restarts at ring 0, while the recorded one started
+at the frontier. So the gate admits the first expensive walk after **every** prefix
+collapse — it degrades one walk late, every time. Worse, it splits two identically-shaped
+events: `hasActionableRetries` (also "next walk starts at ring 0") keeps riding 1 Hz while
+movement now runs fast. Same cost, opposite verdict.
+
+**Resolution — no new field, no hot-loop counter.** The scanner already stores both terms.
+Predicted cost of the *next* walk, from `confirmedRing` (`SpiralScanner.java:63`) and
+`scanRing` (`:64`):
+
+```java
+// Σ 8r for r in [confirmedRing, scanRing] = 4·(s(s+1) − c(c+1)); a walk truncated at the
+// budget stops at scanRing, so this is exact for truncated walks too.
+private int predictedWalkCost() {
+    int s = this.scanRing, c = this.confirmedRing;
+    long cost = 4L * ((long) s * (s + 1) - (long) c * (c + 1));
+    return cost <= 0 ? 0 : (int) Math.min(cost, Integer.MAX_VALUE);
+}
+```
+
+After `recenter()` zeroes `confirmedRing` this becomes `4·s(s+1)` — the full re-walk it is
+about to do. This deletes §2.2's field, the `Integer.MAX_VALUE` init (unreachable anyway —
+`lastSentCount <= 0` returns first, and that is only set after a walk), and the §7 pin for
+it.
+
+**Threshold: 262144 → `FAST_RESCAN_MAX_WALK_COST = 65_536`.** All three reviewers caught
+that a full walk to ring R costs `4R(R+1)`, not `4R²`, so ring 256 is **263,168 > 262,144**
+— the old constant *refused* the case §2.3 claimed it admits, and sat 0.4% from the live
+server's configured `lodDistanceChunks=256`, which would read bimodally in the A/B. The new
+constant is derived from measurement rather than tidiness: the measured flight walk is
+`4·75·76 = 22,800`, so 65,536 gives ~2.9× headroom and refuses a warm full-256 disc walk
+(263k) by 4×.
+
+That last part is a deliberate policy, now stated: **fast re-scans run only while the walk
+is cheap, which is exactly when there is near work to do.** On a disc already satisfied out
+to 256 the walk is expensive *and* there is little to fetch — 1 Hz is right there. This is
+never a regression, since movement is 1 Hz today unconditionally.
+
+Also folded: §2.3's per-second framing was the wrong unit — an admitted walk costs its
+whole price *inside one client tick*, so the budget is a frame budget (~65k × 50–100 ns ≈
+3–7 ms), not a per-second one.
+
+**Docs/pins that must move with it** (none were in §10): `SpiralScannerTest`'s
+`prefixInvalidationHoldsFastFiresUntilTheNextWalk`, the `fastRescanDue` javadoc that *is*
+the design argument, the adaptive-cadence constants pin, `CLAUDE.md`'s want-set paragraph
+(states the `confirmedRing > 0` gate as decided design), and
+`adaptive-scan-cadence-design.md` §5.5/§11/§12 — where this exact knob is listed as a
+deliberate **v1 non-goal**. This plan reverses a 3-Opus-reviewed decision; the amendment
+must say so, and say that the reviewers' cost estimate was analytic while the trace
+measured 22,800 iterations ≈ 0.9 ms with fps flat at 60.
+
+## 11.3 Change B — the netty identity in §3.1 is wrong
+
+MC 26.2 ships **netty 4.2.15**. Its `ChannelOutboundBuffer` computes
+`bytesBeforeUnwritable = high − pending + 1` and `bytesBeforeWritable = pending − low + 1`,
+so §3.1's formula is off by one in both branches. Two harder defects:
+
+- **`Channel.bytesBeforeWritable()` returns `Long.MAX_VALUE` when the outbound buffer is
+  null** (closed/unregistered), while `isWritable()` returns false in the same state — so
+  §3.1's unwritable branch computes `32768 + Long.MAX_VALUE` and **overflows to ≈ −9.2e18**.
+  Reachable every tick between socket close and the next lifecycle drain.
+- User-defined writability flags can make a channel unwritable with a near-empty buffer,
+  yielding a phantom 32 KiB.
+
+**Corrected**, with `-1` = no signal:
+
+```java
+if (!ch.isActive()) return -1;
+if (ch.isWritable()) { long b = ch.bytesBeforeUnwritable(); return b <= 0 ? high : high - b + 1; }
+long b = ch.bytesBeforeWritable();
+return (b <= 0 || b == Long.MAX_VALUE) ? -1 : low + b - 1;
+```
+
+**And §7's test for it was circular** — a hand-written fake channel implements
+`bytesBefore*` to match whatever formula the author believes, so it asserts the plan against
+itself. Use a real `io.netty.channel.embedded.EmbeddedChannel` with configured water marks
+and unflushed writes, which exercises the real `ChannelOutboundBuffer`.
+
+Diag renders `obuf=n/a` on no-signal rather than a plausible-looking number.
+
+## 11.4 Change C — placement was a shipped bug; default off
+
+**The bug (all 3 reviewers).** §4.1's "before any send … return" sits above three things
+that live outside the send loop (`AbstractPlayerRequestState.java:547-551`, `:588`):
+
+1. the **only** drain of `readyPayloads` → `sendQueue`,
+2. the `sendQueueSizeSnapshot` publish, and
+3. `sweepDepartedColumns()`.
+
+The consequence inverts the feature: `sendQueueSizeSnapshot` is the *only* input to the
+router's retain-and-stop gate (`IncomingRequestRouter.java:269-276`), so an early return
+means `sendQueueFull()` never trips and **the router keeps draining the backlog and
+dispatching disk reads for the entire deferral** — severing the very backpressure the gate
+exists to create. §4.1's claim that `sendQueueLimitPerPlayer` remains the backstop is false
+as written: the limit is checked against `sendQueue`, which the skipped drain never fills.
+Skipping the sweep also leaks one `departedColumns` entry per column ever sent.
+
+**Resolution:** the gate goes *after* the drain and snapshot, before the send loop, with
+`sweepDepartedColumns()` still running on the deferral path (single exit). Return value is
+the existing `NO_DROPPED_POSITIONS`; there is no `NOTHING_SENT`.
+
+**Default off (`outboundBufferCeilingKB = 0`).** Two reviewers independently: C guards a
+mechanism the investigation calls "conclusively dead" (flat 20–26 ms ping is a *direct and
+sensitive* probe of shared-queue depth — 2 MB pending at ~4 MB/s would show as ~500 ms of
+added RTT, and did not), its ceiling is admittedly unmeasured, and shipping it armed
+alongside A makes the §7 A/B unanswerable ("was that A or C?"). It ships correct and
+tested, and `obuf_hw` from the live run decides whether it is ever turned on.
+
+The old default was also **exactly `MAX_SECTIONS_SIZE`** (2,097,152 B), so a single legal
+maximum-size column could trip the gate by itself.
+
+Standing warning, recorded: C is shaped like two mechanisms this repo deliberately retired
+(the movement cadence debounce, the vanilla-load scan budget scale) whose shared failure
+mode was *silently stopping LOD during fast travel*. `deferred=` in diag is the tripwire; a
+nonzero value on a healthy link is a red flag, not the gate working.
+
+## 11.5 Change D — cut
+
+`PlayerChunkSender.unacknowledgedBatches` is marked **"pegged" in all three columns** of the
+investigation's own discriminator table (`elytra…md:166`) — it cannot distinguish anything.
+The row that discriminates is `desiredChunksPerTick`, which already ships client-side as
+`ClientNetTrace`'s `dcpt` (and measured a flat 3.500 through the whole flight). D would add
+a third accessor mixin to re-derive a duplicate, from the side of the connection where the
+symptom is not observed. It also reds `PaperCommandsTest`'s exact 9-line count for a
+Fabric-only feature.
+
+## 11.6 Scope corrections to §7/§10
+
+- **`players[].obuf` is dropped from the soak snapshot schema.** It would force
+  `BenchmarkMetricsExporter` + `PaperSoakMetricsExporter` + the shared
+  `server-snapshot.contract` golden + both contract tests to move in lockstep, and the soak
+  cannot exercise the gate anyway. **Diag-only.**
+- **`check_soak.py`'s `SERVER_CONFIG_INT_KEYS` allowlist must gain
+  `outboundBufferCeilingKB`** or no scenario can ever set it — a failure that is *silently
+  green* in CI because `--selftest` never ties the allowlist to `ServerConfigBase`.
+- **`PaperConfigValidationTest` asserts exact config key-set equality** and needs a
+  `SHARED_BOUNDS` entry plus a dedicated nonzero-floor test (copy the `lodStoreMaxMB`
+  pattern); `ConfigValidationTest`'s floor-allowlist switch needs a `0` arm.
+- `DiagnosticsFormatterTest` asserts whole line lists — the new token moves goldens.
+- The 11 test rigs subclassing `AbstractPlayerRequestState` require the probe to default to
+  `NO_SIGNAL` at construction.
+
+## 11.7 Validation — the ladder was pointed at the wrong things
+
+**The soak harness structurally cannot exercise Change A.** The soak client never moves
+continuously; all movement is discrete server-side `tp` commands, and `rate-limit-storm`'s
+client is stationary for its entire run. So §7's predicted storm re-baseline is aimed at a
+scenario the change barely touches, and A's actual risk surface has **zero** soak coverage.
+The real soak exposure is the **client-law window floors**: `service.requests_received` is a
+moving term, so any 5 s window containing a declaration is disqualified — a denser cadence
+erodes the quiescent-window count directly. Soak's honest role here is "did not break
+anything else".
+
+**The live A/B cannot falsify the top risk as designed**, because the control no longer
+reproduces the wall (§8.6.1: same 100 MB/s cap, no wall). Both arms would be wall-free, so a
+green arm proves nothing about consumed headroom.
+
+**The decisive experiment is zero-code and comes first:** on the *current* build, sweep
+`bytesPerSecondLimitPerPlayer` upward until `runway` collapses, and record the throughput at
+onset. That is a server config knob — no jar, no deploy, no client change. It converts the
+risk to arithmetic: *A must not push sustained flight throughput above X MB/s, where X is
+the measured onset minus margin.* If projected `budget × cadence` exceeds X, A needs a
+cadence ceiling, which C cannot supply — C guards head-of-line blocking, while the wall was
+receiver-cost.
+
+**Falsifiable success criteria** (control numbers from §8.6.3):
+
+- `min(runway)` ≥ 8 chunks **and** ≥ 4.0 s (control: 9–14 / 4.4–6.8 s)
+- `p95(ping)` ≤ 35 ms (control: 20–26 ms)
+- **scan-gap distribution** shifts below 1.0 s — without this, nothing distinguishes "the
+  gate lifted" from "throughput rose for another reason"
+- `deferred == 0` in the arm (nonzero ⇒ C fired ⇒ the ungated risk is untested)
+- ≥ 3 runs per arm, same route and world state, abort pre-registered
+
+**Rollback is asymmetric and §8 must say so:** `enableAdaptiveScanCadence` is a *client*
+config, so once A ships in a released jar no server operator can revert it. The live A/B
+must therefore run **before** any release carrying A.
+
+## 11.8 Revised order of work
+
+1. **Cap sweep on the current build** (no code) — bounds the risk arithmetically.
+2. Implement A + B + C(default-off), with the §11.6 scope corrections.
+3. Tier 1/2/3 + full soak — as a "broke nothing else" gate, not as A's validation.
+4. Local flight A/B on `./test-server.sh run-fabric` with the trace.
+5. Modrinth A/B against the §11.7 criteria, before any release.
