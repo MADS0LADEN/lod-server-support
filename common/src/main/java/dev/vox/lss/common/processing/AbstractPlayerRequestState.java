@@ -108,8 +108,8 @@ public abstract class AbstractPlayerRequestState<T> {
     // The want-set the processing thread most recently applied to the backlog. This is the
     // main-thread probe's FALLBACK source, read when the mailbox is empty — which is almost
     // always: takeIncomingBatch() nulls the mailbox within ~50ms of arrival (the processing loop
-    // polls at 20Hz) while batches arrive at only 1Hz, so a probe reading the mailbox ALONE would
-    // see null on ~19 of every 20 ticks. This carries a want-set too large for the per-player slot
+    // polls at 20Hz) while batches arrive at 1-4Hz (the client's adaptive cadence), so a probe
+    // reading the mailbox ALONE would see null on most ticks. This carries a want-set too large for the per-player slot
     // cap across the cycles that work it off. (The mailbox arm is not redundant with it: it is the
     // only thing that probes a batch on its ARRIVAL tick, before this field is even written — see
     // the probeLoadedChunks javadoc on either platform.) Published on apply, cleared when the

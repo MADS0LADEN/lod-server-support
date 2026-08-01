@@ -96,11 +96,15 @@ class LodRequestManagerTest {
     private final long[] scanTs = new long[LSSConstants.MAX_BATCH_CHUNK_REQUESTS];
 
     /**
-     * One maybeScan call against the manager's own collaborators with viewDistance covering
-     * the lod distance, so a fired scan declares nothing — pure cadence observation.
+     * One maybeScan call against the manager's own collaborators — pure cadence observation.
+     * NOTE: at vd == lod == 64 a fired scan is NOT empty (the corner annulus outside
+     * vanilla's rounded view is correctly declared — see fireScanAtOrigin's comment), but
+     * this helper bypasses tickScanPhase, so nothing is sent, the tracker is never
+     * replaced, and the adaptive fast cadence never ARMS (arming is tickScanPhase's job):
+     * the 19-silent-tick cadence pins below stay exact.
      */
     private int maybeScanOnce() {
-        return manager.scannerForTest().maybeScan(0, 0, 64, 0, 1000, -1, LodRequestManager.INGEST_BACKLOG_HALT_SECTIONS, () -> 0,
+        return manager.scannerForTest().maybeScan(0, 0, 64, 0, 1000, 0L, Long.MAX_VALUE, -1, LodRequestManager.INGEST_BACKLOG_HALT_SECTIONS, () -> 0,
                 manager.columnsForTest(), scanPos, scanTs);
     }
 
@@ -131,7 +135,7 @@ class LodRequestManagerTest {
     /** Drive tickScanPhase at the origin until the 20-tick cadence fires; returns the want-set size. */
     private int fireScan(int viewDistance) {
         for (int i = 0; i < LSSConstants.TICKS_PER_SECOND + 1; i++) {
-            int n = manager.tickScanPhase(0, 0, viewDistance, 0, -1, () -> 0);
+            int n = manager.tickScanPhase(0, 0, viewDistance, 0, 0L, -1, () -> 0);
             if (n >= 0) return n;
         }
         throw new AssertionError("scan cadence never fired");
@@ -473,18 +477,21 @@ class LodRequestManagerTest {
         // no-walk producer (the vanilla-load budget-zero path is retired; a fully missing
         // vanilla disc now walks the full budget). (Successor to CL-005's
         // zeroBudgetScanPreservesCommittedRemainder, whose drip-feed remainder no longer exists.)
+        // NOTE (adaptive cadence): the single stepped tick below sits at tick 1 of the
+        // window, BELOW the fast floor — this rig is armed and unpressured, so stepping to
+        // tick 5+ would legitimately fast-fire and void the no-walk premise.
         manager.trackerForTest().replaceWith(new long[]{POS}, 1);
 
         // A fresh manager's cadence is primed: burn the primed fire (full missing-vanilla
         // disc — must walk anyway under the retired scale), then step ONE mid-window tick.
         int primed = -1;
         for (int i = 0; i < LSSConstants.TICKS_PER_SECOND + 1 && primed < 0; i++) {
-            primed = manager.tickScanPhase(0, 0, 2, 0, -1, () -> 25);
+            primed = manager.tickScanPhase(0, 0, 2, 0, 0L, -1, () -> 25);
         }
         assertTrue(primed >= 0, "premise: a fully missing vanilla disc still walks (scale retired)");
         manager.trackerForTest().replaceWith(new long[]{POS}, 1);
 
-        int walked = manager.tickScanPhase(0, 0, 2, 0, -1, () -> 25);
+        int walked = manager.tickScanPhase(0, 0, 2, 0, 0L, -1, () -> 25);
 
         assertEquals(-1, walked, "a mid-window tick must report NO walk, not an empty one");
         assertTrue(manager.trackerForTest().isInFlight(POS),

@@ -25,6 +25,7 @@ rtt.p50_ms=double
 rtt.p95_ms=double
 scan.budget=int
 scan.confirmed=int
+scan.fast=long
 scan.missing_vanilla=int
 scan.queued=int
 scan.ring=int

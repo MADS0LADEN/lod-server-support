@@ -158,11 +158,13 @@ public final class LSSConstants {
      *  re-declaration arriving within this window of its column payload leaving the send
      *  queue (send success only) is silently skipped instead of honestly re-resolved —
      *  during cold backfill ~7-8% of asks cross their own payload's delivery in flight
-     *  (crossings &asymp; departure_rate &times; client&rarr;server latency per 1 Hz scan)
-     *  and each such re-resolve costs a redundant disk read + send. The skip keeps the
-     *  done-bit and answers NOTHING (never up_to_date — the client claims no data), so a
-     *  genuinely lost payload heals at most one scan later, when the grace has expired
-     *  and the clear-and-re-resolve ladder applies unchanged. Tuning is asymmetric:
+     *  (crossings &asymp; departure_rate &times; client&rarr;server latency per scan — a
+     *  RATE, so the client's adaptive cadence (up to 4 Hz) scales the absorbed skips
+     *  with it) and each such re-resolve costs a redundant disk read + send. The skip
+     *  keeps the done-bit and answers NOTHING (never up_to_date — the client claims no
+     *  data), so a genuinely lost payload heals at most one scan past grace expiry —
+     *  &le;750 ms at the client's 250 ms fast floor, &le;~1.5 s at the 1 Hz fallback —
+     *  when the clear-and-re-resolve ladder applies unchanged. Tuning is asymmetric:
      *  shorter than the RTT+tick window buys nothing; longer only stretches that bounded
      *  heal delay. 0 disables (no stamps are written). */
     public static final long SEND_DEPARTURE_GRACE_MILLIS = 500;

@@ -620,7 +620,7 @@ public class RequestProcessingService {
      *       path's equivalent.)</li>
      *   <li>The PUBLISHED want-set covers the other ~19 ticks of each second:
      *       {@code takeIncomingBatch()} nulls the mailbox within ~50 ms of arrival while
-     *       batches arrive at only 1 Hz, so the mailbox alone would see null on almost every
+     *       batches arrive at 1-4 Hz (the client's adaptive cadence), so the mailbox alone would see null on almost every
      *       tick. It stays published exactly while the backlog is non-empty (cleared on
      *       drain-to-empty, republished by {@code restoreBacklog}), which is what carries a
      *       want-set too large for the slot cap across the cycles that work it off.</li>

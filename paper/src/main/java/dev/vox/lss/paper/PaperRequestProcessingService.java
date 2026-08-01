@@ -862,7 +862,7 @@ public class PaperRequestProcessingService {
      * hold-release makes the same alignment deterministic; this is the sync path's
      * equivalent. The PUBLISHED want-set then covers the other ~19 ticks of each second
      * ({@code takeIncomingBatch()} nulls the mailbox within ~50 ms of arrival while batches
-     * arrive at only 1 Hz) and carries a want-set too large for the slot cap across the
+     * arrive at only 1-4 Hz — the client's adaptive cadence) and carries a want-set too large for the slot cap across the
      * cycles that work it off (published exactly while the backlog is non-empty).
      *
      * <p>Both sources may list already-routed positions; such a probe is simply unused by the

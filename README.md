@@ -130,6 +130,7 @@ Client config is generated at `config/lss-client-config.json` on first run.
 |---------|---------|-------------|
 | `receiveServerLods` | `true` | Enable receiving LOD data from the server |
 | `lodDistanceChunks` | `0` | Max LOD request distance in chunks (0 = use server limit) |
+| `enableAdaptiveScanCadence` | `true` | Request the next batch of LOD chunks as soon as the current one arrives (up to 4×/second) instead of once per second; `false` restores the fixed 1-second pace |
 
 ## License
 

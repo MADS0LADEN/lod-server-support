@@ -1192,18 +1192,24 @@ def check_rate_limit_storm(ctx):
     On a gen-ENABLED server NOT_GENERATED must never fire (the permanence guarantee is
     pinned in generation-capacity-stress where the bottleneck makes it interesting).
 
-    MEASURED (Task 10 live run): superseded == 370, all of it miss-drop churn
-    (miss_dropped == 370 exactly; not_found 579 == gen_submitted 209 + 370 — law A5 exact),
-    fully quiescent tail. Ceiling set to ~2x measured: convergent churn is bounded by the
-    disc (165 positions retrying until the 40/64 gen caps drain them), while a broken
-    healing loop grows superseded by ~150/scan for the whole run (thousands)."""
+    MEASURED (Task 10 live run, fixed 1 Hz cadence): superseded == 370, all of it miss-drop
+    churn (miss_dropped == 370 exactly; not_found 579 == gen_submitted 209 + 370 — law A5
+    exact), fully quiescent tail. RE-MEASURED 2026-08-01 under the client's adaptive scan
+    cadence (docs/planning/adaptive-scan-cadence-design.md): superseded == 742 — the
+    converging TAIL is exactly where >=95% of a batch is answered, so its re-declarations
+    arrive at up to 4 Hz and each replaces a backlog still holding the churning residue
+    (the plan-review round predicted this shift; the storm PEAK is unchanged — high
+    outstanding holds the cadence at 1 Hz there). Ceiling keeps the ~2x-measured
+    convention against the new baseline: convergent churn is bounded by the disc (165
+    positions retrying until the 40/64 gen caps drain them), while a broken healing loop
+    grows superseded by ~150+/scan for the whole run (thousands)."""
     last = ctx.server_snaps[-1]
-    if last["service"]["superseded"] > 800:
+    if last["service"]["superseded"] > 1500:
         yield Violation("rate-limit-storm", "final snapshot",
                         "transient-drop churn did not converge: superseded kept growing, so "
                         "re-declared positions are not being satisfied (the disk-miss "
                         "escalation or the silent-drop healing loop is broken)",
-                        {"expected": "<= 800", "actual": last["service"]["superseded"]})
+                        {"expected": "<= 1500", "actual": last["service"]["superseded"]})
     fc = ctx.final_client(1)
     if fc is None:
         yield Violation("rate-limit-storm", "run1", "no client snapshots in run 1", {})
@@ -3527,8 +3533,10 @@ def selftest():
     # Server-owned generation: the storm declares the full constant want-set (800); misses
     # beyond the gen caps drop superseded (transient) and heal by re-declaration, so a small
     # fresh disc converges with bounded churn. Unbounded superseded growth = the healing
-    # loop is broken. (Ceiling provisional at 500 — re-baselined at Task 10.)
-    storm_srv = {"service.superseded": 180, "generation.completed": 165}
+    # loop is broken. (Ceiling provisional at 500 — re-baselined at Task 10 to 800, and
+    # again 2026-08-01 to 1500 against the adaptive-cadence measurement of 742: the
+    # converging tail re-declares at up to 4 Hz.)
+    storm_srv = {"service.superseded": 1100, "generation.completed": 165}
     storm_cli = {}
     clean("rate-limit-storm clean", list(check_rate_limit_storm(
         stress_ctx(storm_srv, storm_cli))))
