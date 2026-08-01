@@ -1,6 +1,9 @@
 # Compressed columns (CAPABILITY_ZSTD_COLUMNS) — implementation plan
 
-Status: PLANNED, 2-agent review round folded (§9). Develops `compressed-columns-design.md`
+Status: **IMPLEMENTED** on `feat/compressed-columns` (2026-08-01, all four phases —
+see `compressed-columns-progress.md` for the executed record incl. the gate
+verdicts: warm G1 −43% CPU/col, cold −27%, wire ×1.114, all soaks green).
+2-agent review round folded (§9). Develops `compressed-columns-design.md`
 (2026-08-01) into phased, file-level work. Origin: the elytra chunk-wall investigation
 measured the serve path compressing twice (store zstd decompress → netty zlib deflate)
 and burning deflate CPU over raw bytes the store already holds compressed.

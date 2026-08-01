@@ -12,7 +12,7 @@ Branch: `feat/compressed-columns` (off `feat/lod-store`).
 | 1 — protocol v19 + capability + live-path compression | **DONE 2026-08-01** | T1 green both platforms (Fabric ~1040+, Paper ~330+), T2 60 gametests green |
 | 2 — store frame serving (fhash, getFrame, deposit reuse) | **DONE 2026-08-01** | schema v3 (drop-and-rebuild), T1+T2 green |
 | 3 — observability (wire_bytes, exporters, soak schema) | **DONE 2026-08-01** | contracts + goldens + checker selftests green |
-| 4 — validation (tests, soak, compress_gate.sh) | not started | |
+| 4 — validation (tests, soak, compress_gate.sh) | **DONE 2026-08-01** | warm+cold gates PASS 3/3; Fabric+Paper soaks all green; release_check OK |
 
 ## Phase 0 — premise measurement
 
@@ -156,7 +156,7 @@ DONE 2026-08-01. Landed per plan §4:
 
 ## Phase 4 — validation
 
-IN PROGRESS 2026-08-01.
+DONE 2026-08-01 (remaining items below are deployment-gated, not implementation).
 
 - **Tier 1** green both platforms; **Tier 2** green; **Tier 3 green incl. the new C7b
   pin** (wire < raw received proves the compressed session negotiated end-to-end —
@@ -222,6 +222,35 @@ a 3-minute cold-join storm. Bounded, all laws green, columns equal, and the pair
 CPU gates show the server saving 27–43% whole-process CPU for it — recorded as the
 accepted trade, not a regression. (The warm/store path shows no such stretch: store
 frames ship verbatim with ZERO processing-thread compress.)
+
+### §5.1 correctness — Paper soaks: **ALL PASS** (2026-08-01)
+
+`SOAK_PLATFORM=paper ./scripts/soak.sh all` against a real Paper server:
+fresh-backfill, warm-rejoin, dimension-trip, paper-dirty-falling-block,
+paper-store-unfired-event — 0 violations, 0 warnings across all five. Compressed
+serving is live-validated on the Paper platform (twin build path + splice guard +
+frame rung).
+
+### Release pre-flight: **OK** (2026-08-01)
+
+`CI=true :fabric:build -x runClientGameTest :paper:test :paper:shadowJar` green;
+`release_check.py --version 0.8.0` → `OK: release artifacts clean` (incl. the
+LSS↔VSS wire-identity pin — the compressed-columns wire surface is brand-invariant
+for free, as plan §6 predicted). Stale 0.9.0 jars from earlier local builds deleted.
+
+## Remaining (deployment-gated, pending user action)
+
+- **§5.3 live acceptance**: deploy a feat/compressed-columns build to the tracked
+  Modrinth test server, verify `/lsslod diag`'s new `wire` figure matches the panel
+  bandwidth, warm-rejoin eyeball. (The server currently tracks feat/lod-store
+  builds; deploying is the user's call.)
+- **Merge + release**: branch is NOT merged. On release, the notes must carry (plan
+  §6): the CPU win with the measured numbers, the ~+11.5% wire-bytes trade stated
+  honestly (never "wire drop"), the one-time store rebuild (schema v3), the compat
+  matrix incl. v16-shim degradation for older pairings, protocol 19.
+- **Paper CPU numbers are inferred**, not measured (plan §5.2: compress_gate rides
+  the Fabric-only benchmark harness; Paper correctness is soak-gated) — optional
+  report-only sampler attach documented in the plan if ever wanted.
 
 ## Decisions log
 
