@@ -228,6 +228,12 @@ public final class BenchmarkMetricsExporter {
         serviceMap.put("requests_received", diag.getTotalRequestsRouted());
         serviceMap.put("columns_sent", src.tickDiag().getTotalSectionsSent());
         serviceMap.put("bytes_sent", src.tickDiag().getTotalBytesSent());
+        // Compressed columns (protocol 19): SHIPPED payload volume (codec-1 frames) next
+        // to the raw-denominated bytes_sent, plus the per-payload codec split. Law A2
+        // stays raw==raw on both ends; wire_bytes is the observed-bandwidth match.
+        serviceMap.put("wire_bytes", src.tickDiag().getTotalWireBytesSent());
+        serviceMap.put("cols_zstd", diag.getTotalColumnsCompressed());
+        serviceMap.put("cols_raw", diag.getTotalColumnsRaw());
         serviceMap.put("duplicate_skips", diag.getTotalDuplicateSkips());
         serviceMap.put("queue_full", diag.getTotalQueueFull());
         serviceMap.put("up_to_date", diag.getTotalUpToDate());
@@ -412,6 +418,7 @@ public final class BenchmarkMetricsExporter {
                 LSSClientNetworking.isServerEnabled(),
                 LSSClientNetworking.getColumnsReceived(),
                 LSSClientNetworking.getBytesReceived(),
+                LSSClientNetworking.getWireBytesReceived(),
                 LSSClientNetworking.getColumnsDropped(),
                 LSSClientNetworking.getQueuedColumnCount(),
                 LSSClientNetworking.getQueuedColumnBytes());
@@ -420,11 +427,15 @@ public final class BenchmarkMetricsExporter {
     /** Schema-owning overload (test seam — the public method binds the live static reads). */
     static Map<String, Object> buildClientSnapshot(LodRequestManager manager, boolean serverEnabled,
                                                    long receivedColumns, long receivedBytes,
+                                                   long wireReceivedBytes,
                                                    long dropped, int queued, long queuedBytes) {
         var result = new LinkedHashMap<String, Object>();
         result.put("server_enabled", serverEnabled);
         result.put("received_columns", receivedColumns);
         result.put("received_bytes", receivedBytes);
+        // Shipped (codec-1 frame) volume next to the raw-denominated received_bytes —
+        // the client half of the wire_bytes observability (compressed columns, v19).
+        result.put("wire_received_bytes", wireReceivedBytes);
         result.put("dropped", dropped);
         // The decode/ingest queue (ClientColumnProcessor) — unrelated to the request loop, which
         // no longer queues anything (the want-set is scanned and sent in the same tick).
@@ -586,6 +597,7 @@ public final class BenchmarkMetricsExporter {
         // Bandwidth
         var bandwidth = new LinkedHashMap<String, Object>();
         bandwidth.put("total_bytes_sent", service.getBandwidthLimiter().getTotalBytesSent());
+        bandwidth.put("total_wire_bytes_sent", service.getTickDiag().getTotalWireBytesSent());
         result.put("bandwidth", bandwidth);
 
         // LOD store (second exporter site — the benchmark server.json; the warm-join gate

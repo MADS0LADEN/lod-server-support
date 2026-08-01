@@ -167,6 +167,7 @@ class LSSServerCommands {
                 config.sendQueueLimitPerPlayer,
                 service.getUptimeSeconds(), service.getTickDiagnostics(), service.getWindowBandwidthRate(),
                 service.getTickDiag().getTotalSectionsSent(), service.getTickDiag().getTotalBytesSent(),
+                service.getTickDiag().getTotalWireBytesSent(),
                 service.getOffThreadProcessor().getDiagnostics(), service.getDiskReader(),
                 service.getBandwidthLimiter(),
                 genService != null ? genService.getDiagnostics() : null,

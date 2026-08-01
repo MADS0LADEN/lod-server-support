@@ -52,6 +52,10 @@ public class LSSClientNetworking {
         return sessionGate.getBytesReceived();
     }
 
+    public static long getWireBytesReceived() {
+        return sessionGate.getWireBytesReceived();
+    }
+
     public static long getColumnsDropped() {
         return columnProcessor.getColumnsDropped();
     }
@@ -190,7 +194,7 @@ public class LSSClientNetworking {
         ClientPlayNetworking.registerGlobalReceiver(
                 VoxelColumnS2CPayload.TYPE,
                 (payload, context) -> {
-                    sessionGate.recordColumnFrame(payload.estimatedBytes());
+                    sessionGate.recordColumnFrame(payload.estimatedBytes(), payload.wireEstimatedBytes());
 
                     context.client().execute(() ->
                             handleVoxelColumn(sessionGate.getRequestManager(), columnProcessor, payload));

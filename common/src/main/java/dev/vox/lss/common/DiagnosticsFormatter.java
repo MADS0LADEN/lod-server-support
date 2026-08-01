@@ -31,8 +31,26 @@ public final class DiagnosticsFormatter {
             long bwWindowRate,
             List<PlayerDiag> players,
             String v16Line,
-            String xrayLine
+            String xrayLine,
+            long wireTotal, long colsZstd, long colsRaw
     ) {
+        /** Pre-compressed-columns full shape (wire counters zero) — keeps existing
+         *  constructions/tests intact. */
+        public DiagData(boolean enabled, int lodDist, long bwPerPlayer, long bwGlobal,
+                        long uptimeSec, long totalSent, long totalBytes,
+                        long cumInMem, long cumUtd, long cumGen, long cumReResolved,
+                        long cumGraceSkipped,
+                        long diskCompleted, String tickDiagnostics, String diskReaderDiagnostics,
+                        String generationDiagnostics, boolean generationEnabled,
+                        long genOrderGated, long genInversions,
+                        long bwTotal, long bwWindowRate, List<PlayerDiag> players,
+                        String v16Line, String xrayLine) {
+            this(enabled, lodDist, bwPerPlayer, bwGlobal, uptimeSec, totalSent, totalBytes,
+                    cumInMem, cumUtd, cumGen, cumReResolved, cumGraceSkipped, diskCompleted,
+                    tickDiagnostics, diskReaderDiagnostics, generationDiagnostics,
+                    generationEnabled, genOrderGated, genInversions, bwTotal, bwWindowRate,
+                    players, v16Line, xrayLine, 0L, 0L, 0L);
+        }
         /** Pre-v16-compat shape (no shim/xray lines) — keeps existing constructions/tests intact. */
         public DiagData(boolean enabled, int lodDist, long bwPerPlayer, long bwGlobal,
                         long uptimeSec, long totalSent, long totalBytes,
@@ -56,7 +74,7 @@ public final class DiagnosticsFormatter {
                     totalBytes, cumInMem, cumUtd, cumGen, cumReResolved, cumGraceSkipped,
                     diskCompleted, tickDiagnostics, diskReaderDiagnostics, generationDiagnostics,
                     generationEnabled, genOrderGated, genInversions, bwTotal, bwWindowRate,
-                    players, line, xrayLine);
+                    players, line, xrayLine, wireTotal, colsZstd, colsRaw);
         }
 
         /** Attach the x-ray masking one-line summary (always shown when non-null — the off
@@ -66,7 +84,8 @@ public final class DiagnosticsFormatter {
                     totalBytes, cumInMem, cumUtd, cumGen, cumReResolved, cumGraceSkipped,
                     diskCompleted, tickDiagnostics, diskReaderDiagnostics,
                     generationDiagnostics, generationEnabled, genOrderGated, genInversions,
-                    bwTotal, bwWindowRate, players, v16Line, line);
+                    bwTotal, bwWindowRate, players, v16Line, line,
+                    wireTotal, colsZstd, colsRaw);
         }
     }
 
@@ -131,10 +150,13 @@ public final class DiagnosticsFormatter {
             lines.add(d.xrayLine);
         }
 
-        // Bandwidth
-        lines.add(String.format("Bandwidth: %s/s / %s/s global (%s total)",
+        // Bandwidth. total = the RAW-denominated counted volume (the limiter's charge —
+        // client decode work scales with it); wire = SHIPPED payload bytes (codec-1
+        // frames), the number that matches observed network bandwidth (the elytra
+        // investigation's §1 confusion). cols = per-payload codec outcomes.
+        lines.add(String.format("Bandwidth: %s/s / %s/s global (%s total, %s wire, cols zstd=%d raw=%d)",
                 formatBytes(d.bwWindowRate), formatBytes(d.bwGlobal),
-                formatBytes(d.bwTotal)));
+                formatBytes(d.bwTotal), formatBytes(d.wireTotal), d.colsZstd, d.colsRaw));
 
         // Per-player
         for (var p : d.players) {
@@ -176,6 +198,7 @@ public final class DiagnosticsFormatter {
                                            long bwPerPlayer, long bwGlobal, int sendQueueLimitPerPlayer,
                                            long uptimeSec, String tickDiagnostics, long windowBandwidthRate,
                                            long serviceTotalSent, long serviceTotalBytes,
+                                           long serviceWireBytes,
                                            ProcessingDiagnostics diag, AbstractChunkDiskReader diskReader,
                                            SharedBandwidthLimiter bwLimiter,
                                            String generationDiagnosticsOrNull,
@@ -219,7 +242,8 @@ public final class DiagnosticsFormatter {
                 diag.getTotalGenOrderGated(), diag.getTotalGenCompletionInversions(),
                 bwLimiter.getTotalBytesSent(),
                 windowBandwidthRate,
-                players
+                players, null, null,
+                serviceWireBytes, diag.getTotalColumnsCompressed(), diag.getTotalColumnsRaw()
         );
     }
 

@@ -11,7 +11,7 @@ Branch: `feat/compressed-columns` (off `feat/lod-store`).
 | 0 — premise measurement | **DONE 2026-08-01** | all premises confirmed; numbers below |
 | 1 — protocol v19 + capability + live-path compression | **DONE 2026-08-01** | T1 green both platforms (Fabric ~1040+, Paper ~330+), T2 60 gametests green |
 | 2 — store frame serving (fhash, getFrame, deposit reuse) | **DONE 2026-08-01** | schema v3 (drop-and-rebuild), T1+T2 green |
-| 3 — observability (wire_bytes, exporters, soak schema) | not started | |
+| 3 — observability (wire_bytes, exporters, soak schema) | **DONE 2026-08-01** | contracts + goldens + checker selftests green |
 | 4 — validation (tests, soak, compress_gate.sh) | not started | |
 
 ## Phase 0 — premise measurement
@@ -132,7 +132,27 @@ DONE 2026-08-01. Landed per plan §3:
 
 ## Phase 3 — observability
 
-Not started. Work list tracked in plan §4.
+DONE 2026-08-01. Landed per plan §4:
+
+- `/lsslod diag` Bandwidth line now reads
+  `Bandwidth: <rate>/s / <cap>/s global (<raw> total, <shipped> wire, cols zstd=N raw=M)` —
+  the §1-confusion fix: `wire` matches observed network bandwidth, `total` stays the
+  raw-denominated limiter charge. Threaded via `collectDiagData` (+wire param, both
+  platform command sites + the CommandGameTests agreement site); DiagData gained
+  wireTotal/colsZstd/colsRaw with a compat ctor; formatter goldens updated.
+- Soak/benchmark exporters (Fabric + Paper twins): `service.wire_bytes`,
+  `service.cols_zstd`, `service.cols_raw`; client snapshot `wire_received_bytes`
+  (ClientSessionGate wire counter, reset with the session, netty-thread recorded from
+  `payload.wireEstimatedBytes()`); benchmark deep-report `bandwidth.total_wire_bytes_sent`.
+- `check_soak.py`: the three server fields in SERVER_MONOTONIC (auto-required via
+  GLOBAL_SERVER_FIELDS) + fixture; `wire_received_bytes` in KNOWN_CLIENT_KEYS
+  (presence-optional). **Law A2 verified unchanged**: both ends keep counting
+  raw-denominated bytes (server estimatedBytes == client charge for honest frames), so
+  `d(bytes_sent) == d(received_bytes)` holds under compression. Selftests: check_soak
+  191 OK, soak_report 20 OK, release_check 59 OK.
+- Exporter contract files rebuilt (comment header preserved, keys re-sorted) — the
+  lockstep convention (contract + Paper twin + checker) moved together; `soak_report.py`
+  deliberately untouched (review B6: byte-volume counters live in neither lens dict).
 
 ## Phase 4 — validation
 

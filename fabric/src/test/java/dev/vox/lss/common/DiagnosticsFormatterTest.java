@@ -121,7 +121,7 @@ class DiagnosticsFormatterTest {
                 "Sources (tick): sent=9, disk=1/2",
                 "DiskReader: submitted=5, completed=5",
                 "Generation: active=1/32, order_gated=7, inversions=3",
-                "Bandwidth: 512 B/s / 1.0 MB/s global (2.0 MB total)",
+                "Bandwidth: 512 B/s / 1.0 MB/s global (2.0 MB total, 0 B wire, cols zstd=0 raw=0)",
                 "  Steve: sq=3/4000, psync=2, pgen=1, sent=2000 (4.0 KB), rate=20/s"
         ), DiagnosticsFormatter.formatDiagnostics(d));
     }
@@ -233,7 +233,7 @@ class DiagnosticsFormatterTest {
                 "Sources (tick): idle",
                 "DiskReader: idle",
                 "Generation: disabled",
-                "Bandwidth: 0 B/s / 1.0 KB/s global (0 B total)"
+                "Bandwidth: 0 B/s / 1.0 KB/s global (0 B total, 0 B wire, cols zstd=0 raw=0)"
         ), DiagnosticsFormatter.formatDiagnostics(d));
     }
 
@@ -247,7 +247,7 @@ class DiagnosticsFormatterTest {
                 true, 8,
                 1024, 2048, 100,
                 5, "tick", 256,
-                0, 0,
+                0, 0, 0,
                 new ProcessingDiagnostics(), null,
                 new SharedBandwidthLimiter(4096),
                 null,
@@ -295,6 +295,7 @@ class DiagnosticsFormatterTest {
                 111, 222, 333,
                 10, "tick-string", 444,
                 999, 9999, // service-scoped totals — deliberately NOT the state sums (150/1500)
+                8888, // wire total (shipped)
                 pd, reader,
                 limiter,
                 "gen-running",

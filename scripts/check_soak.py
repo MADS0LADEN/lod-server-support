@@ -238,6 +238,12 @@ SERVER_MONOTONIC = (
     # drop, dedup-primary departure), healed by the client's 1 Hz re-declaration;
     # range_filtered = dropped by the Chebyshev ingress guard (the movement race).
     "service.superseded", "service.range_filtered",
+    # Compressed columns (protocol 19, compressed-columns-implementation-plan.md §4):
+    # wire_bytes = SHIPPED payload volume (zstd frames for capable sessions) — the
+    # observed-bandwidth match next to the raw-denominated bytes_sent (law A2 stays
+    # raw==raw); cols_zstd/cols_raw = per-payload codec outcomes at build. Monotonic
+    # counters; no law consumes them yet — the compress-gate harness reads them.
+    "service.wire_bytes", "service.cols_zstd", "service.cols_raw",
     # Server-owned generation: disk misses resolved into transient silent drops (law A5's
     # dedicated term — a subset of superseded events, counted separately because
     # backlog-replace supersession never touches disk).
@@ -315,10 +321,14 @@ KNOWN_CLIENT_KEYS = {
     # with v17's drip-feed queue; rtt now measures last-declare->answer, not first-ask->answer.
     # queued_bytes: the decode-queue byte gauge (disk-read profile round, presence-optional
     # like the other late additions — older recordings predate it).
+    # wire_received_bytes: shipped (codec-1 frame) volume next to the raw-denominated
+    # received_bytes (compressed columns, protocol 19) — presence-optional like the
+    # other late additions.
     "snapshot": {"event", "wallMs", "dimension", "received_columns", "received_bytes",
                  "dropped", "responses", "requested_total", "send_cycles", "columns",
                  "scan", "tracker_in_flight", "queued", "queued_bytes", "server_enabled",
-                 "probes", "effective_lod", "rtt", "ingest_failures"},
+                 "probes", "effective_lod", "rtt", "ingest_failures",
+                 "wire_received_bytes"},
     # One scripted client-side action (-Dlss.soak.clientActionAt); resets the request
     # metrics, so the loader treats it as a client segment boundary.
     "action": {"event", "wallMs", "action", "atSeconds"},
@@ -2900,6 +2910,7 @@ def _srv(wall=1000, seg=0, over=None):
     """Schema-complete server snapshot fixture (all GLOBAL_SERVER_FIELDS present, zeros)."""
     snap = {"event": "snapshot", "wallMs": wall, "tick": wall // 50, "_seg": seg,
             "service": {"requests_received": 0, "columns_sent": 0, "bytes_sent": 0,
+                        "wire_bytes": 0, "cols_zstd": 0, "cols_raw": 0,
                         "duplicate_skips": 0, "queue_full": 0, "up_to_date": 0,
                         "in_memory": 0, "disk_resolved": 0, "gen_drained": 0,
                         "superseded": 0, "range_filtered": 0, "re_resolved": 0,

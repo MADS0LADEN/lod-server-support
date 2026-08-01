@@ -32,3 +32,4 @@ scan.ring=int
 send_cycles=long
 server_enabled=boolean
 tracker_in_flight=int
+wire_received_bytes=long
