@@ -1,193 +1,199 @@
-# Timestamp persistence unification — implementation plan (v1, 2026-07-31)
+# Timestamp persistence unification — implementation plan (v2, post-review)
 
-Companion to `timestamp-store-unification-design.md` (the WHY and the semantics; this
-doc is the HOW). Scope: three phases on one branch family, each phase gated and
-subagent-reviewed before the next begins, per the repo's plan-execution convention.
-**Phase 0 is deliberately first and deliberately test-only** (user decision): the
-client resync path is the thinnest-covered area this work later touches, and the
-persistence swap must be caught by tests that existed BEFORE the swap.
+v1 was reviewed by 3 Opus agents (2026-08-01; round record in the design doc §10) and
+RESTRUCTURED: the review measured the original centerpiece (the `header > ts` boot
+sweep) at 68–96% stamp loss per restart on real worlds and re-shaped the work into
+independent deliverables. Companion: `timestamp-store-unification-design.md` (all
+semantics; §3.4 carries the measurement). Every step below cites the review finding
+that shaped it.
 
-Prerequisites: `feat/lod-store` merged to main. Branch: `feat/stamps-unification`
-(Phase 0 may land earlier as its own PR — pure test additions are safe on main and
-valuable regardless of whether the swap ever ships).
+**The restructure (R3, confirmed by R1/R2):**
 
----
-
-## Phase 0 — client resync-path regression net (test-only, no production changes)
-
-### 0.1 What the resync path IS (the inventory the tests must cover)
-
-`LodRequestManager` owns the client cache lifecycle:
-- **Join / dimension change:** `pendingCacheLoad = ColumnCacheStore.loadAsync(server,
-  dim)` — async load, adopted on completion into `ColumnStateMap` (stamps seed the
-  classify ladder: cached ts>0 re-declares "send if newer"; uncached → -1; legacy
-  0-stamps classify as "no data" → -1).
-- **Steady state:** received columns stamp the state map; `removeAsync` forgets
-  single positions (ingest-failure reports, ghost clears); dirty broadcasts revive
-  via `markDirtyIfKnown`; `NOT_GENERATED` parks in `sessionSatisfied` WITHOUT a
-  cache stamp.
-- **Departure:** `mergeSaveAsync(server, dim, snapshot)` — MERGE-save (union with
-  the on-disk map, eviction-capped) so a short session cannot clobber a long one's
-  stamps; `clearForServer` on server-initiated resets; `clearAll` behind
-  `/lss clearcache`; `flushPendingIo` (soak/benchmark sync flush).
-- **On disk:** `config/lss/cache/<sanitized-server>/<dim>.bin`, v4 header,
-  temp+atomic-rename saves, corruption/oversize/plausibility guards,
-  `MAX_CACHE_ENTRIES` 2M with `mergeEvictionCap` eviction.
-
-Existing coverage: `ColumnCacheStoreTest` (format guards), `ColumnStateMapTest`
-(classify ladder), `LodRequestManagerTest` (request-loop contract). The GAP is the
-*integration seam*: load→seed→declare→answer→merge-save round-trips, the async
-adoption windows, and any single suite that pins persistence SEMANTICS independently
-of the container.
-
-### 0.2 New test deliverables
-
-1. **`ClientStampsPersistenceContractTest` (the keystone).** A parameterized/abstract
-   contract suite written against a narrow seam interface extracted in this phase
-   (`ClientStampsPersistence`: load / mergeSave / remove / clearForServer / clearAll
-   — the exact surface `LodRequestManager` already consumes, made injectable). The
-   suite pins SEMANTICS, not format: merge-save unions and never clobbers; remove is
-   durable across a reload; eviction cap honored with newest-retained; a second
-   server's stamps are invisible to the first; load of nothing is empty, never null;
-   concurrent mergeSave calls for different dims don't interleave corruptly; a torn/
-   truncated backing store loads as empty (fail-open), never throws into the caller.
-   Phase 0 runs it against the BIN implementation; Phase 2 runs the identical suite
-   against the sqlite implementation — that is the regression net for the swap.
-2. **`ClientResyncRoundTripTest`.** Drives `LodRequestManager` through the injectable
-   seam with a scripted fake: join → async load completes → first scan declares
-   cached ts>0 / uncached -1 (pin the exact want-set); `UP_TO_DATE` consumes;
-   a dirty broadcast revives and re-declares; `reportIngestFailure` forgets the
-   stamp AND the persisted entry (`removeAsync` observed); dimension change swaps
-   maps without cross-dim leakage; disconnect triggers exactly one merge-save whose
-   snapshot equals the state map's stamps. Also the RACE pins: a load completing
-   AFTER the first scan (slow disk) must merge without clobbering fresher
-   session-received stamps; a load completing after a dimension change is discarded.
-3. **`ColumnCacheStoreTest` additions (bin-specific, kept until Phase 2 deletes the
-   bin).** Crash-shape cases: intact main + leftover `.tmp` loads main; truncated
-   main discards cleanly; merge-save onto a corrupt file replaces it.
-4. **Tier 3 extension (one assertion, not a new test):** `LSSClientGameTests` gains a
-   post-flush reload check — after the existing flow, flush, reload the cache for
-   the server+dim, assert the received columns' stamps are present (the e2e "it
-   actually persisted" pin the tier currently lacks).
-5. **Soak lens (no new scenario):** `warm-rejoin` and `clearcache-mid-session`
-   already exercise this live; add a `report.md`-level note only if Phase 1/2
-   recalibration needs it.
-
-### 0.3 Phase 0 exit gate
-
-All new tests green against CURRENT code (they pin today's behavior — any red is
-either a test bug or a live find, triaged before proceeding); the seam extraction is
-behavior-neutral (`LodRequestManager` diff is constructor-injection only); 2-subagent
-review of the suite's blind spots. Deliverable is valuable standalone even if the
-rest of this plan never runs.
+| Deliverable | Ships as | Blocked by |
+|---|---|---|
+| **PR-A** — client resync regression net (Phase 0, corrected) | its own PR to main | nothing |
+| **PR-B** — zero-cost stamp-ghost rungs, bin-side (optional, small, backportable) | its own PR | nothing |
+| **BAKE GATE** | — | store merged + RELEASED + live for weeks with no native/DB reports |
+| **Phase 1** — server stamps table, WRITE PATH ONLY | `feat/stamps-unification` | the bake gate |
+| **Phase 2** — client cache swap | its OWN plan doc when scheduled | PR-A (the contract suite) |
+| chash-suspect seal rung (design §3.4) | separately-gated decision | Phase 1 + a measurement rerun |
 
 ---
 
-## Phase 1 — server stamps table (the correctness phase)
+## PR-A — client resync regression net (Phase 0, corrected per R2)
 
-Design authority: the design doc §3-§7. Steps, each with its own gate:
+**Honest scope (R2 m3): NOT test-only.** It includes: the `ClientStampsPersistence`
+seam interface + a bin adapter delegating to the existing statics, a static
+`ClientStampsPersistence.active()` holder (default = the bin adapter), a DEFAULTED
+no-arg path + package-private setter on `LodRequestManager` (NOT a required ctor arg
+— 12 construction sites; R2 B3), retargeting `LSSClientCommands.clearAll` and
+`BenchmarkHook.flushPendingIo` onto the holder (the soak client flushes immediately
+before `Runtime.halt(0)` — miss it and every two-run soak scenario silently reads a
+stale cache), and one accessor (`LodRequestManager.getServerAddress()`) for the Tier
+3 pin. All behavior-neutral; reviewed as what it is.
 
-- **1a. Stamps machinery inside `SqliteLodStore`.** DDL (`stamps_<dimId>` WITHOUT
-  ROWID beside each blob table — created in `dimIdFor` and `loadDims`), new ops
-  `Op.StampPut(dim, long[] pos, long[] ts)` / `Op.StampDelete(dim, long[] pos)` on
-  the CONTROL queue (never shed; deletes commit immediately, same R1-M1 discipline —
-  extend that pin), `loadStamps(dim, capRows)` reader API (`ORDER BY ts DESC LIMIT`),
-  stamps arms in `Op.DropAll`. Unit tests: round-trip, delete durability across
-  reopen, drop-all clears stamps, cap-limited load returns newest.
-- **1b. `ColumnTimestampCache` dirty-delta + flush.** Per-dim dirty `LongOpenHashSet`
-  under the existing lock; `drainDirtyDeltas()` seam consumed by
-  `OffThreadProcessor`'s repurposed invalidation debounce → one batched StampPut per
-  flush; `invalidate()` fan-out extends the existing blob `DeleteRows` op to carry
-  stamp deletion; `invalidateStamps()` → `StampDelete`. Shutdown: final drain
-  enqueued before `store.shutdown()`. The miss memo untouched (never persisted —
-  re-pin). Unit tests: delta drain exactness (put-put-invalidate nets to nothing),
-  flush idempotence, memo survives StampDelete.
-- **1c. Stamps-mode factory.** `LodStores`/`SqliteLodStore` gain a stamps-only open
-  (no blob tables/serving/backfill/eviction; gauges honest — no blob-tier fields
-  invented). `lodStore=off` servers construct it; native-failure degrade = RAM-only
-  session stamps + one warn. Tests: mode matrix (off/memory/full × native-ok/fail),
-  stamps-mode accepts no deposits, diag renders truthfully.
-- **1d. Boot-sweep extension.** Examined regions drop stamp rows with `header > ts`
-  (strict — the design's boundary decision), vanished-region/absent-chunk drops
-  mirror blob rows. Tests: both boundary sides, the seal-closure scenario end-to-end
-  (edit → crash-simulated unflushed delete → reopen → sweep drops → re-resolve),
-  gen-cohort survival when the write PREdates the serve.
-- **1e. Migration.** `lss-timestamps.bin` present → import rows → delete file (the
-  bin READER survives one release as import-only; writer dies now). Test: import
-  round-trip incl. the buffered-IO boundary sizes the old suite pinned.
-- **1f. Dead-code deletion.** `TimestampSaveScheduler` + test, cache save/load +
-  bin-writer + atomic-rename code + their tests, `dataDir` plumbing (both service
-  wirings + both `OffThreadProcessor` subclasses). CLAUDE.md + exporter docs updated
-  in the same commit (the R4 lesson: docs drift red-flags reviews).
-- **1g. Live gates.** `cold-restart-resync` recalibrated FROM A RECORDING (the
-  design's §3.4 accepted cost: the save-trailed cohort re-resolves once, as store
-  hits where enabled — law A3's inequality absorbs it; verify, never hand-wave);
-  `dirty-while-offline` (should get STRONGER — offline edits now heal stamps by
-  sweep); kill -9 leg extended to assert stamps consistency; full `soak.sh all` both
-  platforms, plus one `lodStore=off` (stamps-mode) fresh-backfill + warm-rejoin pair
-  — the configuration every default server runs.
+**A.1 The contract suite (`ClientStampsPersistenceContractTest`)** — runs against the
+bin adapter now, the sqlite impl in Phase 2, unchanged. Seam signature carries
+`removals` and the eviction CENTER (R2 B1). Cases, corrected + extended:
+- merge-save unions file history, memory wins per position, and applies REMOVALS
+  before the memory overlay (a re-received position survives its own removal);
+- eviction keeps the `cap` entries NEAREST the supplied center (Chebyshev), farthest
+  evicted first — the REAL semantics (never "newest-retained"; `ts` is server
+  content time, not recency — R2 B1);
+- ORDERING group (R2 M2 — the invariant a sqlite swap is most likely to break): a
+  queued write does not survive a subsequently-submitted clear; a remove submitted
+  before a mergeSave for the same (server,dim) is never resurrected by it; flush()
+  makes every previously-submitted op durable; synchronous ops block BOUNDEDLY
+  (render-thread callers);
+- `defaultReturnValue == -1` on ALL load return paths (populated / missing /
+  wrong-version / bad-count / IO error — fastutil's default 0 breaks
+  `markDirtyIfKnown`);
+- `ts == 0` rows round-trip verbatim and stay purgeable — never fabricated for
+  absent keys, never normalized away (the v16 legacy-0-stamp contract); values
+  < -1 pass through unnormalized (the state map owns the clamp);
+- mergeSave of an empty map + empty removals is a no-op; with removals it runs and
+  may delete the store entry; clearForServer during an in-flight mergeSave ends
+  cleared; cross-dimension isolation for the same packed position; distinct raw
+  server strings are ISOLATED (pins the sqlite direction; the bin's
+  sanitize-collision merge becomes an impl-specific test + a release-notes line —
+  R2 m1);
+- holder coherence: clearAll/flush observed through `active()` affect the store the
+  manager writes to.
+The bin's 32 MB oversize case stays bin-only (R2 N5 — don't run it twice).
 
-Phase 1 exit: all above green, 2-subagent review, progress-file record.
+**A.2 `ClientResyncRoundTripTest`** — scoped to the three genuinely-uncovered races
+(R2 M1/M3; the plan's v1 list was part-covered, part-WRONG):
+- load-after-session-stamps is an UNCONDITIONAL OVERWRITE today (`loadFrom` puts
+  disk values over fresher session stamps) — pinned AS today's behavior; changing it
+  is a separate decision;
+- removeAsync-then-mergeSaveAsync same (server,dim) submit-order preservation (the
+  FIFO race, end-to-end through the manager);
+- two dimension changes inside one load window (the saveCache-drains-before-
+  startAsyncCacheLoad ordering contract); load completing after disconnect/teardown
+  is discarded.
+The v1 items already pinned elsewhere (wiring pin, cross-dim unstamp, abandoned-load
+window, ingest-failure-during-load, flush-drops-stale-load) are NOT re-implemented —
+§0.1's coverage inventory is rewritten from the real test list (R2 M1).
 
----
+**A.3 Bin crash shapes** (kept until the bin dies): leftover `.tmp` + intact main
+loads main; truncated main discards cleanly; merge onto corrupt replaces.
 
-## Phase 2 — client cache on the proven machinery
+**A.4 Tier 3 persistence pin** (~25-line step, not "one assertion" — R2 M4):
+pre-clear this server's cache at test start; capture address + received positions
+INSIDE the world block; after close: flush, reload via the seam, assert stamps
+present for non-rejected positions (the rejector/thrower positions excluded).
 
-- **2a. `ClientStampsDb`** (new, `common/store` or client package — decide at
-  review): a deliberately small standalone class (own file
-  `config/lss/lss-client-cache.db`, own single writer thread, WAL, busy_timeout,
-  meta version row, rows `(server TEXT, dim TEXT, pos INTEGER, ts INTEGER, PRIMARY
-  KEY(server, dim, pos))`). It implements the Phase 0 `ClientStampsPersistence` seam
-  — the contract suite is its acceptance test, byte-for-byte the same expectations
-  the bin implementation passed. Shares PATTERNS with `SqliteLodStore` (and any
-  trivially-extractable static helpers), not its lifecycle — the server class stays
-  untouched.
-- **2b. Swap the seam.** `LodRequestManager` constructor-injects the sqlite
-  implementation in production; `mergeSaveAsync` becomes delta-marking + debounced
-  flush (positions dirty since last flush) with a full merge-save retained ONLY as
-  the disconnect flush; `removeAsync`/`clearForServer`/`clearAll` map to keyed
-  deletes. The lazy native load happens at first LSS-server join; a native failure
-  degrades to session-RAM (cold rejoins) with one client-log line.
-- **2c. Migration + pruning.** First load per (server, dim): if the old bin file
-  exists, import → delete. Recency eviction: global row cap (2M, matching today)
-  evicting oldest-ts; dead-server pruning (rows for servers unseen in N days —
-  default 90, constant not config) at open, batched.
-- **2d. Deletion.** Bin writer/reader, path-sanitization, per-file guards, the
-  `config/lss/cache/` tree handling (after migration support ages out — keep the
-  import one release, same policy as Phase 1e).
-- **2e. Gates.** Contract suite green on sqlite; `ClientResyncRoundTripTest`
-  unchanged and green; Tier 3 incl. the 0.2(4) persistence assertion; soak
-  `warm-rejoin` + `clearcache-mid-session` + `cold-restart-resync` (client side);
-  a manual crash test (kill the client mid-session, rejoin, verify stamps survived
-  to the last flush) recorded in the progress file.
+**Exit gate:** all green against CURRENT code; any red is triaged as test-bug vs
+live-find before merge; 2-subagent review of suite blind spots.
 
----
+## PR-B — zero-cost stamp-ghost rungs (optional, backportable)
 
-## Cross-cutting
+The measured-safe fraction of the old fallback: at bin load, drop stamps whose
+region file is ABSENT or whose chunk slot is `loc == 0` (headers of only the
+regions that own stamps; 0 false drops measured on three real worlds). Closes the
+ghost-terrain stamp class on ALL FOUR support lines (the full plan never reaches
+the older three — R3). Explicitly NOT the `header > ts` rule (design §3.4). Small
+enough to ride any release; skip if the user prefers zero pre-bake motion.
 
-- **Progress file:** `docs/planning/stamps-unification-progress.md`, same running-
-  record discipline as the store plan.
-- **Review cadence:** 2-subagent review per phase boundary (this plan itself gets a
-  3-subagent review before any code).
-- **Rollback levers:** Phase 1 ships behind nothing (it replaces plumbing) — the
-  rollback is the branch, so phase-boundary merges are NOT tagged releases; only the
-  complete, soaked branch merges. Phase 2's swap point (2b) is a one-commit revert
-  by construction (seam injection).
-- **Explicit non-goals re-stated:** miss memo never persists; the up-to-date rung
-  and the client classify ladder never read sqlite; no wire changes; no Paper/Folia
-  divergence (stamps-mode is platform-shared `common/` code).
-- **Support lines:** 26.2 only, like the store (recorded).
+## BAKE GATE (R3 M4)
 
-## Open decisions for the plan review to challenge
+Phase 1 starts only after: `feat/lod-store` merged, RELEASED, and running on the
+live population (test server + any real adopters) for several weeks with no
+native-load or store.db incident. Rationale: Phase 1 makes the once-opt-in SQLite
+subsystem load-bearing on every server; the jar-in-jar native path currently has
+one manual boot of live evidence.
 
-1. Phase 1b flush cadence: reuse the ~2 s invalidation debounce vs a dedicated
-   stamps cadence (the debounce currently fires only after INVALIDATIONS — puts with
-   no invalidations may need their own timer; verify against the real trigger before
-   coding).
-2. Stamps-mode diag surface: new `store=stamps` token vs rendering as off-with-
-   stamps — pick whichever cannot mislead an admin reading `/lsslod diag`.
-3. `ClientStampsDb` package placement (common/store vs client) and whether ANY code
-   is genuinely shareable with `SqliteLodStore` or only the pattern.
-4. Client flush cadence + the disconnect-flush blocking budget (the soak client's
-   synchronous flush must stay possible).
-5. Whether Phase 0 lands on main ahead of the branch (recommended: yes).
+## Phase 1 — server stamps table, WRITE PATH ONLY (amended per R1)
+
+What ships: the delta write path + migration + dead-code deletion + the two
+zero-cost sweep rungs. What does NOT ship: any `header > ts` drop (design §3.4 —
+measured 68–96% loss; the chash-suspect rung is a separate gated decision).
+
+- **1a. Stamps machinery in `SqliteLodStore`.** `stamps_<dimId>` DDL;
+  `Op.StampPut(dim, pos[], ts[])` / `Op.StampDelete(dim, pos[])` on the control
+  queue, immediate-commit deletes; whole-table `loadStamps(dim)` (NO ORDER BY/LIMIT
+  — no ts index; bound = content-age trimming folded into the pass that already
+  scans the table); stamps arms audited into EVERY `lods_`-assuming path
+  (dropDimensionRows/sweep/eviction/DropAll/get/hasRow — a throw latches the store
+  off and stamp flushes silently vanish; R1 M-E). `Op.DropAll` does NOT touch
+  stamps (R1 MINOR-2 — the invalidate-all lever's documented contract; a stamps
+  wipe would be a new verb). Meta partition per design §3.5 (consequence-based:
+  mask/registry/wire/mc drop stamps, schema/codec don't).
+- **1b. Cache-side write path.** Dirty set inside `put()` (thread-confined — the
+  processing thread owns it, NO lock claims); DEDICATED ~2 s flush cadence (R1's
+  open-decision-1 answer: the invalidation debounce never arms on pure-serve
+  sessions and the periodic timer is ~5 min) emitting ONE array op per dimension
+  per flush — pinned ("never one op per position": the #62 class relocates to the
+  unbounded control queue otherwise); edit-path `StampDelete` INDEPENDENT and
+  unconditional on the stamps handle in all three modes, never gated on the RAM
+  removed-count (R1 M-B); not-found-path `StampDelete` GATED on removed > 0 (R1
+  MINOR-1); shutdown drain before store.shutdown; the three
+  OffThreadProcessorLifecycleTest pins RE-EXPRESSED (warm-resolve-after-restart,
+  exit-path flush, debounce-fires) — never deleted.
+- **1c. StampsStore handle + stamps-mode factory.** Separate narrow handle (design
+  §3.5 M2 — never through the blob attach slot); stamps-mode open for off/memory;
+  construction NOT behind the zstd codec probe (R1 M-E tail); degrade = RAM-only +
+  persistent `stamps=ram` diag token (R1's open-decision-2 answer: `store=off`
+  stays; independent `stamps=sqlite|ram|ram(latched)` token — golden VALUE updates
+  on both platforms + both exporters); own gauge/counters OUTSIDE `SERVER_DRAINS`
+  and outside the all-zero-while-off contract comment (R1 MINOR-4).
+- **1d. Sweep: the two zero-cost rungs only** (vanished region, `loc == 0`), over
+  the UNION of blob + stamp rows inside the same per-region block, `seen_mtime`
+  recorded after both (R1 M-A); drops fan out via the DEDICATED mailbox event
+  applying invalidateStamps only; adoption post-sweep via `adoptStamps` mailbox
+  event, never-clobber-fresher, never marks dirty (design §3.3a as corrected —
+  everything crosses to the processing thread through the mailbox, nothing touches
+  the maps off-thread; R1 B-2). Unplaceable dimensions retain stamps unverified
+  (R1 M-D).
+- **1e. Migration.** Import SYNCHRONOUSLY on the constructing thread beside
+  `openOrRecreateWriter()` (legacy path via Environment) — BEFORE the startup sweep
+  (R1 B-3: attachStore-time import lands after the sweep and `seen_mtime` hides the
+  rows forever); delete the bin + orphan `.tmp.*` files; reader retained a full
+  minor line. Test: an imported ghost stamp (vanished region) drops the SAME boot.
+- **1f. Deletion.** v1's ledger + R3's additions (13 test-rig dataDir params, the
+  cold-restart-resync docstring AND violation message, soak.sh comments, diag
+  goldens, exporter contracts, 3 CLAUDE.md sites) + R1's additions (saveExecutor +
+  thread factory + test seams, snapshotForSave, sweepOrphanedTempFiles + constant +
+  tests, the save-half of ColumnTimestampCacheTest — memo/eviction half stays,
+  timestamp-save-backlog-fix.md marked historical). Release-notes item for the
+  world-folder DB + the migration (R3 M7 tail).
+- **1g. Live gates.** `cold-restart-resync` re-derived from a recording under the
+  MINIMAL sweep (expect near-zero stamp loss now — the 1479-drop wave belonged to
+  the rejected rule); dirty-while-offline; kill -9 leg extended to stamps
+  consistency; full `soak.sh all` both platforms + one `lodStore=off` stamps-mode
+  fresh-backfill/warm-rejoin pair; Paper /reload two-writer check (design §9).
+
+**User decisions required BEFORE Phase 1 starts:** (a) Folia — adopting
+stamps-mode-everywhere permanently decides "no hard Folia store gate" (design §3.5
+M3); (b) whether the chash-suspect seal rung is wanted at all, ever (its price:
++8 bytes/row and one read per suspect position; its value: the full edit-seal — a
+hole R1 showed is already narrowed by Fabric's first-save self-heal and the
+millisecond delete window).
+
+## Phase 2 — client cache swap (EXTRACTED to its own plan when scheduled)
+
+Carried here only as corrected direction (full plan to be written against the
+landed PR-A suite): swap = one holder assignment (R2 B3); flush-eligibility rule —
+a stamp flushes only after its column LEFT the decode queue, removals commit
+with-or-before stamps (R2 B2: periodic flush otherwise inverts crash honesty into
+over-claiming — a flushed stamp whose consumer rejection died with the crash is a
+permanent hole); eviction keeps distance-from-center semantics or moves to an
+explicit `last_seen` column — NEVER oldest-`ts` (R2 B1); cap stays per-(server,dim)
+unless the multi-server budget change is deliberately accepted (R2 Q4); migration =
+LAZY per-(server,dim) forward-map import (scan-all is impossible — sanitization is
+lossy), bin marked-imported rather than deleted, whole tree removed one release
+later (R2 Q3); `ClientStampsDb` lives in the CLIENT package (common/ ships to the
+Paper jar and is Java 21 — R2 D3), sharing exactly one extracted helper (the native
+probe + `org.sqlite.tmpdir` guard); write-coalescing pin (one flush in flight, N
+stamps/interval = 1 flush — the #62 twin, R2 M7); retarget the four highest-value
+existing pins (three LodRequestManagerTest persistence tests +
+ClientColumnProcessorTest's disconnect-save) onto the seam in the swap PR (R2 M5).
+
+## Resolved decisions (were "open" in v1)
+
+1. Flush cadence → dedicated ~2 s stamps cadence (R1, definitive).
+2. Diag → independent `stamps=` token, `store=` untouched (R1).
+3. Client DB placement → client package + one shared helper (R2).
+4. Client flush → eligibility-gated + bounded synchronous waits + holder-routed
+   soak flush (R2).
+5. Phase 0 on main → yes, as its own honestly-scoped PR (R2 + R3).
