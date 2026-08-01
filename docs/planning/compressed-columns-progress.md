@@ -156,8 +156,34 @@ DONE 2026-08-01. Landed per plan §4:
 
 ## Phase 4 — validation
 
-Not started. Work list tracked in plan §5 (correctness + the compress_gate.sh CPU
-proof: G1/G1t/G2/G3/G4, premise pins, NativeMethodSample tooling fix).
+IN PROGRESS 2026-08-01.
+
+- **Tier 1** green both platforms; **Tier 2** green; **Tier 3 green incl. the new C7b
+  pin** (wire < raw received proves the compressed session negotiated end-to-end —
+  the test cannot silently pass raw).
+- Tooling: `compress_gate.sh` + `compress_gate_check.py` (selftest 6 cases) +
+  `analyze_profile_jfr.py` now counts `jdk.NativeMethodSample` (review B2 — the zip
+  band was blind to native deflate).
+
+### §5.2 CPU-proof — WARM arm: **PASS, 3/3 reps** (2026-08-01, stamp 20260801-130447)
+
+`./scripts/compress_gate.sh warm 3 150` — warm-join, lodStore=full both arms,
+~37.2k columns/run, interleaved same-box A/B:
+
+| Gate | rep1 | rep2 | rep3 | median | limit |
+|---|---|---|---|---|---|
+| P: OFF zlib ratio (premise) | 6.90 | 6.91 | 6.91 | — | ≥3.0 |
+| G1 server CPU-s/1k cols cut | +43.3% | +45.4% | +42.3% | **+43.3%** | ≥+10% |
+| G1t zip-band CPU/col cut | +89.7% (222→23 µs) | +90.2% | +87.2% | **+89.7%** | ≥+50% |
+| G2 client CPU/col ratio | 0.974 | 0.961 | 1.008 | 0.974 | ≤1.05 |
+| G3 socket bytes ratio | 1.114 | 1.114 | 1.115 | **1.114** | ≤1.15 |
+| G3x counted-wire/acked (ON) | 0.98 | 0.98 | 0.98 | — | 0.7..1.3 |
+| G4 columns parity | 0.06% | 0.01% | 0.02% | — | ≤5% |
+
+The CPU claim lands ~3x above the Phase-0-derived floor (the warm-join workload is
+store-hit-dominated, so the compression band is a larger whole-process fraction than
+the conservative 3-4 ms/col estimate assumed); wire cost lands exactly on the
+Phase 0 prediction (×1.12); the client is a slight net WIN, not just non-regressed.
 
 ## Decisions log
 
