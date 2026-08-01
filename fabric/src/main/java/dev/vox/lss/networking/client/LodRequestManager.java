@@ -165,6 +165,16 @@ public class LodRequestManager {
                 LSSClientNetworking.getQueuedColumnBytes(),
                 this.ingestBacklogSupplier.getAsInt(),
                 () -> countMissingVanillaChunks(level, playerCx, playerCz, viewDistance));
+        // Transport instrument (1 Hz, self-throttled): vanilla's ping/chunk-rate view of the
+        // shared connection next to LSS's byte rates — see ClientNetTrace and
+        // docs/planning/elytra-chunk-wall-investigation-2026-08-01.md §8.2. After the tick
+        // body so the queue/backlog numbers it reports are this tick's.
+        if (ClientTraceLog.enabled()) {
+            ClientNetTrace.maybeEmit(mc, player, level, viewDistance,
+                    LSSClientNetworking.getQueuedColumnCount(),
+                    LSSClientNetworking.getQueuedColumnBytes(),
+                    this.lastIngestBacklog, this.tracker.size());
+        }
     }
 
     /**

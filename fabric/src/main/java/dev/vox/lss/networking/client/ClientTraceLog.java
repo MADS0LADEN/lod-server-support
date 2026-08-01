@@ -6,6 +6,7 @@ import net.minecraft.client.Minecraft;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -18,14 +19,27 @@ import java.time.format.DateTimeFormatter;
  * {@code /vss}); writes compact JSONL to {@code logs/<brand>-trace-<timestamp>.jsonl} in the
  * game directory (the filename prefix follows {@link dev.vox.lss.common.Brand}). Disabled it
  * costs one volatile read per hook — every formatting happens behind the gate. Main
- * client thread only (every hook site lives on it); the writer flushes per line so a
- * crash or force-quit loses nothing.
+ * client thread only (every hook site lives on it).
+ *
+ * <p><b>Flush policy</b> (2026-08-01, elytra-wall investigation part II): the writer holds a
+ * 64 KB buffer and flushes at most every {@link #FLUSH_INTERVAL_MS} ms. It used to flush per
+ * line, which is one write syscall per event — and {@code col}/{@code col_light} fire PER
+ * COLUMN, so at the ~700 columns/s of a backfill wall the instrument became a measurable
+ * client-side load on exactly the thing it was measuring. A force-quit now loses at most
+ * {@link #FLUSH_INTERVAL_MS} of trace, which is the deliberate trade.
  */
 final class ClientTraceLog {
+
+    /** Trace writer buffer — sized so a wall-rate burst of {@code col} lines costs ~5
+     *  syscalls/s instead of ~700. */
+    private static final int BUFFER_CHARS = 64 * 1024;
+    /** Upper bound on trace lost to a client crash / force-quit. */
+    private static final long FLUSH_INTERVAL_MS = 200;
 
     private static volatile boolean enabled;
     private static BufferedWriter writer;
     private static long startMs;
+    private static long lastFlushMs;
 
     static boolean enabled() {
         return enabled;
@@ -63,8 +77,13 @@ final class ClientTraceLog {
         var path = Minecraft.getInstance().gameDirectory.toPath().resolve("logs").resolve(name);
         try {
             Files.createDirectories(path.getParent());
-            writer = Files.newBufferedWriter(path, StandardCharsets.UTF_8);
+            writer = new BufferedWriter(new OutputStreamWriter(
+                    Files.newOutputStream(path), StandardCharsets.UTF_8), BUFFER_CHARS);
             startMs = System.currentTimeMillis();
+            lastFlushMs = startMs;
+            // Drop the net-event rate baselines: the first sample of a new trace must not
+            // report a byte rate averaged over the gap since the previous one.
+            ClientNetTrace.reset();
             enabled = true;
             return new Toggle(path, false);
         } catch (IOException e) {
@@ -80,9 +99,13 @@ final class ClientTraceLog {
     static synchronized void event(String type, String body) {
         if (!enabled || writer == null) return;
         try {
-            writer.write("{\"t\":\"" + type + "\",\"ms\":" + (System.currentTimeMillis() - startMs)
+            long now = System.currentTimeMillis();
+            writer.write("{\"t\":\"" + type + "\",\"ms\":" + (now - startMs)
                     + (body.isEmpty() ? "" : "," + body) + "}\n");
-            writer.flush();
+            if (now - lastFlushMs >= FLUSH_INTERVAL_MS) {
+                writer.flush();
+                lastFlushMs = now;
+            }
         } catch (IOException e) {
             enabled = false;
             try {

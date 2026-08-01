@@ -12,6 +12,7 @@
     "ChunkSaveDataHook"
   ],
   "client": [
-    "IntegratedServerLanHook"
+    "IntegratedServerLanHook",
+    "AccessorClientPacketListener"
   ]
 }
