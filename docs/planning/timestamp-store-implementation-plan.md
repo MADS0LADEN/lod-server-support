@@ -163,12 +163,17 @@ measured 68–96% loss; the chash-suspect rung is a separate gated decision).
   consistency; full `soak.sh all` both platforms + one `lodStore=off` stamps-mode
   fresh-backfill/warm-rejoin pair; Paper /reload two-writer check (design §9).
 
-**User decisions required BEFORE Phase 1 starts:** (a) Folia — adopting
-stamps-mode-everywhere permanently decides "no hard Folia store gate" (design §3.5
-M3); (b) whether the chash-suspect seal rung is wanted at all, ever (its price:
-+8 bytes/row and one read per suspect position; its value: the full edit-seal — a
-hole R1 showed is already narrowed by Fabric's first-save self-heal and the
-millisecond delete window).
+**User decisions — RESOLVED (2026-08-01):**
+(a) **Folia: no hard gate — release-note wording only** ("untested, leave it off").
+The user accepts that stamps-mode-everywhere forecloses a code-level Folia store
+gate permanently; when `folia-supported` returns, the Folia validation pass must
+include a stamps-mode leg, and the release notes carry the untested warning until
+then. This also closes the store round's open item (b) the same way.
+(b) **No chash-suspect seal rung — declined.** The write-path plan is the accepted
+tradeoff: immediate-commit deletes (milliseconds crash window) + Fabric's
+first-save self-heal + the zero-cost ghost rungs are the shipped seal. The rung
+stays recorded in design §3.4 as the designed remedy, to be revisited ONLY if a
+live stale-seal is ever reported — no reserved column, no partial machinery.
 
 ## Phase 2 — client cache swap (EXTRACTED to its own plan when scheduled)
 

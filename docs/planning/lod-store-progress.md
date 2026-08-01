@@ -1063,3 +1063,10 @@ Still open for the USER (final): (a) §0 metric-2-as-written 62.2% vs 70%;
 (c) recorded future work: live mask/region resolvers, Paper backfill parity,
 multi-player unfired-event, 7.6-vs-5.3 KB/col, a backfill-enabled soak scenario
 (allowlist key ready), lodStore=memory burn-in leg.
+
+**Open-item resolution (2026-08-01, user):** the review-round's "(b) whether Folia
+should get a hard store-off gate or stay wording-only" is DECIDED: **wording only**
+("untested, leave it off" in the release notes; no code gate). Decided together with
+the stamps-unification plan's Folia question — see
+timestamp-store-unification-design.md §3.5 — which forecloses a code gate anyway;
+the future `folia-supported` re-add must include store + stamps-mode validation legs.

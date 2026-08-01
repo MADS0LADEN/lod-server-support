@@ -175,12 +175,14 @@ rule over bin-loaded stamps) as originally specified.
 - **The two measured-zero-cost rungs only:** vanished-region and `loc == 0` drops
   (a stamp for a chunk that no longer exists is unconditionally wrong — 0 drops on
   all three real worlds, closes the ghost-terrain class).
-- **The full seal, IF deemed worth buying, is bought with content identity, not save
-  time (R1 option 3):** carry `chash` on the stamp row (both platforms already hash
-  served bytes); `header > ts` marks a stamp SUSPECT instead of dropping it — the
-  next declaration forces one NBT read, and an equal hash answers `up_to_date` and
-  re-stamps. Cost: one disk read per suspect position, ZERO wire traffic. This is a
-  measurement-gated, separately-scheduled decision — not part of the initial swap.
+- **The full seal — DECLINED by the user (2026-08-01).** The correct mechanism is
+  recorded for posterity: content identity, not save time (R1 option 3) — carry
+  `chash` on the stamp row; `header > ts` marks a stamp SUSPECT instead of dropping
+  it; the next declaration forces one NBT read, an equal hash answers `up_to_date`
+  and re-stamps (one read per suspect position, ZERO wire traffic). Not scheduled,
+  no column reserved: the write path's millisecond delete window + Fabric's
+  first-save self-heal + the ghost rungs are the accepted seal. Revisit ONLY if a
+  live stale-seal is ever reported.
 - Context that shrinks the seal's residual value (R1): on Fabric an offline edit
   already self-heals — `DirtyContentFilter` treats the first observed save of a
   position as changed, marking dirty and invalidating the stamp; and the
@@ -241,11 +243,12 @@ sqlite native already ships in every release jar regardless of config.
 - **Degrade honesty (M7).** Stamps must not sit behind the zstd codec probe (they
   compress nothing — a zstd failure must not cost stamps); the degraded RAM-only
   state gets a persistent `/lsslod diag` token, not just one boot warning.
-- **Folia (M3).** Adopting stamps-mode-everywhere DECIDES the still-open user
-  question "hard store-off gate on Folia?" as **no gate, ever** (a gate would force
-  the bin file back = the rejected two-paths outcome). This must be explicitly
-  acknowledged by the user before Phase 1 starts, and stamps-mode inherits the
-  store's zero-Folia-validation status the day `folia-supported` returns.
+- **Folia (M3) — DECIDED by the user (2026-08-01): no hard gate, release-note
+  wording only** ("untested, leave it off"). Adopting stamps-mode-everywhere
+  forecloses a code-level Folia store gate permanently (a gate would force the bin
+  file back = the rejected two-paths outcome) — accepted. When `folia-supported`
+  returns, the Folia validation pass includes a stamps-mode leg; the release notes
+  carry the untested warning until then.
 - **Support surface.** Every world folder gains `lss-lod/store.db(-wal/-shm)` + the
   extracted native, and the JVM gains the `org.sqlite.tmpdir` property,
   unconditionally — a user-visible change requiring a release-notes item ("why is
