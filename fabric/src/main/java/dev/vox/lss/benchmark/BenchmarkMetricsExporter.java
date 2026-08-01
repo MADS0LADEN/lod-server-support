@@ -438,6 +438,11 @@ public final class BenchmarkMetricsExporter {
         scan.put("missing_vanilla", manager != null ? manager.getMissingVanillaChunks() : 0);
         scan.put("budget", manager != null ? manager.getLastBudget() : 0);
         scan.put("queued", manager != null ? manager.getLastQueued() : 0);
+        // Adaptive-cadence liveness (docs/planning/adaptive-scan-cadence-design.md §8's
+        // acceptance criterion): fast-fire count — ~0 across a warm backfill means a gate
+        // is suppressing the feature. Additive key; check_soak.py validates top-level
+        // client keys only.
+        scan.put("fast", manager != null ? manager.getFastScans() : 0L);
         result.put("scan", scan);
 
         // Declared-and-unanswered (the awaiting-answer set), replaced per scan.

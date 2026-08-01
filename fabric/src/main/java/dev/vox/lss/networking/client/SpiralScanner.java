@@ -44,8 +44,10 @@ class SpiralScanner {
     static final int FAST_RESCAN_OUTSTANDING_DIVISOR = 20;
     /**
      * Fast fires require MILD downstream pressure at most: each pipe signal below 1/4 of its
-     * halt threshold (decode queue &lt; 1500 columns, consumer ingest backlog &lt; 1536
-     * sections at the production constants). Deliberately proportional, NOT strict zero: a
+     * halt threshold (decode queue &lt; 1500 columns AND &lt; 48 MiB queued bytes — the byte
+     * halt is the one that binds for real terrain columns — and consumer ingest backlog
+     * &lt; 1536 sections at the production constants). Deliberately proportional, NOT strict
+     * zero: a
      * received column leaves the awaiting set and enters the decode queue in the same
      * network-handler statement pair, so at the instant outstanding reaches 5% the queue
      * holds that batch's peak — a strict-zero gate would suppress the fast path in exactly
@@ -90,9 +92,11 @@ class SpiralScanner {
     private int lastBudget;
     private int lastQueued;
 
-    // Cached Voxy view distance — rechecked every 20 walk invocations (~20 s at the 1 Hz
-    // fallback, as fast as ~5 s under sustained fast cadence; the lookup is a cheap
-    // MethodHandle call, so fresher is fine)
+    // Cached Voxy view distance — refreshed every 20th getEffectiveLodDistance()
+    // INVOCATION, and the walk is not the dominant caller: getPruneDistance() reads it per
+    // received column and per movement crossing, so the effective window is sub-second
+    // whenever columns are arriving (pinned by voxyDistanceRefreshIsInvocationCountBased…).
+    // The lookup is a cheap MethodHandle call, so fresher is fine.
     private int cachedVoxyDistance = -1; // -1 = not present
     private int voxyDistanceStaleness = 0;
 
@@ -114,22 +118,29 @@ class SpiralScanner {
      */
     int maybeScan(int playerCx, int playerCz, int viewDistance,
                   int columnQueueSize, int columnQueueHaltThreshold,
+                  long columnQueueBytes, long columnQueueByteHaltThreshold,
                   int ingestBacklogSections, int ingestBacklogHaltThreshold,
                   IntSupplier missingVanilla,
                   ColumnStateMap columns,
                   long[] posOut, long[] tsOut) {
         int ticksSinceFire = ++this.scanTickCounter;
         boolean fast = ticksSinceFire < LSSConstants.TICKS_PER_SECOND;
-        if (fast && !fastRescanDue(ticksSinceFire, columnQueueSize, columnQueueHaltThreshold,
+        if (fast && !fastRescanDue(ticksSinceFire, playerCx, playerCz, viewDistance, columns,
+                columnQueueSize, columnQueueHaltThreshold,
+                columnQueueBytes, columnQueueByteHaltThreshold,
                 ingestBacklogSections, ingestBacklogHaltThreshold)) {
             return -1;
         }
         // Either fire resets the counter: the 20-tick fallback measures from the LAST batch
-        // ("more than 1 s since the last declaration ⇒ fire regardless"), which bounds any
-        // position a fast walk omitted (budget/center shift under movement) at
-        // TICKS_PER_SECOND + FAST_RESCAN_MIN_INTERVAL_TICKS - 1 = 39 ticks to re-declaration.
+        // ("more than 1 s since the last declaration ⇒ fire regardless"). A position a fast
+        // walk omitted (budget/center shift under movement) waits at most
+        // 2*TICKS_PER_SECOND - 1 = 39 ticks for its re-declaration when ONE fast fire
+        // intervenes; a chain of budget-truncated fast walks can extend that, all
+        // self-healing by re-declaration.
         this.scanTickCounter = 0;
 
+        // "Last" can be arbitrarily old under SUSTAINED fast cadence (a long warm backfill
+        // never takes the periodic branch) — acceptable for a diagnostic-only stat.
         if (!fast) this.missingVanillaChunks = missingVanilla.getAsInt();
 
         // Compute scan budget: base × pressure-scale. The base is
@@ -192,24 +203,39 @@ class SpiralScanner {
      * and the v16 protocol versions, so {@code != 16} is exact today and stays conservative
      * if an intermediate legacy dialect ever lands.
      *
-     * <p>The {@code confirmedRing > 0} term is the walk-cost gate: movement
-     * ({@link #recenter}), dirty re-opens ({@link #resetConfirmedRing}) and actionable
-     * retries all zero the confirmed prefix, and a zero-prefix walk re-walks from ring 0
-     * (the render-thread-hitch shape documented at the 2048 ceiling above) — those walks
-     * stay at the 1 Hz fallback; only cheap frontier walks run fast.
+     * <p>The walk-cost gate has two halves, because the prefix resets in two tempos: the
+     * {@code confirmedRing > 0} term sees the SYNCHRONOUS invalidations — movement
+     * ({@link #recenter}) and dirty re-opens ({@link #resetConfirmedRing}) zero the field
+     * before the next tick's predicate — while the {@code hasActionableRetries} term sees
+     * the IN-WALK one: an actionable retry mark resets the prefix inside {@code scan()}
+     * (after this predicate already ran) and the walk always re-derives
+     * {@code confirmedRing >= 1} (ring 0 is empty), so the field alone can never gate it.
+     * Either way a zero-prefix walk re-walks from ring 0 (the render-thread-hitch shape
+     * documented at the 2048 ceiling above) — those walks stay at the 1 Hz fallback; only
+     * cheap frontier walks run fast.
+     *
+     * <p>Caller contract: the halt thresholds must be positive (production passes the
+     * constants; a zero threshold would divide-by-zero on count/ingest and fail closed on
+     * bytes).
      */
-    private boolean fastRescanDue(int ticksSinceFire, int columnQueueSize, int columnQueueHaltThreshold,
+    private boolean fastRescanDue(int ticksSinceFire, int playerCx, int playerCz, int viewDistance,
+                                  ColumnStateMap columns,
+                                  int columnQueueSize, int columnQueueHaltThreshold,
+                                  long columnQueueBytes, long columnQueueByteHaltThreshold,
                                   int ingestBacklogSections, int ingestBacklogHaltThreshold) {
         if (ticksSinceFire < FAST_RESCAN_MIN_INTERVAL_TICKS) return false;
+        if (!this.adaptiveCadenceEnabled.getAsBoolean()) return false;
         if (this.lastSentCount <= 0) return false; // disarmed: converged, send-failed, or never declared
-        if (this.outstandingSupplier == null || !this.adaptiveCadenceEnabled.getAsBoolean()) return false;
+        if (this.outstandingSupplier == null) return false;
         if (this.sessionConfig == null
                 || this.sessionConfig.protocolVersion() == LSSConstants.V16_COMPAT_PROTOCOL_VERSION) {
             return false;
         }
         if (this.confirmedRing <= 0) return false;
         if (columnQueueSize >= columnQueueHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR) return false;
+        if (columnQueueBytes >= columnQueueByteHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR) return false;
         if (ingestBacklogSections >= ingestBacklogHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR) return false;
+        if (columns.hasActionableRetries(playerCx, playerCz, viewDistance)) return false;
         return this.outstandingSupplier.getAsInt()
                 <= this.lastSentCount / FAST_RESCAN_OUTSTANDING_DIVISOR;
     }

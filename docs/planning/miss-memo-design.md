@@ -152,10 +152,13 @@ end-to-end: far held -> minted near admits instantly -> far follows after the cl
 ## Goal
 
 Under server-owned generation, a position waiting for a generation slot re-reads disk at
-~1 Hz until a slot frees (the deliberate miss-churn loop pinned by the
+the client's scan cadence — ~1 Hz when written; since the adaptive scan cadence
+(docs/planning/adaptive-scan-cadence-design.md) up to 4 Hz — until a slot frees (the
+deliberate miss-churn loop pinned by the
 `generation-capacity-stress` soak: re-declare → SYNC slot → disk read → not-found →
 gen-full drop → repeat). On a fresh world this is hundreds of cheap not-found reads per
-player per second for minutes. The memo records "this chunk was authoritatively absent on
+player per second for minutes (and any `missMemoTtlSeconds: 0` A/B baseline recorded
+before the adaptive cadence understates the re-read rate it now prevents). The memo records "this chunk was authoritatively absent on
 disk at time T" server-side, so a re-declared miss within the TTL **skips the redundant
 read and falls through to the generation decision immediately** — freeing SYNC slots and
 reader-pool capacity for positions that might actually have data.

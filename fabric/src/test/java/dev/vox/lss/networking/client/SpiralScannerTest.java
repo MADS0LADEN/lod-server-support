@@ -83,6 +83,7 @@ class SpiralScannerTest {
                                 ColumnStateMap columns, Sink queue) {
         for (int i = 0; i < LSSConstants.TICKS_PER_SECOND + 1; i++) {
             int n = s.maybeScan(CX, CZ, viewDistance, columnQueueSize, columnQueueHaltThreshold,
+                    0L, Long.MAX_VALUE,
                     ingestBacklog, ingestBacklogHalt,
                     () -> missingVanilla, columns, queue.pos, queue.ts);
             if (n >= 0) { queue.count = Math.max(n, 0); return n; }
@@ -99,7 +100,7 @@ class SpiralScannerTest {
                                     ColumnStateMap columns, Sink queue) {
         for (int i = 0; i < LSSConstants.TICKS_PER_SECOND + 1; i++) {
             int n = s.maybeScan(cx, cz, viewDistance, columnQueueSize, columnQueueHaltThreshold,
-                    -1, 1000,
+                    0L, Long.MAX_VALUE, -1, 1000,
                     () -> missingVanilla, columns, queue.pos, queue.ts);
             if (n >= 0) { queue.count = Math.max(n, 0); return n; }
         }
@@ -551,12 +552,12 @@ class SpiralScannerTest {
 
         // A fresh scanner is primed: the very FIRST cadence call must fire (join burst),
         // not the 20th — the fireScan helper used elsewhere cannot tell those apart.
-        int first = s.maybeScan(CX, CZ, 2, 0, 1000, -1, 1000, () -> 0, new ColumnStateMap(), queue.pos, queue.ts);
+        int first = s.maybeScan(CX, CZ, 2, 0, 1000, 0L, Long.MAX_VALUE, -1, 1000, () -> 0, new ColumnStateMap(), queue.pos, queue.ts);
         assertEquals(8 * 3 + 8 * 4, first, "first maybeScan on a fresh scanner must fire and queue the annulus");
 
         // reset() (new session / flushCache) re-primes: again a single call fires.
         s.reset();
-        int afterReset = s.maybeScan(CX, CZ, 2, 0, 1000, -1, 1000, () -> 0, new ColumnStateMap(), queue.pos, queue.ts);
+        int afterReset = s.maybeScan(CX, CZ, 2, 0, 1000, 0L, Long.MAX_VALUE, -1, 1000, () -> 0, new ColumnStateMap(), queue.pos, queue.ts);
         assertEquals(8 * 3 + 8 * 4, afterReset, "first maybeScan after reset() must fire immediately");
     }
 
@@ -610,7 +611,7 @@ class SpiralScannerTest {
         // cadence alone — the old debounce restarted it here, which starved scanning (and
         // re-declaration with it) for as long as crossings outpaced the window.
         for (int i = 0; i < LSSConstants.TICKS_PER_SECOND - 1; i++) {
-            assertEquals(-1, s.maybeScan(CX, CZ, 2, 0, 1000, -1, 1000, () -> 0, columns, queue.pos, queue.ts));
+            assertEquals(-1, s.maybeScan(CX, CZ, 2, 0, 1000, 0L, Long.MAX_VALUE, -1, 1000, () -> 0, columns, queue.pos, queue.ts));
         }
         s.recenter();
 
@@ -618,7 +619,7 @@ class SpiralScannerTest {
                 "movement must zero ring confirmation (the confirmed prefix belonged to the old center)");
         assertTrue(columns.hasRetries(), "movement preserves in-range retry marks");
         queue.clear();
-        int n = s.maybeScan(CX, CZ, 2, 0, 1000, -1, 1000, () -> 0, columns, queue.pos, queue.ts);
+        int n = s.maybeScan(CX, CZ, 2, 0, 1000, 0L, Long.MAX_VALUE, -1, 1000, () -> 0, columns, queue.pos, queue.ts);
         assertEquals(1, n, "the in-progress cadence window completes ON SCHEDULE through a"
                 + " recenter and the scan re-walks the disc, declaring the retry");
         assertEquals(List.of(retried), queue.positions(n));
@@ -672,7 +673,7 @@ class SpiralScannerTest {
 
         assertEquals(0, s.getConfirmedRing(), "reset() zeroes ring confirmation");
         assertFalse(columns.hasRetries(), "session state cleared with the map");
-        int first = s.maybeScan(CX, CZ, 2, 0, 1000, -1, 1000, () -> 0, columns, queue.pos, queue.ts);
+        int first = s.maybeScan(CX, CZ, 2, 0, 1000, 0L, Long.MAX_VALUE, -1, 1000, () -> 0, columns, queue.pos, queue.ts);
         assertEquals(8 * 3 + 8 * 4, first,
                 "reset() primes the cadence: the rejoin scan fires on the FIRST call");
     }
@@ -1048,10 +1049,12 @@ class SpiralScannerTest {
             return declared;
         }
 
-        int tickOnce() { return tickOnce(0, 1000, -1, 1000); }
+        int tickOnce() { return tickOnce(0, 1000, 0L, 1L << 30, -1, 1000); }
 
-        int tickOnce(int queueSize, int queueHalt, int ingest, int ingestHalt) {
-            int n = this.s.maybeScan(CX, CZ, 2, queueSize, queueHalt, ingest, ingestHalt,
+        int tickOnce(int queueSize, int queueHalt, long queueBytes, long queueByteHalt,
+                     int ingest, int ingestHalt) {
+            int n = this.s.maybeScan(CX, CZ, 2, queueSize, queueHalt, queueBytes, queueByteHalt,
+                    ingest, ingestHalt,
                     () -> { this.missingVanillaCalls++; return 0; },
                     this.columns, this.q.pos, this.q.ts);
             if (n >= 0) this.q.count = Math.max(n, 0);
@@ -1059,11 +1062,12 @@ class SpiralScannerTest {
         }
 
         /** Drives until the next fire; returns the 1-based tick it fired on (fails past 20). */
-        int ticksToFire() { return ticksToFire(0, 1000, -1, 1000); }
+        int ticksToFire() { return ticksToFire(0, 1000, 0L, 1L << 30, -1, 1000); }
 
-        int ticksToFire(int queueSize, int queueHalt, int ingest, int ingestHalt) {
+        int ticksToFire(int queueSize, int queueHalt, long queueBytes, long queueByteHalt,
+                        int ingest, int ingestHalt) {
             for (int t = 1; t <= LSSConstants.TICKS_PER_SECOND; t++) {
-                if (tickOnce(queueSize, queueHalt, ingest, ingestHalt) >= 0) return t;
+                if (tickOnce(queueSize, queueHalt, queueBytes, queueByteHalt, ingest, ingestHalt) >= 0) return t;
             }
             throw new AssertionError("cadence never fired within a fallback window");
         }
@@ -1146,11 +1150,30 @@ class SpiralScannerTest {
         var rig = new AdaptiveRig();
         rig.primeAndArm();
         rig.outstanding = 0;
-        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(250, 1000, -1, 1000),
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(250, 1000, 0L, 1L << 30, -1, 1000),
                 "queue at exactly 1/4 of its halt threshold blocks the fast fire");
         rig.s.noteDeclared(rig.q.count);
         rig.outstanding = 0;
-        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(249, 1000, -1, 1000),
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS,
+                rig.ticksToFire(249, 1000, 0L, 1L << 30, -1, 1000),
+                "just below the 1/4 line the fast fire proceeds");
+    }
+
+    @Test
+    void byteQueueGateBlocksAtAQuarterOfItsHaltThreshold() {
+        // The byte pipe is the halt term that actually BINDS for real terrain columns
+        // (columns > ~32 KiB hit the byte halt before the count halt), so the fast gate
+        // must cover it too — a count-only gate left the fast path open at 74% of the
+        // binding halt (implementation-review finding).
+        var rig = new AdaptiveRig();
+        rig.primeAndArm();
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(0, 1000, 250L, 1000L, -1, 1000),
+                "queued bytes at exactly 1/4 of the byte-halt threshold block the fast fire");
+        rig.s.noteDeclared(rig.q.count);
+        rig.outstanding = 0;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS,
+                rig.ticksToFire(0, 1000, 249L, 1000L, -1, 1000),
                 "just below the 1/4 line the fast fire proceeds");
     }
 
@@ -1159,11 +1182,12 @@ class SpiralScannerTest {
         var rig = new AdaptiveRig();
         rig.primeAndArm();
         rig.outstanding = 0;
-        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(0, 1000, 250, 1000),
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(0, 1000, 0L, 1L << 30, 250, 1000),
                 "consumer ingest backlog at 1/4 of its halt threshold blocks the fast fire");
         rig.s.noteDeclared(rig.q.count);
         rig.outstanding = 0;
-        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(0, 1000, 249, 1000),
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS,
+                rig.ticksToFire(0, 1000, 0L, 1L << 30, 249, 1000),
                 "below the line it proceeds (and -1 no-signal always passes — every other test here)");
     }
 
@@ -1266,6 +1290,54 @@ class SpiralScannerTest {
         assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
                 "the deliberate post-dimension-change 20-tick wait cannot be bypassed by a"
                         + " stale armed count over the new dimension's empty awaiting set");
+        // The fire above re-derived the prefix (ring 0 confirms trivially), so the
+        // walk-cost gate is now OPEN — only the disarm can be holding the fast path.
+        // Without re-arming, the next window must still be periodic: this half is what
+        // makes the DISARM assertion non-vacuous (the first window was held by both).
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "resetScanCounter() disarmed: no fast fire until the manager arms a fresh declare");
+    }
+
+    @Test
+    void actionableRetryMarksHoldFastFiresLikeAnyPrefixInvalidation() {
+        // The IN-WALK prefix reset: an actionable retry mark zeroes the prefix inside
+        // scan() — after the gate's confirmedRing read — and every walk re-derives
+        // confirmedRing >= 1, so the field alone can never see it (all three
+        // implementation reviewers' shared MAJOR). The gate consults hasActionableRetries
+        // directly: retry-forced from-ring-0 re-walks ride the 1 Hz fallback, exactly
+        // like movement and dirty re-opens.
+        var rig = new AdaptiveRig();
+        rig.primeAndArm();
+        rig.outstanding = 0;
+        long target = PositionUtil.packPosition(3, 0); // in the declared annulus (outside vd 2)
+        rig.columns.onReceived(target, 5000L);
+        rig.columns.onIngestFailed(target); // consumer rejection: unstamp + retry mark
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "an actionable retry mark holds the fast cadence (its walk re-walks from ring 0)");
+        // The mark is answer-consumed, so it survives the walk — the hold persists...
+        rig.s.noteDeclared(rig.q.count);
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "still held while the mark is unconsumed");
+        // ...until the re-serve lands and consumes it.
+        rig.columns.onReceived(target, 6000L);
+        rig.s.noteDeclared(rig.q.count);
+        rig.outstanding = 0;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(),
+                "mark consumed: the fast cadence resumes");
+    }
+
+    @Test
+    void adaptiveCadenceConstantsArePinned() {
+        // Numeric pins (implementation-review M4): every behavioral test references these
+        // symbolically, so a constant drift (e.g. floor 5 -> 1 = a 20 Hz / 5x-upstream
+        // ceiling) would pass the whole suite green without this.
+        assertEquals(5, SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS,
+                "250 ms floor — the 4 Hz ceiling every cost bound (C2S upstream, walk rate) assumes");
+        assertEquals(20, SpiralScanner.FAST_RESCAN_OUTSTANDING_DIVISOR, "the 5% completion threshold");
+        assertEquals(4, SpiralScanner.FAST_RESCAN_PRESSURE_DIVISOR,
+                "fast fires only below 1/4 of each halt threshold (count, bytes, ingest)");
     }
 
     @Test

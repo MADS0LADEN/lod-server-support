@@ -195,8 +195,8 @@ public class LodRequestManager {
         }
         this.backpressureClearSent = false;
         if (!tickCacheGatePhase()) return;
-        tickScanPhase(playerCx, playerCz, viewDistance, columnQueueSize, ingestBacklogSections,
-                missingVanilla);
+        tickScanPhase(playerCx, playerCz, viewDistance, columnQueueSize, columnQueueBytes,
+                ingestBacklogSections, missingVanilla);
     }
 
     /** The explicit backpressure clear: an empty want-set replaces the server backlog with nothing. */
@@ -204,6 +204,12 @@ public class LodRequestManager {
         if (ClientTraceLog.enabled()) ClientTraceLog.event("clear_batch", "");
         try {
             this.batchSender.send(new BatchChunkRequestC2SPayload(new long[0], new long[0], 0));
+            // A real (empty) declaration went out — disarm the fast cadence with it. The
+            // tracker is deliberately NOT replaced (late-status gating still wants the
+            // pre-halt awaiting set), so without this the one declaration path that
+            // bypasses tickScanPhase would leave "lastSentCount == what was declared"
+            // false and invite a fast re-declare storm right out of the halt.
+            this.scanner.noteDeclared(0);
         } catch (Exception e) {
             LSSLogger.error("Failed to send backpressure clear batch", e);
             this.backpressureClearSent = false; // retry on the next halted tick
@@ -306,17 +312,19 @@ public class LodRequestManager {
     }
 
     /**
-     * Periodic scan (every 20 ticks): build the complete want-set and send it as ONE batch in
-     * the same tick. A walked-but-empty scan (0) sends NOTHING — the convergence invariant that
+     * Scan phase (adaptive cadence: 20-tick fallback + completion-triggered fast re-scans):
+     * build the complete want-set and send it as ONE batch in the same tick. A
+     * walked-but-empty scan (0) sends NOTHING — the convergence invariant that
      * keeps the soak quiescence predicate alive (a heartbeat would keep requests_received moving
      * forever and silently disable every law) — but still replaces the awaiting set so phantom
      * entries cannot linger.
      * @return the {@link SpiralScanner#maybeScan} result (-1 when no walk happened)
      */
     int tickScanPhase(int playerCx, int playerCz, int viewDistance, int columnQueueSize,
-                      int ingestBacklogSections, IntSupplier missingVanilla) {
+                      long columnQueueBytes, int ingestBacklogSections, IntSupplier missingVanilla) {
         int scanned = this.scanner.maybeScan(playerCx, playerCz, viewDistance,
                 columnQueueSize, haltThreshold(),
+                columnQueueBytes, byteHaltThreshold(),
                 ingestBacklogSections, INGEST_BACKLOG_HALT_SECTIONS, missingVanilla,
                 this.columns, this.sendPositionBuffer, this.sendTimestampBuffer);
         if (scanned >= 0 && ClientTraceLog.enabled()) {

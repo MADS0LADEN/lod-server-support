@@ -49,15 +49,23 @@ Two distinct regimes benefit differently (review finding — be honest about whi
      automatically unaffected),
   5. `sessionConfig != null && sessionConfig.protocolVersion() != V16_COMPAT_PROTOCOL_VERSION`
      — see "why the v16 gate is non-optional" below,
-  6. **walk-cost gate**: `confirmedRing > 0` — movement (`recenter()`), dirty re-opens
-     (`resetConfirmedRing()`), and actionable retries all zero the confirmed prefix, and a
-     zero-prefix walk is a full from-ring-0 re-walk (the render-thread hitch shape the code
-     already documents at the 2048 ceiling). Those walks stay at 1 Hz; only cheap
-     frontier walks run fast,
-  7. **mild-pressure gate (proportional, NOT strict zero)**:
+  6. **walk-cost gate (two halves — the implementation-review round found the retry half)**:
+     `confirmedRing > 0` covers the SYNCHRONOUS prefix invalidations (movement
+     (`recenter()`), dirty re-opens (`resetConfirmedRing()`) zero the field before the next
+     tick's predicate), and `!columns.hasActionableRetries(...)` covers the IN-WALK one (a
+     retry mark resets the prefix inside `scan()` after the field was read, and every walk
+     re-derives `confirmedRing >= 1` since ring 0 is empty — the field alone structurally
+     cannot gate it). A zero-prefix walk is a full from-ring-0 re-walk (the render-thread
+     hitch shape the code already documents at the 2048 ceiling). Those walks stay at 1 Hz;
+     only cheap frontier walks run fast,
+  7. **mild-pressure gate (proportional, NOT strict zero, all THREE pipes)**:
      `columnQueueSize < columnQueueHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR &&
+     columnQueueBytes < byteHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR &&
      ingestBacklogSections < ingestBacklogHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR`
-     (divisor 4 ⇒ queue < 1500 columns, ingest < 1536 sections; -1 no-signal passes),
+     (divisor 4 ⇒ queue < 1500 columns AND < 48 MiB queued bytes AND ingest < 1536
+     sections; -1 no-signal passes). The byte term was an implementation-review addition:
+     the byte halt is the one that BINDS for real terrain columns (> ~32 KiB), so a
+     count-only gate left the fast path open at up to 74% of the binding halt,
   8. **outstanding below threshold**: `outstanding <= lastSentCount / FAST_RESCAN_OUTSTANDING_DIVISOR`
      (divisor 20 ⇒ 5%, integer math — see §5.2).
 
@@ -165,13 +173,15 @@ a halt, exactly as today.
    `dirty-range-filter` soak (exactly-flat `requested_total` — §9).
 2. **No send-time suppression of awaited positions** — untouched; the fast path changes only
    *when* `maybeScan` fires, never what the walk declares.
-3. **Per-position re-declaration bound (restated honestly — review fix):** the fallback
-   keeps every position's re-declaration interval ≤ `TICKS_PER_SECOND +
-   FAST_RESCAN_MIN_INTERVAL_TICKS - 1` = **39 ticks worst case** (a fast fire at tick 19
-   resets the counter; a position the fast walk omitted — budget/center shift under
-   movement — waits for the next fallback). Today's bound is 20 ticks; the regression is
-   bounded, movement-only, and the affected position was mid-supersession anyway. The v1
-   claim "never worse than today" was false as written.
+3. **Per-position re-declaration bound (restated honestly — twice-corrected):** a position
+   a fast walk omitted (budget/center shift under movement) waits at most
+   `2*TICKS_PER_SECOND - 1` = **39 ticks** when ONE fast fire intervenes (fast fire at
+   tick 19 resets the counter; the next fire ≤20 ticks later re-declares it — every fire
+   runs the identical walk). A chain of budget-truncated fast walks can extend that
+   further; all of it self-heals by re-declaration. Today's bound is 20 ticks; the
+   regression is bounded, movement-only, and the affected position was mid-supersession
+   anyway. (The v1 claim "never worse than today" was false; v2's formula
+   `TICKS + FLOOR - 1` computed 24, not 39 — both fixed.)
 4. **First-scan-immediate on join** — `reset()` still primes `scanTickCounter = TICKS-1`.
 5. **Dimension-change debounce** — `resetScanCounter()` still delays the next scan a full
    20 ticks, and now also disarms.
@@ -450,3 +460,39 @@ server answers quickly"). Works against every v17+ server; v16 servers see zero 
   ceiling evidence requirement (§9), config pin triplet (§9). Plus: doc-debt enumeration
   (§10), C2S upstream cost (§6), benchmark/RTT comparison hygiene (§8), A1 flake-exposure
   note (§6), halt-recovery pin now load-bearing (§9 #17).
+
+## 14. Implementation review round (3× Opus on commit 6f2037b — all three: SHIP-WITH-FIXES, folded)
+
+Shared MAJOR (all three reviewers independently): the walk-cost gate's `confirmedRing > 0`
+term structurally cannot see the ACTIONABLE-RETRY prefix reset — it happens inside `scan()`
+after the predicate read the field, and every walk re-derives `confirmedRing >= 1` (ring 0
+is empty). An ingest-failure burst (which also drains the awaiting set, enabling the
+trigger) therefore drove full from-ring-0 re-walks at 4 Hz. Fixed: `fastRescanDue` now
+consults `hasActionableRetries` directly (§2 cond. 6), pinned by
+`actionableRetryMarksHoldFastFiresLikeAnyPrefixInvalidation`.
+
+Also folded:
+- **Byte pipe added to the pressure gate** (§2 cond. 7) — the binding halt term for real
+  terrain columns was ungated; `columnQueueBytes`/`byteHaltThreshold()` now thread through
+  `tickScanPhase` → `maybeScan`, pinned by `byteQueueGateBlocksAtAQuarterOfItsHaltThreshold`.
+- **`sendClearBatch` disarms** — the one declaration path bypassing `tickScanPhase` left
+  "lastSentCount == what was declared" false and invited a fast re-declare storm out of a
+  halt (coincidence-masked until the byte-gate case).
+- **`fastScans` exported in the soak client snapshot** (`scan.fast`, additive) so the §8
+  acceptance criterion is machine-checkable in soak runs.
+- **Test-quality round:** the converged-disarm is now pinned through the PRODUCTION arming
+  path (`convergedFastWalkDisarmsThroughTheManagerArming` — an `if (scanned > 0)` guard on
+  `noteDeclared` was suite-green before); the kill switch's production config binding is
+  pinned (`killSwitchBindsThroughTheProductionConfigRead`); the `resetScanCounter` disarm
+  pin was de-vacuumed (its second window isolates the disarm from the prefix gate); the
+  three constants are numerically pinned; manager-level adaptive rigs pin the seam ON
+  (isolating them from the developer's local gitignored config file).
+- Comment/doc accuracy: the 39-tick bound formula (§4.3), the Voxy-staleness comment
+  (invocation-based, per its own pinning test), `missingVanilla` staleness under sustained
+  fast cadence, miss-memo-design.md cadence + A/B-baseline note, the two service-file
+  mailbox-comment twins, CLAUDE.md churn wording ("threshold-dependent", not "structural")
+  and Tier-1 count.
+
+Still open when this round closed (deliberate): the §9 soak gauntlet + the §8 live
+`fastScans` acceptance measurement on a store-warm backfill — evidence to gather before
+merge, not code changes.

@@ -1,6 +1,7 @@
 package dev.vox.lss.networking.client;
 
 import dev.vox.lss.common.LSSConstants;
+import dev.vox.lss.config.LSSClientConfig;
 import dev.vox.lss.common.PositionUtil;
 import dev.vox.lss.networking.payloads.SessionConfigS2CPayload;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
@@ -79,7 +80,7 @@ class LodRequestManagerTickTest {
     /** Drive tickScanPhase until the 20-tick cadence fires; returns the scanned count. */
     private int fireScanPhase(int playerCx, int playerCz, int viewDistance) {
         for (int i = 0; i <= LSSConstants.TICKS_PER_SECOND; i++) {
-            int n = manager.tickScanPhase(playerCx, playerCz, viewDistance, 0, -1, () -> 0);
+            int n = manager.tickScanPhase(playerCx, playerCz, viewDistance, 0, 0L, -1, () -> 0);
             if (n >= 0) return n;
         }
         throw new AssertionError("scan cadence never fired");
@@ -466,6 +467,16 @@ class LodRequestManagerTickTest {
     // (docs/planning/adaptive-scan-cadence-design.md — the wiring pins: tracker::size
     // supplier from the constructor, arming in tickScanPhase beside the tracker replace.)
 
+    /**
+     * Pin the kill-switch seam ON for this rig: the default seam reads the global
+     * LSSClientConfig.CONFIG, which in a dev Tier-1 JVM resolves to the developer's
+     * LOCAL (gitignored) config file — a local false would red these tests confusingly.
+     * killSwitchBindsThroughTheProductionConfigRead pins the default binding itself.
+     */
+    private void enableAdaptiveSeam() {
+        manager.scannerForTest().adaptiveCadenceEnabled = () -> true;
+    }
+
     /** One plain tick at (0,0)/vd 0 with no pressure signals. */
     private void plainTick(ResourceKey<Level> dim) {
         manager.tickWithContext(0, 0, dim, 0, 0, 0L, -1, () -> 0);
@@ -489,6 +500,7 @@ class LodRequestManagerTickTest {
 
     @Test
     void nearlyAnsweredBatchFastFiresThroughTheRealTickPath() {
+        enableAdaptiveSeam();
         var overworld = dim("overworld");
         plainTick(overworld); // primed scan: the 24-position lod-2/vd-0 annulus
         assertEquals(1, sent.size());
@@ -503,6 +515,7 @@ class LodRequestManagerTickTest {
 
     @Test
     void partiallyAnsweredBatchStaysPeriodic() {
+        enableAdaptiveSeam();
         // The supplier-wiring pin (the #71 pattern): if the scanner consulted anything but
         // the live tracker::size, the 12 unanswered positions would read as drained and
         // this would fast-fire at tick 5.
@@ -517,6 +530,7 @@ class LodRequestManagerTickTest {
 
     @Test
     void sendFailureDisarmsTheFastCadence() {
+        enableAdaptiveSeam();
         var overworld = dim("overworld");
         // The first scan's send THROWS: sendRequests empties the tracker (replaceWith 0),
         // which without the catch's disarm would read as "all answered" and turn a dying
@@ -535,6 +549,7 @@ class LodRequestManagerTickTest {
 
     @Test
     void disconnectDisarmsTheFastCadence() {
+        enableAdaptiveSeam();
         var overworld = dim("overworld");
         plainTick(overworld);
         assertEquals(1, sent.size());
@@ -546,14 +561,42 @@ class LodRequestManagerTickTest {
     }
 
     @Test
-    void haltRecoveryTickCannotFastFire() {
+    void pressureAboveTheQuarterLineHoldsFastFires() {
+        // The sharp pressure-gate pin through the production path, WITHOUT a halt (a halt
+        // ships the clear batch, whose own disarm would mask this gate — see the next
+        // test): queue at exactly 1/4 of the halt threshold, far below the halt itself,
+        // keeps an otherwise fully fast-eligible client at the periodic cadence.
+        enableAdaptiveSeam();
+        var overworld = dim("overworld");
+        int quarter = LodRequestManager.haltThreshold() / SpiralScanner.FAST_RESCAN_PRESSURE_DIVISOR;
+        manager.tickWithContext(0, 0, overworld, 0, quarter, 0L, -1, () -> 0); // primed scan
+        assertEquals(1, sent.size());
+        answer(sent.get(0), overworld, 23); // fast-eligible by outstanding (1 <= 24/20)
+
+        int ticksToNext = -1;
+        for (int t = 1; t <= LSSConstants.TICKS_PER_SECOND; t++) {
+            manager.tickWithContext(0, 0, overworld, 0, quarter, 0L, -1, () -> 0);
+            if (sent.size() > 1) { ticksToNext = t; break; }
+        }
+        assertEquals(LSSConstants.TICKS_PER_SECOND, ticksToNext,
+                "queue at the 1/4 line: the fast fire is held and the fallback declares"
+                        + " (load-bearing now that the gate is proportional, not strict zero)");
+    }
+
+    @Test
+    void backpressureClearDisarmsTheFastCadence() {
+        // The clear batch is a real (empty) declaration that bypasses tickScanPhase — it
+        // must disarm like any other declare. Without sendClearBatch's noteDeclared(0),
+        // the recovery tick below (queue fully drained, outstanding 1 <= threshold) would
+        // fast-fire straight out of the halt: a re-declare storm against a server backlog
+        // the clear just emptied.
+        enableAdaptiveSeam();
         var overworld = dim("overworld");
         plainTick(overworld); // primed scan
         answer(sent.get(0), overworld, 23); // fast-eligible by outstanding (1 <= 24/20)
 
-        // Climb past the floor without firing, then halt: the halt path returns before the
-        // scan phase, freezing the cadence counter. Entering the halt ships the one
-        // edge-triggered EMPTY clear batch (the designed backpressure clear) — count it.
+        // Climb to one tick short of the floor, then halt: the halt path returns before
+        // the scan phase (counter frozen) and ships the one edge-triggered clear.
         for (int t = 0; t < SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS - 1; t++) plainTick(overworld);
         for (int t = 0; t < 3; t++) {
             manager.tickWithContext(0, 0, overworld, 0, LodRequestManager.haltThreshold(), 0L, -1, () -> 0);
@@ -561,15 +604,65 @@ class LodRequestManagerTickTest {
         assertEquals(2, sent.size(), "halted ticks never scan — only the one clear ships");
         assertEquals(0, sent.get(1).count(), "...and it is the empty backpressure clear");
 
-        // The recovery tick: queue just under the halt line — far above the 1/4 fast line.
-        manager.tickWithContext(0, 0, overworld, 0, LodRequestManager.haltThreshold() - 1, 0L, -1, () -> 0);
-        assertEquals(2, sent.size(),
-                "the tick recovering out of a halt is above the mild-pressure line and must"
-                        + " not fast-fire (load-bearing now that the gate is proportional)");
+        // Recovery with the queue FULLY drained: no pressure, outstanding below threshold —
+        // only the clear's disarm can (and must) hold the fast path. The counter was
+        // frozen at floor-1 through the halt, so the fallback lands 20-(floor-1) recovery
+        // ticks later; a missing disarm would instead fast-fire on recovery tick 1.
+        int ticksToNext = -1;
+        for (int t = 1; t <= LSSConstants.TICKS_PER_SECOND; t++) {
+            plainTick(overworld);
+            if (sent.size() > 2) { ticksToNext = t; break; }
+        }
+        assertEquals(LSSConstants.TICKS_PER_SECOND - (SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS - 1),
+                ticksToNext,
+                "the clear disarmed: the next declaration rides the fallback, never a 250 ms"
+                        + " re-declare right after the backlog was deliberately emptied");
+        assertEquals(1, sent.get(2).count(), "…and it re-declares the one still-unanswered position");
+    }
 
-        // With the queue actually drained the held-up fast fire proceeds.
+    @Test
+    void convergedFastWalkDisarmsThroughTheManagerArming() {
+        // THE safety property, pinned through the PRODUCTION arming path (the scanner-level
+        // twin arms by hand): tickScanPhase's noteDeclared(scanned) must stay UNCONDITIONAL.
+        // An `if (scanned > 0)` guard on it — the obvious "optimization" — would leave the
+        // scanner armed over an empty tracker after a converged walk: a silent 250 ms
+        // full-spiral walk loop that no sent-batch assertion can ever see.
+        enableAdaptiveSeam();
+        var overworld = dim("overworld");
         plainTick(overworld);
-        assertEquals(3, sent.size(), "with pressure gone the fast fire lands");
-        assertEquals(1, sent.get(2).count(), "declaring the one still-unanswered position");
+        assertEquals(1, sent.size());
+        answer(sent.get(0), overworld, sent.get(0).count()); // fully answered: converged
+
+        long fastBefore = manager.getFastScans();
+        for (int t = 0; t < SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS; t++) plainTick(overworld);
+        assertEquals(fastBefore + 1, manager.getFastScans(),
+                "the one converged fast walk happens at the floor...");
+        assertEquals(1, sent.size(), "...and sends nothing (convergence invariant)");
+
+        for (int t = 0; t < LSSConstants.TICKS_PER_SECOND - 1; t++) plainTick(overworld);
+        assertEquals(fastBefore + 1, manager.getFastScans(),
+                "...and its 0-count declare disarmed: no further fast walk in the fallback window");
+        assertEquals(1, sent.size(), "a converged client stays silent throughout");
+    }
+
+    @Test
+    void killSwitchBindsThroughTheProductionConfigRead() {
+        // The production binding pin (the #71 config-gate pattern): the scanner's DEFAULT
+        // seam must read LSSClientConfig.CONFIG.enableAdaptiveScanCadence — a hardcoded
+        // `() -> true` or a re-bind to any other default-true boolean passes every other
+        // test green while the shipped kill switch silently stops killing.
+        var overworld = dim("overworld");
+        boolean old = LSSClientConfig.CONFIG.enableAdaptiveScanCadence;
+        LSSClientConfig.CONFIG.enableAdaptiveScanCadence = false;
+        try {
+            plainTick(overworld);
+            assertEquals(1, sent.size());
+            answer(sent.get(0), overworld, 23); // fast-eligible by every other condition
+
+            assertEquals(LSSConstants.TICKS_PER_SECOND, ticksToNextBatch(overworld, 1),
+                    "config false must hold the periodic cadence through the DEFAULT seam");
+        } finally {
+            LSSClientConfig.CONFIG.enableAdaptiveScanCadence = old;
+        }
     }
 }
