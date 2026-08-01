@@ -10,7 +10,7 @@ Branch: `feat/compressed-columns` (off `feat/lod-store`).
 |-------|-------|-------|
 | 0 — premise measurement | **DONE 2026-08-01** | all premises confirmed; numbers below |
 | 1 — protocol v19 + capability + live-path compression | **DONE 2026-08-01** | T1 green both platforms (Fabric ~1040+, Paper ~330+), T2 60 gametests green |
-| 2 — store frame serving (fhash, getFrame, deposit reuse) | not started | |
+| 2 — store frame serving (fhash, getFrame, deposit reuse) | **DONE 2026-08-01** | schema v3 (drop-and-rebuild), T1+T2 green |
 | 3 — observability (wire_bytes, exporters, soak schema) | not started | |
 | 4 — validation (tests, soak, compress_gate.sh) | not started | |
 
@@ -98,7 +98,37 @@ DONE 2026-08-01. Landed exactly per plan §2:
 
 ## Phase 2 — store frame serving
 
-Not started. Work list tracked in plan §3.
+DONE 2026-08-01. Landed per plan §3:
+
+- `LodStoreService`: `FrameHit`, `getFrame` (default null), `depositFrame` (default
+  false = unsupported; TRUE even on shed — the caller's false-fallback is a raw
+  deposit and shed-as-false would double-deposit), canonical `contentHash` static
+  (SQLite's private fnv1a now delegates — one hash, never twinned).
+- `SqliteLodStore`: **SCHEMA_VERSION 2→3** (`fhash INTEGER NOT NULL` — one-time
+  drop-and-rebuild on upgrade, release-note item); `getFrame` validates usize bounds +
+  declared-content-size + fhash (no decompress) and feeds the SAME row-poison purge
+  ladder; `Op.Deposit` gained the preFramed shape; `depositFrame` enqueues the wire
+  frame with caller-computed usize/chash/fhash.
+- `MemoryLodStore`: `getFrame` = resident frame verbatim (unvalidated — review A8
+  accepted, stated); preFramed deposits skip the batcher compress.
+- `AbstractChunkDiskReader`: `setServeStoreFrames` gate (set by both services ONLY
+  when wire compression is live — frames off-compression would move decompress onto
+  the processing thread for everyone); the frame rung consults getFrame EXCLUSIVELY
+  (a miss falls to region IO, never a second get()); `ChunkReadResult` carries
+  `frameBytes`/`frameRawSize` (compat ctors keep every rig).
+- `OffThreadProcessor`: frame results wrap as `ColumnBytes.ofFrame` (capable
+  recipients ship verbatim; raw-needing recipients cost one lazy ~24 µs decompress);
+  `depositColumn` reuses a MATERIALIZED wire frame via depositFrame (opportunistic:
+  the disk-path deposit runs after the primary build, so a later fan-out recipient's
+  frame is missed — accepted); the gen path shares ONE holder between build and
+  deposit (new `enqueueLoadedColumn` overload).
+- **New tests**: `SqliteFrameServingTest` (frame round-trip, wire-frame-verbatim
+  identity pin, all-air shape, nonsense refusal, fhash bit-rot → purge via SQL
+  corruption), `MemoryFrameServingTest` (resident-verbatim + skip-compress),
+  `StoreFrameServingRungTest` (frame rung exclusivity, all-air, miss-to-IO,
+  flag-off bit-identity, throw containment), `StoreFrameDeliveryTest` (no-raw-
+  materialization end-to-end, deposit frame-reuse with hash verification, raw-session
+  fallback).
 
 ## Phase 3 — observability
 

@@ -75,7 +75,10 @@ public final class SqliteLodStore implements LodStoreService {
 
     // v2: auto_vacuum=INCREMENTAL (must be set before table creation; the bump
     // rebuilds every v1 store once — the legal migration for derived data).
-    static final int SCHEMA_VERSION = 2;
+    // 3: the fhash column (FNV-1a of the compressed blob — frame-level integrity for
+    // protocol-19 verbatim frame serving, compressed-columns plan §0.1/§3). Derived
+    // data: the bump drops-and-rebuilds; the warm store re-warms from serves/backfill.
+    static final int SCHEMA_VERSION = 3;
     private static final String DB_FILE = "store.db";
     private static final int PAGE_SIZE = 16384;
     private static final int WRITE_TXN_ROWS = 64;
@@ -122,8 +125,17 @@ public final class SqliteLodStore implements LodStoreService {
     }
 
     private sealed interface Op {
+        /** {@code preFramed}: {@code bytes} IS the zstd frame (usize/chash/fhash
+         *  caller-computed on the processing thread — the compress-once reuse, plan §3);
+         *  otherwise {@code bytes} are raw and the batcher compresses + hashes. */
         record Deposit(String dim, long packed, byte[] bytes, long ts, long srcStampSeconds,
-                       long enqueuedNanos) implements Op {}
+                       long enqueuedNanos, boolean preFramed, int usize, long chash,
+                       long fhash) implements Op {
+            Deposit(String dim, long packed, byte[] bytes, long ts, long srcStampSeconds,
+                    long enqueuedNanos) {
+                this(dim, packed, bytes, ts, srcStampSeconds, enqueuedNanos, false, 0, 0L, 0L);
+            }
+        }
         record DeleteRows(String dim, long[] positions) implements Op {}
         record Resweep() implements Op {}
         record BackfillMark(String dim, int rx, int rz) implements Op {}
@@ -445,6 +457,62 @@ public final class SqliteLodStore implements LodStoreService {
         }
     }
 
+    /**
+     * Frame-form lookup (protocol-19 verbatim serving, plan §3): the stored zstd frame
+     * WITHOUT a decompress. Integrity parity with {@link #get} comes from frame-level
+     * checks — usize bounds, the frame's declared content size, and {@code fhash} over
+     * the blob (~2-3 µs vs the ~24 µs decompress + raw hash) — feeding the SAME
+     * row-poison purge ladder, so bit-rot dies here exactly as it does on the raw path
+     * instead of looping through client decode failures (review A finding 1 of the
+     * plan round).
+     */
+    @Override
+    public FrameHit getFrame(String dimension, long packed) {
+        if (!this.serving || this.latchedOff) return null;
+        var tombs = this.tombstones.get(dimension);
+        if (tombs != null && tombs.containsKey(packed)) return null;
+        Integer dimId = this.dimIdsShared.get(dimension);
+        if (dimId == null) return null;
+        try {
+            Connection c = readerConnection();
+            if (c == null) return null;
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT ts, fhash, usize, blob FROM lods_" + dimId + " WHERE pos=?")) {
+                ps.setLong(1, packed);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) return null;
+                    long ts = rs.getLong(1);
+                    long fhash = rs.getLong(2);
+                    int usize = rs.getInt(3);
+                    if (usize == 0) return new FrameHit(EMPTY, 0, ts);
+                    if (usize < 0 || usize > MAX_ROW_USIZE) {
+                        throw new IllegalStateException("row integrity failure at " + packed
+                                + " (usize " + usize + " out of bounds)");
+                    }
+                    byte[] blob = rs.getBytes(4);
+                    if (fnv1a(blob) != fhash
+                            || this.codec.declaredContentSize(blob) != usize) {
+                        throw new IllegalStateException("row integrity failure at " + packed
+                                + " (fhash/declared-size mismatch)");
+                    }
+                    return new FrameHit(blob, usize, ts);
+                }
+            }
+        } catch (Throwable t) {
+            this.diag.recordError();
+            // Same purge triage as get(): row-poison throws purge; transient
+            // SQLExceptions read as a miss and retry on the next re-declaration.
+            if (!(t instanceof SQLException)) {
+                enqueueControl(new Op.DeleteRows(dimension, new long[]{packed}));
+            }
+            if (this.readErrorWarned.compareAndSet(false, true)) {
+                LSSLogger.warn("LOD store read failed — served from disk instead (counted"
+                        + " store.errors; further failures are silent)", t);
+            }
+            return null;
+        }
+    }
+
     /** Thread-confined read-only connection (created lazily per reader-pool thread). */
     private Connection readerConnection() {
         Connection c = this.readerConn.get();
@@ -505,6 +573,29 @@ public final class SqliteLodStore implements LodStoreService {
         // batcher stamps the depth after every drain pass; sustained backlogs still
         // show.
         return !shed;
+    }
+
+    @Override
+    public boolean depositFrame(String dimension, long packed, byte[] frame, int usize,
+                                long chash, long fhash, long columnTimestamp,
+                                long srcStampSeconds) {
+        // The frame path never carries all-air (that stays the raw path's byte[0]
+        // normalization) — refuse nonsense so the caller's raw fallback handles it.
+        if (frame == null || frame.length == 0 || usize <= 0) return false;
+        if (this.shutdown.get() || this.latchedOff) return false;
+        long nowSeconds = System.currentTimeMillis() / 1000L;
+        long stamp = srcStampSeconds > 0 ? Math.min(srcStampSeconds, nowSeconds) : nowSeconds;
+        Op.Deposit op = new Op.Deposit(dimension, packed, frame, columnTimestamp,
+                stamp, System.nanoTime(), true, usize, chash, fhash);
+        while (!this.queue.offer(op)) {
+            if (this.shutdown.get() || this.latchedOff) return false;
+            if (this.queue.poll() != null) {
+                this.diag.recordDepositDrop();
+                // Shed still returns TRUE (the frame WAS enqueued): the caller's false
+                // fallback is a raw deposit, and shed-as-false would double-deposit.
+            }
+        }
+        return true;
     }
 
     @Override
@@ -882,7 +973,24 @@ public final class SqliteLodStore implements LodStoreService {
             }
         }
         int dimId = dimIdFor(dep.dim());
-        byte[] blob = dep.bytes().length == 0 ? EMPTY : this.codec.compress(dep.bytes());
+        // Pre-framed deposits (compressed sessions) carry the wire frame + caller-computed
+        // hashes — the batcher skips its compress entirely (plan §3); raw deposits keep
+        // the compress-on-batcher shape.
+        byte[] blob;
+        int usize;
+        long chash;
+        long fhash;
+        if (dep.preFramed()) {
+            blob = dep.bytes();
+            usize = dep.usize();
+            chash = dep.chash();
+            fhash = dep.fhash();
+        } else {
+            blob = dep.bytes().length == 0 ? EMPTY : this.codec.compress(dep.bytes());
+            usize = dep.bytes().length;
+            chash = fnv1a(dep.bytes());
+            fhash = fnv1a(blob);
+        }
         // Latest-wins by STORED ts in ONE statement: the conditional upsert replaces the
         // old SELECT-then-INSERT pair (the cold-path gate measured per-deposit cost —
         // statement overhead matters at backfill rates). 0 rows changed = the WHERE
@@ -891,20 +999,22 @@ public final class SqliteLodStore implements LodStoreService {
         PreparedStatement insert = this.insertByDim.get(dep.dim());
         if (insert == null) {
             insert = this.writer.prepareStatement("INSERT INTO lods_" + dimId
-                    + " (pos, ts, chash, usize, src_stamp, blob) VALUES (?,?,?,?,?,?)"
+                    + " (pos, ts, chash, usize, src_stamp, fhash, blob) VALUES (?,?,?,?,?,?,?)"
                     + " ON CONFLICT(pos) DO UPDATE SET ts=excluded.ts,"
                     + " chash=excluded.chash, usize=excluded.usize,"
-                    + " src_stamp=excluded.src_stamp, blob=excluded.blob"
+                    + " src_stamp=excluded.src_stamp, fhash=excluded.fhash,"
+                    + " blob=excluded.blob"
                     + " WHERE excluded.ts >= ts");
             this.insertByDim.put(dep.dim(), insert);
         }
         insert.setLong(1, dep.packed());
         insert.setLong(2, dep.ts());
-        insert.setLong(3, fnv1a(dep.bytes()));
-        insert.setInt(4, dep.bytes().length);
+        insert.setLong(3, chash);
+        insert.setInt(4, usize);
         // src_stamp: the deposit-CALL wall second (never the column ts — see deposit()).
         insert.setLong(5, dep.srcStampSeconds());
-        insert.setBytes(6, blob);
+        insert.setLong(6, fhash);
+        insert.setBytes(7, blob);
         if (insert.executeUpdate() > 0) {
             this.diag.recordDeposit();
         } else {
@@ -962,7 +1072,8 @@ public final class SqliteLodStore implements LodStoreService {
         try (Statement st = this.writer.createStatement()) {
             st.execute("CREATE TABLE IF NOT EXISTS lods_" + next + " ("
                     + "pos INTEGER PRIMARY KEY, ts INTEGER NOT NULL, chash INTEGER NOT NULL,"
-                    + " usize INTEGER NOT NULL, src_stamp INTEGER NOT NULL, blob BLOB NOT NULL)");
+                    + " usize INTEGER NOT NULL, src_stamp INTEGER NOT NULL,"
+                    + " fhash INTEGER NOT NULL, blob BLOB NOT NULL)");
             // ts index (review A2): eviction's ORDER BY ts and the sweep's index-only
             // key scan both need it — without it each is a full scan of the blob pages.
             st.execute("CREATE INDEX IF NOT EXISTS lods_" + next + "_ts ON lods_"
@@ -1467,12 +1578,9 @@ public final class SqliteLodStore implements LodStoreService {
         return ((long) (cx >> 5) << 32) | ((cz >> 5) & 0xFFFFFFFFL);
     }
 
+    /** Delegates to the ONE canonical hash (LodStoreService.contentHash) — the
+     *  frame-reuse deposit computes chash/fhash on the processing thread against it. */
     private static long fnv1a(byte[] data) {
-        long hash = 0xcbf29ce484222325L;
-        for (byte b : data) {
-            hash ^= (b & 0xFF);
-            hash *= 0x100000001b3L;
-        }
-        return hash;
+        return LodStoreService.contentHash(data);
     }
 }

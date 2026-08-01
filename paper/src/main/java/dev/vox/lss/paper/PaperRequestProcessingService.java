@@ -345,6 +345,8 @@ public class PaperRequestProcessingService {
                         + " every session");
             } else {
                 offThreadProcessor.attachWireCodec(wireCodec);
+                // Frame-form store serving (plan §3) — twin of the Fabric latch.
+                diskReader.setServeStoreFrames(true);
                 wireCompressionLive = true;
             }
         }

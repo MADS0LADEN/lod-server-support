@@ -363,6 +363,21 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                                           String dimension,
                                           boolean staleAgainstEdit,
                                           byte source) {
+        // One holder per call: the probe path has no dedup group, so two players wanting
+        // the same loaded chunk compress the same bytes twice — accepted (plan §0.4).
+        return enqueueLoadedColumn(state, column, columnTimestamp, submissionOrder,
+                dimension, staleAgainstEdit, source, null);
+    }
+
+    /** As above with a caller-supplied holder (the generation path shares one holder
+     *  between its build and its store deposit — plan §3 frame reuse); null builds one. */
+    protected boolean enqueueLoadedColumn(PlayerState state, LoadedColumnData column,
+                                          long columnTimestamp,
+                                          long submissionOrder,
+                                          String dimension,
+                                          boolean staleAgainstEdit,
+                                          byte source,
+                                          ColumnBytes sharedBytes) {
         if (column.serializedSections() == null || column.serializedSections().length == 0) {
             return false;
         }
@@ -375,12 +390,10 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
             this.timestampCache.put(dimension, packed, columnTimestamp, this.cycleNow);
         }
 
-        // One holder per call: the probe path has no dedup group, so two players wanting
-        // the same loaded chunk compress the same bytes twice — accepted (plan §0.4);
-        // the generation path is single-recipient by construction.
         return buildAndEnqueueColumnPayload(state, column.cx(), column.cz(), dimension,
                 columnTimestamp, submissionOrder,
-                ColumnBytes.ofRaw(this.wireCodec, column.serializedSections()),
+                sharedBytes != null ? sharedBytes
+                        : ColumnBytes.ofRaw(this.wireCodec, column.serializedSections()),
                 estimatedBytes, source);
     }
 
@@ -848,9 +861,19 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                 // ONE holder per drained result (plan §0.4): every dedup recipient's build
                 // and the store deposit share it, so a mixed-capability group costs one
                 // compress, never one per recipient. Null for non-data results (all-air /
-                // not-found / saturated).
-                ColumnBytes columnBytes = result.sectionBytes() == null ? null
-                        : ColumnBytes.ofRaw(this.wireCodec, result.sectionBytes());
+                // not-found / saturated). A store-FRAME hit (plan §3) wraps the validated
+                // frame — capable recipients ship it verbatim; raw-needing recipients
+                // (v16/no-capability) cost one lazy ~24 µs decompress here on the
+                // processing thread, bounded and rare.
+                ColumnBytes columnBytes;
+                if (result.frameBytes() != null) {
+                    columnBytes = ColumnBytes.ofFrame(this.wireCodec, result.frameBytes(),
+                            result.frameRawSize());
+                } else if (result.sectionBytes() != null) {
+                    columnBytes = ColumnBytes.ofRaw(this.wireCodec, result.sectionBytes());
+                } else {
+                    columnBytes = null;
+                }
 
                 deliverDiskResult(playerUuid, state, result, columnBytes,
                         result.submissionOrder(), dimension, staleAgainstEdit);
@@ -866,8 +889,8 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                     // per-recipient payload-build outcome (the gen flavor matches): a
                     // send rejection loses the delivery, not the bytes.
                     if (this.store != null && !result.fromStore()) {
-                        this.store.deposit(result.dimension(), packed,
-                                result.sectionBytes(), result.columnTimestamp(),
+                        depositColumn(result.dimension(), packed, result.sectionBytes(),
+                                columnBytes, result.columnTimestamp(),
                                 result.srcStampSeconds());
                     }
                 } else if (result.notFound()) {
@@ -990,6 +1013,33 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     // A VoxelColumn body carrying zero sections (one varint 0). Sent to a data-claiming client
     // for an all-air resolution so it clears ghost terrain by ingesting air for every section.
     private static final byte[] ZERO_SECTION_COLUMN = new byte[]{0x00};
+
+    /**
+     * Store deposit with opportunistic frame reuse (plan §3 "compress once, use twice"):
+     * when a capable recipient's build already materialized the wire frame on this very
+     * holder, hand the store the FRAME + processing-thread-computed hashes and skip the
+     * batcher's compress; otherwise (raw sessions, all-air, or the frame simply wasn't
+     * built yet — the deposit runs after the primary's build but before the dedup
+     * fan-out, so a later recipient's frame is missed, accepted) deposit raw as before.
+     * {@code raw} is always in hand at both call sites (never a store hit), so
+     * {@code holder.raw()} costs nothing here.
+     */
+    private void depositColumn(String dimension, long packed, byte[] raw,
+                               ColumnBytes holder, long columnTimestamp,
+                               long srcStampSeconds) {
+        if (holder != null && holder.frameMaterialized()) {
+            byte[] frame = holder.frame();
+            if (this.store.depositFrame(dimension, packed, frame, holder.rawSize(),
+                    dev.vox.lss.common.store.LodStoreService.contentHash(holder.raw()),
+                    dev.vox.lss.common.store.LodStoreService.contentHash(frame),
+                    columnTimestamp, srcStampSeconds)) {
+                return;
+            }
+            // false = unsupported/store-down, never "enqueued-with-shed" — the raw
+            // fallback cannot double-deposit (see the interface contract).
+        }
+        this.store.deposit(dimension, packed, raw, columnTimestamp, srcStampSeconds);
+    }
 
     /**
      * Authoritative all-air serve: enqueue a 0-section {@code VoxelColumn} (carrying the server
@@ -1271,9 +1321,13 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
             }
             byte[] genSections = entry.columnData().serializedSections();
             boolean allAir = genSections == null || genSections.length == 0;
+            // One holder shared by the build AND the deposit (plan §3): a compressed
+            // session's wire frame is reused by the store, compress-once-use-twice.
+            ColumnBytes genBytes = allAir ? null
+                    : ColumnBytes.ofRaw(this.wireCodec, genSections);
             boolean sent = !allAir && this.enqueueLoadedColumn(state, entry.columnData(),
                     entry.columnTimestamp(), entry.submissionOrder(), entry.dimension(), genStale,
-                    LSSConstants.COLUMN_SOURCE_GENERATION);
+                    LSSConstants.COLUMN_SOURCE_GENERATION, genBytes);
             // LOD-store deposit, generation flavor — same delivery-path choke point,
             // same stale-guard condition (a genStale outcome carries pre-edit bytes and
             // must not populate the store). All-air deposits byte[0] so a warm all-air
@@ -1284,9 +1338,13 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                 // The gen columnTimestamp IS the acquisition stamp: both platforms set
                 // it via epochSeconds() at completion-serialization, the moment the
                 // bytes exist (R1-M2 — closes the completion→delivery mailbox gap).
-                this.store.deposit(entry.dimension(), packed,
-                        allAir ? null : genSections, entry.columnTimestamp(),
-                        entry.columnTimestamp());
+                if (allAir) {
+                    this.store.deposit(entry.dimension(), packed, null,
+                            entry.columnTimestamp(), entry.columnTimestamp());
+                } else {
+                    depositColumn(entry.dimension(), packed, genSections, genBytes,
+                            entry.columnTimestamp(), entry.columnTimestamp());
+                }
             }
             if (!sent) {
                 if (allAir && !genStale) {

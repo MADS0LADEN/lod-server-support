@@ -147,6 +147,9 @@ public class RequestProcessingService {
                         + " every session");
             } else {
                 this.offThreadProcessor.attachWireCodec(wireCodec);
+                // Frame-form store serving (plan §3): with compression live, the store
+                // rung ships stored frames verbatim instead of decompress-then-recompress.
+                this.diskReader.setServeStoreFrames(true);
                 wireCompressionLive = true;
             }
         }

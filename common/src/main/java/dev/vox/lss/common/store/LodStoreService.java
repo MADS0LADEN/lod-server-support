@@ -42,12 +42,44 @@ public interface LodStoreService {
      *  stored column timestamp. */
     record StoreHit(byte[] sectionBytes, long columnTimestamp) {}
 
+    /** A frame-form store hit (protocol 19 verbatim serving —
+     *  compressed-columns-implementation-plan.md §3): the stored zstd frame, its
+     *  validated uncompressed size, and the stored column timestamp.
+     *  {@code usize == 0} = all-air ({@code frame} is empty). */
+    record FrameHit(byte[] frame, int usize, long columnTimestamp) {}
+
+    /** The store's content hash (FNV-1a 64): {@code chash} over raw bytes, {@code fhash}
+     *  over the compressed frame. ONE canonical implementation — the frame-reuse deposit
+     *  computes both on the processing thread and the store validates against them, so
+     *  the function must be shared, not twinned. */
+    static long contentHash(byte[] data) {
+        long hash = 0xcbf29ce484222325L;
+        for (byte b : data) {
+            hash ^= (b & 0xFF);
+            hash *= 0x100000001b3L;
+        }
+        return hash;
+    }
+
     /** The mode this store was built for (memory tier only vs memory+disk). */
     LodStoreMode mode();
 
     /** Look up a column; null = miss. Reader-pool threads. Must never throw — internal
      *  failures are contained, counted {@code store.errors}, and read as a miss. */
     StoreHit get(String dimension, long packed);
+
+    /**
+     * Frame-form lookup (protocol 19 verbatim serving): the stored zstd frame WITHOUT a
+     * decompress — integrity comes from frame-level validation ({@code fhash} + declared
+     * content size, plan §0.1) instead of the raw-hash-after-decompress {@link #get}
+     * pays. Null = miss (same containment contract as get) — or "frames unsupported"
+     * (the default), which callers must treat as a plain miss and NOT retry via get()
+     * within the same rung (the reader consults exactly one of the two per submit,
+     * gated on {@code serveStoreFrames}).
+     */
+    default FrameHit getFrame(String dimension, long packed) {
+        return null;
+    }
 
     /**
      * Enqueue a deposit (processing thread; the write happens on the batcher thread).
@@ -75,6 +107,25 @@ public interface LodStoreService {
     default boolean deposit(String dimension, long packed, byte[] sectionBytes,
                             long columnTimestamp) {
         return deposit(dimension, packed, sectionBytes, columnTimestamp, 0L);
+    }
+
+    /**
+     * Pre-compressed deposit (plan §3 "compress once, use twice"): a compressed session
+     * already built the wire frame, so the store enqueues the FRAME with caller-computed
+     * {@code usize}/{@code chash} (raw hash)/{@code fhash} (frame hash — both via
+     * {@link #contentHash}) instead of re-compressing raw on the batcher. Never used for
+     * all-air (that stays the raw path's {@code byte[0]} normalization).
+     *
+     * @return true when the frame deposit was ENQUEUED (shedding an older entry is still
+     *     true — unlike {@link #deposit}'s no-shed contract, because the caller's
+     *     fallback on false is a RAW deposit and a shed-as-false would double-deposit);
+     *     false when unsupported (this default) or the store is down — the caller then
+     *     falls back to the raw {@link #deposit}, which no-ops harmlessly on a down store.
+     */
+    default boolean depositFrame(String dimension, long packed, byte[] frame, int usize,
+                                 long chash, long fhash, long columnTimestamp,
+                                 long srcStampSeconds) {
+        return false;
     }
 
     /** Synchronously drop the given positions (the dirty/edit invalidation fan-out). */

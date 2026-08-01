@@ -61,6 +61,8 @@ public abstract class AbstractChunkDiskReader {
     // rung in readAndDeliver before any region IO. Null while lodStore=off. Volatile:
     // attached once at service init (before the first submit) from the server thread.
     private volatile dev.vox.lss.common.store.LodStoreService store;
+    // Frame-form store serving (protocol 19): see setServeStoreFrames.
+    private volatile boolean serveStoreFrames;
 
     // Adaptive read throttle (Approach B): null until a platform reader detects that its
     // background-priority path is incompatible (a chunk-IO-overhaul mod replaced vanilla IO) and
@@ -111,6 +113,19 @@ public abstract class AbstractChunkDiskReader {
     /** Attach the LOD store (lodStore != off). Must happen before the first submit. */
     public final void attachStore(dev.vox.lss.common.store.LodStoreService store) {
         this.store = store;
+    }
+
+    /**
+     * Enable frame-form store serving (protocol 19, plan §3): the rung consults
+     * {@code getFrame} instead of {@code get}, delivering the stored zstd frame
+     * verbatim (zero decompress; raw-needing recipients materialize lazily on the
+     * processing thread). Set by the services ONLY while wire compression is live —
+     * with compression off, frame hits would cost every recipient a processing-thread
+     * decompress that {@code get} pays on the reader pool instead. Volatile: set once
+     * at service init.
+     */
+    public final void setServeStoreFrames(boolean serveFrames) {
+        this.serveStoreFrames = serveFrames;
     }
 
     /**
@@ -235,10 +250,44 @@ public abstract class AbstractChunkDiskReader {
                                     long submissionOrder) {
         var s = this.store;
         if (s == null) return false;
+        long packed = dev.vox.lss.common.PositionUtil.packPosition(chunkX, chunkZ);
         long t0 = System.nanoTime();
+        if (this.serveStoreFrames) {
+            // Frame-form rung (protocol 19, plan §3): the stored zstd frame ships
+            // VERBATIM — zero decompress here, zero compress downstream. Exactly ONE of
+            // getFrame/get is consulted per submit (a getFrame miss falls to region IO,
+            // never to a second get() of the same row).
+            dev.vox.lss.common.store.LodStoreService.FrameHit hit;
+            try {
+                hit = s.getFrame(dimension, packed);
+            } catch (Throwable t) {
+                s.diagnostics().recordError();
+                hit = null;
+            }
+            if (hit == null) {
+                s.diagnostics().recordMiss();
+                return false;
+            }
+            s.diagnostics().recordHit(System.nanoTime() - t0);
+            if (hit.usize() == 0) {
+                // All-air: same result shape as the raw rung (null section bytes,
+                // never not-found — a null read as an authoritative miss would seed
+                // the miss memo falsely).
+                addResult(playerUuid, new ChunkReadResult(playerUuid, chunkX, chunkZ, null,
+                        dimension, 0, hit.columnTimestamp(),
+                        false, false, false, true, submissionOrder, 0L));
+                return true;
+            }
+            int estimatedBytes = hit.usize() + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
+            addResult(playerUuid, new ChunkReadResult(playerUuid, chunkX, chunkZ, null,
+                    dimension, estimatedBytes, hit.columnTimestamp(),
+                    false, false, false, true, submissionOrder, 0L,
+                    hit.frame(), hit.usize()));
+            return true;
+        }
         dev.vox.lss.common.store.LodStoreService.StoreHit hit;
         try {
-            hit = s.get(dimension, dev.vox.lss.common.PositionUtil.packPosition(chunkX, chunkZ));
+            hit = s.get(dimension, packed);
         } catch (Throwable t) {
             // get() is contained by contract; this belt exists because an escaped throw
             // here would strand the request in flight (leaked slot + orphaned dedup

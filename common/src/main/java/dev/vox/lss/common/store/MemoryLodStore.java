@@ -45,8 +45,14 @@ public final class MemoryLodStore implements LodStoreService {
         int residentBytes() { return this.compressed.length + 64; } // approx per-entry overhead
     }
 
+    /** {@code preFramed}: {@code bytes} IS the compressed frame ({@code usize}
+     *  caller-supplied) — the batcher skips its compress (plan §3 reuse). */
     private record Deposit(String dimension, long packed, byte[] bytes, long ts,
-                           long enqueuedNanos) {}
+                           long enqueuedNanos, boolean preFramed, int usize) {
+        Deposit(String dimension, long packed, byte[] bytes, long ts, long enqueuedNanos) {
+            this(dimension, packed, bytes, ts, enqueuedNanos, false, 0);
+        }
+    }
 
     private static final byte[] EMPTY = new byte[0];
     private static final int QUEUE_CAPACITY = 1024;
@@ -144,6 +150,39 @@ public final class MemoryLodStore implements LodStoreService {
             }
             return null;
         }
+    }
+
+    /** The resident frame VERBATIM (plan §3) — deliberately unvalidated (review A8,
+     *  accepted: session-lifetime RAM is not the bit-rot threat model; a step below
+     *  {@link #get}'s round-trip length check, stated so it isn't rediscovered). */
+    @Override
+    public FrameHit getFrame(String dimension, long packed) {
+        var dim = this.byDimension.get(dimension);
+        if (dim == null) return null;
+        Entry e = dim.get(packed);
+        if (e == null) return null;
+        this.diag.recordMemHit();
+        return e.usize() == 0 ? new FrameHit(EMPTY, 0, e.ts())
+                : new FrameHit(e.compressed(), e.usize(), e.ts());
+    }
+
+    @Override
+    public boolean depositFrame(String dimension, long packed, byte[] frame, int usize,
+                                long chash, long fhash, long columnTimestamp,
+                                long srcStampSeconds) {
+        // chash/fhash unused: the memory tier stores no hashes (see getFrame's stated
+        // no-validation stance). All-air never rides the frame path.
+        if (frame == null || frame.length == 0 || usize <= 0) return false;
+        if (this.shutdown.get()) return false;
+        var dep = new Deposit(dimension, packed, frame, columnTimestamp,
+                System.nanoTime(), true, usize);
+        while (!this.queue.offer(dep)) {
+            if (this.queue.poll() != null) {
+                this.diag.recordDepositDrop();
+                // Shed still returns TRUE — see the SQLite twin's depositFrame comment.
+            }
+        }
+        return true;
     }
 
     @Override
@@ -271,8 +310,16 @@ public final class MemoryLodStore implements LodStoreService {
             this.diag.recordDepositSkip();
             return;
         }
-        byte[] compressed = dep.bytes().length == 0 ? EMPTY : this.codec.compress(dep.bytes());
-        var entry = new Entry(compressed, dep.bytes().length, dep.ts());
+        byte[] compressed;
+        int usize;
+        if (dep.preFramed()) {
+            compressed = dep.bytes(); // the wire frame, verbatim (plan §3 reuse)
+            usize = dep.usize();
+        } else {
+            compressed = dep.bytes().length == 0 ? EMPTY : this.codec.compress(dep.bytes());
+            usize = dep.bytes().length;
+        }
+        var entry = new Entry(compressed, usize, dep.ts());
         Entry replaced = dim.put(dep.packed(), entry);
         this.diag.recordDeposit();
         this.residentBytes.addAndGet(entry.residentBytes());
