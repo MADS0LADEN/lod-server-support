@@ -299,6 +299,52 @@ the hypotheses directly:
 
 Zero code, one flight. It should be the first thing run.
 
+### 8.6.1 RESULT — run 2026-08-01, and it is clean
+
+The cap was put back to **exactly the incident's 100 MB/s** (per-player 104,857,600;
+global 300 MB/s unchanged) and the same flying was repeated. **No wall.** Live counters
+14 minutes in, one player, `feat/compressed-columns` deployed:
+
+```
+Bandwidth: 14.6 MB/s / 300.0 MB/s global (7.65 GB total, 1.98 GB wire)
+Throughput: rate=301 sections/s (9.2 MB/s)
+Voximus_Maximus: sq=0/2000, psync=0, pgen=0
+DiskReader: saturated=0, pending=0, avg_read=1.7ms, store h=248894 m=9865 avg_read=24us
+Sources (tick): sent=0, qpeak=0/2000
+```
+
+**What this settles:**
+
+- **H2 (path congestion) is falsified.** The zstd deploy made the wire ~11.5% *more*
+  expensive per raw byte. If the pipe had been the binding constraint, the wall should
+  have gotten **worse** at the same cap. It vanished instead.
+- **H1 is not active at these rates.** `sq=0/2000` and `qpeak=0/2000` — the server's send
+  queue is empty; there is no LSS backlog for vanilla's chunk packets to queue behind.
+  (This does *not* retire H1 as a mechanism — it says the queue never builds at ~15 MB/s.
+  H1 remains the amplifier that would convert any future downstream limit into a wall,
+  which is why the writability gate in §8.9 is still worth doing.)
+- **H3 (receiver-limited) is what §4 got right.** The one thing that improved is the cost
+  of *receiving*: zstd decompression instead of connection-zlib inflate, and no
+  double-compression on store hits. Making the receiver cheaper removed the wall.
+
+So §4's verdict now rests on a measurement rather than on elimination.
+
+**The question that replaces it:** raising the cap 5× (20.9 → 100 MB/s) barely moved
+throughput — it settles around **9–15 MB/s**, well under both the old cap and the new one.
+The cap has not been the binding constraint at any point in this range. With the server
+demonstrably idle (empty send queue, no disk saturation, 96% store hits at 24 µs), the
+new ceiling is **client-side**, and the `net` event names which resource:
+
+| Observation in the `net` event | Ceiling |
+|---|---|
+| `ingest` at/near 6144 | Voxy's mesher — LSS is correctly tapering the want-set to it (issue #71, working as designed) |
+| `q` near 1500 or `qb` near 48 MiB | LSS's own single-threaded column decode |
+| both low, `inflight` low, `runway` high | neither — the request loop simply is not asking for more (want-set budget / cadence) |
+
+Note the incident sustained **21–25 MB/s** while the current session settles lower, so the
+comparison is not throughput-for-throughput; a hard flight over cold terrain is what the
+trace should capture.
+
 ## 8.7 Experiment 4 — packet count vs byte volume
 
 A **warm** flight (client cache populated ⇒ the server answers `up_to_date`) has the same
