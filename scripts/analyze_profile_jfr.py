@@ -236,12 +236,17 @@ def analyze_jfr(run_dir, jfr_tool):
     thread_cpu = defaultdict(lambda: [0.0, 0])       # group -> [sum user+system, n]
     total_exec = 0
 
-    events = ["jdk.ExecutionSample", "jdk.ObjectAllocationSample", "jdk.GCPhasePause",
+    # jdk.NativeMethodSample (compressed-columns plan §5.2, review B2): time inside
+    # native methods — Deflater.deflateBytes, zstd-jni — is NOT in jdk.ExecutionSample,
+    # which made the `zip` band read 0.5% while deflate-6 provably cost ~15-20% of the
+    # serve path. Counted into the same band/self-method attribution as exec samples.
+    events = ["jdk.ExecutionSample", "jdk.NativeMethodSample",
+              "jdk.ObjectAllocationSample", "jdk.GCPhasePause",
               "jdk.FileRead", "jdk.ThreadCPULoad"]
     for name, fields, stack in stream_events(jfr_tool, jfr_file, events):
         if not in_window(fields):
             continue
-        if name == "jdk.ExecutionSample":
+        if name in ("jdk.ExecutionSample", "jdk.NativeMethodSample"):
             total_exec += 1
             th = thread_group(parse_thread(fields.get("sampledThread", "?")))
             exec_by_thread[th] += 1
