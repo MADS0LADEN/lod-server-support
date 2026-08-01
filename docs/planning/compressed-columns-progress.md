@@ -272,10 +272,11 @@ round …`):
 
 ## Remaining (deployment-gated, pending user action)
 
-- **§5.3 live acceptance**: deploy a feat/compressed-columns build to the tracked
-  Modrinth test server, verify `/lsslod diag`'s new `wire` figure matches the panel
-  bandwidth, warm-rejoin eyeball. (The server currently tracks feat/lod-store
-  builds; deploying is the user's call.)
+- **§5.3 live acceptance**: jar DEPLOYED 2026-08-01 (post-4-agent-review build,
+  byte-verified upload to the Modrinth server's /mods/) — **pending the user's panel
+  restart**, then: verify `/lsslod diag`'s new `wire` figure matches the panel
+  bandwidth, warm-rejoin eyeball. First boot drop-and-rebuilds the warm store
+  (schema v3) and the backfill re-walks at the configured 500 col/s.
 - **Merge + release**: branch is NOT merged. On release, the notes must carry (plan
   §6): the CPU win with the measured numbers, the ~+11.5% wire-bytes trade stated
   honestly (never "wire drop"), the one-time store rebuild (schema v3), the compat
