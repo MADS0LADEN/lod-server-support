@@ -204,6 +204,40 @@ itself becomes client I/O load and perturbs the very thing being measured. Befor
 investigation runs, either buffer the writer (flush on a timer) or add a sampled/aggregate
 mode for `col`. The per-second `net` event is fine either way.
 
+### 8.2.1 Built — the `net` event (2026-08-01)
+
+Shipped on `feat/compressed-columns`; client-only, no protocol change, no server redeploy.
+`ClientNetTrace` emits one line per second while `/lss trace` is on:
+
+```json
+{"t":"net","ms":123456,"ping":42,"dcpt":11.250,"runway":18,"runway_s":"3.60",
+ "miss_view":37,"loaded":1024,"wire_bps":4210233,"raw_bps":26314561,"fps":118,
+ "q":312,"qb":18874368,"ingest":2048,"inflight":640,"spd":"79.94"}
+```
+
+- `ping` — ms; `-1` until the first pong lands.
+- `dcpt` — vanilla chunks/tick the client believes it can apply; `-1` if the accessor is
+  unreachable (a future MC could move the field — the trace degrades, it never throws).
+- `runway` / `runway_s` — loaded chunks ahead before the first hole, and seconds at
+  current speed; `-1` when standing still (no meaningful heading).
+- `wire_bps` / `raw_bps` — LSS column bytes as shipped vs raw; `-1` across a reconnect
+  (the session-gate counters reset, so the delta would be negative).
+- `spd` — blocks/s.
+
+**Reading it:** the wall is `runway` → 0. Look at what the *other* fields were doing in
+the seconds before: `dcpt` collapsing ⇒ H3; `ping` inflating with `dcpt` steady ⇒ H1/H2;
+`wire_bps` at the link's ceiling ⇒ H2. `raw_bps / wire_bps` is the live compression ratio
+that §8.8's cap ladder needs.
+
+The F3 dependency is designed out: vanilla only *sends* its ping while the network charts
+are open, so LSS sends its own `ServerboundPingRequestPacket` at 1 Hz — vanilla's pong
+handler (`ClientPacketListener.handlePongResponse`) logs the sample unconditionally,
+verified in bytecode.
+
+**Flush hazard fixed in the same change:** `ClientTraceLog` flushed per line (one write
+syscall per event) and `col`/`col_light` fire per column — at wall rates the trace was
+loading the client it measured. Now a 64 KB buffer, flushed at most every 200 ms.
+
 ## 8.3 Instrument B — the shared queue + vanilla's sender, in `/lsslod diag`
 
 Per player, sampled per tick with a high-water mark (matching the existing `*_hw` gauges):
