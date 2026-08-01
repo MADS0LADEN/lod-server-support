@@ -109,4 +109,196 @@ wall returns, the number to move is this one, downward.
   deferral safe by construction.
 - **End-to-end zstd columns**: `compressed-columns-design.md` — kills the
   double-compression on store hits and the counted-vs-wire confusion that cost this
-  investigation a round.
+  investigation a round. **Shipped** on `feat/compressed-columns` and live-validated
+  2026-08-01 (protocol 19; 8.63 GB raw → 1.38 GB wire over a full session). Its
+  relevance here is §8.7: it moved client decode cost DOWN and wire bytes slightly UP,
+  which makes it a free controlled A/B for the question below.
+
+---
+
+# Part II — nailing down the transport hypothesis (opened 2026-08-01, post-zstd)
+
+§4's verdict ("client processing budget, not the pipe") was reached by *elimination* —
+server-side evidence ruled out everything server-side, and the remaining candidate was
+named. Nothing measured the transport directly. The working suspicion now is that the
+TCP connection itself is congested. This part is the plan to settle it with
+measurements instead of elimination.
+
+## 8. What "congested" could mean — three hypotheses, different fixes
+
+The word covers three distinct mechanisms. They stack, they look alike from the server,
+and only one of them is fixed by lowering the byte cap.
+
+**H1 — Send-queue head-of-line blocking (server-local, LSS's own doing).**
+LSS sends through `ServerPlayNetworking.send(player, payload)` → `Connection.send` →
+netty channel write. **There is no writability check anywhere in the LSS send path**
+(verified: no `isWritable` / `ChannelOutboundBuffer` reference in the codebase). Every
+byte LSS hands netty enters the *same* `ChannelOutboundBuffer` that vanilla's chunk
+packets enter — and netty's outbound buffer is unbounded. Whatever the downstream
+bottleneck is, a vanilla chunk packet written after 20 MB of LOD payloads waits for
+20 MB to drain. Vanilla chunk latency = queue depth ÷ drain rate, and the per-tick flush
+tops up the queue faster than a constrained socket empties it. **This mechanism needs no
+network fault at all** — it converts *any* downstream limit into a multi-second vanilla
+chunk stall.
+
+**H2 — Path congestion (true TCP congestion).** cwnd limited by loss or AQM somewhere
+between the host and the player. Signature: retransmissions, dup-ACKs, cwnd collapse,
+RTT inflation *without* a closed receive window.
+
+**H3 — Receiver-limited.** The client's netty event loop and/or render thread falls
+behind, the client stops reading the socket, the receive window closes, and the server's
+send path backs up. This is §4's current verdict.
+
+The trap: **H1, H2 and H3 all look identical from the server** — its buffer backs up in
+every case. That is precisely why the last round could not distinguish them, and why the
+new instruments below are deliberately split between *both ends* of the connection.
+
+## 8.1 Discriminator table
+
+| Signal | Where | H1 queue | H2 path | H3 receiver |
+|---|---|---|---|---|
+| netty outbound pending bytes | server | **large** | large | large |
+| `channel.isWritable()` | server | false | false | false |
+| TCP zero-window advertised | client capture | no | no | **yes** |
+| retransmits / dup-ACK / cwnd collapse | client capture | no | **yes** | no |
+| kernel `Recv-Q` on the client socket | client | ~0 | ~0 | **high** |
+| `ChunkBatchSizeCalculator.getDesiredChunksPerTick()` | client | **stays high** (starved) | stays high | **collapses** (busy) |
+| `PlayerChunkSender.unacknowledgedBatches` | server | pegged | pegged | pegged |
+| vanilla ping RTT (1 Hz, same connection) | client | **inflates** | inflates | inflates |
+| wire bytes/s vs link capacity | client | below | **at/near** | below |
+
+Read the table by columns, not rows: the *three* decisive cells are the client's
+zero-window flag (H3), the retransmit counters (H2), and `desiredChunksPerTick` — which
+splits "the client is busy" from "the client is starved" in one number, from inside the
+client, with no capture at all.
+
+## 8.2 Instrument A — vanilla's own numbers in `/lss trace`
+
+This is the "add vanilla data to lss trace" idea, and it lands better than expected:
+**vanilla already computes every number we want on the client.** One new `net` event per
+second, all behind the existing `ClientTraceLog.enabled()` gate, hooked in
+`LodRequestManager.tick()` (`LodRequestManager.java:151`):
+
+| Field | Source (all verified present in 26.2) | What it settles |
+|---|---|---|
+| `ping_ms` | `Minecraft.getDebugOverlay().getPingLogger()` — public getter on `DebugScreenOverlay`, `LocalSampleLogger.get(i)` reads the ring | App-level RTT **on the same TCP connection**. The queueing-delay probe: if vanilla's ping goes 30 ms → seconds while LSS streams, the shared byte stream is backed up. |
+| `wire_bps` | `getBandwidthLogger()` — fed by `BandwidthDebugMonitor.onReceive`, installed in the **frame decoder**, so it counts *compressed wire* bytes off the socket | Real pipe utilization. Pair with LSS's raw counter for a live wire/raw ratio — the exact confusion that cost §4 a round. |
+| `dcpt` | `ClientPacketListener.chunkBatchSizeCalculator` (private → accessor mixin) → `getDesiredChunksPerTick()` | **The cleanest H3 discriminator.** Vanilla's own measurement of how fast *this client* can apply chunks (`aggregatedNanosPerChunk`). Collapses ⇒ client-bound; stays high while chunks don't arrive ⇒ starved. |
+| `runway` | `ClientChunkCache.getLoadedChunksCount()` + presence probes along the velocity vector | Turns "the wall" into a continuous number: loaded vanilla chunks ahead, and seconds-of-runway at current speed. Lets onset be time-aligned against everything else instead of depending on the player noticing. |
+| `tick_ms`, `fps` | `getTickTimeLogger()`, `Minecraft.getFps()` | H3's other half — render-thread saturation from Voxy meshing. |
+| decode queue / bytes / ingest backlog | already in LSS (`ClientColumnProcessor.getQueuedBytes()` etc.) | LSS-side pressure, for correlation. |
+
+**Gotcha, verified in bytecode:** `ClientPacketListener.tick()` calls
+`pingDebugMonitor.tick()` **only while `getDebugOverlay().showNetworkCharts()` is true**
+— the ping samples do not accumulate otherwise. So the trace must call
+`toggleNetworkCharts()` on start (or refuse to start without it and say so). Nice side
+effect: the player then *sees* the ping and bandwidth charts live while flying, which is
+a zero-code readout on its own. Whether the client installs the `BandwidthDebugMonitor`
+unconditionally is **not yet verified** — if it turns out to be chart-gated too, the same
+toggle covers it; if it is absent entirely, LSS can add its own counting handler at the
+head of the client pipeline.
+
+**Measurement hazard to fix first:** `ClientTraceLog.event` flushes per line, and the
+`col` event fires **per column** — at the ~700 columns/s of a wall episode, the trace
+itself becomes client I/O load and perturbs the very thing being measured. Before this
+investigation runs, either buffer the writer (flush on a timer) or add a sampled/aggregate
+mode for `col`. The per-second `net` event is fine either way.
+
+## 8.3 Instrument B — the shared queue + vanilla's sender, in `/lsslod diag`
+
+Per player, sampled per tick with a high-water mark (matching the existing `*_hw` gauges):
+
+- **`ChannelOutboundBuffer.totalPendingWriteBytes()`**, `channel.isWritable()`,
+  `channel.bytesBeforeUnwritable()` — reachable via two accessor mixins
+  (`ServerCommonPacketListenerImpl.connection`, `Connection.channel`; both verified
+  private fields). **This is the H1 measurement and the single highest-value addition** —
+  it is also exactly the signal §7's flow-control follow-up would consume, so the
+  diagnostic is not throwaway.
+- **`PlayerChunkSender`** — `desiredChunksPerTick`, `unacknowledgedBatches` /
+  `maxUnacknowledgedBatches`, `pendingChunks.size()`, `batchQuota` (accessor mixin; all
+  verified present in 26.2). `unacknowledgedBatches` pegged at max = vanilla has stopped
+  sending and is waiting on the client's ack, i.e. delivery is being throttled *by the
+  ack loop* rather than by bytes.
+- **`ServerCommonPacketListenerImpl.latency()`** — public, no mixin. Keepalive RTT, 15 s
+  cadence: coarse, free, and enough to confirm a multi-second inflation.
+- **`Connection.getAverageSentPackets()`** — public.
+
+**The falsifiable prediction:** if the outbound buffer stays small (< ~1 MB) through a
+wall episode, **H1 is dead** and writability gating is not the fix. If it sits at tens of
+MB, H1 is proven — and is worth fixing regardless of what is downstream, because it is
+LSS unilaterally injecting seconds of latency into vanilla's chunk delivery.
+
+## 8.4 Experiment 1 — external ground truth (no code)
+
+The managed host gives no shell, so the client end is the only capture vantage. Wireshark
+on the client machine, filtered to the server address, then:
+
+```
+tshark -r cap.pcapng -q -z io,stat,1,"COUNT(tcp.analysis.zero_window)tcp.analysis.zero_window","COUNT(tcp.analysis.retransmission)tcp.analysis.retransmission","SUM(tcp.len)tcp.len"
+```
+
+- **zero-window events** ⇒ H3 (the client's socket buffer filled; the app is not reading)
+- **retransmissions / dup-ACKs** ⇒ H2 (real path loss)
+- **neither, but the ping trace inflates anyway** ⇒ H1 (a server-side queue, not the wire)
+
+If the client ever runs on Linux, `ss -tin dst <server>` polled at 1 Hz gives the same
+verdict far more cheaply — it prints `Recv-Q`, `cwnd`, `rtt`, and `retrans` directly.
+
+## 8.5 Experiment 2 — burstiness at constant mean (the causal test for H1)
+
+Hold `bytesPerSecondLimitPerPlayer` fixed and change only the *shape* of the writes:
+spread each tick's allocation across sub-flushes, or simply gate sends on
+`channel.isWritable()`. Mean throughput identical, queue depth much lower. If the wall
+disappears at unchanged throughput, H1 was the mechanism and the fix is nearly free. If
+nothing changes, the queue was not the problem and the byte cap really is the lever.
+
+## 8.6 Experiment 3 — the zstd natural A/B (free, already deployed, do this first)
+
+The compressed-columns deploy is a controlled change already in production: client decode
+cost went **down** (zstd in place of connection-zlib, and no double-compression on store
+hits), while wire bytes went **up ~11.5%** (measured, §5.3 of the progress doc). So flying
+the same route at the same 40 MB/s cap and comparing against the pre-zstd episode splits
+the hypotheses directly:
+
+- wall **materially better** ⇒ receiver-processing-bound (H3 — §4's verdict holds)
+- wall **unchanged or worse** ⇒ pipe/queue-bound (H1/H2 — §4's verdict was wrong)
+
+Zero code, one flight. It should be the first thing run.
+
+## 8.7 Experiment 4 — packet count vs byte volume
+
+A **warm** flight (client cache populated ⇒ the server answers `up_to_date`) has the same
+request/response *packet* churn at near-zero bytes. Smooth warm flight + walled cold
+flight ⇒ the wall is driven by byte volume, not by the request loop's packet rate or
+round-trip structure. The last live session already produced both regimes in one sitting
+(198,572 `up_to_date` vs 283,731 sent) — this may be answerable from an existing trace.
+
+## 8.8 Experiment 5 — cap ladder, with the knee measured in *both* units
+
+Sweep the cap (5 / 10 / 20 / 40 MB/s raw) and record the wall onset — but convert each
+onset to wire bytes using the live ratio, and repeat over terrain with very different
+compressibility (open ocean/superflat vs cave-riddled/varied). Terrain compressibility is
+the lever that separates the units:
+
+- knee constant in **wire MB/s** across terrain ⇒ the pipe/queue binds (H1/H2)
+- knee constant in **raw MB/s** ⇒ client processing binds (H3)
+
+This also produces the number the cap should actually be set to, in whichever unit turns
+out to be the real one — closing §5's open question ("40 MB/s re-admits the incident
+range").
+
+## 8.9 Order of work
+
+1. **§8.6** — the zstd A/B. Free, already deployed, splits H3 from H1/H2 in one flight.
+2. **§8.2 + §8.3** — the two instruments. ~1 day; both are also the inputs the §7
+   flow-control design needs, so nothing is throwaway. Fix the trace flush hazard first.
+3. **§8.4** — packet capture on the next repro, with the instruments running so the
+   timelines can be aligned.
+4. **§8.5** — burstiness / writability gate. Likely the *fix*, not merely a test.
+5. **§8.8** — cap ladder to set the final number in the unit that turns out to matter.
+
+**Independent of the outcome:** LSS should not enqueue into a channel that is already
+unwritable. That is true under all three hypotheses, it is the cheapest possible
+mitigation, and §7 already names netty writability as a flow-control signal. The v17
+silent-drop + re-declaration architecture makes deferring a send free by construction —
+a skipped column is re-declared within a second.
