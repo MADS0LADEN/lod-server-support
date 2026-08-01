@@ -185,6 +185,24 @@ store-hit-dominated, so the compression band is a larger whole-process fraction 
 the conservative 3-4 ms/col estimate assumed); wire cost lands exactly on the
 Phase 0 prediction (×1.12); the client is a slight net WIN, not just non-regressed.
 
+### §5.2 CPU-proof — COLD arm: **PASS, 3/3 reps** (2026-08-01, stamp 20260801-134641)
+
+`./scripts/compress_gate.sh cold 3 150` — no-cache, lodStore=off both arms (the
+disk/live serve path, compress-replaces-deflate):
+
+| Gate | rep1 | rep2 | rep3 | median | limit |
+|---|---|---|---|---|---|
+| G1 server CPU regression | **−27.2%** (a win) | −27.0% | −29.0% | −27.2% | ≤+5% |
+| G1t zip-band CPU/col cut | +73.8% (307→80 µs) | +74.3% | +72.0% | +73.8% | ≥+50% |
+| G2 client CPU/col ratio | 1.046 | 1.015 | 0.993 | 1.015 | ≤1.05 |
+| G3 socket bytes ratio | 1.115 | 1.114 | 1.115 | 1.115 | ≤1.15 |
+| G3x / G4 / P | 0.98 / ≤0.07% / 6.90 | — | — | — | all green |
+
+The "parity-or-better" cold gate is a clean WIN: zstd-1 + deflate-over-frame costs
+~27% less whole-process server CPU per column than deflate-over-raw, matching the
+Phase 0 live-serve premise (551→101 µs in-band). Both §5.2 arms are now green —
+the CPU-reduction claim is PROVEN under the review-hardened gates.
+
 ## Decisions log
 
 - 2026-08-01: branch created off `feat/lod-store` (Phase 2 depends on the store).
