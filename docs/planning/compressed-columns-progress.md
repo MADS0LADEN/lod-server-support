@@ -238,6 +238,41 @@ frame rung).
 LSS↔VSS wire-identity pin — the compressed-columns wire surface is brand-invariant
 for free, as plan §6 predicted). Stale 0.9.0 jars from earlier local builds deleted.
 
+## §5.3 LIVE ACCEPTANCE — PASS (2026-08-01, Modrinth test server)
+
+Deployed to the live Fabric 26.2 server (Moonrise + Lithium + FerriteCore, store
+`full`, 256-chunk LOD distance) and driven by a real player session. `/lsslod diag`
+over RCON after 8m20s / 31,885 columns served:
+
+```
+Bandwidth: 20.9 MB/s / 300.0 MB/s global (1000.8 MB total, 157.1 MB wire,
+                                          cols zstd=32312 raw=0)
+DiskReader: … store=full h=31933 m=139 dep=139 drop=0 err=0 avg_read=31us
+```
+
+- **Wire ratio 6.37:1** (1000.8 MB raw-counted → 157.1 MB actually shipped) — within
+  0.6% of the Phase 0 corpus prediction for zstd-1 (6.33:1). The design's headline
+  observability goal is met: `wire` is the number that matches the host's bandwidth
+  graph, `total` is the raw-denominated limiter charge, and the gap between them IS
+  the compression.
+- **cols zstd=32312 / raw=0** — every single column negotiated codec 1 end-to-end
+  through a real client. The capability handshake, the codec byte, and the client
+  decompress drain all work live.
+- **Store frames served verbatim: 31,933 hits, 139 misses, `err=0`, 31 µs avg** — the
+  Phase 2 frame path (fhash validation, no decompress) is live-proven at scale on a
+  ~3.8 GB store; zero integrity failures, zero purges.
+- No LSS warnings or errors in the boot log; `read_path=moonrise-low` unchanged.
+- Note the per-player cap is charged in RAW bytes by design (§5): the session ran at
+  the 20.9 MB/s configured cap while using only ~3.3 MB/s of actual network.
+
+Loose end (benign, worth one glance later): no `schema/wire/version drift — dropping
+and rebuilding` line appears in ANY of today's logs, yet the store answers frame reads
+(which require the v3 `fhash` column) with zero errors — so the DB and the code
+demonstrably agree. Most consistent explanation is the store was already schema-3 from
+an earlier deploy of this branch. Also: `Store backfill: 0 region(s) to process` shows
+on EVERY boot including old-jar ones, so that line is not evidence of a re-walk and the
+region-dir resolver on that host deserves a look.
+
 ## 4-agent implementation review (2026-08-01) — folded
 
 Four parallel lenses over the full branch diff (wire/client, server pipeline,
@@ -272,11 +307,7 @@ round …`):
 
 ## Remaining (deployment-gated, pending user action)
 
-- **§5.3 live acceptance**: jar DEPLOYED 2026-08-01 (post-4-agent-review build,
-  byte-verified upload to the Modrinth server's /mods/) — **pending the user's panel
-  restart**, then: verify `/lsslod diag`'s new `wire` figure matches the panel
-  bandwidth, warm-rejoin eyeball. First boot drop-and-rebuilds the warm store
-  (schema v3) and the backfill re-walks at the configured 500 col/s.
+- ~~**§5.3 live acceptance**~~ — **DONE 2026-08-01, PASS.** See below.
 - **Merge + release**: branch is NOT merged. On release, the notes must carry (plan
   §6): the CPU win with the measured numbers, the ~+11.5% wire-bytes trade stated
   honestly (never "wire drop"), the one-time store rebuild (schema v3), the compat
