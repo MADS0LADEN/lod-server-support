@@ -922,6 +922,25 @@ feat/lod-store is NOT to be released without a fresh pre-flight (CLAUDE.md updat
 
 ---
 
+### §0 warm gate re-run 2026-08-02 (post v0.9.0 review) — GATE PASS 3/3
+
+Re-run after the review pinned `lodStoreBackfill: false` in `store_gate.sh`'s staged
+config. The pin is PREVENTIVE, not a repair: the `lodStoreBackfill=true` default landed
+2026-08-02 00:44 (`4c24216`), so every previously recorded gate verdict predates it and
+was never contaminated. This run is the first that could have been, and it reproduces the
+20260731 numbers exactly — median hit ratio 0.988 and disk.submitted 1.17% are identical —
+which also clears the store fixes from that review (deficit-sized eviction, logical-byte
+cap accounting, the drained vacuum, the identity-checked tombstone floor, the O(1) drop
+barrier) of any regression against this gate.
+
+    median hit ratio            0.988   (floor 0.95)   3/3 reps
+    median disk.submitted       1.17%   (ceil 2%)      3/3 reps
+    median addressable-CPU cut  99.0%   (floor 85%)    3/3 reps
+    median band-CPU cut         81.8%   (floor 50%)    3/3 reps
+    hit p95 29us vs off-arm mean read 1962us — 68x
+    plan §0 metric-2 as-written (>=70% whole-band): PASS at 81.8%
+
+
 ## Final 4-agent Opus review round (2026-07-31, user-requested post-completion)
 
 Four Opus 5 reviewers over the whole `main...feat/lod-store` diff, one lens each
