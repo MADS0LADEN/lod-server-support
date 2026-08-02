@@ -42,7 +42,7 @@ log "=== arm: store-save-storm-off (lodStore=off, MSPT pair) ==="
 # config's lodStore — inherited here it silently turns the off arm into full-vs-full
 # and the CPU pairing measures nothing (4-agent round R4). The on arm may inherit it
 # (full is what it pins anyway); the off arm must not.
-env -u SOAK_LODSTORE_OVERRIDE "$PROJECT_ROOT/scripts/soak.sh" store-save-storm-off
+env -u SOAK_LODSTORE_OVERRIDE -u SOAK_LODSTORE_BACKFILL_OVERRIDE "$PROJECT_ROOT/scripts/soak.sh" store-save-storm-off
 OFF_DIR="$(latest_results store-save-storm-off)"
 
 log "paired storm-window verdict (process CPU + cadence hold)"

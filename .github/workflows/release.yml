@@ -133,17 +133,22 @@ jobs:
           modrinth-id: lKiXKLvv
           modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
           files: paper/build/libs/lod-server-support-paper-*.jar
-          name: ${{ github.ref_name }} - Paper/Purpur (MC 26.2)
+          name: ${{ github.ref_name }} - Paper/Purpur/Folia (MC 26.2)
           version: ${{ github.ref_name }}+paper+mc26.2
           version-type: release
-          # Since v0.7.0 the jar does NOT declare folia-supported (no Folia build exists for
-          # MC 26.2 — the flag would auto-load Folia-unvalidated jars the day Folia ships), so
-          # releases advertise only paper + purpur. Re-add `folia` here TOGETHER with the
-          # plugin.yml flag + PluginYmlContractTest + release_check inversions once Folia
-          # ships 26.2 and the SOAK_PLATFORM=folia validation passes.
+          # Folia re-added for v0.9.0: all three preconditions the previous comment named
+          # are met — Folia published 26.2-1 on 2026-07-28, the jar declares
+          # folia-supported again (PluginYmlContractTest + release_check pin its PRESENCE),
+          # and all four SOAK_PLATFORM=folia scenarios passed 2026-08-01. This step was the
+          # last piece still advertising the old state, which left plugin.yml and the README
+          # claiming Folia while Modrinth's loader filter hid the jar from Folia admins.
+          # Folia remains EXPERIMENTAL (single-player soaks only; concurrent multi-region
+          # ingress is still unvalidated) — that is a release-notes caveat, not a reason to
+          # withhold a jar the platform can actually load.
           loaders: |
             paper
             purpur
+            folia
           game-versions: |
             26.2
           changelog: ${{ steps.release_notes.outputs.notes }}

@@ -136,8 +136,13 @@ public class PaperCommands implements CommandExecutor, TabCompleter {
                 genService != null ? genService.getDiagnostics() : null,
                 // LIVE store mode, not the config's ask (review MINOR-3): a codec-probe
                 // degrade renders store=unavailable, never a lying store=memory h=0.
-                dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore)
-                        == dev.vox.lss.common.store.LodStoreMode.OFF
+                // enabled=false is an OFF store, not a degraded one — without that term
+                // a disabled server rendered store=unavailable, which formatToken
+                // documents as "requested but the codec native failed", sending admins
+                // after a zstd problem that does not exist (v0.9.0 final review).
+                !config.enabled
+                        || dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore)
+                                == dev.vox.lss.common.store.LodStoreMode.OFF
                         ? dev.vox.lss.common.store.LodStoreMode.OFF
                         : (service.getLodStore() != null ? service.getLodStore().mode() : null),
                 service.getOffThreadProcessor().getStoreDiagnostics(),

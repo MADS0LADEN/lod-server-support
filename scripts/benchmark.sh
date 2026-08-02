@@ -53,6 +53,30 @@ cd "$PROJECT_ROOT"
 # Step 2: Prepare run directories
 mkdir -p "$SERVER_RUN_DIR" "$CLIENT_RUN_DIR" "$RESULTS_DIR"
 
+# This script is config-agnostic BY CONTRACT — benchmark_compare.sh and store_gate.sh stage
+# their own arm configs into $SERVER_RUN_DIR/config and then call us, so we must never
+# clobber theirs. They announce that by exporting BENCHMARK_CONFIG_STAGED=1.
+#
+# Standalone, though, "no config" no longer means "neutral": since 2026-08-02 the shipped
+# defaults are lodStore=full + lodStoreBackfill=true, so a bare `benchmark.sh no-cache`
+# would run a 500 col/s background region walk over the pre-built world DURING the measured
+# window — silently voiding the scenario's own "disk-read + serialization pipeline" premise
+# and making results incomparable with every earlier baseline. Worse, a config left behind
+# by a previous store_gate.sh run would apply to an unrelated later run. So when no caller
+# claims the config, stage the neutral one the scenarios were defined against.
+if [[ -z "${BENCHMARK_CONFIG_STAGED:-}" ]]; then
+    mkdir -p "$SERVER_RUN_DIR/config"
+    cat > "$SERVER_RUN_DIR/config/lss-server-config.json" <<'EOF'
+{
+  "enabled": true,
+  "enableChunkGeneration": true,
+  "lodStore": "off",
+  "lodStoreBackfill": false
+}
+EOF
+    echo "[benchmark] Staged neutral config (lodStore=off) — export BENCHMARK_CONFIG_STAGED=1 to keep your own"
+fi
+
 require_base_world() {
     if [[ ! -d "$WORLDS_DIR/base/world" ]]; then
         echo "[benchmark] ERROR: No base world found at $WORLDS_DIR/base/world"

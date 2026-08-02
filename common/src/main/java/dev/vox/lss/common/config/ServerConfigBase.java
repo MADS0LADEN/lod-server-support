@@ -391,7 +391,7 @@ public abstract class ServerConfigBase extends JsonConfig {
         lodStoreResweepSeconds = Math.clamp(lodStoreResweepSeconds,
                 LSSConstants.MIN_LOD_STORE_RESWEEP_SECONDS, LSSConstants.MAX_LOD_STORE_RESWEEP_SECONDS);
         // 0 (and negative nonsense) = uncapped — the resweepSeconds 0-means-off
-        // pattern; only a nonzero opt-in cap gets the 64..32768 floor/ceiling.
+        // pattern; only a nonzero opt-in cap gets the 64..1048576 floor/ceiling.
         lodStoreMaxMB = lodStoreMaxMB <= 0 ? 0 : Math.clamp(lodStoreMaxMB,
                 LSSConstants.MIN_LOD_STORE_MAX_MB, LSSConstants.MAX_LOD_STORE_MAX_MB);
         lodStoreBackfillColumnsPerSecond = Math.clamp(lodStoreBackfillColumnsPerSecond,

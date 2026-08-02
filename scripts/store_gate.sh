@@ -93,7 +93,7 @@ run_arm() { # <arm-label> <lodStore-value> <rep>
     rm -f "$RESULTS"/server*.json "$RESULTS"/client*.json "$RESULTS"/cpu*.jsonl \
           "$RESULTS"/*.jfr "$RESULTS"/warm-join-meta.json
     local rc=0
-    (cd "$PROJECT_ROOT" && ./scripts/benchmark.sh "$SCENARIO" "$DURATION") \
+    (export BENCHMARK_CONFIG_STAGED=1; cd "$PROJECT_ROOT" && ./scripts/benchmark.sh "$SCENARIO" "$DURATION") \
         > "$OUT_ROOT/$STAMP/${arm}-rep${rep}.orchestrator.log" 2>&1 || rc=$?
     collect "$out"
     cat > "$out/meta.json" <<EOF

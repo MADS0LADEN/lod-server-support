@@ -151,12 +151,17 @@ class ReleaseWorkflowContractTest {
     }
 
     @Test
-    void paperStepsDoNotAdvertiseFolia() {
-        // folia-supported is deliberately ABSENT on the 26.2 line (no Folia 26.2 build
-        // exists); advertising the folia loader would surface an unloadable jar. Re-add
-        // together with the plugin.yml flag + pin inversions once Folia ships 26.2.
-        assertFalse(Pattern.compile("(?m)^\\s+folia\\s*$").matcher(releaseYml).find(),
-                "no Modrinth step may advertise the folia loader on the 26.2 line");
+    void paperStepAdvertisesFolia() {
+        // INVERTED for v0.9.0. This used to pin the folia loader's ABSENCE, on the premise
+        // that no Folia 26.2 build existed and the loader would surface an unloadable jar.
+        // Folia published 26.2-1 on 2026-07-28, plugin.yml declares folia-supported again
+        // (PluginYmlContractTest pins that PRESENCE), and all four SOAK_PLATFORM=folia
+        // scenarios passed — so the guarded failure inverted too: it is now a Paper jar
+        // that Folia CAN load but that Modrinth's loader filter hides from Folia admins,
+        // while the README's compatibility table claims the platform is supported.
+        assertTrue(Pattern.compile("(?m)^\\s+folia\\s*$").matcher(releaseYml).find(),
+                "the Paper Modrinth step must advertise the folia loader now that the jar "
+                        + "declares folia-supported and the Folia soaks pass");
     }
 
     @Test

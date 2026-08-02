@@ -60,6 +60,7 @@ Config is generated on first run at the paths in the install table above. The ge
 | `lodStore` | `"full"` | Keep a compressed copy of every served LOD column in `<world>/lss-lod/` and serve repeat requests from it. `"off"` disables it — see **Tuning** |
 | `lodStoreBackfill` | `true` | Pre-warm that store with a low-priority background walk of your existing world, so the first player to arrive already gets fast serves. Yields to players, pauses under load, resumes across restarts. Fabric only |
 | `lodStoreMaxMB` | `0` | Size cap for the store. `0` = uncapped; set a value to bound it, and the oldest columns are evicted first |
+| `useCompressedColumns` | `true` | Send LOD columns pre-compressed, which cuts CPU on both server and client. Clients that do not support it are served the old format automatically; `false` disables it entirely as a rollback |
 | `useBackgroundReadPriority` | `true` | LOD disk reads yield to normal chunk loading, so streaming distant terrain doesn't delay the chunks players are actively walking into |
 | `enableV16Compat` | `true` | Serve legacy v0.4.x–v0.6.x clients through a built-in translation layer. `false` requires every client to match the server's protocol |
 | `xrayObfuscation` | `"auto"` | Anti-xray masking for LOD data. `"auto"` mirrors your anti-xray engine's own hidden-block list and height cutoff whenever one is detected (Paper's built-in, per world; the DrexHD AntiXray mod on Fabric). `"on"` forces masking, `"off"` disables it — LOD data then carries real ore locations even on anti-xray servers |
@@ -78,7 +79,7 @@ The defaults suit a typical server and most admins never need this section.
 
 Lowering either costs *speed*, not correctness: LOD fills in more slowly, nothing breaks. Most other settings change *how* the work is done rather than how much, so they are the wrong lever for a CPU problem.
 
-**The LOD store trades disk for CPU.** With `lodStore: "full"` a repeat request is answered from the store instead of re-reading and re-serializing the chunk — roughly 99% less CPU on those serves, against a store that grows to about the size of your region files (a 10 GB world adds ~7 GB). So: short on CPU, keep it on; short on disk, turn it off or bound it with `lodStoreMaxMB`. It is derived data, so deleting `lss-lod/` while the server is stopped is always safe and it re-warms on its own.
+**The LOD store trades disk for CPU.** With `lodStore: "full"` a repeat request is answered from the store instead of re-reading and re-serializing the chunk. That removes about 99% of the read-and-serialize work and cuts total LSS CPU per served column by roughly 80%, against a store that grows to about the size of your region files (a 10 GB world adds ~7 GB). So: short on CPU, keep it on; short on disk, turn it off or bound it with `lodStoreMaxMB`. It is derived data, so deleting `lss-lod/` while the server is stopped is always safe and it re-warms on its own.
 
 ## Redistribution
 

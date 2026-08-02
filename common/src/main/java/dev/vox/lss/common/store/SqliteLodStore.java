@@ -981,24 +981,32 @@ public final class SqliteLodStore implements LodStoreService {
                 // tombstoned + dropped (counted sweep_drops — maintenance culls share
                 // that counter); the store re-warms from serves/backfill.
                 commitTxn();
-                long now = System.nanoTime();
+                // Fence FIRST, drop second. Review B9 fences in-flight backfill
+                // done-marks so a region judged before this drop cannot be marked done
+                // after it — but the bump used to happen at the END of the arm, leaving
+                // the whole drop unfenced. That window was a single `DELETE FROM` when
+                // it was written; batching the drop (v0.9.0, to bound its heap) stretched
+                // it to tens of seconds on a large store, which is long enough for a
+                // concurrent walk of an already-warm region to see drained=true, read the
+                // pre-bump generation, and enqueue a BackfillMark that lands after the
+                // backfill table is cleared — a done-marked region with zero rows, never
+                // re-walked. Bumping up front makes the whole drop fenced.
+                this.dropGeneration++;
+                // The backfill progress table must reset with the rows it describes
+                // (4-agent round R3-M1): done-marks surviving the drop made the
+                // documented "invalidate all -> re-backfill" remediation enumerate 0
+                // regions — the store then only re-warmed where players walked. Cleared
+                // up front too, so a mark racing the drop cannot survive in it.
+                try (Statement st = this.writer.createStatement()) {
+                    st.executeUpdate("DELETE FROM backfill");
+                }
+                this.writer.commit();
                 for (var e : List.copyOf(this.dimIds.entrySet())) {
                     // dropDimensionRows publishes each batch to the sweep-drop
                     // listener and installs the O(1) drop barrier itself; it no
                     // longer needs a tombstone per position.
                     dropDimensionRows(e.getKey(), e.getValue());
                 }
-                // The backfill progress table must reset with the rows it describes
-                // (4-agent round R3-M1): done-marks surviving the drop made the
-                // documented "invalidate all -> re-backfill" remediation enumerate 0
-                // regions — the store then only re-warmed where players walked.
-                try (Statement st = this.writer.createStatement()) {
-                    st.executeUpdate("DELETE FROM backfill");
-                }
-                this.writer.commit();
-                // Review B9: fence in-flight backfill done-marks — a region judged
-                // before this drop must not be marked done after it.
-                this.dropGeneration++;
                 LSSLogger.info("LOD store: dropped all rows + backfill progress"
                         + " (admin invalidate)");
             }

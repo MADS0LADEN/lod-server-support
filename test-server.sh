@@ -111,6 +111,12 @@ if [ -n "$LSS_LOD_DISTANCE" ]; then
     case "$LSS_LOD_DISTANCE" in
         ''|*[!0-9]*) echo "LSS_LOD_DISTANCE must be a positive integer (got '$LSS_LOD_DISTANCE')" >&2; exit 1 ;;
     esac
+    # Same overflow guard as the CPS knob: a value too large for an int makes GSON throw,
+    # and JsonConfig's whole-file fallback then silently resets the ENTIRE staged config
+    # to defaults rather than failing loudly.
+    if [ "${#LSS_LOD_DISTANCE}" -gt 4 ]; then
+        echo "LSS_LOD_DISTANCE too large — server clamps to 2048 (got '$LSS_LOD_DISTANCE')" >&2; exit 1
+    fi
 fi
 if [ -n "$LSS_LODSTORE_BACKFILL_CPS" ]; then
     case "$LSS_LODSTORE_BACKFILL_CPS" in
