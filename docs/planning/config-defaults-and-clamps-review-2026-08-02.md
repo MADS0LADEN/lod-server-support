@@ -1,7 +1,8 @@
 # Config surface review — defaults, clamps, retirements, auto-configuration
 
-**Status: REVIEW / RECOMMENDATIONS. No code changed by this document** (one stale
-javadoc excepted). Written 2026-08-02 on `feat/compressed-columns` at the user's
+**Status: IMPLEMENTED 2026-08-02** (commit `4c24216`), with one recommendation REVERSED
+during implementation — see §6 and §11. Originally written as review/recommendations.
+Written 2026-08-02 on `feat/compressed-columns` at the user's
 request: audit every config option and its default and clamp, turn the new
 performance features on by default including the store and backfill, find options
 that can be deleted / made internal / auto-configured, and free up clamps that are
@@ -469,3 +470,54 @@ document.
 **Not in any batch:** §8.1 waits on the cap sweep, which needs the user to fly on the
 live server. §3.6 waits on a generation-concurrency MSPT experiment. Both are blocked on
 measurement, not on decisions.
+
+---
+
+## 11. Implementation outcome (2026-08-02)
+
+Everything above landed in one commit except as noted here.
+
+### 11.1 The retirement batch was wrong about two of its three knobs
+
+§6 recommended retiring `useBackgroundReadPriority` and `sendQueueLimitPerPlayer` on the
+grounds that they are unreachable or buy nothing. **Implementing it surfaced that both are
+the only levers that let a test harness exercise a real production path**, which is a fact
+the review did not have and which reverses the call:
+
+- **`sendQueueLimitPerPlayer`** — the `bandwidth-throttle` soak scenario sets it to `64` and
+  its checker *gates on* `service.queue_full >= 1`. That counter is the send-queue breaker: a
+  genuine loss signal, unlike the transient-drop counters beside it. Retiring the key would
+  have left that production path with no end-to-end coverage at all.
+- **`useBackgroundReadPriority`** — it is the arm selector for `benchmark_compare.sh`'s
+  `v17-fg` foreground-vs-background CPU comparison. Retiring it would not have *broken* that
+  harness; it would have made its two arms **silently identical**, which is worse. That is the
+  same failure shape §9.1 flags for the generation clamp, and it would have been self-inflicted.
+
+Only `lodStoreBackfillTickCeilingMillis` was retired. It has no scenario, no harness, and no
+production caller beyond one wiring site.
+
+**The generalisable lesson: "no production use" is not the same as "no use."** A knob whose
+only consumer is the test harness is test infrastructure, and the audit criterion should have
+been "who reads this, including harnesses" rather than "would an admin ever set it."
+
+### 11.2 Everything else landed as recommended
+
+Defaults (§0), the AUTO derivations (§7.1, §7.3), the four freed clamps (§5), and the §9
+coherence fixes are all in. §7.2 was implemented as the simple 256 MiB bump rather than the
+`16 × per-player` derivation, which §7.2 itself named as an equally acceptable answer.
+
+`lodDistanceChunks` also went 256 → **512** at the user's request in the same pass. That
+change is what makes §7.3 load-bearing rather than tidy: at 512 the old fixed 32 MB timestamp
+cache would have held roughly *half* of one player's disc, so it would have thrashed.
+
+### 11.3 Soak baselines were frozen, deliberately
+
+The 19 pre-store scenarios now pin `lodStore: "off"` explicitly. Their configs are copied
+verbatim as the whole server config, so a default-on store would silently have changed what
+every one of them measures — including the timing-sensitive quiescence laws, against a
+background backfill. The store scenarios already opt in explicitly, so coverage of the
+store path is unchanged.
+
+This means **the full suite has not yet been run against the shipped defaults**, which is
+still the outstanding Batch 3 gate from §10. `SOAK_LODSTORE_OVERRIDE=full` is the lever for
+that run.
