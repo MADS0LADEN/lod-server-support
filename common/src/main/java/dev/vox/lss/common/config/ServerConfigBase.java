@@ -106,10 +106,12 @@ public abstract class ServerConfigBase extends JsonConfig {
     public boolean enableV16Compat = true;
     /**
      * The LOD store switch (docs/planning/lod-store-implementation-plan.md):
-     * "off" (default — no store; the kill switch every store gate A/Bs against),
-     * "memory" (bounded in-memory tier only), "full" (memory + SQLite disk store).
+     * "off" (default — no store; the kill switch every store gate A/Bs against) and
+     * "full" (the SQLite disk store, alone since the Phase 2 delete-the-tier verdict).
      * Unknown values normalize to "off" — the SAFE value, deliberately unlike
      * xrayObfuscation's normalize-to-auto: a typo must never enable a storage engine.
+     * "memory" was a third value until 2026-08-02 and is now one of those unknowns;
+     * the in-memory tier survives only as the SQLite-init degrade (see LodStores).
      */
     public String lodStore = "off";
     // NOTE: lodStoreMemoryMB is RETIRED (2026-08-02) along with the "memory" mode — the
