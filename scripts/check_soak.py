@@ -152,7 +152,12 @@ SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBac
                                      "lodStoreBackfill",
                                      # Compressed-columns kill switch (protocol 19):
                                      # scenarios pin it off for the raw-path A/B arm.
-                                     "useCompressedColumns"})
+                                     "useCompressedColumns",
+                                     # Legacy-client shim toggle. Absent from this list
+                                     # since it was introduced, so no scenario could
+                                     # ever pin it — the same R4 hole as lodStoreBackfill
+                                     # (v0.9.0 review).
+                                     "enableV16Compat"})
 SERVER_CONFIG_INT_KEYS = frozenset({
     "lodDistanceChunks", "bytesPerSecondLimitPerPlayer", "diskReaderThreads",
     "sendQueueLimitPerPlayer", "bytesPerSecondLimitGlobal",
@@ -184,7 +189,9 @@ SERVER_CONFIG_INT_KEYS = frozenset({
 # id list — the only
 # non-bool non-int server config keys; validated loosely (any string / list of strings).
 SERVER_CONFIG_STRING_KEYS = frozenset({"xrayObfuscation", "lodStore"})
-SERVER_CONFIG_STRING_LIST_KEYS = frozenset({"xrayHiddenBlocks"})
+# updateEvents is Paper-only (the Bukkit event class names driving dirty detection);
+# it was absent here, so no Paper scenario could pin its dirty-detection surface.
+SERVER_CONFIG_STRING_LIST_KEYS = frozenset({"xrayHiddenBlocks", "updateEvents"})
 SERVER_CONFIG_KEYS = (SERVER_CONFIG_BOOL_KEYS | SERVER_CONFIG_INT_KEYS
                       | SERVER_CONFIG_STRING_KEYS | SERVER_CONFIG_STRING_LIST_KEYS)
 

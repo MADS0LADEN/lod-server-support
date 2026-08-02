@@ -67,7 +67,8 @@ stage_config() { # <lodStore-value>
   "missMemoTtlSeconds": 30,
   "useBackgroundReadPriority": true,
   "useNbtTranscode": true,
-  "lodStore": "$1"
+  "lodStore": "$1",
+  "lodStoreBackfill": false
 }
 EOF
 }

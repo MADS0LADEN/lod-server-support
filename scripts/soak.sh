@@ -358,14 +358,27 @@ mkdir -p "$SERVER_CONFIG_DIR"
 cp "$SCENARIO_CONFIG" "$SERVER_CONFIG_DIR/lss-server-config.json"
 # Phase 5 burn-in lever: SOAK_LODSTORE_OVERRIDE=full merges the store into EVERY
 # scenario's staged config (the laws are store-aware; named checks are engine-blind).
-if [[ -n "${SOAK_LODSTORE_OVERRIDE:-}" ]]; then
-    python3 - "$SERVER_CONFIG_DIR/lss-server-config.json" "$SOAK_LODSTORE_OVERRIDE" <<'PYEOF'
+# SOAK_LODSTORE_BACKFILL_OVERRIDE independently forces the backfill, because every
+# scenario config now PINS lodStoreBackfill (the 19 pre-store ones to keep their
+# pre-store baselines, the store ones so their paired-CPU arms are not contaminated by
+# an unpaired region walk). Without this second lever the override could only ever
+# produce store-on/backfill-off — which is not the shipped default, so the suite could
+# not be run "against the shipped defaults" as intended. (v0.9.0 review.)
+if [[ -n "${SOAK_LODSTORE_OVERRIDE:-}" || -n "${SOAK_LODSTORE_BACKFILL_OVERRIDE:-}" ]]; then
+    python3 - "$SERVER_CONFIG_DIR/lss-server-config.json" \
+        "${SOAK_LODSTORE_OVERRIDE:-}" "${SOAK_LODSTORE_BACKFILL_OVERRIDE:-}" <<'PYEOF'
 import json, sys
-path, mode = sys.argv[1], sys.argv[2]
+path, mode, backfill = sys.argv[1], sys.argv[2], sys.argv[3]
 cfg = json.load(open(path))
-cfg["lodStore"] = mode
+applied = []
+if mode:
+    cfg["lodStore"] = mode
+    applied.append(f"lodStore={mode}")
+if backfill:
+    cfg["lodStoreBackfill"] = backfill.lower() in ("1", "true", "yes", "on")
+    applied.append(f"lodStoreBackfill={cfg['lodStoreBackfill']}")
 json.dump(cfg, open(path, "w"), indent=2)
-print(f"[soak] SOAK_LODSTORE_OVERRIDE: lodStore={mode} merged into the staged config")
+print("[soak] SOAK_LODSTORE override: " + ", ".join(applied) + " merged into the staged config")
 PYEOF
 fi
 

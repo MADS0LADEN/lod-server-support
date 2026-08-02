@@ -86,7 +86,9 @@ stage_server_config() { # <path> <use_bg_read>
   "perDimensionTimestampCacheSizeMB": 32,
   "missMemoTtlSeconds": 30,
   "useBackgroundReadPriority": $2,
-  "enableV16Compat": true
+  "enableV16Compat": true,
+  "lodStore": "off",
+  "lodStoreBackfill": false
 }
 EOF
 }
