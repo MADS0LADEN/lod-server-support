@@ -52,6 +52,15 @@ PAPER_SCENARIOS=(fresh-backfill warm-rejoin dimension-trip paper-dirty-falling-b
 # save-all steps are mapped to acknowledged no-ops by the driver (Folia unregisters the
 # command); an aggressive bukkit.yml autosave keeps chunks flushing mid-run instead.
 FOLIA_SCENARIOS=("${PAPER_SCENARIOS[@]}")
+# Store scenarios that are portable to the Bukkit platforms but stay OUT of every 'all'
+# list. store-second-join is the only scenario that actually creates store DEMAND — it
+# clearcaches mid-session so the re-serve wave must come from the store — and its steps are
+# plain vanilla commands with a Paper twin for the probe recorder (PaperSoakProbeBridge), so
+# nothing in it was ever Fabric-specific; it simply was never added to the Bukkit lists.
+# That mattered once the Folia store question came up: warm-rejoin, the closest scenario in
+# the Folia set, keeps the client cache and so answers up_to_date instead of serving, which
+# means the Folia set could not exercise a store SERVE at all.
+STORE_STANDALONE_SCENARIOS=(store-second-join)
 # Phases of scripts/store_offline_edit.sh (populate -> offline mutate -> verify, chained
 # via SOAK_WORLD_FROM). Valid standalone invocations on fabric AND paper, but excluded
 # from every 'all' list: mutate/verify are meaningless without the carried world.
@@ -155,12 +164,12 @@ esac
 # Platform gating: the Paper port covers a validated subset; the falling-block scenario is
 # Paper-native (setblock fires no Bukkit event, and Fabric's save-hook detection would need
 # a save-all the timeline deliberately omits).
-if [[ "$SOAK_PLATFORM" == "paper" && " ${PAPER_SCENARIOS[*]} ${PHASE_SCENARIOS[*]} " != *" $SCENARIO "* ]]; then
+if [[ "$SOAK_PLATFORM" == "paper" && " ${PAPER_SCENARIOS[*]} ${PHASE_SCENARIOS[*]} ${STORE_STANDALONE_SCENARIOS[*]} " != *" $SCENARIO "* ]]; then
     echo "[soak] ERROR: Scenario '$SCENARIO' is not ported to SOAK_PLATFORM=paper"
     usage
     exit 1
 fi
-if [[ "$SOAK_PLATFORM" == "folia" && " ${FOLIA_SCENARIOS[*]} " != *" $SCENARIO "* ]]; then
+if [[ "$SOAK_PLATFORM" == "folia" && " ${FOLIA_SCENARIOS[*]} ${STORE_STANDALONE_SCENARIOS[*]} " != *" $SCENARIO "* ]]; then
     echo "[soak] ERROR: Scenario '$SCENARIO' is not ported to SOAK_PLATFORM=folia"
     usage
     exit 1
