@@ -80,7 +80,7 @@ class JsonConfigLoadTest {
         TestServerConfig c = TestServerConfig.load(configDir);
 
         assertEquals(256, c.lodDistanceChunks);
-        assertEquals(52_428_800, c.bytesPerSecondLimitPerPlayer);
+        assertEquals(26_214_400, c.bytesPerSecondLimitPerPlayer);
         assertTrue(Files.isRegularFile(configDir.resolve(FILE)));
 
         JsonObject saved = savedJson(configDir);
@@ -146,7 +146,7 @@ class JsonConfigLoadTest {
         // default (then validate() clamps the zeros to the minimums, e.g. 20 MB/s -> 1 KB/s).
         // These exact-value assertions are the only guard against that landmine.
         assertTrue(c.enabled);
-        assertEquals(52_428_800, c.bytesPerSecondLimitPerPlayer);
+        assertEquals(26_214_400, c.bytesPerSecondLimitPerPlayer);
         assertEquals(0, c.diskReaderThreads);           // 0 = AUTO (derived per read path)
         assertEquals(1024, c.sendQueueLimitPerPlayer);
         assertEquals(268_435_456, c.bytesPerSecondLimitGlobal);
@@ -169,7 +169,7 @@ class JsonConfigLoadTest {
         for (String key : serializedFieldNames()) {
             assertTrue(saved.has(key), "re-saved file missing migrated field " + key);
         }
-        assertEquals(52_428_800, saved.get("bytesPerSecondLimitPerPlayer").getAsInt());
+        assertEquals(26_214_400, saved.get("bytesPerSecondLimitPerPlayer").getAsInt());
     }
 
     @Test

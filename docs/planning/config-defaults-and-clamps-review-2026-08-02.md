@@ -528,11 +528,12 @@ that run.
   §7.3: the AUTO timestamp cache now derives ~30 MB at 256 (i.e. the old hand-tuned figure)
   and, unlike the fixed value it replaced, it *follows* the distance if anyone raises it.
   That is the durable half of the change.
-- **`bytesPerSecondLimitPerPlayer` 20 -> 50 MiB.** §8.1 argued for holding at 20 pending the
-  cap sweep, and the user set 50. The reasoning in §8.1 is unchanged and still worth knowing
-  when retuning: the cap charges RAW bytes because it bounds client decode work, so the
-  6.25:1 from compressed columns did NOT loosen it — at 50 MiB counted the wire cost is
-  ~8 MB/s but the client still decodes 50 MiB/s. 50 sits above the ~25 MB/s at which the
-  elytra wall reproduced; that is defensible because the wall was root-caused to the scan
-  cadence (fixed) rather than to bandwidth, and the #71 ingest taper plus the decode-queue
-  halt are standing guards. The §11.7 cap sweep remains the falsifiable check.
+- **`bytesPerSecondLimitPerPlayer` 20 -> 50 -> 25 MiB** (settled at 25). §8.1 argued for
+  holding at 20 pending the cap sweep; the landing point is one notch above that and lands
+  somewhere defensible on its own terms. The §8.1 reasoning is what matters when retuning:
+  the cap charges RAW bytes because it bounds client decode work, so the 6.25:1 from
+  compressed columns did NOT loosen it — at 25 MiB counted the wire cost is ~4 MB/s while
+  the client still decodes 25 MiB/s. **25 MiB puts the ceiling AT the ~25 MB/s rate the
+  elytra wall reproduced at, rather than above it**: traffic can reach the rate that once
+  hurt but cannot exceed it, and the mechanism that actually caused the wall (the scan-cadence
+  gate) is fixed. The §11.7 cap sweep remains the falsifiable check.

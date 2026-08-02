@@ -21,7 +21,7 @@ public abstract class ServerConfigBase extends JsonConfig {
      *  footprint. Admins who want the larger disc raise this one key and the cache follows. */
     public int lodDistanceChunks = 256;
     /**
-     * Per-player bandwidth cap. Raised 20 -> 50 MiB on 2026-08-02 (user decision).
+     * Per-player bandwidth cap. Went 20 -> 50 -> 25 MiB on 2026-08-02 (user decisions).
      *
      * <p><b>This charges RAW bytes, not wire bytes</b> ({@code estimatedBytes} = raw sections +
      * envelope; wire compression is deliberately invisible to it), because what it really
@@ -30,14 +30,15 @@ public abstract class ServerConfigBase extends JsonConfig {
      * compressed-columns work bought did NOT loosen the thing this cap exists to limit: at
      * 50 MiB counted the wire cost is roughly 8 MB/s, but the client still decodes 50 MiB/s.
      *
-     * <p>Context for anyone retuning it: the wall reproduced at ~25 MB/s counted, so this
-     * default sits above the historic incident rate. It is defensible because that incident
-     * was root-caused to the client's scan-cadence gate (fixed) rather than to bandwidth, and
-     * because the #71 ingest taper and the decode-queue halt are standing guards underneath.
-     * The falsifiable check is the cap sweep in the investigation's section 11.7 — sweep
-     * upward until {@code runway} collapses in the client trace.
+     * <p>Context for anyone retuning it: the elytra chunk wall reproduced at ~25 MB/s
+     * counted, so 25 MiB places the CEILING at the historic incident rate rather than above
+     * it — traffic can reach the rate that once hurt but cannot exceed it, and the thing that
+     * actually caused the wall (the client's scan-cadence gate) is fixed. The #71 ingest taper
+     * and the decode-queue halt sit underneath as client-side guards. The falsifiable check is
+     * the cap sweep in the investigation's section 11.7 — sweep upward until {@code runway}
+     * collapses in the client trace.
      */
-    public int bytesPerSecondLimitPerPlayer = 52_428_800;
+    public int bytesPerSecondLimitPerPlayer = 26_214_400;
     /**
      * LSS disk-read pool size. <b>0 = AUTO (the default)</b>, derived from the resolved read
      * path — see {@link #effectiveDiskReaderThreads(boolean)}.
