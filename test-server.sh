@@ -90,15 +90,28 @@ esac
 # pre-warms the store, yielding to players and tick health (default 500 col/s cap —
 # LSS_LODSTORE_BACKFILL_CPS below overrides — pauses under load). run-fabric-store
 # forces it on; '/lsslod store backfill status|stop' to steer.
-LSS_LODSTORE_BACKFILL="${LSS_LODSTORE_BACKFILL:-false}"
+# Default follows the SHIPPED default (true since 2026-08-02), like LSS_LODSTORE above,
+# so a plain ./test-server.sh exercises what players actually get.
+LSS_LODSTORE_BACKFILL="${LSS_LODSTORE_BACKFILL:-true}"
 case "$LSS_LODSTORE_BACKFILL" in
     true|false) ;;
     *) echo "LSS_LODSTORE_BACKFILL must be true or false (got '$LSS_LODSTORE_BACKFILL')" >&2; exit 1 ;;
 esac
 # Optional backfill pace override (columns/second, server clamps 10..1000). UNSET means
-# the key is omitted from the staged config so the server default (100) rules —
+# the key is omitted from the staged config so the server default (500) rules —
 # run-fabric-store deliberately keeps the default.
 LSS_LODSTORE_BACKFILL_CPS="${LSS_LODSTORE_BACKFILL_CPS:-}"
+# Optional LOD-distance override (chunks, server clamps 32..2048). UNSET means the key is
+# omitted so the shipped default (256) rules. The rig used to hardcode 64; 256 is 16x the
+# area, so on a small box — or with all three test servers up at once — set this to 64 or
+# 96 to keep generation and IO manageable while still exercising the real defaults
+# elsewhere.
+LSS_LOD_DISTANCE="${LSS_LOD_DISTANCE:-}"
+if [ -n "$LSS_LOD_DISTANCE" ]; then
+    case "$LSS_LOD_DISTANCE" in
+        ''|*[!0-9]*) echo "LSS_LOD_DISTANCE must be a positive integer (got '$LSS_LOD_DISTANCE')" >&2; exit 1 ;;
+    esac
+fi
 if [ -n "$LSS_LODSTORE_BACKFILL_CPS" ]; then
     case "$LSS_LODSTORE_BACKFILL_CPS" in
         ''|*[!0-9]*) echo "LSS_LODSTORE_BACKFILL_CPS must be a positive integer (got '$LSS_LODSTORE_BACKFILL_CPS')" >&2; exit 1 ;;
@@ -226,26 +239,36 @@ EOF
     fi
 }
 
+# Stages the SHIPPED defaults, deliberately. This used to hand-write nine tuned values
+# — lodDistanceChunks 64, 8 MiB/player, 40 MiB global, diskReaderThreads 8,
+# sendQueueLimitPerPlayer 9600, generation caps 40/40 — dating from before those defaults
+# were reviewed, and every one of them has since been superseded:
+#   * diskReaderThreads 8 defeats the whole point of 0 = AUTO (which derives the pool from
+#     the resolved read path), and 8 is precisely the over-provisioned figure the v0.9.0
+#     review flagged on the unprioritized path;
+#   * sendQueueLimitPerPlayer 9600 predates issue #62, which LOWERED the default to 1024
+#     (= the wire batch cap) to stop unbounded snapshot backlog;
+#   * 8 MiB/player and 40 MiB global sit far under the reviewed 25 MiB / 256 MiB, so the
+#     rig throttled exactly the bandwidth behaviour it exists to eyeball.
+# A dev rig that contradicts the shipped defaults tests a configuration no player runs.
+# Only genuinely rig-specific keys belong here now; everything else falls through to the
+# mod's own defaults. NOTE this raises lodDistanceChunks 64 -> 256 (16x the area) — set
+# LSS_LOD_DISTANCE to dial it back on a small box.
 write_lss_config() {
     local dir="$1"
-    echo "  Writing lss-server-config.json (lodStore=${LSS_LODSTORE}, backfill=${LSS_LODSTORE_BACKFILL})"
+    echo "  Writing lss-server-config.json (shipped defaults; lodStore=${LSS_LODSTORE}, backfill=${LSS_LODSTORE_BACKFILL}${LSS_LOD_DISTANCE:+, lodDistance=${LSS_LOD_DISTANCE}})"
     mkdir -p "$dir"
     cat > "$dir/lss-server-config.json" << EOF
 {
   "enabled": true,
-  "lodDistanceChunks": 64,
-  "bytesPerSecondLimitPerPlayer": 8388608,
-  "diskReaderThreads": 8,
-  "sendQueueLimitPerPlayer": 9600,
-  "bytesPerSecondLimitGlobal": 41943040,
-  "generationConcurrencyLimitPerPlayer": 40,
   "enableChunkGeneration": true,
-  "generationConcurrencyLimitGlobal": 40,
-  "generationTimeoutSeconds": 60,
   "lodStore": "${LSS_LODSTORE}",
   "lodStoreBackfill": ${LSS_LODSTORE_BACKFILL}$(
     if [ -n "$LSS_LODSTORE_BACKFILL_CPS" ]; then
         printf ',\n  "lodStoreBackfillColumnsPerSecond": %s' "$LSS_LODSTORE_BACKFILL_CPS"
+    fi)$(
+    if [ -n "$LSS_LOD_DISTANCE" ]; then
+        printf ',\n  "lodDistanceChunks": %s' "$LSS_LOD_DISTANCE"
     fi)
 }
 EOF
@@ -694,14 +717,18 @@ case "${1:-run}" in
         echo "  run-fabric-antixray - Same as run-fabric plus DrexHD AntiXray — the live gate"
         echo "               for the AntiXray compat shim + masking (current builds must"
         echo "               survive a client join and serve masked; only pre-shim builds crash)"
-        echo "  run-fabric-store - Same as run-fabric with the LOD store ON (lodStore=full)"
-        echo "               AND the background backfill (lodStoreBackfill=true — auto-walks"
-        echo "               existing regions to pre-warm the store): warm rejoins serve from"
-        echo "               world/lss-lod/store.db; '/lsslod store status' + client /lss"
-        echo "               trace src:3 are the eyeball instruments"
+        echo "  run-fabric-store - run-fabric with the store and backfill FORCED on, i.e."
+        echo "               immune to LSS_LODSTORE=off in your environment. Since both are"
+        echo "               now shipped defaults this matches plain run-fabric unless you"
+        echo "               have set that variable — it is kept as the explicit arm for"
+        echo "               store A/Bs. Warm rejoins serve from world/lss-lod/store.db;"
+        echo "               '/lsslod store status' + client /lss trace src:3 are the"
+        echo "               eyeball instruments"
         echo "  run-paper  - Set up and start Paper server only (port 25566; native anti-xray on)"
-        echo "  run-paper-store - Same as run-paper with the LOD store ON (lodStore=full)."
-        echo "               No backfill on Paper (Fabric-only) — the store warms from serves"
+        echo "  run-paper-store - run-paper with the store FORCED on (immune to"
+        echo "               LSS_LODSTORE=off); matches plain run-paper otherwise, since"
+        echo "               lodStore=full is now the default. No backfill on Paper"
+        echo "               (Fabric-only) — the store warms from serves"
         echo "  run-folia  - Set up and start Folia server only (port 25567)"
         echo "  run-legacy - Set up and start an OLD LSS v${LEGACY_LSS_VERSION} (protocol 16) server (port 25568),"
         echo "               for eyeballing the client-side v16 backward-compat path"
@@ -713,15 +740,24 @@ case "${1:-run}" in
         echo "  LSS_ADMISSION_TRACE - Fabric [lss-adm] generation-admission trace (default: 1)."
         echo "                        Set to 0 to silence it — it is verbose during backfill."
         echo "  LSS_LODSTORE - lodStore mode written into EVERY staged lss-server-config.json"
-        echo "                 (off|full, default: off; the run-*-store entrypoints"
-        echo "                 force full). Hand-edits to the config do NOT survive a re-run"
+        echo "                 (off|full, default: full — the shipped default; use off for"
+        echo "                 the A/B arm). Hand-edits to the config do NOT survive a re-run"
         echo "                 — the staging rewrites it; this variable is the supported knob."
         echo "  LSS_LODSTORE_BACKFILL - lodStoreBackfill written the same way (true|false,"
-        echo "                 default: false; run-fabric-store forces true). Fabric-only —"
-        echo "                 the key is inert on Paper/Folia."
+        echo "                 default: true — the shipped default). Fabric-only — the key"
+        echo "                 is inert on Paper/Folia."
         echo "  LSS_LODSTORE_BACKFILL_CPS - optional backfill pace (columns/second, server"
-        echo "                 clamps 10..1000). Unset = key omitted, server default (100)"
+        echo "                 clamps 10..1000). Unset = key omitted, server default (500)"
         echo "                 rules; run-fabric-store keeps the default."
+        echo "  LSS_LOD_DISTANCE - optional lodDistanceChunks override. Unset = the shipped"
+        echo "                 default (256). The rig used to hardcode 64; 256 is 16x the"
+        echo "                 area, so set 64 or 96 on a small box or when running all"
+        echo "                 three servers at once."
+        echo ""
+        echo "The staged config now carries the SHIPPED DEFAULTS. It used to hand-write nine"
+        echo "tuned values (distance 64, 8 MiB/player, diskReaderThreads 8, sendQueue 9600,"
+        echo "generation caps 40/40) that predated the config review and contradicted what"
+        echo "players actually run — the rig tested a configuration nobody had."
         exit 1
         ;;
 esac

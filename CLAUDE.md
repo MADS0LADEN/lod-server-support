@@ -87,10 +87,18 @@ Since 2026-07 `build.yml` contains the flakes automatically: docs-only changes (
                                      # (no backfill on Paper — Fabric-only; warms from serves)
 ./test-server.sh update       # rebuild + reinstall the LSS jars into all three (restart to apply)
 ./test-server.sh clean        # delete test-server/
-# LSS_LODSTORE=off|memory|full and LSS_LODSTORE_BACKFILL=true|false are written into EVERY
-# staged lss-server-config.json (defaults off/false; run-fabric-store forces full+true,
-# run-paper-store full only) — the staging REWRITES that config each run, so hand-edits
-# don't survive; the env vars are the supported knobs.
+# The staged lss-server-config.json now carries the SHIPPED DEFAULTS and nothing else —
+# it used to hand-write nine tuned values (distance 64, 8 MiB/player, diskReaderThreads 8,
+# sendQueueLimitPerPlayer 9600, generation caps 40/40) that predated the config review, so
+# the rig tested a configuration no player runs. Only genuinely rig-specific keys are
+# written; everything else falls through to the mod's defaults.
+# Knobs (the staging REWRITES the config each run, so hand-edits don't survive — these are
+# the supported way): LSS_LODSTORE=off|full (default full), LSS_LODSTORE_BACKFILL=true|false
+# (default true) — both now follow the shipped defaults; LSS_LODSTORE_BACKFILL_CPS (unset =
+# server default 500); LSS_LOD_DISTANCE (unset = shipped default 256 — the rig used to
+# hardcode 64, and 256 is 16x the area, so set 64/96 on a small box or when running all
+# three servers). run-fabric-store / run-paper-store FORCE the store on (immune to
+# LSS_LODSTORE=off) and otherwise match plain run-fabric / run-paper now that full is default.
 ```
 
 Downloads real server jars (Fabric launcher; Paper/Folia latest stable via fill.papermc.io),
