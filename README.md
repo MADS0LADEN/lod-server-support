@@ -99,17 +99,24 @@ Server config is generated on first run:
 | `enabled` | `true` | Enable LOD distribution |
 | `enableV16Compat` | `true` | Serve legacy v0.6.x (protocol 16) clients through a built-in translation layer at their slower pace. Set `false` to require every client to match the server's protocol (a v0.6.x client then gets no LOD session, like any other version mismatch) |
 | `lodDistanceChunks` | `256` | Max LOD distance in chunks |
-| `bytesPerSecondLimitPerPlayer` | `20971520` | Per-player pre-compression bandwidth cap (20 MB/s) |
-| `bytesPerSecondLimitGlobal` | `104857600` | Total pre-compression bandwidth cap (100 MB/s) |
-| `diskReaderThreads` | `5` | Thread pool size for async disk reads |
+| `bytesPerSecondLimitPerPlayer` | `26214400` | Per-player bandwidth cap (25 MiB/s), counted **before** compression |
+| `bytesPerSecondLimitGlobal` | `268435456` | Total bandwidth cap across all players (256 MiB/s), counted **before** compression |
+| `diskReaderThreads` | `0` | Thread pool size for async disk reads. `0` = auto: sized from the read path actually in use (3 on vanilla single-threaded IO, up to 8 where reads are properly prioritised) |
 | `useBackgroundReadPriority` | `true` | LOD disk reads yield to vanilla/gameplay chunk loading, so streaming distant terrain doesn't delay the chunks players are actively loading (Fabric: IOWorker BACKGROUND priority; Paper/Folia: Moonrise LOW priority). On Fabric servers running a chunk-IO-overhaul mod (e.g. C2ME) that replaces vanilla's IOWorker, LSS automatically switches to adaptive read throttling (self-restraint that still yields to gameplay), logging one warning. Set `false` to restore foreground reads with no read protection |
 | `sendQueueLimitPerPlayer` | `1024` | Max queued column payloads per player (each carries a full chunk column of sections; = the wire batch cap — existing saved configs keep their value) |
 | `generationConcurrencyLimitPerPlayer` | `16` | Max concurrently generating chunks per player — misses beyond it are retried automatically each second until a slot frees |
 | `enableChunkGeneration` | `true` | Generate missing chunks on demand for LOD data |
 | `generationConcurrencyLimitGlobal` | `32` | Max chunks generating server-wide at once |
 | `generationTimeoutSeconds` | `60` | Timeout for pending chunk generation |
-| `perDimensionTimestampCacheSizeMB` | `32` | Max timestamp cache size per dimension in MB (used for up-to-date checks on reconnect) |
+| `perDimensionTimestampCacheSizeMB` | `0` | Max timestamp cache per dimension in MB (used for up-to-date checks on reconnect). `0` = auto: sized from `lodDistanceChunks`, so raising the distance no longer silently under-provisions it |
 | `dirtyBroadcastIntervalSeconds` | `10` | Interval for pushing dirty column notifications to clients |
+| `lodStore` | `"full"` | Keep a compressed copy of every served LOD column in `<world>/lss-lod/store.db` and serve repeat requests straight from it. `"off"` disables it. See **Tuning** below for the CPU/disk trade |
+| `lodStoreBackfill` | `true` | Pre-warm the store with a low-priority background walk of your existing region files, so the first player to arrive already gets warm serves. Yields to players and tick health, pauses under load, resumes across restarts. Fabric only |
+| `lodStoreBackfillColumnsPerSecond` | `500` | Pace of that walk (clamped 10–1000). Lower it if the walk is noticeable on a busy server |
+| `lodStoreMaxMB` | `0` | Size cap for the store. `0` = uncapped (grows to roughly the size of your region files). Set a value to bound it — oldest columns are evicted first and re-warm on demand |
+| `lodStoreResweepSeconds` | `0` Fabric / `300` Paper | How often the store re-checks stored columns against the world files for staleness. Paper needs this because some world edits raise no event |
+| `useCompressedColumns` | `true` | Compress LOD columns on the wire (about 6× smaller). Clients that don't support it are served uncompressed automatically; `false` disables it entirely as a rollback |
+| `outboundBufferCeilingKB` | `0` | `0` = off. If set, LSS skips a tick's column flush when the connection's outbound buffer is above this, so it stops adding to a queue vanilla's own chunk packets share. Leave off unless `/lsslod diag` shows a high `obuf_hw` |
 | `useNbtTranscode` | `true` | Serve disk chunks by transcoding region NBT straight to wire bytes (skips object construction); `false` restores the object path as a rollback |
 | `missMemoTtlSeconds` | `30` | How long the server remembers "this chunk isn't generated yet" after a disk miss, so chunks waiting for generation don't re-check disk every second. Any serve, world edit, or finished generation forgets the entry immediately; `0` disables the memo (values are clamped to 0-60) |
 | `xrayObfuscation` | `"auto"` | Anti-xray masking for LOD data. `"auto"` masks hidden ores in served LOD columns whenever an anti-xray engine is detected — Paper's built-in anti-xray (per world) or the DrexHD AntiXray mod on Fabric — mirroring that engine's exact hidden-block list and height cutoff. `"on"` forces masking everywhere; `"off"` disables it (LOD data then carries real ore locations even on anti-xray servers) |
@@ -121,6 +128,28 @@ Server config is generated on first run:
 **Paper-specific:** The config also includes an `updateEvents` list of Bukkit event class names used for dirty chunk detection.
 
 `/lsslod` commands require operator status on both platforms (Fabric: gamemaster permission level; Paper: the `lss.admin` permission, default op).
+
+### Tuning
+
+The defaults are tuned for a typical server — most admins never need this section. If you do:
+
+**To limit CPU, use the bandwidth and generation limiters.** LSS's CPU cost is essentially "how many columns per second does it serve, and how many chunks does it generate to do it". Those two families of setting cap exactly that:
+
+- `bytesPerSecondLimitPerPlayer` / `bytesPerSecondLimitGlobal` bound the serve rate. They count **uncompressed** bytes on purpose, so enabling compression doesn't quietly raise the real ceiling. Halving them roughly halves LSS's steady-state CPU.
+- `generationConcurrencyLimitGlobal` / `generationConcurrencyLimitPerPlayer` bound generation, which is by far the most expensive thing LSS can trigger — it is worldgen. On a server exploring fresh terrain this is the dominant cost, and lowering it is the biggest single CPU saving available. Setting `enableChunkGeneration: false` removes it entirely (players then only see terrain that already exists).
+
+Lowering either costs *speed*, not correctness: LOD fills in more slowly, nothing breaks. Most other settings change *how* the work is done rather than how much, so they are the wrong lever for a CPU problem.
+
+**The LOD store trades disk for CPU.** With `lodStore: "full"` (the default), a repeat request is answered from `<world>/lss-lod/store.db` instead of reading the region file and re-serializing the chunk:
+
+| | CPU per served column | Disk |
+|---|---|---|
+| `"full"` | ~99% lower on warm serves (≈29µs vs ≈2ms), and ~99% of requests hit the store once warm | Roughly the size of your region files — a 10 GB world adds ~7 GB |
+| `"off"` | Every serve pays a region read plus full re-serialization | Nothing |
+
+So: **short on CPU, keep the store on. Short on disk, turn it off or bound it with `lodStoreMaxMB`.** The store is derived data — deleting `lss-lod/` while the server is stopped is always safe, and it re-warms on its own.
+
+If disk space is tight, `lodStoreBackfill: false` also stops the initial background walk, and the store then warms only where players actually go — slower to become useful, but it never writes more than your players need.
 
 ### Client
 
