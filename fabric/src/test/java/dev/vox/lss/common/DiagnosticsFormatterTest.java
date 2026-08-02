@@ -267,6 +267,29 @@ class DiagnosticsFormatterTest {
     }
 
     @Test
+    void outboundGaugeRendersNotAvailableRatherThanAPlausibleZero() {
+        // §11.3: a probe that cannot resolve must never render as a believable number —
+        // "obuf=0 B/0 B" would read as "no buffer is building", the exact false negative
+        // that would wrongly close the H1 investigation.
+        var d = new DiagnosticsFormatter.DiagData(
+                true, 24,
+                2048, 1_048_576,
+                100, 5000, 10_485_760,
+                11, 33, 44, 55, 66,
+                22,
+                "sent=9, disk=1/2",
+                "submitted=5, completed=5",
+                "active=1/32", true,
+                7, 3,
+                2_097_152,
+                512,
+                List.of(new DiagnosticsFormatter.PlayerDiag("Steve", 0, 4000, 0, 0, 0, 0,
+                        -1L, -1L, 0L)));
+        var lines = DiagnosticsFormatter.formatDiagnostics(d);
+        assertTrue(lines.stream().anyMatch(l -> l.contains("obuf=n/a/n/a")),
+                "no-signal must render as n/a, got: " + lines);
+    }
+    @Test
     void collectDiagDataWiresCountersSumsAndPlayerRows() {
         var reader = new AbstractChunkDiskReader(1) {};
         reader.getDiag().recordSuccess();

@@ -79,6 +79,38 @@ public class ServiceLifecycleGameTests {
     }
 
     @GameTest(structure = "fabric-gametest-api-v1:empty")
+    public void outboundBufferGaugeResolvesThroughTheRealMixinsAndChannel(GameTestHelper helper) {
+        // The ONLY place the outbound-buffer gauge runs end-to-end: both accessor mixins
+        // applied, the listener->Connection->Channel hops, and OutboundBufferMath against a
+        // live netty channel. Its failure mode is silent and terminal (one warning, then
+        // NO_SIGNAL forever), and a dead gauge reads exactly like "no buffer is building" —
+        // a false negative on the measurement that decides whether transport deference is
+        // ever armed (elytra-wall investigation §8.3).
+        var server = helper.getLevel().getServer();
+        var mock = placeMockServerPlayer(helper);
+        var service = new RequestProcessingService(server);
+        try {
+            var state = service.registerPlayer(mock, LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+            helper.assertTrue(state.getOutboundPendingBytes() == -1,
+                    "premise: nothing sampled before the first flush");
+
+            service.tick(); // flushSendQueues samples the probe once per player per tick
+
+            long pending = state.getOutboundPendingBytes();
+            helper.assertTrue(pending >= 0,
+                    "the gauge must resolve through the real mixins + channel; -1 means the"
+                            + " accessors did not apply and the instrument is dead, got " + pending);
+            helper.assertTrue(state.getOutboundPendingHighWater() >= pending,
+                    "high-water must track the sampled value");
+            helper.assertTrue(state.getSendDeferrals() == 0,
+                    "transport deference ships OFF (ceiling 0) — nothing may defer");
+        } finally {
+            service.shutdown();
+        }
+        helper.succeed();
+    }
+
+    @GameTest(structure = "fabric-gametest-api-v1:empty")
     public void batchRequestDistanceGuardBoundaryAndNegativeCoords(GameTestHelper helper) {
         var server = helper.getLevel().getServer();
         var playerList = server.getPlayerList();

@@ -561,3 +561,89 @@ must therefore run **before** any release carrying A.
 3. Tier 1/2/3 + full soak — as a "broke nothing else" gate, not as A's validation.
 4. Local flight A/B on `./test-server.sh run-fabric` with the trace.
 5. Modrinth A/B against the §11.7 criteria, before any release.
+
+---
+
+# 12. Review round 2 (implementation, 2 agents: correctness / test-adequacy) — folded
+
+## 12.1 MAJOR — the prediction was blind to the walk it most needed to see
+
+`predictedWalkCost()` measured to `scanRing`. But `scan()`'s **only** early exit is the
+budget `break outer`; without it the loop iterates every ring out to `lodDistance`, and
+`scanRing` records merely the outermost ring that *queued* something. Those coincide only
+for a truncated walk.
+
+On a **warm disc — the shipped server's own regime** (`lodStore=full`, backfill complete,
+`lodDistanceChunks=256`) — a moving client finds work only in the trailing view-edge
+crescents near ring ≈ viewDistance. So `scanRing` stays ~12 while the walk still examines
+the whole disc:
+
+| | predicted | actual |
+|---|---|---|
+| warm 256 disc, crescent at ring 12 | **~96** | **~263,000** |
+| same at the 2048 ceiling | ~100 | **16.8 M** |
+
+The gate would have admitted, at up to 4 Hz, exactly the walks its own javadoc says it
+refuses — and this is **worse than the old proxy**, which hard-refused every post-`recenter`
+tick. Fix: `scan()` records whether the budget truncated it (one field, set once per walk,
+no hot-loop counter), and the prediction measures to `getEffectiveLodDistance()` when it did
+not. Pinned by `untruncatedWalkPredictsToTheLodDistanceNotTheLastQueuedRing`.
+
+**Also fixed:** the ring sum omitted the starting ring — the loop runs `[confirmedRing,
+scanRing]`, so the lower term is `c(c−1)`, not `c(c+1)`. Nil at `c = 0` (which is why no
+test saw it), 16,384 short at the 2048 ceiling.
+
+## 12.2 MAJOR — the instrument had no assertion anywhere
+
+Both accessor mixins, both platform adapters and both wiring sites were executed by no
+test. The failure mode is silent and terminal (one warning, then `NO_SIGNAL` forever), and
+a dead gauge reads exactly like **"no buffer is building"** — a false negative on the one
+measurement that decides whether deference is ever armed. §7 had specified a Tier-2 pin;
+§11 never retracted it and it was not written.
+
+Landed: `ChannelAccessorContractTest` (source-regex + reflective field-type checks for both
+accessors, mixin-config registration, the Paper twin's matching field literals, and both
+platforms' probe-install + `*1024` ceiling wiring — `ServiceGlueTest` only exercises the
+overload that hard-codes `0L`, so a revert would otherwise ship green), plus
+`outboundBufferGaugeResolvesThroughTheRealMixinsAndChannel` in `ServiceLifecycleGameTests`,
+which runs the whole chain against a live netty channel (Tier 2 is now 62 tests).
+
+## 12.3 Other fixes folded
+
+- **A throwing probe could take down every later player's flush** — it runs inside the
+  per-player loop. Contained at the call site (both adapters already caught internally; this
+  is the belt), pinned by `aThrowingProbeCannotTakeTheFlushDown`.
+- **`deferred=` counted idle ticks**, so the operator tripwire over-reported. Now counts
+  only ticks that actually withheld queued work.
+- **Calibration was prose-only.** No test evaluated either number the constant's javadoc
+  cites, and at the rings the suite exercised, the correct `4R(R+1)` and the wrong `4R²`
+  agree on the verdict — so the arithmetic error that inverted the first draft's threshold
+  was invisible. Now pinned: the measured flight walk is exactly `4·75·76 = 22,800` and
+  **admitted**; the full 256 disc is `263,168` and **refused**.
+- **The deferral path's `sweepDepartedColumns()`** — the third thing §11.4 said the
+  mis-placed return would skip, and the only one that had no test.
+- **The ceiling boundary** (`>` vs `>=`) and the **`obuf=n/a`** rendering, both previously
+  unpinned.
+- Stale comments corrected: `SpiralScannerTest`'s "exactly like movement and dirty
+  re-opens" (no longer true — the retry term is now deliberately the strictest of the
+  three), the long-math justification, and the probe's reconnect claim.
+
+## 12.4 Recorded, not fixed
+
+- `walkCostIsPredictedForTheNextWalkNotRememberedFromTheLast` asserts `> 0` against a zero
+  baseline. It does discriminate the remembered-cost alternative — its stated job — but it
+  is weaker than the calibration pins that now sit beside it.
+- Paper renders no player diag line in any test (every Paper diag test stubs
+  `getPlayers() → Map.of()`); the shared formatter is pinned once via the Fabric tier.
+- `check_soak.py`'s config allowlist is still not tied to `ServerConfigBase`'s field set, so
+  the next new key will be silently green in CI again.
+
+## 12.5 Validation as landed
+
+Tier 1 both platforms, Tier 2 (62 gametests), Tier 3, and all three script selftests
+(`check_soak.py` 191 cases, `soak_report.py` 20, `release_check.py` 59) green.
+
+**Still outstanding, and unchanged by this round:** the §11.7 sequencing. Soak cannot
+exercise Change A (its client never moves continuously), and the live A/B cannot falsify the
+top risk while the control no longer reproduces the wall. The zero-code cap sweep on the
+current build remains the first thing to run.

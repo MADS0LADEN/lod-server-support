@@ -575,8 +575,15 @@ public abstract class AbstractPlayerRequestState<T> {
         this.sendQueueSizeSnapshot = this.sendQueue.size();
 
         // ONE authoritative probe read per tick — it is both the diag gauge and the
-        // deference input, so the two can never disagree.
-        long pending = this.channelPressure.pendingOutboundBytes();
+        // deference input, so the two can never disagree. Contained: this runs inside the
+        // per-player flush loop, so a throwing probe would take every LATER player's flush
+        // down with it. Both shipped adapters already catch internally; this is the belt.
+        long pending;
+        try {
+            pending = this.channelPressure.pendingOutboundBytes();
+        } catch (Exception e) {
+            pending = -1L; // no signal — never throttle on a broken probe
+        }
         this.outboundPendingBytes = pending;
         if (pending > this.outboundPendingHighWater) this.outboundPendingHighWater = pending;
 
@@ -594,7 +601,9 @@ public abstract class AbstractPlayerRequestState<T> {
         // sweep below is for the same reason: it is the only GC of departedColumns, and
         // skipping it leaks one entry per column ever sent.
         if (outboundCeilingBytes > 0 && pending > outboundCeilingBytes) {
-            this.sendDeferrals++;
+            // Count only ticks that actually withheld work: `deferred=` is the operator's
+            // tripwire, and an idle-queue tick skipped nothing.
+            if (!this.sendQueue.isEmpty()) this.sendDeferrals++;
             sweepDepartedColumns();
             return dropped;
         }

@@ -1287,7 +1287,9 @@ class SpiralScannerTest {
         // Deliberate policy — such a disc is both expensive to walk AND has little left to
         // fetch, so the fallback is the right cadence there.
         var rig = new AdaptiveRig(scanner(200));
-        seedSatisfiedDisc(rig.columns, 140); // 4*140*141 = 78,960 > FAST_RESCAN_MAX_WALK_COST
+        // Ring 141 alone (1128 positions) overruns the budget, so the walk TRUNCATES there:
+        // scanRing = confirmedRing = 141, and the post-recenter prediction is 4*141*142.
+        seedSatisfiedDisc(rig.columns, 140);
         rig.primeAndArm();
         rig.outstanding = 0;
         assertTrue(rig.s.predictedWalkCost() <= SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
@@ -1315,6 +1317,72 @@ class SpiralScannerTest {
         rig.s.recenter(); // no walk has happened yet
         assertTrue(rig.s.predictedWalkCost() > frontierWalk,
                 "the prediction reflects the re-walk immediately, with no walk in between");
+    }
+
+    @Test
+    void untruncatedWalkPredictsToTheLodDistanceNotTheLastQueuedRing() {
+        // Implementation-review MAJOR A-1. scan()'s ONLY early exit is the budget break;
+        // otherwise it iterates every ring out to lodDistance, while scanRing records merely
+        // the outermost ring that QUEUED something. On a warm disc — the shipped server's
+        // regime — a moving client finds work only in the trailing view-edge crescents near
+        // ring ~viewDistance, so scanRing stays tiny while the walk still examines the whole
+        // disc. Predicting off scanRing there under-reports by orders of magnitude and admits
+        // exactly the expensive walk this gate exists to refuse.
+        var rig = new AdaptiveRig(scanner(150));
+        seedSatisfiedDiscExceptRing(rig.columns, 150, 12); // full disc warm, one crescent ring open
+        rig.primeAndArm();
+        rig.outstanding = 0;
+
+        assertTrue(rig.s.getConfirmedRing() <= 12,
+                "premise: the prefix stops at the open crescent ring");
+        // The walk queued only ~96 positions — far under budget — so it ran to ring 150.
+        // Predicting off scanRing (~12) would give ~96 and open the gate.
+        assertTrue(rig.s.predictedWalkCost() > SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "an UNtruncated walk must be predicted against the LOD distance it actually"
+                        + " iterates (4*150*151 = 90,600), not the last queued ring");
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "...so a full warm-disc sweep still rides the 1 Hz fallback");
+    }
+
+    @Test
+    void walkCostCalibrationAdmitsTheMeasuredFlightWalkAndRefusesTheWarmFullDisc() {
+        // The constant's entire rationale, pinned. Its javadoc cites both numbers; nothing
+        // evaluated either, and at the rings the rest of the suite exercises the correct
+        // 4R(R+1) and the WRONG 4R^2 agree on the verdict — so the arithmetic error that
+        // inverted the first draft's threshold (262,144 refusing the live server's own
+        // lod-256 walk at 263,168) was invisible to tests.
+        var flight = new AdaptiveRig(scanner(200));
+        // Rings 0..73 satisfied; ring 74 (592 positions) fits inside the 800 budget and
+        // ring 75 overruns it, so the walk truncates IN ring 75 => scanRing = 75, the
+        // frontier the elytra trace measured.
+        seedSatisfiedDisc(flight.columns, 73);
+        flight.primeAndArm();
+        flight.s.recenter();
+        assertEquals(4 * 75 * 76, flight.s.predictedWalkCost(),
+                "the measured elytra flight walk is exactly 4R(R+1) at frontier ring 75");
+        assertTrue(flight.s.predictedWalkCost() <= SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "...and it MUST be admitted — unlocking it is the whole point of the change");
+
+        var warm = new AdaptiveRig(scanner(256));
+        assertTrue(4 * 256 * 257 > SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "a full walk at the default 256 LOD distance (263,168) must be refused;"
+                        + " 4R^2 would give 262,144 and sit on the wrong side of the constant");
+        seedSatisfiedDiscExceptRing(warm.columns, 256, 12);
+        warm.primeAndArm();
+        warm.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, warm.ticksToFire(),
+                "a warm full-disc sweep rides the 1 Hz fallback");
+    }
+
+    /** Seeds a satisfied square of {@code radius} but leaves one Chebyshev ring open — the
+     *  trailing view-edge crescent shape a moving client sees on warm terrain. */
+    private static void seedSatisfiedDiscExceptRing(ColumnStateMap columns, int radius, int openRing) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                if (Math.max(Math.abs(dx), Math.abs(dz)) == openRing) continue;
+                columns.onReceived(PositionUtil.packPosition(CX + dx, CZ + dz), 5000L);
+            }
+        }
     }
 
     /** Marks every column in a square of {@code radius} around the rig centre as received
@@ -1401,8 +1469,9 @@ class SpiralScannerTest {
         assertTrue(rig.s.predictedWalkCost() > SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
                 "premise: an expensive prediction is standing");
         rig.s.reset();
-        assertEquals(0, rig.s.predictedWalkCost(),
-                "a new session predicts nothing — no stale frontier survives reset()");
+        assertTrue(rig.s.predictedWalkCost() > SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "a fresh session has never walked, so it must predict the FULL disc and fail"
+                        + " closed — never inherit a cheap stale frontier");
     }
 
     @Test

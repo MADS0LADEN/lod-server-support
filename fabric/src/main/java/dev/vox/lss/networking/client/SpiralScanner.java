@@ -86,6 +86,13 @@ class SpiralScanner {
 
     private int confirmedRing = 0;
     private int scanRing = 0;
+    /**
+     * Did the last walk stop early because the budget filled? Decides which end
+     * {@link #predictedWalkCost()} measures to: a truncated walk stops at {@link #scanRing},
+     * an untruncated one iterates every ring out to the LOD distance. Starts false so a
+     * never-walked scanner predicts the full disc — fail-closed.
+     */
+    private boolean lastWalkTruncated = false;
     private int scanTickCounter = LSSConstants.TICKS_PER_SECOND - 1; // starts at max so first scan fires immediately on join
     private int missingVanillaChunks = Integer.MAX_VALUE;
 
@@ -288,14 +295,26 @@ class SpiralScanner {
      * identically-shaped events, letting movement resets run fast while
      * {@code hasActionableRetries} resets (also "next walk starts at ring 0") stay at 1 Hz.
      *
-     * <p>Costs nothing in the walk itself: no counter in the hot loop, no new state.
-     * Saturates rather than overflowing at the 2048 LOD ceiling (~16.8M fits an int, but
-     * the intermediate does not for larger spans, hence the long math).
+     * <p>Costs nothing in the walk itself: no counter in the hot loop. The long math and
+     * the saturation are belt-and-braces — {@code scanRing} is clamped to the LOD distance,
+     * so the worst real product (~16.8M at the 2048 ceiling) fits an int comfortably.
      */
     int predictedWalkCost() {
-        int s = this.scanRing;
+        if (this.sessionConfig == null) return Integer.MAX_VALUE; // fail closed
+        // WHERE the walk stops is not scanRing. scan()'s ONLY early exit is the budget
+        // `break outer`; without it the loop runs all the way to lodDistance, and scanRing
+        // is merely the outermost ring that QUEUED something. Those coincide only for a
+        // truncated walk. On a warm disc — the shipped server's own regime — a moving
+        // client finds work solely in the trailing view-edge crescents near ring
+        // ~viewDistance, so scanRing stays tiny while the walk still iterates every
+        // satisfied ring out to lodDistance. Predicting off scanRing there under-reports by
+        // three orders of magnitude and admits exactly the walk this gate exists to refuse.
+        int s = this.lastWalkTruncated ? this.scanRing : getEffectiveLodDistance();
         int c = this.confirmedRing;
-        long cost = 4L * ((long) s * (s + 1) - (long) c * (c + 1));
+        if (s < c) return 0;
+        // Σ 8r for r in [c, s] — the loop starts AT confirmedRing, so the lower term is
+        // c(c-1), not c(c+1).
+        long cost = 4L * ((long) s * (s + 1) - (long) c * (c - 1));
         return cost <= 0 ? 0 : (int) Math.min(cost, Integer.MAX_VALUE);
     }
 
@@ -329,6 +348,7 @@ class SpiralScanner {
         int[] chunkCoords = new int[2];
         int localScanRing = -1;
         int queued = 0;
+        boolean truncated = false;
 
         // Only an ACTIONABLE retry mark (outside the vanilla-view exclusion) resets the
         // confirmed ring. A mark whose position slipped INSIDE the exclusion after it was
@@ -351,7 +371,7 @@ class SpiralScanner {
             boolean ringFullySatisfied = true;
             int ringSize = 8 * r;
             for (int i = 0; i < ringSize; i++) {
-                if (count >= budget) { ringFullySatisfied = false; break outer; }
+                if (count >= budget) { ringFullySatisfied = false; truncated = true; break outer; }
 
                 ringIndexToCoord(r, i, playerCx, playerCz, chunkCoords);
                 int cx = chunkCoords[0];
@@ -396,6 +416,7 @@ class SpiralScanner {
 
         this.confirmedRing = localConfirmedRing;
         this.scanRing = localScanRing >= 0 ? localScanRing : localConfirmedRing;
+        this.lastWalkTruncated = truncated;
         this.lastBudget = budget;
         this.lastQueued = queued;
 
@@ -432,6 +453,7 @@ class SpiralScanner {
     void reset() {
         this.confirmedRing = 0;
         this.scanRing = 0;
+        this.lastWalkTruncated = false; // fresh session predicts the full disc — fail closed
         this.scanTickCounter = LSSConstants.TICKS_PER_SECOND - 1;
         this.missingVanillaChunks = Integer.MAX_VALUE;
         this.cachedVoxyDistance = -1;

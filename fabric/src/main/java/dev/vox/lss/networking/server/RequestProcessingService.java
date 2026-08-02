@@ -269,8 +269,10 @@ public class RequestProcessingService {
             // Session identity for the router's stale-snapshot guard (set before the map
             // publish so the processing thread never sees it null on a live state).
             s.setRegisteredDimension(player.level().dimension().identifier().toString());
-            // Transport-pressure gauge (elytra-wall §8.3). Bound per state, not per tick:
-            // the probe re-reads the channel on every call, so a reconnect is picked up.
+            // Transport-pressure gauge (elytra-wall §8.3). The probe re-reads the player's
+            // channel on every call, so a reconnect on the SAME ServerPlayer is picked up;
+            // a player-object swap that keeps this state degrades to isActive()==false =>
+            // no signal, never a wrong number.
             s.setChannelPressureProbe(FabricChannelPressure.forPlayer(player));
             return s;
         });

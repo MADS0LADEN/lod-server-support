@@ -75,6 +75,53 @@ class FlushSendQueueTest {
     }
 
     @Test
+    void deferralStillSweepsDepartedStampsAndRespectsTheExactBoundary() throws Exception {
+        // §11.4 named THREE things the mis-placed early return would have skipped: the
+        // readyPayloads drain, the snapshot publish, and this sweep. The first two are
+        // pinned above; without this one a sustained deferral leaks one departedColumns
+        // entry per column ever sent.
+        var clock = new AtomicLong(0);
+        state.setDepartureGraceForTest(500_000_000L, clock::get);
+        state.addReadyPayload(new QueuedPayload<>("a", 0, 0, POS_1));
+        Thread.sleep(50);
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 0L);
+        assertEquals(1, state.departedColumnCountForTest(), "premise: one departure stamped");
+
+        // Past the grace, with the gate DEFERRING: the sweep must still run.
+        clock.addAndGet(2_000_000_000L); // well past the 500 ms grace
+        state.setChannelPressureProbe(() -> 8_000_000L);
+        state.addReadyPayload(new QueuedPayload<>("b", 0, 1, POS_2));
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 2_097_152L);
+        assertEquals(1, state.getSendDeferrals(), "premise: this tick deferred");
+        assertEquals(0, state.departedColumnCountForTest(),
+                "the expired stamp must be swept on the deferral path too");
+    }
+
+    @Test
+    void theCeilingIsAnExclusiveBoundary() throws Exception {
+        // pending == ceiling must SEND (the gate is `pending > ceiling`); a `>=` flip would
+        // be invisible to the coarse 8MB-vs-2MB tests above.
+        state.setChannelPressureProbe(() -> 2_097_152L);
+        state.addReadyPayload(new QueuedPayload<>("a", 0, 0, POS_1));
+        Thread.sleep(50);
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 2_097_152L);
+        assertEquals(List.of("a"), sent, "exactly at the ceiling still sends");
+        assertEquals(0, state.getSendDeferrals());
+    }
+
+    @Test
+    void aThrowingProbeCannotTakeTheFlushDown() throws Exception {
+        // The probe runs inside the per-player flush loop, so an escaping exception would
+        // take every LATER player's flush with it.
+        state.setChannelPressureProbe(() -> { throw new IllegalStateException("probe blew up"); });
+        state.addReadyPayload(new QueuedPayload<>("a", 0, 0, POS_1));
+        Thread.sleep(50);
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 2_097_152L);
+        assertEquals(List.of("a"), sent, "a broken probe must degrade to no-signal, not throw");
+        assertEquals(-1, state.getOutboundPendingBytes());
+    }
+
+    @Test
     void noSignalNeverThrottles() throws Exception {
         // -1 means "unmeasurable", never "empty". A mixin/reflection miss on a future MC
         // must degrade to today's exact behaviour, not stall the player forever.
