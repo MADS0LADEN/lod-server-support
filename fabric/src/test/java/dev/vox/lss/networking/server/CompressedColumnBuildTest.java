@@ -181,5 +181,26 @@ class CompressedColumnBuildTest {
         assertSame(raw, rawCol.shippedSections(), "the raw recipient shares the original array");
         assertEquals(1, capable.processor().getDiagnostics().getTotalColumnsCompressed());
         assertEquals(1, capable.processor().getDiagnostics().getTotalColumnsRaw());
+
+        // The v16 egress guard, pinned on the SAME two payloads the build just
+        // produced. This decision is the only thing between a codec-1 payload and a
+        // hard-kicked v16 client — the legacy layout has nowhere to carry a codec byte,
+        // so a converted zstd body decodes as garbage — and it had no Fabric-side test
+        // at all, while Paper pins its equivalent twice. Reachable in one narrow but
+        // real window: an established compressed session downgrading to v16 via the
+        // discovery re-handshake can drain already-queued codec-1 payloads into it.
+        assertFalse(RequestProcessingService.isV16Convertible(capCol),
+                "a compressed column must NEVER be converted to the legacy shape");
+        assertTrue(RequestProcessingService.isV16Convertible(rawCol),
+                "a raw column is what the legacy shape can carry");
+    }
+
+    /** Codec 0 IS the raw constant the guard tests for, and it is the byte a v16 client
+     *  never sees. Pins the constant the predicate above is written against, so a
+     *  renumbering cannot silently make every column look convertible. */
+    @Test
+    void rawCodecConstantIsZero() {
+        assertEquals(0, LSSConstants.COLUMN_CODEC_RAW);
+        assertNotEquals(LSSConstants.COLUMN_CODEC_RAW, LSSConstants.COLUMN_CODEC_ZSTD);
     }
 }

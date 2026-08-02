@@ -94,7 +94,7 @@ final class ClientNetTrace {
         int runway = runwayChunks(level, player, speedPerTick, viewDistance);
         // Seconds of clear terrain ahead: chunks * 16 blocks, over blocks/second.
         String runwaySeconds = runway < 0 ? "-1"
-                : String.format("%.2f", runway * 16.0 / (speedPerTick * 20.0));
+                : String.format(java.util.Locale.ROOT, "%.2f", runway * 16.0 / (speedPerTick * 20.0));
 
         ClientTraceLog.event("net", "\"ping\":" + pingMillis(mc)
                 + ",\"dcpt\":" + desiredChunksPerTick(mc)
@@ -109,7 +109,7 @@ final class ClientNetTrace {
                 + ",\"qb\":" + queueBytes
                 + ",\"ingest\":" + ingestBacklog
                 + ",\"inflight\":" + inFlight
-                + ",\"spd\":" + String.format("%.2f", speedPerTick * 20.0));
+                + ",\"spd\":" + String.format(java.util.Locale.ROOT, "%.2f", speedPerTick * 20.0));
 
         sendPingProbe(mc);
     }
@@ -149,7 +149,7 @@ final class ClientNetTrace {
             if (connection == null) return "-1";
             var calculator = ((AccessorClientPacketListener) connection)
                     .lss$getChunkBatchSizeCalculator();
-            return String.format("%.3f", calculator.getDesiredChunksPerTick());
+            return String.format(java.util.Locale.ROOT, "%.3f", calculator.getDesiredChunksPerTick());
         } catch (Exception | LinkageError e) {
             return "-1";
         }

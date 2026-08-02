@@ -122,7 +122,13 @@ public class RequestProcessingService {
         // cannot disagree at startup. (If it latches incompatible LATER the pool is already
         // sized — acceptable: every latched fallback engages the adaptive throttle, which
         // narrows hasHeadroom() and makes the pool size non-binding.)
-        boolean prioritizedReads = dev.vox.lss.compat.MoonriseReadCompat.resolveOrNull() != null;
+        // useBackgroundReadPriority=false short-circuits chooseReadPath to foregroundRead,
+        // so the Moonrise rung never runs and the pool must be sized by the UNprioritized
+        // tier. Sizing it off Moonrise presence alone gave an admin who disabled background
+        // priority — precisely because LSS reads were hurting vanilla chunk loading — up to
+        // 8 FOREGROUND readers where the historic default was 5. (v0.9.0 review.)
+        boolean prioritizedReads = config.useBackgroundReadPriority
+                && dev.vox.lss.compat.MoonriseReadCompat.resolveOrNull() != null;
         this.diskReader = new ChunkDiskReader(config.effectiveDiskReaderThreads(prioritizedReads),
                 config.useBackgroundReadPriority, config.useNbtTranscode);
         if (config.enableChunkGeneration) {
@@ -556,6 +562,16 @@ public class RequestProcessingService {
      *  guard cannot convert is DROPPED with a warn-once (design §5): a dropped frame
      *  self-heals by re-declaration, a wrong-shaped one kicks the client. Unreachable
      *  today — only buildAndEnqueueColumnPayload feeds this queue. */
+    /** Whether a column may be converted to the legacy v16 shape. Extracted so the
+     *  guard's decision is pinnable: {@code sendColumnPayload} is private and needs a
+     *  live server, so this — the only thing standing between a codec-1 payload and a
+     *  hard-kicked v16 client — had no test on either side of the Fabric module, while
+     *  Paper pins its equivalent twice. (v0.9.0 review.) The legacy layout has nowhere
+     *  to carry a codec byte, so only RAW converts; anything else must be dropped. */
+    static boolean isV16Convertible(dev.vox.lss.networking.payloads.VoxelColumnS2CPayload col) {
+        return col.codec() == LSSConstants.COLUMN_CODEC_RAW;
+    }
+
     private void sendColumnPayload(PlayerRequestState state, CustomPacketPayload payload)
             throws Exception {
         var uuid = state.getPlayerUUID();
@@ -569,7 +585,7 @@ public class RequestProcessingService {
                 }
                 return;
             }
-            if (col.codec() != LSSConstants.COLUMN_CODEC_RAW) {
+            if (!isV16Convertible(col)) {
                 // Codec-0 assert at the seam (plan review A6): the legacy layout has
                 // nowhere to carry a codec, so a framed payload converted here would
                 // ship a zstd body the old client decodes as garbage (hard-kick class).

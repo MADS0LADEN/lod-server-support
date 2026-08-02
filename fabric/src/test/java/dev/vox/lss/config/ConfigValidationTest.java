@@ -409,10 +409,6 @@ class ConfigValidationTest {
         }
     }
 
-    /** Read protection is UNCONDITIONAL since useBackgroundReadPriority was retired (config
-     *  review §6). Its real failure modes are handled by automatic one-way latches
-     *  (backgroundIncompatible / moonriseIncompatible), not by config, so a chunk-IO-overhaul
-     *  mod still degrades to foreground reads plus the adaptive throttle with no file edit. */
     /** LOD reads yield to gameplay out of the box; false is the documented rollback and the
      *  arm selector for benchmark_compare.sh's foreground-vs-background comparison. */
     @Test

@@ -300,6 +300,18 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                 (capabilities, dialect, replyAfterRegister) -> {
                     if (dialect == HandshakeGate.WireDialect.V16) {
                         service.getV16CompatManager().onHandshake(nmsPlayer.getUUID());
+                    } else {
+                        // Shed a stale v16 session HERE as well as on the sender seam.
+                        // For a REGISTER outcome the sender seam IS replyAfterRegister,
+                        // which the lifecycle drain runs AFTER registerPlayer — and
+                        // registerPlayer derives wantsCompressedColumns from isV16(). So a
+                        // v16 -> current re-handshake (reachable via the client's own
+                        // slow-join downgrade race) registered against the stale identity
+                        // and ran the whole session uncompressed. Fabric clears before
+                        // registering; this is the Paper twin. Fail-safe either way — raw
+                        // is valid current-protocol wire — but it silently disables the
+                        // release's headline feature for that session. (v0.9.0 review.)
+                        service.getV16CompatManager().onNonV16Handshake(nmsPlayer.getUUID());
                     }
                     service.enqueueRegister(nmsPlayer, capabilities, replyAfterRegister);
                 });

@@ -320,8 +320,11 @@ public class PaperRequestProcessingService {
         var xrayMasks = PaperXrayMaskManager.activate(config);
         Map<UUID, PaperPlayerRequestState> players = new ConcurrentHashMap<>();
         // Paper/Folia reads ALWAYS route through Moonrise at Priority.LOW, so the prioritized
-        // AUTO tier is unconditional here (unlike Fabric, which must probe for Moonrise).
-        var diskReader = new PaperChunkDiskReader(config.effectiveDiskReaderThreads(true),
+        // AUTO tier applies whenever background priority is on (unlike Fabric, which must
+        // also probe for Moonrise). With the flag off the reads run FOREGROUND, so the pool
+        // must be sized by the unprioritized tier — see the Fabric twin. (v0.9.0 review.)
+        var diskReader = new PaperChunkDiskReader(
+                config.effectiveDiskReaderThreads(config.useBackgroundReadPriority),
                 config.useBackgroundReadPriority,
                 config.useNbtTranscode);
         PaperChunkGenerationService generationService = config.enableChunkGeneration

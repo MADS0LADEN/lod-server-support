@@ -87,7 +87,7 @@ case "$LSS_LODSTORE" in
 esac
 # Background store population (Fabric only — Paper has no backfill wiring yet, the key
 # is inert there): lodStoreBackfill=true auto-starts a low-priority region walk that
-# pre-warms the store, yielding to players and tick health (default 100 col/s cap —
+# pre-warms the store, yielding to players and tick health (default 500 col/s cap —
 # LSS_LODSTORE_BACKFILL_CPS below overrides — pauses under load). run-fabric-store
 # forces it on; '/lsslod store backfill status|stop' to steer.
 LSS_LODSTORE_BACKFILL="${LSS_LODSTORE_BACKFILL:-false}"
@@ -238,7 +238,6 @@ write_lss_config() {
   "diskReaderThreads": 8,
   "sendQueueLimitPerPlayer": 9600,
   "bytesPerSecondLimitGlobal": 41943040,
-  "syncOnLoadConcurrencyLimitPerPlayer": 400,
   "generationConcurrencyLimitPerPlayer": 40,
   "enableChunkGeneration": true,
   "generationConcurrencyLimitGlobal": 40,

@@ -28,7 +28,7 @@ public abstract class ServerConfigBase extends JsonConfig {
      * bounds is CLIENT DECODE AND INGEST WORK — and the elytra chunk-wall investigation
      * confirmed the client, not the link, is the binding constraint. So the ~6.25:1 the
      * compressed-columns work bought did NOT loosen the thing this cap exists to limit: at
-     * 50 MiB counted the wire cost is roughly 8 MB/s, but the client still decodes 50 MiB/s.
+     * 25 MiB counted the wire cost is roughly 4 MB/s, but the client still decodes 25 MiB/s.
      *
      * <p>Context for anyone retuning it: the elytra chunk wall reproduced at ~25 MB/s
      * counted, so 25 MiB places the CEILING at the historic incident rate rather than above

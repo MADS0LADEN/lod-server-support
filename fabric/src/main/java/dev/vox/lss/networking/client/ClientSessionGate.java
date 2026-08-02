@@ -311,5 +311,10 @@ final class ClientSessionGate {
         this.v16FallbackSent = false;
         this.isV16Server = false;
         V16ClientWire.reset();
+        // A trace belongs to the session it was started in. It used to survive
+        // disconnect, server switches and world reloads with no size cap and no
+        // reminder — and its 1 Hz net event kept sending a ping packet to whatever
+        // server the player joined next. (v0.9.0 review.)
+        ClientTraceLog.stop();
     }
 }

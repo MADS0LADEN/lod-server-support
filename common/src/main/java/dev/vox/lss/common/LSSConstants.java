@@ -74,7 +74,7 @@ public final class LSSConstants {
     public static final int MIN_BYTES_PER_SECOND = 1024;
     /** Per-player bandwidth ceiling. Raised 100 MB -> 1 GiB 2026-08-02 (config review
      *  section 5): the live server hit the old ceiling exactly, and this bounds only what an
-     *  admin deliberately types. The DEFAULT stays 20 MiB — the cap charges RAW bytes
+     *  admin deliberately types. The DEFAULT is 25 MiB — the cap charges RAW bytes
      *  because it bounds client decode work (the confirmed receiver-limited bottleneck),
      *  so wire compression did not loosen the constraint it exists to enforce. */
     public static final int MAX_BYTES_PER_SECOND_PER_PLAYER = 1_073_741_824;
