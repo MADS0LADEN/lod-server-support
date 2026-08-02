@@ -90,7 +90,7 @@ class LSSServerCommands {
         }
         if (!service.invalidateStoreAllDimensions()) {
             source.sendFailure(Component.literal(
-                    "Invalidate-all requires the persistent store — this session runs the memory tier (lodStore=memory, or full degraded at boot)"));
+                    "Invalidate-all requires the persistent store — this session degraded to the in-memory tier at boot (SQLite could not open; see the startup warning)"));
             return 0;
         }
         source.sendSuccess(() -> Component.literal(

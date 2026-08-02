@@ -5,6 +5,5 @@
   "dirtyBroadcastIntervalSeconds": 5,
   "diskReaderThreads": 5,
   "lodStore": "full",
-  "lodStoreMemoryMB": 64,
   "lodStoreResweepSeconds": 10
 }

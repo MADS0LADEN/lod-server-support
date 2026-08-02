@@ -10,7 +10,9 @@ set -euo pipefail
 #   store_gate.sh warm <reps> <duration> [lodStore-on-mode]   # warm-join A/B (§0 gate)
 #   store_gate.sh cold <reps> <duration> [lodStore-on-mode]   # no-cache deposits A/B
 #                                                             # (the ≤10% cold-path gate)
-#   lodStore-on-mode defaults to "full"; Phase 1 passes "memory".
+#   lodStore-on-mode defaults to (and since 2026-08-02 may only be) "full" — the
+#   "memory" mode Phase 1 used is retired, and it now normalizes to OFF, which would
+#   silently turn the on-arm into a second off-arm and read as "the store is free".
 #
 # Results: store-gate-results/<stamp>/<arm>-rep<N>/… then store_gate_check.py runs the
 # §0 math (work-elimination, band CPU/col, non-regression) over the whole stamp dir.
@@ -21,6 +23,11 @@ MODE="${1:?warm|cold}"
 REPS="${2:?reps}"
 DURATION="${3:?duration-seconds}"
 ON_MODE="${4:-full}"
+if [ "$ON_MODE" != "full" ]; then
+    echo "store_gate.sh: lodStore-on-mode must be 'full' (got '$ON_MODE') — 'memory' was" >&2
+    echo "  retired 2026-08-02 and normalizes to off, which would make both arms off-arms." >&2
+    exit 2
+fi
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_ROOT="${OUT_ROOT:-$PROJECT_ROOT/store-gate-results}"
 STAMP="${RUN_STAMP:-$(date +%Y%m%d-%H%M%S)}"

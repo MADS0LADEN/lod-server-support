@@ -41,7 +41,7 @@ ALL_SCENARIOS=(fresh-backfill warm-rejoin dimension-trip dirty-broadcast
                cold-restart-resync enabled-false teleport-prune
                dirty-range-filter dirty-during-backfill dirty-while-offline
                clearcache-mid-session dimension-rejoin-warm store-second-join
-               store-second-join-full store-save-storm)
+               store-save-storm)
 # Scenarios ported to Paper. The remaining ones are Fabric-specific for now: the dirty-*
 # family leans on the save-hook + DirtyContentFilter (Paper's dirty detection is
 # event-driven — paper-dirty-falling-block is the Paper-native dirty scenario),
@@ -141,7 +141,7 @@ case "$SCENARIO" in
     rate-limit-storm|disk-saturation|generation-disabled|generation-capacity-stress|bandwidth-throttle) ;;
     cold-restart-resync|enabled-false|teleport-prune|dirty-range-filter) ;;
     dirty-during-backfill|dirty-while-offline|clearcache-mid-session|dimension-rejoin-warm) ;;
-    store-second-join|store-second-join-full) ;;
+    store-second-join) ;;
     store-offline-populate|store-offline-mutate|store-offline-verify) ;;
     store-save-storm|store-save-storm-off) ;;
     paper-dirty-falling-block|paper-store-unfired-event) ;;
@@ -195,14 +195,15 @@ case "$SCENARIO" in
                                 CLIENT_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
     clearcache-mid-session)     CLIENT_RUNS=1; EXPECTED_SECONDS=280
                                 CLIENT_EXTRA_ARGS=("-Psoak.clientActionAt=60:clearcache") ;;
-    store-second-join|store-second-join-full)
+    store-second-join)
                                 CLIENT_RUNS=1; EXPECTED_SECONDS=280
-                                # The Phase 1/2 LOD-store gates: backfill populates the
-                                # store, the clearcache forces the full ts<=0
-                                # re-declaration, the checker requires the re-serve wave
-                                # to be STORE HITS with byte-identical probe hashes.
-                                # The -full flavor runs the same timeline with
-                                # lodStore=full (SQLite tier live under the law set).
+                                # The Phase 1/2 LOD-store gate (lodStore=full): backfill
+                                # populates the store, the clearcache forces the full
+                                # ts<=0 re-declaration, the checker requires the re-serve
+                                # wave to be STORE HITS with byte-identical probe hashes.
+                                # Absorbed the old store-second-join-full twin when
+                                # lodStore=memory was retired (2026-08-02) — same
+                                # timeline, and this arm now IS the SQLite one.
                                 CLIENT_EXTRA_ARGS=("-Psoak.clientActionAt=60:clearcache")
                                 SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
     dimension-rejoin-warm)      CLIENT_RUNS=2; EXPECTED_SECONDS=650 ;;

@@ -72,7 +72,7 @@ case "$LSS_ADMISSION_TRACE" in
     *)              ADMISSION_TRACE_FLAG="-Dlss.admissionTrace=true" ;;
 esac
 
-# LOD store for manual play: LSS_LODSTORE=off|memory|full (default off) is written into
+# LOD store for manual play: LSS_LODSTORE=off|full (default off) is written into
 # the staged lss-server-config.json on EVERY run — the staging rewrites that file, so a
 # hand-edit does not survive a re-run; this variable is the supported way to flip it.
 # `run-fabric-store` / `run-paper-store` below force "full". The store DB lives at
@@ -80,8 +80,8 @@ esac
 # lss-lod/ dir is always safe); eyeball it with '/lsslod store status' in-game.
 LSS_LODSTORE="${LSS_LODSTORE:-off}"
 case "$LSS_LODSTORE" in
-    off|memory|full) ;;
-    *) echo "LSS_LODSTORE must be off, memory, or full (got '$LSS_LODSTORE')" >&2; exit 1 ;;
+    off|full) ;;
+    *) echo "LSS_LODSTORE must be off or full (got '$LSS_LODSTORE')" >&2; exit 1 ;;
 esac
 # Background store population (Fabric only — Paper has no backfill wiring yet, the key
 # is inert there): lodStoreBackfill=true auto-starts a low-priority region walk that
@@ -712,7 +712,7 @@ case "${1:-run}" in
         echo "  LSS_ADMISSION_TRACE - Fabric [lss-adm] generation-admission trace (default: 1)."
         echo "                        Set to 0 to silence it — it is verbose during backfill."
         echo "  LSS_LODSTORE - lodStore mode written into EVERY staged lss-server-config.json"
-        echo "                 (off|memory|full, default: off; the run-*-store entrypoints"
+        echo "                 (off|full, default: off; the run-*-store entrypoints"
         echo "                 force full). Hand-edits to the config do NOT survive a re-run"
         echo "                 — the staging rewrites it; this variable is the supported knob."
         echo "  LSS_LODSTORE_BACKFILL - lodStoreBackfill written the same way (true|false,"

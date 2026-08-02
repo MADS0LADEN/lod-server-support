@@ -4,8 +4,19 @@ import java.util.Locale;
 
 /**
  * The {@code lodStore} config switch (docs/planning/lod-store-implementation-plan.md §1):
- * {@code off} (no store — the kill switch every phase gate A/Bs against), {@code memory}
- * (the Phase 1 bounded in-memory tier only), {@code full} (memory + SQLite disk store).
+ * {@code off} (no store — the kill switch every phase gate A/Bs against) and
+ * {@code full} (the SQLite disk store).
+ *
+ * <p><b>{@link #MEMORY} is NOT a config value</b> — it is the internal state of the
+ * boot-time degrade only (retired as a user-facing mode 2026-08-02; {@code "memory"} in
+ * a config file now normalizes to {@code off} like any other unrecognized word). It
+ * survives as an enum constant because {@link LodStores} falls back to
+ * {@link MemoryLodStore} when SQLite cannot initialize, and the diag token must report
+ * what is actually RUNNING ({@code store=memory}) rather than the configured
+ * aspiration. Rationale for the retirement: at its 64 MB budget the tier held ~6% of one
+ * player's disc under random eviction while zstd-compressing every deposit, and the
+ * Phase 2 A/B had already deleted it from {@code full} mode for costing +14.6% CPU/col
+ * to save 5 µs against a 2.4 ms NBT path.
  *
  * <p>Unknown values normalize to {@link #OFF} — the SAFE value (unlike
  * {@code xrayObfuscation}'s normalize-to-auto, this one is deliberately safe-biased: a
@@ -17,7 +28,8 @@ public enum LodStoreMode {
     public static LodStoreMode normalize(String value) {
         if (value == null) return OFF;
         return switch (value.trim().toLowerCase(Locale.ROOT)) {
-            case "memory" -> MEMORY;
+            // NOTE: no "memory" case — see the MEMORY javadoc. A config that still says
+            // "memory" lands on OFF and validate() rewrites the file to "off".
             case "full" -> FULL;
             default -> OFF;
         };

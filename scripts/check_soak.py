@@ -83,7 +83,6 @@ ANOMALY_OPT_INS = {
     "dirty-while-offline": frozenset({"saturated"}),
     "clearcache-mid-session": frozenset({"saturated"}),
     "store-second-join": frozenset({"saturated"}),
-    "store-second-join-full": frozenset({"saturated"}),
     "store-offline-populate": frozenset({"saturated"}),
     "store-offline-mutate": frozenset(),
     "store-offline-verify": frozenset({"saturated"}),
@@ -124,7 +123,6 @@ MIN_CLIENT_WINDOWS = {
     # is a segment boundary, like a dimension change)
     "clearcache-mid-session": {(1, 0): 4, (1, 1): 4},
     "store-second-join": {(1, 0): 4, (1, 1): 4},
-    "store-second-join-full": {(1, 0): 4, (1, 1): 4},
     "store-offline-populate": {(1, 0): 4},
     "store-offline-mutate": {(1, 0): 3},
     "store-offline-verify": {(1, 0): 4},
@@ -171,8 +169,6 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     "missMemoTtlSeconds",
     # X-ray masking cutoff (docs/planning/antixray-compat-design.md §3).
     "xrayMaxBlockHeight",
-    # LOD-store memory-tier cap — the Phase 1 hit-rate-curve scenarios sweep it.
-    "lodStoreMemoryMB",
     # LOD-store periodic freshness re-sweep (Paper's stale bound; 0 = off).
     "lodStoreResweepSeconds",
     # LOD-store on-disk size cap (Phase 5 eviction).
@@ -183,8 +179,9 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     "lodStoreBackfillColumnsPerSecond",
     "lodStoreBackfillTickCeilingMillis",
 })
-# X-ray masking tri-state ("auto"/"on"/"off"), the LOD-store switch ("off"/"memory"/
-# "full" — scenarios A/B store gates against it), + hidden-block id list — the only
+# X-ray masking tri-state ("auto"/"on"/"off"), the LOD-store switch ("off"/"full" —
+# scenarios A/B store gates against it; "memory" retired 2026-08-02), + hidden-block
+# id list — the only
 # non-bool non-int server config keys; validated loosely (any string / list of strings).
 SERVER_CONFIG_STRING_KEYS = frozenset({"xrayObfuscation", "lodStore"})
 SERVER_CONFIG_STRING_LIST_KEYS = frozenset({"xrayHiddenBlocks"})
@@ -1842,10 +1839,10 @@ def check_clearcache_mid_session(ctx):
 
 
 def make_store_second_join(scenario):
-    """Factory: store-second-join (lodStore=memory) and store-second-join-full
-    (lodStore=full — the SQLite store alone since the Phase 2 delete-the-tier verdict)
-    share this check verbatim: the serving ENGINE is invisible to the gated counters
-    (store.hits counts whichever store answers)."""
+    """Factory for store-second-join (lodStore=full — the SQLite store alone since the
+    Phase 2 delete-the-tier verdict). Kept a factory because the check is written against
+    the counters, not the engine: store.hits counts whichever store answers, so the old
+    lodStore=memory twin (retired 2026-08-02) shared it verbatim."""
     @named_check(scenario, ["client.requested_total", "client.received_columns",
                                        "server.store.hits", "server.store.deposits",
                                        "server.store.errors", "server.disk.submitted"])
@@ -2554,11 +2551,6 @@ CHECKS = {
     "store-second-join": [check_store_second_join,
                           make_handshake_check("store-second-join"),
                           make_disc_completeness("store-second-join")],
-    # The lodStore=full sibling: same timeline, same check — the SQLite store live
-    # under the whole law set (WAL batcher running during a real backfill).
-    "store-second-join-full": [make_store_second_join("store-second-join-full"),
-                               make_handshake_check("store-second-join-full"),
-                               make_disc_completeness("store-second-join-full")],
     # store_offline_edit.sh phases: each individually law-checked; the cross-phase
     # probe-hash comparison (edited differs, control identical) lives in the wrapper.
     "store-offline-populate": [check_store_offline_populate,

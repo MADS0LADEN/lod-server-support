@@ -386,8 +386,7 @@ public class PaperRequestProcessingService {
                     LSSConstants.PROTOCOL_VERSION, regionDirs::get, maskFingerprints::get,
                     config.lodStoreResweepSeconds, config.lodStoreMaxBytes(),
                     storeRegistryFingerprint(server));
-            lodStore = dev.vox.lss.common.store.LodStores.createOrNull(
-                    storeMode, config.lodStoreMemoryMB * 1024L * 1024L, env);
+            lodStore = dev.vox.lss.common.store.LodStores.createOrNull(env);
             if (lodStore == null) {
                 LSSLogger.warn("lodStore=" + storeMode.configValue() + " requested but the "
                         + dev.vox.lss.common.store.StoreCodec.NAME + " codec native cannot "

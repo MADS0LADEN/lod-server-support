@@ -112,12 +112,11 @@ public abstract class ServerConfigBase extends JsonConfig {
      * xrayObfuscation's normalize-to-auto: a typo must never enable a storage engine.
      */
     public String lodStore = "off";
-    /**
-     * Memory-tier size cap for the LOD store (compressed resident bytes), used by both
-     * the "memory" and "full" modes. The Phase 1 gate measures the hit-rate curve
-     * against this cap; scan-workload hit rate ≈ cap / working-set (random eviction).
-     */
-    public int lodStoreMemoryMB = 64;
+    // NOTE: lodStoreMemoryMB is RETIRED (2026-08-02) along with the "memory" mode — the
+    // in-memory tier survives only as the boot-time degrade when SQLite cannot init, at
+    // a fixed budget (LodStores.DEGRADE_MAX_BYTES). GSON ignores the key on load and
+    // validate()'s next save drops it from the file, same as the retired
+    // syncOnLoadConcurrencyLimitPerPlayer.
     /**
      * Periodic LOD-store freshness re-sweep (seconds; 0 = off). This is PAPER's stale
      * bound: its dirty detection is event-driven with documented unfired-event gaps
@@ -247,8 +246,6 @@ public abstract class ServerConfigBase extends JsonConfig {
         perDimensionTimestampCacheSizeMB = Math.clamp(perDimensionTimestampCacheSizeMB, LSSConstants.MIN_TIMESTAMP_CACHE_SIZE_MB, LSSConstants.MAX_TIMESTAMP_CACHE_SIZE_MB);
         missMemoTtlSeconds = Math.clamp(missMemoTtlSeconds, LSSConstants.MIN_MISS_MEMO_TTL_SECONDS, LSSConstants.MAX_MISS_MEMO_TTL_SECONDS);
         lodStore = dev.vox.lss.common.store.LodStoreMode.normalize(lodStore).configValue();
-        lodStoreMemoryMB = Math.clamp(lodStoreMemoryMB,
-                LSSConstants.MIN_LOD_STORE_MEMORY_MB, LSSConstants.MAX_LOD_STORE_MEMORY_MB);
         lodStoreResweepSeconds = Math.clamp(lodStoreResweepSeconds,
                 LSSConstants.MIN_LOD_STORE_RESWEEP_SECONDS, LSSConstants.MAX_LOD_STORE_RESWEEP_SECONDS);
         // 0 (and negative nonsense) = uncapped — the resweepSeconds 0-means-off

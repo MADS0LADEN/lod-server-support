@@ -14,20 +14,40 @@ class LodStoreModeTest {
     @Test
     void normalizeMapsKnownValuesAndDefaultsUnknownToOff() {
         assertEquals(LodStoreMode.OFF, LodStoreMode.normalize("off"));
-        assertEquals(LodStoreMode.MEMORY, LodStoreMode.normalize("memory"));
         assertEquals(LodStoreMode.FULL, LodStoreMode.normalize("full"));
-        assertEquals(LodStoreMode.MEMORY, LodStoreMode.normalize("  Memory "));
+        assertEquals(LodStoreMode.FULL, LodStoreMode.normalize("  Full "));
         assertEquals(LodStoreMode.OFF, LodStoreMode.normalize("FULL_SPEED"));
         assertEquals(LodStoreMode.OFF, LodStoreMode.normalize("auto"));
         assertEquals(LodStoreMode.OFF, LodStoreMode.normalize(""));
         assertEquals(LodStoreMode.OFF, LodStoreMode.normalize(null));
     }
 
+    /**
+     * "memory" was a config value until 2026-08-02 and is now retired (LodStores javadoc:
+     * ~6% of one disc under random eviction, zstd on every deposit). An existing config
+     * file still carrying it must land on the SAFE value, not resurrect the tier — and
+     * validate() then rewrites the file to "off". A regression here would silently run a
+     * storage engine nobody asked for.
+     */
     @Test
-    void configValueRoundTrips() {
-        for (var mode : LodStoreMode.values()) {
-            assertEquals(mode, LodStoreMode.normalize(mode.configValue()));
-        }
+    void retiredMemoryValueNormalizesToOffLikeAnyUnknownWord() {
+        assertEquals(LodStoreMode.OFF, LodStoreMode.normalize("memory"));
+        assertEquals(LodStoreMode.OFF, LodStoreMode.normalize("  Memory "));
+        assertEquals(LodStoreMode.OFF, LodStoreMode.normalize("MEMORY"));
+    }
+
+    /**
+     * Only the two CONFIG-legal modes round-trip. MEMORY is deliberately excluded: it
+     * survives as an enum constant purely so the SQLite-init degrade can report
+     * {@code store=memory} honestly in diagnostics, so its configValue() is a display
+     * token with no parse side.
+     */
+    @Test
+    void configValueRoundTripsForTheConfigLegalModesOnly() {
+        assertEquals(LodStoreMode.OFF, LodStoreMode.normalize(LodStoreMode.OFF.configValue()));
+        assertEquals(LodStoreMode.FULL, LodStoreMode.normalize(LodStoreMode.FULL.configValue()));
+        assertEquals("memory", LodStoreMode.MEMORY.configValue(),
+                "the degrade's diag token must still render as store=memory");
     }
 
     @Test

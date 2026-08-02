@@ -98,7 +98,7 @@ public class PaperCommands implements CommandExecutor, TabCompleter {
                 return;
             }
             if (!service.invalidateStoreAllDimensions()) {
-                sender.sendMessage("Invalidate-all requires the persistent store — this session runs the memory tier (lodStore=memory, or full degraded at boot)");
+                sender.sendMessage("Invalidate-all requires the persistent store — this session degraded to the in-memory tier at boot (SQLite could not open; see the startup warning)");
                 return;
             }
             sender.sendMessage("LOD store: dropping all rows (background) — re-warms from serves");
