@@ -195,9 +195,10 @@ class ConfigValidationTest {
     }
 
     /** The AUTO sizing must track lodDistanceChunks — its whole reason for existing is that a
-     *  fixed value silently under-provisions exactly when an admin raises the distance. The
-     *  512-chunk default disc is ~4x the area of the old 256 one, so AUTO must be materially
-     *  larger there, and it must reproduce the historic hand-tuned 32 MB at 256. */
+     *  fixed value silently under-provisions exactly when an admin raises the distance —
+     *  which is the whole point, since the default went 256 -> 512 -> 256 in one day. AUTO must
+     *  reproduce the historic hand-tuned 32 MB at the 256 default, and a 512 disc (~4x the
+     *  area) must buy materially more. */
     @Test
     void timestampCacheAutoSizeTracksLodDistance() {
         var c = serverConfig();
@@ -207,7 +208,7 @@ class ConfigValidationTest {
         c.validate();
         int at256 = c.effectiveTimestampCacheMB();
         assertTrue(at256 >= 28 && at256 <= 36,
-                "AUTO at the historic 256 distance should land near the old hand-tuned 32 MB, got " + at256);
+                "AUTO at the 256 default must land near the historic hand-tuned 32 MB, got " + at256);
 
         c.lodDistanceChunks = 512;
         c.validate();

@@ -58,7 +58,7 @@ class PaperConfigLoadTest {
         Path dataFolder = tempDir.resolve("LodServerSupport"); // first run: folder doesn't exist yet
         PaperConfig c = PaperConfig.load(dataFolder);
 
-        assertEquals(512, c.lodDistanceChunks);
+        assertEquals(256, c.lodDistanceChunks);
         assertFalse(DEFAULT_EVENTS.isEmpty(), "compiled updateEvents defaults must not be empty");
         assertEquals(DEFAULT_EVENTS, c.updateEvents);
         assertTrue(Files.isRegularFile(dataFolder.resolve(FILE)));
@@ -77,7 +77,7 @@ class PaperConfigLoadTest {
 
         PaperConfig c = assertDoesNotThrow(() -> PaperConfig.load(dataFolder));
 
-        assertEquals(512, c.lodDistanceChunks); // defaults, not the half-written value
+        assertEquals(256, c.lodDistanceChunks); // defaults, not the half-written value
         assertEquals(DEFAULT_EVENTS, c.updateEvents);
         assertEquals(broken, Files.readString(dataFolder.resolve(FILE)));
     }
@@ -88,7 +88,7 @@ class PaperConfigLoadTest {
 
         PaperConfig c = assertDoesNotThrow(() -> PaperConfig.load(dataFolder));
 
-        assertEquals(512, c.lodDistanceChunks);
+        assertEquals(256, c.lodDistanceChunks);
         assertEquals(DEFAULT_EVENTS, c.updateEvents);
         assertEquals("", Files.readString(dataFolder.resolve(FILE)));
     }
@@ -105,7 +105,7 @@ class PaperConfigLoadTest {
         // Exact values double as Fabric/Paper default-parity pins (see ServerConfigBase).
         assertEquals(DEFAULT_EVENTS, c.updateEvents);
         assertTrue(c.enabled);
-        assertEquals(20_971_520, c.bytesPerSecondLimitPerPlayer);
+        assertEquals(52_428_800, c.bytesPerSecondLimitPerPlayer);
         assertEquals(0, c.diskReaderThreads);           // 0 = AUTO (derived per read path)
         assertEquals(1024, c.sendQueueLimitPerPlayer);
         assertEquals(268_435_456, c.bytesPerSecondLimitGlobal);
@@ -182,7 +182,7 @@ class PaperConfigLoadTest {
         PaperConfig c = assertDoesNotThrow(() -> PaperConfig.load(dataFolder));
 
         assertEquals(DEFAULT_EVENTS, c.updateEvents);
-        assertEquals(512, c.lodDistanceChunks); // the valid customization is reverted with the rest
+        assertEquals(256, c.lodDistanceChunks); // the valid customization is reverted with the rest
         assertEquals(broken, Files.readString(dataFolder.resolve(FILE)));
 
         List<Class<?>> registered = new ArrayList<>();

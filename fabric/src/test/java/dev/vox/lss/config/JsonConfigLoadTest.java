@@ -79,15 +79,15 @@ class JsonConfigLoadTest {
         Path configDir = tempDir.resolve("config"); // not yet existing — load must create it
         TestServerConfig c = TestServerConfig.load(configDir);
 
-        assertEquals(512, c.lodDistanceChunks);
-        assertEquals(20_971_520, c.bytesPerSecondLimitPerPlayer);
+        assertEquals(256, c.lodDistanceChunks);
+        assertEquals(52_428_800, c.bytesPerSecondLimitPerPlayer);
         assertTrue(Files.isRegularFile(configDir.resolve(FILE)));
 
         JsonObject saved = savedJson(configDir);
         for (String key : serializedFieldNames()) {
             assertTrue(saved.has(key), "defaults file missing field " + key);
         }
-        assertEquals(512, saved.get("lodDistanceChunks").getAsInt());
+        assertEquals(256, saved.get("lodDistanceChunks").getAsInt());
     }
 
     @Test
@@ -97,7 +97,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(512, c.lodDistanceChunks); // defaults, not the half-written value
+        assertEquals(256, c.lodDistanceChunks); // defaults, not the half-written value
         assertEquals(broken, Files.readString(configDir.resolve(FILE)));
     }
 
@@ -108,7 +108,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(512, c.lodDistanceChunks);
+        assertEquals(256, c.lodDistanceChunks);
         assertEquals(broken, Files.readString(configDir.resolve(FILE)));
     }
 
@@ -119,7 +119,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(512, c.lodDistanceChunks);
+        assertEquals(256, c.lodDistanceChunks);
         assertEquals(broken, Files.readString(configDir.resolve(FILE)));
     }
 
@@ -129,7 +129,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(512, c.lodDistanceChunks);
+        assertEquals(256, c.lodDistanceChunks);
         assertEquals("", Files.readString(configDir.resolve(FILE)));
     }
 
@@ -146,7 +146,7 @@ class JsonConfigLoadTest {
         // default (then validate() clamps the zeros to the minimums, e.g. 20 MB/s -> 1 KB/s).
         // These exact-value assertions are the only guard against that landmine.
         assertTrue(c.enabled);
-        assertEquals(20_971_520, c.bytesPerSecondLimitPerPlayer);
+        assertEquals(52_428_800, c.bytesPerSecondLimitPerPlayer);
         assertEquals(0, c.diskReaderThreads);           // 0 = AUTO (derived per read path)
         assertEquals(1024, c.sendQueueLimitPerPlayer);
         assertEquals(268_435_456, c.bytesPerSecondLimitGlobal);
@@ -169,7 +169,7 @@ class JsonConfigLoadTest {
         for (String key : serializedFieldNames()) {
             assertTrue(saved.has(key), "re-saved file missing migrated field " + key);
         }
-        assertEquals(20_971_520, saved.get("bytesPerSecondLimitPerPlayer").getAsInt());
+        assertEquals(52_428_800, saved.get("bytesPerSecondLimitPerPlayer").getAsInt());
     }
 
     @Test
@@ -211,10 +211,10 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = TestServerConfig.load(configDir);
 
-        assertEquals(512, c.lodDistanceChunks); // the typo'd value never binds
+        assertEquals(256, c.lodDistanceChunks); // the typo'd value never binds
         JsonObject saved = savedJson(configDir);
         assertFalse(saved.has("lodDistanceChunk"), "typo'd key must be dropped by the re-save");
-        assertEquals(512, saved.get("lodDistanceChunks").getAsInt());
+        assertEquals(256, saved.get("lodDistanceChunks").getAsInt());
         assertEquals(12, saved.get("diskReaderThreads").getAsInt()); // bound values survive the rewrite
         // Same mechanism retires a key: lodStoreBackfillTickCeilingMillis and lodStoreMemoryMB
         // are gone as fields, so a file still carrying them loads fine and the re-save drops
@@ -234,7 +234,7 @@ class JsonConfigLoadTest {
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
         assertEquals(0, c.diskReaderThreads);          // the valid customization is reverted too
-        assertEquals(512, c.lodDistanceChunks);
+        assertEquals(256, c.lodDistanceChunks);
         assertEquals(broken, Files.readString(configDir.resolve(FILE)));
     }
 
@@ -244,7 +244,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(512, c.lodDistanceChunks);
+        assertEquals(256, c.lodDistanceChunks);
         assertEquals("null", Files.readString(configDir.resolve(FILE)));
     }
 
@@ -255,7 +255,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(512, c.lodDistanceChunks);
+        assertEquals(256, c.lodDistanceChunks);
         assertEquals(body, Files.readString(configDir.resolve(FILE)));
     }
 
@@ -269,10 +269,10 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(512, c.lodDistanceChunks);       // compiled default kept
+        assertEquals(256, c.lodDistanceChunks);       // compiled default kept
         assertEquals(12, c.diskReaderThreads);        // parse succeeded: sibling customization kept
         JsonObject saved = savedJson(configDir);
-        assertEquals(512, saved.get("lodDistanceChunks").getAsInt()); // healed to a number on disk
+        assertEquals(256, saved.get("lodDistanceChunks").getAsInt()); // healed to a number on disk
         assertEquals(12, saved.get("diskReaderThreads").getAsInt());
     }
 
@@ -323,7 +323,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(512, c.lodDistanceChunks); // NOT truncated to 32
+        assertEquals(256, c.lodDistanceChunks); // NOT truncated to 32
         assertEquals(broken, Files.readString(configDir.resolve(FILE)));
     }
 
@@ -335,8 +335,8 @@ class JsonConfigLoadTest {
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
         // The overflow dies in the PARSER, before validate() ever runs: the result is the
-        // compiled default (512), not the clamp ceiling (2048) a successful bind would produce.
-        assertEquals(512, c.lodDistanceChunks);
+        // compiled default (256), not the clamp ceiling (2048) a successful bind would produce.
+        assertEquals(256, c.lodDistanceChunks);
         assertEquals(broken, Files.readString(configDir.resolve(FILE)));
     }
 
@@ -361,7 +361,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(512, c.lodDistanceChunks); // not-a-regular-file -> missing-file path -> defaults
+        assertEquals(256, c.lodDistanceChunks); // not-a-regular-file -> missing-file path -> defaults
         assertTrue(Files.isDirectory(configDir.resolve(FILE)),
                 "the failed defaults-save must be swallowed and leave the directory alone");
     }
@@ -374,7 +374,7 @@ class JsonConfigLoadTest {
                 "filesystem does not enforce write permissions here (e.g. running as root)");
         try {
             TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(locked));
-            assertEquals(512, c.lodDistanceChunks);
+            assertEquals(256, c.lodDistanceChunks);
             assertFalse(Files.exists(locked.resolve(FILE)), "failed save must not leave a partial file");
 
             c.lodDistanceChunks = 64;
@@ -450,7 +450,7 @@ class JsonConfigLoadTest {
     void candidateLoadCreatesThePrimaryWhenNoCandidateExists(@TempDir Path configDir) throws Exception {
         TestServerConfig c = TestServerConfig.load(VSS_FIRST, configDir);
 
-        assertEquals(512, c.lodDistanceChunks); // defaults
+        assertEquals(256, c.lodDistanceChunks); // defaults
         // This is the assertion that distinguishes activeFileName (candidates[0]) from getFileName()
         // (which is "lss-..." here): a genuinely fresh install creates the brand-PRIMARY, not getFileName.
         assertTrue(Files.isRegularFile(configDir.resolve("vss-server-config.json")),
@@ -486,7 +486,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(VSS_FIRST, configDir));
 
-        assertEquals(512, c.lodDistanceChunks, "defaults — not the fallback's 222 nor the corrupt 111");
+        assertEquals(256, c.lodDistanceChunks, "defaults — not the fallback's 222 nor the corrupt 111");
         assertEquals(brokenPrimary, Files.readString(configDir.resolve("vss-server-config.json")),
                 "the corrupt primary is preserved for the admin to fix, never overwritten");
         assertEquals("{\"lodDistanceChunks\": 222}",

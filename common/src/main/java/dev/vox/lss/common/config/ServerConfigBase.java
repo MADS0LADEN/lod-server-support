@@ -14,12 +14,30 @@ public abstract class ServerConfigBase extends JsonConfig {
     protected static final String FILE_NAME = "lss-server-config.json";
 
     public boolean enabled = true;
-    /** LOD radius in chunks. Raised 256 -> 512 on 2026-08-02 (user decision, alongside the
-     *  store defaulting on): a warm store makes the far band cheap to serve, which is what
-     *  made the larger disc affordable. Note what scales with it — the timestamp cache
-     *  (see effectiveTimestampCacheMB) and, when the store is on, the warmed disk footprint. */
-    public int lodDistanceChunks = 512;
-    public int bytesPerSecondLimitPerPlayer = 20_971_520;
+    /** LOD radius in chunks. Briefly 512 on 2026-08-02 and returned to 256 the same day
+     *  (user decision). Note what scales with it — the timestamp cache (see
+     *  effectiveTimestampCacheMB, which now derives from this rather than sitting at a fixed
+     *  value that would silently under-provision) and, when the store is on, the warmed disk
+     *  footprint. Admins who want the larger disc raise this one key and the cache follows. */
+    public int lodDistanceChunks = 256;
+    /**
+     * Per-player bandwidth cap. Raised 20 -> 50 MiB on 2026-08-02 (user decision).
+     *
+     * <p><b>This charges RAW bytes, not wire bytes</b> ({@code estimatedBytes} = raw sections +
+     * envelope; wire compression is deliberately invisible to it), because what it really
+     * bounds is CLIENT DECODE AND INGEST WORK — and the elytra chunk-wall investigation
+     * confirmed the client, not the link, is the binding constraint. So the ~6.25:1 the
+     * compressed-columns work bought did NOT loosen the thing this cap exists to limit: at
+     * 50 MiB counted the wire cost is roughly 8 MB/s, but the client still decodes 50 MiB/s.
+     *
+     * <p>Context for anyone retuning it: the wall reproduced at ~25 MB/s counted, so this
+     * default sits above the historic incident rate. It is defensible because that incident
+     * was root-caused to the client's scan-cadence gate (fixed) rather than to bandwidth, and
+     * because the #71 ingest taper and the decode-queue halt are standing guards underneath.
+     * The falsifiable check is the cap sweep in the investigation's section 11.7 — sweep
+     * upward until {@code runway} collapses in the client trace.
+     */
+    public int bytesPerSecondLimitPerPlayer = 52_428_800;
     /**
      * LSS disk-read pool size. <b>0 = AUTO (the default)</b>, derived from the resolved read
      * path — see {@link #effectiveDiskReaderThreads(boolean)}.
