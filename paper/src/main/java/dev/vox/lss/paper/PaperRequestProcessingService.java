@@ -466,7 +466,12 @@ public class PaperRequestProcessingService {
      *  service's non-concurrent maps), so region-thread callers enqueue here and tick() drains
      *  first — one queue preserves arrival order across a kick→rejoin of the same UUID. */
     private sealed interface LifecycleEvent {
-        record Register(ServerPlayer player, int capabilities, Runnable replyAfterRegister) implements LifecycleEvent {}
+        /** {@code beforeRegister} runs on the PUMP immediately before registerPlayer;
+         *  {@code replyAfterRegister} immediately after. See the enqueueRegister javadoc
+         *  for why the dialect flip must be the former and the reply the latter. */
+        record Register(ServerPlayer player, int capabilities,
+                        Runnable beforeRegister, Runnable replyAfterRegister)
+                implements LifecycleEvent {}
         record Remove(UUID uuid) implements LifecycleEvent {}
     }
 
@@ -474,7 +479,12 @@ public class PaperRequestProcessingService {
 
     /** Any thread. Applied at the top of the next tick(). */
     public void enqueueRegister(ServerPlayer player, int capabilities) {
-        enqueueRegister(player, capabilities, () -> { });
+        enqueueRegister(player, capabilities, () -> { }, () -> { });
+    }
+
+    /** Any thread; no pre-register hook. */
+    public void enqueueRegister(ServerPlayer player, int capabilities, Runnable replyAfterRegister) {
+        enqueueRegister(player, capabilities, () -> { }, replyAfterRegister);
     }
 
     /**
@@ -486,8 +496,10 @@ public class PaperRequestProcessingService {
      * dropped uncounted. Replying only after the drain makes that window unreachable for
      * clients that declare only after receiving SessionConfig (all of them).
      */
-    public void enqueueRegister(ServerPlayer player, int capabilities, Runnable replyAfterRegister) {
-        this.lifecycleMailbox.add(new LifecycleEvent.Register(player, capabilities, replyAfterRegister));
+    public void enqueueRegister(ServerPlayer player, int capabilities,
+                                Runnable beforeRegister, Runnable replyAfterRegister) {
+        this.lifecycleMailbox.add(new LifecycleEvent.Register(
+                player, capabilities, beforeRegister, replyAfterRegister));
     }
 
     /** Any thread. Applied at the top of the next tick(). */
@@ -506,6 +518,17 @@ public class PaperRequestProcessingService {
             try {
                 switch (ev) {
                     case LifecycleEvent.Register r -> {
+                        // On the PUMP, before registration: the wire-dialect flip. It must
+                        // be here rather than on the calling thread, because on Folia the
+                        // handshake arrives on a REGION thread and the flip takes effect
+                        // instantly, while the SessionConfig that re-arms the client's
+                        // decoder is deferred to this drain — so a flip made off-pump can
+                        // land mid-tick and let the rest of that tick's flush ship
+                        // NEW-dialect columns to a decoder still armed for the OLD one,
+                        // which the client reads as a malformed frame and disconnects on.
+                        // It must also be before registerPlayer, which derives
+                        // wantsCompressedColumns from the dialect. (Round-3 review.)
+                        r.beforeRegister().run();
                         try {
                             registerPlayer(r.player(), r.capabilities());
                         } finally {

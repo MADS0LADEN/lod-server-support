@@ -924,6 +924,39 @@ class PaperRequestProcessingServiceTest {
     }
 
     @Test
+    void dialectFlipRunsOnThePumpBeforeRegistrationAndBeforeTheReply() {
+        // The wire-dialect flip rides enqueueRegister's PRE-register hook, and both halves
+        // of that placement are load-bearing (round-3 review):
+        //   * BEFORE registerPlayer, which derives wantsCompressedColumns from isV16().
+        //     Flipping after it left a v16 -> current re-handshake uncompressed all session.
+        //   * ON THE PUMP, not the calling thread. On Folia the handshake arrives on a
+        //     REGION thread; a flip applied there takes effect at once while the
+        //     SessionConfig that re-arms the client's decoder waits for this drain, so the
+        //     rest of that tick's flush could ship new-dialect columns to a decoder armed
+        //     for the old one — a malformed frame and a disconnect.
+        // Fixing the first bullet is what originally opened the second, so pin the order.
+        var overworld = level(Level.OVERWORLD);
+        var player = playerIn(UUID.randomUUID(), overworld);
+        var order = new java.util.ArrayList<String>();
+        var stateExistedAtFlip = new java.util.concurrent.atomic.AtomicBoolean(true);
+        service.enqueueRegister(player, 1,
+                () -> {
+                    order.add("flip");
+                    stateExistedAtFlip.set(service.getPlayers().containsKey(player.getUUID()));
+                },
+                () -> order.add("reply"));
+        assertTrue(order.isEmpty(), "neither hook may run before the drain — both are pump work");
+        service.tick();
+        assertEquals(java.util.List.of("flip", "reply"), order,
+                "the dialect flip must precede the reply, with registration between them");
+        assertFalse(stateExistedAtFlip.get(),
+                "the flip must run BEFORE registerPlayer publishes state, or the session's "
+                        + "compression flag is derived from the stale dialect");
+        assertTrue(service.getPlayers().containsKey(player.getUUID()),
+                "registration still applies in the same drain");
+    }
+
+    @Test
     void deferredHandshakeReplyNeverFiresAfterShutdown() {
         // A register racing shutdown is discarded with its reply: sending SessionConfig
         // from a torn-down service would invite declarations nobody will ever drain.

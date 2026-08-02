@@ -1214,6 +1214,16 @@ public final class SqliteLodStore implements LodStoreService {
         }
     }
 
+    /** Publishes accumulated sweep drops once they reach a batch, returning the list to
+     *  keep accumulating into (the same one when it is still small, a fresh one after a
+     *  flush). Keeps the sweep's transient heap bounded regardless of how many rows one
+     *  dimension drops. */
+    private List<Long> flushSweepDrops(String dimension, List<Long> accumulated) {
+        if (accumulated.size() < DROP_BATCH_ROWS) return accumulated;
+        notifySweepDrops(dimension, accumulated);
+        return new ArrayList<>();
+    }
+
     /** Positions in {@code dimension} whose DeleteRows is still queued, and whose
      *  tombstones must therefore not expire however old they are. */
     private Set<Long> queuedDeletePositions(String dimension) {
@@ -1658,6 +1668,13 @@ public final class SqliteLodStore implements LodStoreService {
                      + " INDEXED BY lods_" + dimId + "_ts")) {
             while (rs.next()) rowRegions.add(regionOf(rs.getLong(1)));
         }
+        // Published to the sweep-drop listener in bounded batches rather than accumulated
+        // whole. Same shape the v0.9.0 review fixed for dropDimensionRows, through a door
+        // it left open: when the region DIRECTORY survives but its .mca files do not — a
+        // world-trim or regen tool run against a kept lss-lod/ — every region takes the
+        // vanished branch below and this list would otherwise hold the dimension's entire
+        // row set (boxed Longs, plus the long[] copy notifySweepDrops builds) on the
+        // batcher, during the STARTUP sweep that gates serving.
         List<Long> droppedPositions = new ArrayList<>();
         int droppedVanished = 0, droppedStale = 0, checkedRegions = 0;
         for (long rpos : rowRegions) {
@@ -1669,6 +1686,7 @@ public final class SqliteLodStore implements LodStoreService {
                 List<Long> rows = new ArrayList<>(regionRows(dimId, rpos).keySet());
                 droppedVanished += deleteRows(dimId, rows);
                 droppedPositions.addAll(rows);
+                droppedPositions = flushSweepDrops(dimension, droppedPositions);
                 continue;
             }
             // Capture the mtime BEFORE the header read, and record THAT value as
@@ -1690,6 +1708,7 @@ public final class SqliteLodStore implements LodStoreService {
                 List<Long> all = new ArrayList<>(rows.keySet());
                 droppedVanished += deleteRows(dimId, all);
                 droppedPositions.addAll(all);
+                droppedPositions = flushSweepDrops(dimension, droppedPositions);
                 continue;
             }
             List<Long> stale = new ArrayList<>();
@@ -1706,6 +1725,7 @@ public final class SqliteLodStore implements LodStoreService {
             }
             droppedStale += deleteRows(dimId, stale);
             droppedPositions.addAll(stale);
+            droppedPositions = flushSweepDrops(dimension, droppedPositions);
             // This region's rows are now judged against the header we read — record
             // the PRE-read mtime, and ONLY when provably not raced: the stamp must be
             // unchanged by a post-judgement re-stat AND strictly older than the current

@@ -309,7 +309,20 @@ public final class StoreBackfill {
                             Thread.currentThread().interrupt();
                             this.stopRequested.set(true);
                             break;
-                        } catch (Exception e) {
+                        } catch (Throwable e) {
+                            // Throwable, not Exception (round-3 review). The walk's
+                            // serialization runs SYNCHRONOUSLY on this thread
+                            // (readColumnBytesSyncForBackfill), unlike the pooled read
+                            // path where future.get wraps pool-side throwables in an
+                            // ExecutionException. So an Error from one hostile or corrupt
+                            // chunk — the allocation-class failure the disk reader
+                            // broadened its OWN containment to Throwable for, twice —
+                            // escaped this per-column belt to the run-level handler and
+                            // aborted the entire walk. The poison region never gets
+                            // done-marked and lodStoreBackfill defaults on, so every
+                            // subsequent boot re-enumerates, re-hits the same column and
+                            // re-aborts: every region after it in the plan, other
+                            // dimensions included, stays cold permanently.
                             errors++;
                             regionErrors++;
                             // Visible to operators: backfill failures count store.errors
