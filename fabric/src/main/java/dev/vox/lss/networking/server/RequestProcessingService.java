@@ -269,6 +269,9 @@ public class RequestProcessingService {
             // Session identity for the router's stale-snapshot guard (set before the map
             // publish so the processing thread never sees it null on a live state).
             s.setRegisteredDimension(player.level().dimension().identifier().toString());
+            // Transport-pressure gauge (elytra-wall §8.3). Bound per state, not per tick:
+            // the probe re-reads the channel on every call, so a reconnect is picked up.
+            s.setChannelPressureProbe(FabricChannelPressure.forPlayer(player));
             return s;
         });
         this.diskReader.registerPlayer(player.getUUID());
@@ -511,7 +514,8 @@ public class RequestProcessingService {
         long perPlayerAllocation = this.bandwidthLimiter.getPerPlayerAllocation(activeCount);
         long perPlayerCap = Math.min(perPlayerAllocation, config.bytesPerSecondLimitPerPlayer);
         flushSendQueues(this.players.values(), perPlayerCap, this.bandwidthLimiter, this.diag,
-                this::sendColumnPayload, this.offThreadProcessor);
+                this::sendColumnPayload, this.offThreadProcessor,
+                (long) config.outboundBufferCeilingKB * 1024L);
     }
 
     /** Warn-once latch for the v16 egress guard (MAIN thread only). */
@@ -571,13 +575,21 @@ public class RequestProcessingService {
                                  SharedBandwidthLimiter bandwidthLimiter, TickDiagnostics diag,
                                  ColumnPayloadSender sender,
                                  FabricOffThreadProcessor offThreadProcessor) {
+        flushSendQueues(states, perPlayerCap, bandwidthLimiter, diag, sender, offThreadProcessor, 0L);
+    }
+
+    static void flushSendQueues(Iterable<PlayerRequestState> states, long perPlayerCap,
+                                 SharedBandwidthLimiter bandwidthLimiter, TickDiagnostics diag,
+                                 ColumnPayloadSender sender,
+                                 FabricOffThreadProcessor offThreadProcessor,
+                                 long outboundCeilingBytes) {
         for (var state : states) {
             if (!state.hasCompletedHandshake()) continue;
             long[] dropped = state.flushSendQueue(perPlayerCap, bandwidthLimiter, diag,
                     payload -> {
                         if (consumeSendDropFault()) return;
                         sender.send(state, payload);
-                    });
+                    }, outboundCeilingBytes);
             if (dropped.length > 0) {
                 // A send failure discarded resolved-but-undelivered columns: clear their
                 // done-bits so the client's re-requests re-resolve instead of being

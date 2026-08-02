@@ -45,6 +45,83 @@ class FlushSendQueueTest {
     private final List<String> sent = new ArrayList<>();
     private final TestState state = new TestState();
 
+    // ---- Transport deference (elytra-wall plan §11.4) ----
+
+    @Test
+    void deferralRetainsTheQueueAndStillPublishesTheSnapshot() throws Exception {
+        // Placement is the whole finding of the plan review: the gate must sit AFTER the
+        // readyPayloads drain and the snapshot publish. The snapshot is the router's ONLY
+        // retain-and-stop input, so deferring above it would leave sendQueueFull() forever
+        // false and the router dispatching disk reads for the entire deferral — inverting
+        // the backpressure this gate exists to create.
+        state.setChannelPressureProbe(() -> 8_000_000L); // 8 MB pending
+        state.addReadyPayload(new QueuedPayload<>("a", 0, 0, POS_1));
+        state.addReadyPayload(new QueuedPayload<>("b", 0, 1, POS_2));
+        Thread.sleep(50);
+
+        long[] dropped = state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 2_097_152L);
+
+        assertTrue(sent.isEmpty(), "over the ceiling nothing is sent");
+        assertEquals(0, dropped.length, "deferral RETAINS — it must never report drops");
+        assertEquals(2, state.getSendQueueSize(),
+                "the readyPayloads drain and snapshot publish must still have happened");
+        assertEquals(1, state.getSendDeferrals(), "the deferral is counted for diag");
+
+        // Next tick with a drained buffer: the retained queue goes out, in order.
+        state.setChannelPressureProbe(() -> 0L);
+        Thread.sleep(50);
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 2_097_152L);
+        assertEquals(List.of("a", "b"), sent, "the retained queue drains intact next tick");
+    }
+
+    @Test
+    void noSignalNeverThrottles() throws Exception {
+        // -1 means "unmeasurable", never "empty". A mixin/reflection miss on a future MC
+        // must degrade to today's exact behaviour, not stall the player forever.
+        state.setChannelPressureProbe(ChannelPressureProbe.NO_SIGNAL);
+        state.addReadyPayload(new QueuedPayload<>("a", 0, 0, POS_1));
+        Thread.sleep(50);
+
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 1L);
+
+        assertEquals(List.of("a"), sent, "no signal must send exactly as before");
+        assertEquals(0, state.getSendDeferrals());
+        assertEquals(-1, state.getOutboundPendingBytes(), "and the gauge reports no signal");
+    }
+
+    @Test
+    void ceilingZeroDisablesTheGateEntirely() throws Exception {
+        // The shipped default. Even an absurd pending depth sends normally.
+        state.setChannelPressureProbe(() -> Long.MAX_VALUE / 2);
+        state.addReadyPayload(new QueuedPayload<>("a", 0, 0, POS_1));
+        Thread.sleep(50);
+
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 0L);
+
+        assertEquals(List.of("a"), sent, "ceiling 0 = off");
+        assertEquals(0, state.getSendDeferrals());
+    }
+
+    @Test
+    void gaugeTracksCurrentAndHighWaterAcrossTicks() throws Exception {
+        var pending = new AtomicLong(5_000L);
+        state.setChannelPressureProbe(pending::get);
+        Thread.sleep(50);
+
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 0L);
+        assertEquals(5_000L, state.getOutboundPendingBytes());
+        assertEquals(5_000L, state.getOutboundPendingHighWater());
+
+        pending.set(50_000L);
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 0L);
+        assertEquals(50_000L, state.getOutboundPendingHighWater(), "high-water rises");
+
+        pending.set(1_000L);
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 0L);
+        assertEquals(1_000L, state.getOutboundPendingBytes(), "current follows down");
+        assertEquals(50_000L, state.getOutboundPendingHighWater(), "...high-water does not");
+    }
+
     @Test
     void drainsInSubmissionOrderAndRefreshesSnapshot() throws Exception {
         // estimatedBytes=0: sends never deplete tokens, so one refill covers the whole queue

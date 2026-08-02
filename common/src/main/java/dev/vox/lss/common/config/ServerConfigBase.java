@@ -30,6 +30,22 @@ public abstract class ServerConfigBase extends JsonConfig {
      * future multi-batch shapes.
      */
     public int sendQueueLimitPerPlayer = LSSConstants.MAX_BATCH_CHUNK_REQUESTS;
+    /**
+     * Transport deference (docs/planning/flight-cadence-and-transport-backpressure-plan.md
+     * §11.4): when a player's network outbound buffer holds more than this many KB, LSS
+     * skips that tick's column flush and retains its queue, so LSS payloads stop deepening
+     * the head-of-line delay ahead of vanilla's own chunk packets on the shared channel.
+     *
+     * <p><b>Default 0 = OFF, deliberately.</b> The elytra-wall investigation measured this
+     * mechanism ABSENT — flat 20–26 ms ping across a full flight is a direct and sensitive
+     * probe of shared-queue depth, and the server's send queue read empty throughout. The
+     * gate ships correct and tested so it can be armed the moment {@code obuf_hw} in
+     * {@code /lsslod diag} shows a real buffer building, and so that arming it does not
+     * confound the adaptive-cadence A/B it was written alongside. Nonzero {@code deferred=}
+     * on a healthy link is a red flag (the retired movement-cadence-debounce failure mode
+     * was "LOD silently stops during fast travel"), not the gate doing its job.
+     */
+    public int outboundBufferCeilingKB = 0;
     public int bytesPerSecondLimitGlobal = 104_857_600;
     public boolean enableChunkGeneration = true;
     public int generationConcurrencyLimitGlobal = 32;
@@ -218,6 +234,11 @@ public abstract class ServerConfigBase extends JsonConfig {
         bytesPerSecondLimitPerPlayer = Math.clamp(bytesPerSecondLimitPerPlayer, LSSConstants.MIN_BYTES_PER_SECOND, LSSConstants.MAX_BYTES_PER_SECOND_PER_PLAYER);
         diskReaderThreads = Math.clamp(diskReaderThreads, LSSConstants.MIN_DISK_READER_THREADS, LSSConstants.MAX_DISK_READER_THREADS);
         sendQueueLimitPerPlayer = Math.clamp(sendQueueLimitPerPlayer, LSSConstants.MIN_SEND_QUEUE_SIZE, LSSConstants.MAX_SEND_QUEUE_SIZE);
+        // 0 = disabled is a first-class value (the default); any nonzero opt-in clamps into
+        // the supported band — same shape as lodStoreMaxMB.
+        outboundBufferCeilingKB = outboundBufferCeilingKB <= 0 ? 0 : Math.clamp(
+                outboundBufferCeilingKB, LSSConstants.MIN_OUTBOUND_BUFFER_CEILING_KB,
+                LSSConstants.MAX_OUTBOUND_BUFFER_CEILING_KB);
         bytesPerSecondLimitGlobal = (int) Math.clamp((long) bytesPerSecondLimitGlobal, LSSConstants.MIN_BYTES_PER_SECOND, LSSConstants.MAX_BYTES_PER_SECOND_GLOBAL_LIMIT);
         generationConcurrencyLimitGlobal = Math.clamp(generationConcurrencyLimitGlobal, LSSConstants.MIN_CONCURRENT_GENERATIONS, LSSConstants.MAX_CONCURRENT_GENERATIONS);
         generationTimeoutSeconds = Math.clamp(generationTimeoutSeconds, LSSConstants.MIN_GENERATION_TIMEOUT, LSSConstants.MAX_GENERATION_TIMEOUT);

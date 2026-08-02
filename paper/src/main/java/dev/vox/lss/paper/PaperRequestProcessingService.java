@@ -523,6 +523,8 @@ public class PaperRequestProcessingService {
             // Session identity for the router's stale-snapshot guard (set before the map
             // publish so the processing thread never sees it null on a live state).
             s.setRegisteredDimension(player.level().dimension().identifier().toString());
+            // Transport-pressure gauge (elytra-wall §8.3), Fabric-parity.
+            s.setChannelPressureProbe(PaperChannelPressure.forPlayer(player));
             return s;
         });
         this.diskReader.registerPlayer(player.getUUID());
@@ -877,7 +879,8 @@ public class PaperRequestProcessingService {
             if (!state.hasCompletedHandshake())
                 continue;
             long[] dropped = state.flushSendQueue(perPlayerCap, this.bandwidthLimiter, this.diag,
-                    data -> this.columnPayloadSender.send(state, data));
+                    data -> this.columnPayloadSender.send(state, data),
+                    (long) this.config.outboundBufferCeilingKB * 1024L);
             if (dropped.length > 0) {
                 // A send failure discarded resolved-but-undelivered columns: clear their
                 // done-bits so the client's re-requests re-resolve instead of being

@@ -60,6 +60,29 @@ class PaperConfigValidationTest {
         assertEquals(LSSConstants.MIN_LOD_STORE_MAX_MB, c.lodStoreMaxMB);
     }
 
+    /** Transport deference ships OFF (0) on both platforms — the elytra-wall investigation
+     *  measured the head-of-line mechanism ABSENT (flat ping, empty send queue), so the gate
+     *  exists to be armed from measurement, not by default. The 4096 KB floor binds only
+     *  nonzero opt-ins, and is deliberately well above one maximum-size column so a single
+     *  legal payload can never trip the gate on its own. */
+    @Test
+    void outboundBufferCeilingShipsOffAndKeepsItsNonzeroFloor() {
+        assertEquals(0, new PaperConfig().outboundBufferCeilingKB,
+                "transport deference must ship disabled");
+        PaperConfig c = new PaperConfig();
+        c.outboundBufferCeilingKB = 1;
+        c.validate();
+        assertEquals(LSSConstants.MIN_OUTBOUND_BUFFER_CEILING_KB, c.outboundBufferCeilingKB,
+                "a nonzero opt-in must clamp up to the floor through the Paper subclass");
+        assertTrue((long) LSSConstants.MIN_OUTBOUND_BUFFER_CEILING_KB * 1024L
+                        > LSSConstants.MAX_SECTIONS_SIZE,
+                "the floor must exceed one maximum-size column, or a single legal payload"
+                        + " could self-trip the gate");
+        c.outboundBufferCeilingKB = 0;
+        c.validate();
+        assertEquals(0, c.outboundBufferCeilingKB, "0 stays 0 — it is the off switch");
+    }
+
     /** Paper inherits the shared read-priority default: LOD reads yield to gameplay out of the box. */
     @Test
     void backgroundReadPriorityDefaultsOn() {
@@ -113,6 +136,10 @@ class PaperConfigValidationTest {
             // applies only to nonzero opt-in caps, pinned by the named test below.
             Map.entry("lodStoreMaxMB",
                     new Bounds(0, LSSConstants.MAX_LOD_STORE_MAX_MB)),
+            // outboundBufferCeilingKB's legal floor is 0 (= transport deference off, the
+            // default); the 4096 floor applies only to nonzero opt-ins, pinned below.
+            Map.entry("outboundBufferCeilingKB",
+                    new Bounds(0, LSSConstants.MAX_OUTBOUND_BUFFER_CEILING_KB)),
             Map.entry("lodStoreResweepSeconds",
                     new Bounds(LSSConstants.MIN_LOD_STORE_RESWEEP_SECONDS,
                             LSSConstants.MAX_LOD_STORE_RESWEEP_SECONDS)),

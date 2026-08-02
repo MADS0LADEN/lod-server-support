@@ -77,6 +77,11 @@ public final class LSSConstants {
     public static final int MAX_DISK_READER_THREADS = 64;
     public static final int MIN_SEND_QUEUE_SIZE = 1;
     public static final int MAX_SEND_QUEUE_SIZE = 100_000;
+    /** Transport-deference ceiling bounds (0 = disabled, the default — see
+     *  {@code outboundBufferCeilingKB}). The floor is well above one legal maximum-size
+     *  column so a single admissible payload can never trip the gate on its own. */
+    public static final int MIN_OUTBOUND_BUFFER_CEILING_KB = 4_096;
+    public static final int MAX_OUTBOUND_BUFFER_CEILING_KB = 262_144;
     public static final long MAX_BYTES_PER_SECOND_GLOBAL_LIMIT = 1_073_741_824;
     public static final int MIN_CONCURRENT_GENERATIONS = 1;
     public static final int MAX_CONCURRENT_GENERATIONS = 256;

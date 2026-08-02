@@ -1259,26 +1259,72 @@ class SpiralScannerTest {
     }
 
     @Test
-    void prefixInvalidationHoldsFastFiresUntilTheNextWalk() {
-        // The walk-cost gate: recenter()/resetConfirmedRing() zero the confirmed prefix,
-        // and the next walk is the potentially-full re-walk (the render-thread-hitch shape)
-        // — it must ride the 1 Hz fallback. The walk itself re-derives the prefix (ring 0
-        // confirms trivially), so the fast cadence resumes after it without a re-arm:
-        // neither invalidation DISARMS.
+    void cheapPrefixInvalidationNoLongerHoldsTheFastPath() {
+        // THE regression the walk-cost gate rewrite exists to fix (elytra-chunk-wall
+        // investigation §8.6.3). recenter() zeroes the confirmed prefix on EVERY chunk
+        // crossing, and the old `confirmedRing > 0` term read that as "expensive walk".
+        // At 33 blocks/s crossings run ~2.76 Hz against 1 Hz scans, so a moving client
+        // never fast-fired at all — measured as exactly 1.000 s gaps for 23 consecutive
+        // seconds of flight. A small disc's re-walk costs ~80 iterations; cost decides now,
+        // so it fires at the floor.
         var rig = new AdaptiveRig();
         rig.primeAndArm();
         rig.outstanding = 0;
         rig.s.recenter(); // movement
-        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
-                "post-movement: the full re-walk rides the fallback");
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(),
+                "post-movement: a CHEAP re-walk fast-fires (was pinned to 1 Hz — the bug)");
+
+        rig.s.resetConfirmedRing(); // dirty re-open, same shape
         rig.outstanding = 0;
         assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(),
-                "the walk re-derived the prefix and recenter() did not disarm — fast resumes");
+                "post-dirty-reopen: same — the COST decides, not the fact of invalidation");
+    }
 
-        rig.s.resetConfirmedRing(); // dirty re-open, same contract
+    @Test
+    void expensivePrefixInvalidationStillRidesTheFallback() {
+        // The half of the old gate worth keeping: a from-ring-0 re-walk across a disc that
+        // is satisfied far out is the render-thread-hitch shape, and must stay at 1 Hz.
+        // Deliberate policy — such a disc is both expensive to walk AND has little left to
+        // fetch, so the fallback is the right cadence there.
+        var rig = new AdaptiveRig(scanner(200));
+        seedSatisfiedDisc(rig.columns, 140); // 4*140*141 = 78,960 > FAST_RESCAN_MAX_WALK_COST
+        rig.primeAndArm();
         rig.outstanding = 0;
+        assertTrue(rig.s.predictedWalkCost() <= SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "premise: with the prefix intact the frontier-only walk is cheap");
+
+        rig.s.recenter();
+        assertTrue(rig.s.predictedWalkCost() > SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "premise: zeroing the prefix makes the NEXT walk the expensive full re-walk");
         assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
-                "post-dirty-reopen: the below-ring re-walk rides the fallback too");
+                "an expensive from-ring-0 re-walk still rides the 1 Hz fallback");
+    }
+
+    @Test
+    void walkCostIsPredictedForTheNextWalkNotRememberedFromTheLast() {
+        // Plan review round 1: a REMEMBERED cost gates the next walk with the last walk's
+        // price, and those differ exactly here — after recenter() the next walk restarts at
+        // ring 0 while the last one started at the frontier. A remembered gate would admit
+        // one full-price walk after every prefix collapse. The prediction must jump the
+        // moment the prefix is zeroed, before any walk has run.
+        var rig = new AdaptiveRig(scanner(200));
+        seedSatisfiedDisc(rig.columns, 140);
+        rig.primeAndArm();
+        int frontierWalk = rig.s.predictedWalkCost();
+
+        rig.s.recenter(); // no walk has happened yet
+        assertTrue(rig.s.predictedWalkCost() > frontierWalk,
+                "the prediction reflects the re-walk immediately, with no walk in between");
+    }
+
+    /** Marks every column in a square of {@code radius} around the rig centre as received
+     *  (SATISFIED), so a walk must traverse them before it finds work. */
+    private static void seedSatisfiedDisc(ColumnStateMap columns, int radius) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                columns.onReceived(PositionUtil.packPosition(CX + dx, CZ + dz), 5000L);
+            }
+        }
     }
 
     @Test
@@ -1338,6 +1384,25 @@ class SpiralScannerTest {
         assertEquals(20, SpiralScanner.FAST_RESCAN_OUTSTANDING_DIVISOR, "the 5% completion threshold");
         assertEquals(4, SpiralScanner.FAST_RESCAN_PRESSURE_DIVISOR,
                 "fast fires only below 1/4 of each halt threshold (count, bytes, ingest)");
+        assertEquals(65_536, SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "walk-cost ceiling — calibrated from the measured 22,800-iteration flight walk"
+                        + " (4R(R+1) at frontier ring 75); a drift upward re-admits the"
+                        + " full-256-disc walk (263,168) at 4 Hz on the render thread");
+    }
+
+    @Test
+    void resetRestoresTheWalkCostPredictionWithTheRestOfTheSessionState() {
+        // reset() zeroes confirmedRing AND scanRing, so the prediction must come back as a
+        // fresh-session zero rather than carrying the old dimension's frontier.
+        var rig = new AdaptiveRig(scanner(200));
+        seedSatisfiedDisc(rig.columns, 140);
+        rig.primeAndArm();
+        rig.s.recenter();
+        assertTrue(rig.s.predictedWalkCost() > SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "premise: an expensive prediction is standing");
+        rig.s.reset();
+        assertEquals(0, rig.s.predictedWalkCost(),
+                "a new session predicts nothing — no stale frontier survives reset()");
     }
 
     @Test

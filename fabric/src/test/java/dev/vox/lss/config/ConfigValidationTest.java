@@ -310,10 +310,12 @@ class ConfigValidationTest {
             c.validate();
             // missMemoTtlSeconds and lodStoreResweepSeconds have a legal floor of 0
             // (each 0 is that feature's kill switch), as does lodStoreMaxMB (0 =
-            // uncapped, the default); xrayMaxBlockHeight's floor is a world Y and
+            // uncapped, the default) and outboundBufferCeilingKB (0 = transport
+            // deference off, the default); xrayMaxBlockHeight's floor is a world Y and
             // deliberately negative — every other numeric floor is >= 1.
             int floor = switch (f.getName()) {
-                case "missMemoTtlSeconds", "lodStoreResweepSeconds", "lodStoreMaxMB" -> 0;
+                case "missMemoTtlSeconds", "lodStoreResweepSeconds", "lodStoreMaxMB",
+                        "outboundBufferCeilingKB" -> 0;
                 case "xrayMaxBlockHeight" -> LSSConstants.MIN_XRAY_MAX_BLOCK_HEIGHT;
                 default -> 1;
             };

@@ -77,6 +77,18 @@ public abstract class AbstractPlayerRequestState<T> {
     // Single-writer (main thread) — volatile for cross-thread visibility to processing thread
     private volatile int sendQueueSizeSnapshot = 0;
 
+    /**
+     * Transport-pressure probe for this player (elytra-wall investigation §8.3). Defaults
+     * to {@link ChannelPressureProbe#NO_SIGNAL} so every test rig and any platform that has
+     * not wired one behaves exactly as before.
+     */
+    private volatile ChannelPressureProbe channelPressure = ChannelPressureProbe.NO_SIGNAL;
+    /** Last sampled outbound-buffer depth, and the session high-water. -1 = no signal. */
+    private volatile long outboundPendingBytes = -1;
+    private volatile long outboundPendingHighWater = -1;
+    /** Ticks on which the deference gate skipped the column flush. */
+    private volatile long sendDeferrals = 0;
+
     // ---- Want-set mailbox + backlog (protocol v17) ----
 
     // Network/region thread → processing thread, latest-wins: a batch overwritten before
@@ -544,13 +556,48 @@ public abstract class AbstractPlayerRequestState<T> {
      */
     public long[] flushSendQueue(long allocationBytes, SharedBandwidthLimiter globalLimiter,
                                   TickDiagnostics diag, PayloadSender<T> sender) {
+        return flushSendQueue(allocationBytes, globalLimiter, diag, sender, 0L);
+    }
+
+    /**
+     * Flush overload carrying the transport-deference ceiling (0 = disabled, the default —
+     * see {@code outboundBufferCeilingKB}). Above the ceiling this tick's column flush is
+     * skipped and the queue RETAINED, matching the router's "a full slot cap retains the
+     * entry" convention: nothing is dropped, and the next tick drains normally.
+     */
+    public long[] flushSendQueue(long allocationBytes, SharedBandwidthLimiter globalLimiter,
+                                  TickDiagnostics diag, PayloadSender<T> sender,
+                                  long outboundCeilingBytes) {
         QueuedPayload<T> ready;
         while ((ready = this.readyPayloads.poll()) != null) {
             this.sendQueue.add(ready);
         }
         this.sendQueueSizeSnapshot = this.sendQueue.size();
 
+        // ONE authoritative probe read per tick — it is both the diag gauge and the
+        // deference input, so the two can never disagree.
+        long pending = this.channelPressure.pendingOutboundBytes();
+        this.outboundPendingBytes = pending;
+        if (pending > this.outboundPendingHighWater) this.outboundPendingHighWater = pending;
+
         long[] dropped = NO_DROPPED_POSITIONS;
+
+        // Transport deference. A deep outbound buffer means LSS payloads are already
+        // queued AHEAD of vanilla's chunk packets on the shared channel; writing more
+        // deepens that head-of-line delay. -1 (no signal) never throttles.
+        //
+        // Placement is load-bearing: this sits AFTER the readyPayloads drain and the
+        // sendQueueSizeSnapshot publish because that snapshot is the ONLY input to the
+        // router's retain-and-stop gate. Deferring above it would leave sendQueueFull()
+        // permanently false and the router happily dispatching disk reads for the whole
+        // deferral — inverting the backpressure this gate exists to create. The departed
+        // sweep below is for the same reason: it is the only GC of departedColumns, and
+        // skipping it leaks one entry per column ever sent.
+        if (outboundCeilingBytes > 0 && pending > outboundCeilingBytes) {
+            this.sendDeferrals++;
+            sweepDepartedColumns();
+            return dropped;
+        }
         while (!this.sendQueue.isEmpty()) {
             if (!this.bandwidth.canSend(allocationBytes)) break;
 
@@ -756,6 +803,19 @@ public abstract class AbstractPlayerRequestState<T> {
     public UUID getPlayerUUID() { return this.playerUuid; }
     /** Returns a volatile snapshot of the send queue size, safe for cross-thread reads. */
     public int getSendQueueSize() { return this.sendQueueSizeSnapshot; }
+
+    /** Wire this player's transport-pressure probe; never null (use {@code NO_SIGNAL}). */
+    public void setChannelPressureProbe(ChannelPressureProbe probe) {
+        this.channelPressure = probe == null ? ChannelPressureProbe.NO_SIGNAL : probe;
+    }
+
+    /** Last sampled outbound-buffer depth in bytes; -1 = no signal (never "empty"). */
+    public long getOutboundPendingBytes() { return this.outboundPendingBytes; }
+    /** Session high-water of {@link #getOutboundPendingBytes()}; -1 = never measured. */
+    public long getOutboundPendingHighWater() { return this.outboundPendingHighWater; }
+    /** Ticks whose column flush the deference gate skipped. Nonzero on a healthy link is
+     *  a red flag, not the gate working — see the plan's §11.4 standing warning. */
+    public long getSendDeferrals() { return this.sendDeferrals; }
     public int getHeldSyncSlots() { return this.heldSyncSlots; }
     public int getHeldGenSlots() { return this.heldGenSlots; }
     public int getSyncSlotCap() { return this.syncSlotCap; }

@@ -516,3 +516,71 @@ Four load-bearing scenarios, all green on the first run:
   (outstanding stays high there, cadence stays 1 Hz). `--selftest` 144 cases green.
 - **`dirty-range-filter`** — passed: `requested_total` exactly flat through the far-edit
   suppression window (the zero-tolerance live pin of converged silence), `scan.fast == 5`.
+
+---
+
+## 13. AMENDMENT (2026-08-01) — cond. 6 replaced by a predicted walk-cost gate
+
+This section supersedes cond. 6 wherever §2, §5.5, §11 and §12 describe it. Nothing else
+in the design changes: the 250 ms floor, the ≥95%-answered threshold and its geometric
+tightening, the ¼-halt pressure gates, the v16 exclusion, the arming/disarm family and
+`enableAdaptiveScanCadence` are all untouched.
+
+**What changed.** Cond. 6's first half was `confirmedRing > 0`. §5.5 ("Movement
+(review-corrected: the most expensive case, now gated)") adopted it on the reasoning that a
+post-`recenter()` walk restarts at ring 0 and is therefore expensive. That reasoning was
+**analytic**; a live trace has now measured it.
+
+**What the measurement showed** (docs/planning/elytra-chunk-wall-investigation-2026-08-01.md
+§8.6.3, 26 s of elytra flight at ~33 blocks/s):
+
+- `recenter()` fires on every chunk-boundary crossing — **2.76 Hz** against a 1 Hz scan — and
+  nothing re-derives the prefix until the next *walk*. So the first crossing after each scan
+  zeroed the term and the fast path was dead until the next scan.
+- Result: **exactly 1.000 s scan gaps for 23 consecutive seconds of flight**, while the same
+  client ran 2–3 Hz standing still. Cond. 6 was not gating expensive walks during movement;
+  it was **structurally inert for the entire duration of any sustained movement**.
+- The walk it was refusing costs `4·75·76 = 22,800` iterations ≈ 0.9 ms, with **fps flat at
+  60** throughout. §5.5's "the most expensive case" was two orders of magnitude off for the
+  regime that actually matters.
+
+**The replacement.** `predictedWalkCost() <= FAST_RESCAN_MAX_WALK_COST` (65,536), where the
+prediction is `4·(scanRing·(scanRing+1) − confirmedRing·(confirmedRing+1))` — the ring-sum
+over the span the *next* walk will cover, from two fields the scanner already keeps. No new
+state, no counter in the hot loop.
+
+Three things this gets right that a `lastWalkVisited` counter (§11's proposed escalation,
+§12's listed non-goal) would not:
+
+1. **It predicts rather than remembers.** A remembered cost gates the next walk with the last
+   walk's price, and those differ *exactly* at the movement transition — the recorded walk
+   started at the frontier, the next starts at ring 0. A remembered gate admits one
+   full-price walk after every prefix collapse.
+2. **It keeps the two prefix-reset shapes symmetric.** `hasActionableRetries` resets the
+   prefix *inside* `scan()`, so no prefix-derived value can gate it and it keeps its own
+   term. A remembered cost would have let movement resets run fast while retry resets — the
+   same "next walk starts at ring 0" shape — stayed at 1 Hz.
+3. **It costs nothing to compute.**
+
+**Calibration.** A walk to ring R costs `4R(R+1)`, *not* `4R²` — an error that made the
+first draft of this change pick 262,144 and thereby refuse a full walk at the default
+`lodDistanceChunks=256` (263,168), the live server's exact setting. 65,536 gives the
+measured flight walk ~2.9× headroom and refuses the warm full-256-disc walk by 4×. The
+budget is a **frame** budget, not a per-second one: an admitted walk spends its whole cost
+inside one client tick (~65k × 50–100 ns ≈ 3–7 ms), and the 250 ms floor bounds that to 4×/s.
+
+**Refusing the expensive case is deliberate policy**, now stated: a disc already satisfied
+out to the LOD distance is both expensive to walk *and* has little left to fetch, so 1 Hz is
+the right cadence there. This is never a regression — movement rides 1 Hz unconditionally
+today.
+
+**§12's non-goal is retired**, and §11's "escalation if live traces show render hitching" was
+invoked for a different reason than its stated trigger: the trace showed **no hitching**
+(fps 60 flat). The escalation is being taken because the v1 gate proved *inert*, not because
+it proved *insufficient*.
+
+Pins: `SpiralScannerTest.cheapPrefixInvalidationNoLongerHoldsTheFastPath` (the regression),
+`expensivePrefixInvalidationStillRidesTheFallback` (the retained guard),
+`walkCostIsPredictedForTheNextWalkNotRememberedFromTheLast` (finding 1 above),
+`resetRestoresTheWalkCostPredictionWithTheRestOfTheSessionState`, and the constant in
+`adaptiveCadenceConstantsArePinned`.

@@ -158,6 +158,9 @@ SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBac
 SERVER_CONFIG_INT_KEYS = frozenset({
     "lodDistanceChunks", "bytesPerSecondLimitPerPlayer", "diskReaderThreads",
     "sendQueueLimitPerPlayer", "bytesPerSecondLimitGlobal",
+    # Transport deference (0 = off, the shipped default). Listed so an A/B scenario can
+    # arm it — the R4 lesson below is exactly this omission.
+    "outboundBufferCeilingKB",
     "generationConcurrencyLimitGlobal", "generationTimeoutSeconds",
     "dirtyBroadcastIntervalSeconds",
     "generationConcurrencyLimitPerPlayer", "perDimensionTimestampCacheSizeMB",

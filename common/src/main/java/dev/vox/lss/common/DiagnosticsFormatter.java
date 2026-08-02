@@ -11,10 +11,14 @@ import java.util.List;
 
 public final class DiagnosticsFormatter {
 
+    /** {@code outboundPending}/{@code outboundHighWater} are netty outbound-buffer depths
+     *  in bytes, -1 = no signal (never "empty"); {@code sendDeferrals} counts ticks the
+     *  transport-deference gate skipped. See the elytra-wall investigation §8.3. */
     public record PlayerDiag(
             String name, int sendQueue, int maxSendQueue,
             int pendingSync, int pendingGen,
-            long sent, long bytes
+            long sent, long bytes,
+            long outboundPending, long outboundHighWater, long sendDeferrals
     ) {}
 
     public record DiagData(
@@ -162,11 +166,13 @@ public final class DiagnosticsFormatter {
         for (var p : d.players) {
             double pRate = d.uptimeSec > 0 ? (double) p.sent / d.uptimeSec : 0;
             lines.add(String.format(
-                    "  %s: sq=%d/%d, psync=%d, pgen=%d, sent=%d (%s), rate=%s/s",
+                    "  %s: sq=%d/%d, psync=%d, pgen=%d, sent=%d (%s), rate=%s/s, obuf=%s/%s, deferred=%d",
                     p.name, p.sendQueue, p.maxSendQueue,
                     p.pendingSync, p.pendingGen,
                     p.sent, formatBytes(p.bytes),
-                    formatRate(pRate)
+                    formatRate(pRate),
+                    formatOutbound(p.outboundPending), formatOutbound(p.outboundHighWater),
+                    p.sendDeferrals
             ));
         }
 
@@ -217,7 +223,9 @@ public final class DiagnosticsFormatter {
                     state.getPlayerName(),
                     state.getSendQueueSize(), sendQueueLimitPerPlayer,
                     state.getHeldSyncSlots(), state.getHeldGenSlots(),
-                    state.getTotalSectionsSent(), state.getTotalBytesSent()
+                    state.getTotalSectionsSent(), state.getTotalBytesSent(),
+                    state.getOutboundPendingBytes(), state.getOutboundPendingHighWater(),
+                    state.getSendDeferrals()
             ));
         }
 
@@ -272,6 +280,12 @@ public final class DiagnosticsFormatter {
         if (seconds < 60) return seconds + "s";
         if (seconds < 3600) return String.format("%dm %ds", seconds / 60, seconds % 60);
         return String.format("%dh %dm", seconds / 3600, (seconds % 3600) / 60);
+    }
+
+    /** Outbound-buffer depth for the diag line: {@code n/a} when the probe has no signal,
+     *  so an unresolvable channel never renders as a plausible-looking "0 B". */
+    private static String formatOutbound(long bytes) {
+        return bytes < 0 ? "n/a" : formatBytes(bytes);
     }
 
     public static String formatBytes(long bytes) {

@@ -57,6 +57,30 @@ class SpiralScanner {
      * the 1 Hz fallback where the budget taper + halt own regulation.
      */
     static final int FAST_RESCAN_PRESSURE_DIVISOR = 4;
+    /**
+     * Fast fires require the NEXT walk to be cheap: at most this many ring positions
+     * examined (see {@link #predictedWalkCost()}). Replaces the original
+     * {@code confirmedRing > 0} term, which was a PROXY for walk cost and — because
+     * {@link #recenter()} zeroes the prefix on every chunk-boundary crossing while nothing
+     * re-derives it until the next walk — measured movement instead. At 33 blocks/s
+     * crossings run 2.76 Hz against 1 Hz scans, so the proxy was structurally inert for the
+     * whole of any sustained flight: the elytra trace of 2026-08-01 measured 2–3 Hz standing
+     * still and exactly 1.000 s gaps for 23 consecutive seconds of flight
+     * (docs/planning/elytra-chunk-wall-investigation-2026-08-01.md §8.6.3).
+     *
+     * <p>Calibration: a walk to ring R costs {@code 4R(R+1)} — NOT 4R² — so the measured
+     * flight walk (frontier ring 75) is 22,800 and a full walk at the default 256 LOD
+     * distance is 263,168. 65,536 gives the flight case ~2.9× headroom while refusing the
+     * warm full-disc walk by 4×. The budget is a FRAME budget, not a per-second one: an
+     * admitted walk spends its whole cost inside one client tick (~65k × 50–100 ns ≈
+     * 3–7 ms), and the 250 ms floor lets that happen at most 4×/s.
+     *
+     * <p>Refusing the expensive case is deliberate policy, not a limitation: a disc already
+     * satisfied out to the LOD distance is both expensive to walk AND has little left to
+     * fetch, so the 1 Hz fallback is right there. It is never a regression — movement rides
+     * 1 Hz unconditionally today.
+     */
+    static final int FAST_RESCAN_MAX_WALK_COST = 65_536;
 
     private SessionConfigS2CPayload sessionConfig;
 
@@ -203,16 +227,25 @@ class SpiralScanner {
      * and the v16 protocol versions, so {@code != 16} is exact today and stays conservative
      * if an intermediate legacy dialect ever lands.
      *
-     * <p>The walk-cost gate has two halves, because the prefix resets in two tempos: the
-     * {@code confirmedRing > 0} term sees the SYNCHRONOUS invalidations — movement
-     * ({@link #recenter}) and dirty re-opens ({@link #resetConfirmedRing}) zero the field
-     * before the next tick's predicate — while the {@code hasActionableRetries} term sees
-     * the IN-WALK one: an actionable retry mark resets the prefix inside {@code scan()}
-     * (after this predicate already ran) and the walk always re-derives
-     * {@code confirmedRing >= 1} (ring 0 is empty), so the field alone can never gate it.
-     * Either way a zero-prefix walk re-walks from ring 0 (the render-thread-hitch shape
-     * documented at the 2048 ceiling above) — those walks stay at the 1 Hz fallback; only
-     * cheap frontier walks run fast.
+     * <p>The walk-cost gate has two halves, because the prefix resets in two tempos. The
+     * {@link #predictedWalkCost()} term sees the SYNCHRONOUS invalidations — movement
+     * ({@link #recenter}) and dirty re-opens ({@link #resetConfirmedRing}) zero
+     * {@code confirmedRing} before the next tick's predicate, so the prediction becomes the
+     * full from-ring-0 re-walk those force. The {@code hasActionableRetries} term sees the
+     * IN-WALK one: an actionable retry mark resets the prefix inside {@code scan()} (after
+     * this predicate already ran) and the walk always re-derives {@code confirmedRing >= 1}
+     * (ring 0 is empty), so no prefix-derived value can gate it. Either way a zero-prefix
+     * walk re-walks from ring 0 (the render-thread-hitch shape documented at the 2048
+     * ceiling above) — but only walks that are actually EXPENSIVE stay at the 1 Hz
+     * fallback now, rather than every reset regardless of cost.
+     *
+     * <p>The predecessor of the cost term was {@code confirmedRing > 0}, which conflated
+     * "the prefix was invalidated" with "the walk is expensive". Those coincide for a
+     * stationary client and diverge completely for a moving one, where the prefix is
+     * invalidated ~3×/s and the resulting walk still costs ~22,800 iterations (~0.9 ms,
+     * fps flat at 60 in the measured trace). See {@link #FAST_RESCAN_MAX_WALK_COST}. This
+     * reverses adaptive-scan-cadence-design.md §5.5 — a review-round decision taken on an
+     * ANALYTIC cost estimate; the trace measured it.
      *
      * <p>Caller contract: the halt thresholds must be positive (production passes the
      * constants; a zero threshold would divide-by-zero on count/ingest and fail closed on
@@ -231,13 +264,39 @@ class SpiralScanner {
                 || this.sessionConfig.protocolVersion() == LSSConstants.V16_COMPAT_PROTOCOL_VERSION) {
             return false;
         }
-        if (this.confirmedRing <= 0) return false;
+        if (predictedWalkCost() > FAST_RESCAN_MAX_WALK_COST) return false;
         if (columnQueueSize >= columnQueueHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR) return false;
         if (columnQueueBytes >= columnQueueByteHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR) return false;
         if (ingestBacklogSections >= ingestBacklogHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR) return false;
         if (columns.hasActionableRetries(playerCx, playerCz, viewDistance)) return false;
         return this.outstandingSupplier.getAsInt()
                 <= this.lastSentCount / FAST_RESCAN_OUTSTANDING_DIVISOR;
+    }
+
+    /**
+     * Ring positions the NEXT walk will examine, from the two fields that already describe
+     * it: it starts at {@link #confirmedRing} and runs to the frontier
+     * ({@link #scanRing}, where the previous walk's budget ran out). Ring {@code r} holds
+     * {@code 8r} positions, so the span costs
+     * {@code Σ 8r = 4·(s(s+1) − c(c+1))} — exact for budget-truncated walks too, since a
+     * truncated walk stops at {@code scanRing} by construction.
+     *
+     * <p>Deliberately a PREDICTION, not a measurement of the last walk. The two differ
+     * exactly where this gate matters: after {@link #recenter} the next walk restarts at
+     * ring 0 while the last one started at the frontier, so a remembered cost would admit
+     * one full-price walk after every prefix collapse — and would split two
+     * identically-shaped events, letting movement resets run fast while
+     * {@code hasActionableRetries} resets (also "next walk starts at ring 0") stay at 1 Hz.
+     *
+     * <p>Costs nothing in the walk itself: no counter in the hot loop, no new state.
+     * Saturates rather than overflowing at the 2048 LOD ceiling (~16.8M fits an int, but
+     * the intermediate does not for larger spans, hence the long math).
+     */
+    int predictedWalkCost() {
+        int s = this.scanRing;
+        int c = this.confirmedRing;
+        long cost = 4L * ((long) s * (s + 1) - (long) c * (c + 1));
+        return cost <= 0 ? 0 : (int) Math.min(cost, Integer.MAX_VALUE);
     }
 
     /**

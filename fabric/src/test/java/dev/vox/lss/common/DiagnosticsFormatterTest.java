@@ -111,7 +111,8 @@ class DiagnosticsFormatterTest {
                 7, 3,
                 2_097_152,
                 512,
-                List.of(new DiagnosticsFormatter.PlayerDiag("Steve", 3, 4000, 2, 1, 2000, 4096)));
+                List.of(new DiagnosticsFormatter.PlayerDiag("Steve", 3, 4000, 2, 1, 2000, 4096,
+                        65536L, 131072L, 7L)));
 
         assertEquals(List.of(
                 "=== LSS LOD Diagnostics ===",
@@ -122,7 +123,7 @@ class DiagnosticsFormatterTest {
                 "DiskReader: submitted=5, completed=5",
                 "Generation: active=1/32, order_gated=7, inversions=3",
                 "Bandwidth: 512 B/s / 1.0 MB/s global (2.0 MB total, 0 B wire, cols zstd=0 raw=0)",
-                "  Steve: sq=3/4000, psync=2, pgen=1, sent=2000 (4.0 KB), rate=20/s"
+                "  Steve: sq=3/4000, psync=2, pgen=1, sent=2000 (4.0 KB), rate=20/s, obuf=64.0 KB/128.0 KB, deferred=7"
         ), DiagnosticsFormatter.formatDiagnostics(d));
     }
 
