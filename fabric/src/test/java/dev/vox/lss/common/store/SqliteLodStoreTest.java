@@ -646,6 +646,115 @@ class SqliteLodStoreTest {
         store.shutdown();
     }
 
+    /** Concurrent producers: the store's engine under the load more players actually cause.
+     *
+     *  <p>This is the coverage gap the Folia store question exposed, and it is not
+     *  Folia-shaped — it is concurrency-shaped. Every other test in this class drives the
+     *  store from ONE thread, and no soak scenario on any platform has ever put two clients
+     *  on a server at once ({@code CLIENT_RUNS} is sequential), so nothing exercised the
+     *  single batcher writer against simultaneous producers. On Folia that is precisely what
+     *  more players in more regions produce — the store's threads are all LSS-owned and touch
+     *  no region-owned state, so what regionization changes is the deposit/serve RATE, not
+     *  the thread topology.
+     *
+     *  <p>Each thread owns a disjoint position range, so the final state is deterministic
+     *  and strongly assertable: the last timestamp each thread deposited must be exactly what
+     *  reads back, with matching bytes. A shared HOT range that every thread hammers adds real
+     *  key-level contention on top, where only the invariants (no errors, no torn rows) are
+     *  asserted. Reads, invalidates and hasRow interleave throughout so the tombstone
+     *  protocol, the deposit gate and the reader ThreadLocals all see traffic. */
+    @Test
+    void concurrentProducersKeepTheStoreConsistent() throws Exception {
+        writeRegion(OW, 0, 0, Map.of());
+        SqliteLodStore store = open(defaultEnv());
+        final int threads = 6;
+        final int perThread = 250;
+        final int hotPositions = 16;
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        var start = new CountDownLatch(1);
+        var failures = new java.util.concurrent.ConcurrentLinkedQueue<Throwable>();
+        var lastTs = new java.util.concurrent.ConcurrentHashMap<Long, Long>();
+        try {
+            for (int t = 0; t < threads; t++) {
+                final int id = t;
+                pool.execute(() -> {
+                    try {
+                        start.await();
+                        var rnd = new Random(9000 + id);
+                        for (int i = 0; i < perThread; i++) {
+                            // Owned position: deterministic final state.
+                            long owned = PositionUtil.packPosition(1000 + id, i);
+                            long ts = 5000L + i;
+                            store.deposit(OW, owned, bytes(id * 100_003 + i, 256), ts);
+                            lastTs.put(owned, ts);
+                            // Contended position: every thread writes the same few keys.
+                            long hot = PositionUtil.packPosition(-1, rnd.nextInt(hotPositions));
+                            store.deposit(OW, hot, bytes(rnd.nextInt(1 << 20), 256),
+                                    6000L + rnd.nextInt(1000));
+                            // Interleave the read and invalidate paths.
+                            store.get(OW, owned);
+                            store.hasRow(OW, hot);
+                            if ((i & 31) == 0) store.invalidate(OW, new long[]{hot});
+                        }
+                    } catch (Throwable e) {
+                        failures.add(e);
+                    }
+                });
+            }
+            start.countDown();
+            pool.shutdown();
+            assertTrue(pool.awaitTermination(120, java.util.concurrent.TimeUnit.SECONDS),
+                    "producers must finish");
+        } finally {
+            pool.shutdownNow();
+        }
+        assertTrue(failures.isEmpty(), "no producer may throw: " + failures.peek());
+
+        // Drain the batcher, then assert the invariant that concurrency would actually
+        // break. NOT "every deposit survives": the deposit queue is bounded and sheds the
+        // OLDEST deposit to admit the newest by design ("deposits are droppable — the NBT
+        // ladder re-deposits on the next serve"), so under this much pressure some rows are
+        // legitimately missing and store.deposit_drops counts them. The real invariant is
+        // that no row is TORN: whatever ts a row carries, its bytes must be the ones
+        // deposited with that ts. A row mixing one deposit's timestamp with another's bytes
+        // is exactly what a concurrency defect in the batcher or the upsert would produce,
+        // and it would be invisible to every single-threaded test in this class.
+        for (int i = 0; i < 400 && store.diagnostics().getQueueDepth() > 0; i++) Thread.sleep(25);
+        int survived = 0;
+        for (int t = 0; t < threads; t++) {
+            for (int i = 0; i < perThread; i++) {
+                long owned = PositionUtil.packPosition(1000 + t, i);
+                var hit = store.get(OW, owned);
+                if (hit == null) continue; // shed — legitimate under queue pressure
+                assertEquals(lastTs.get(owned).longValue(), hit.columnTimestamp(),
+                        "a surviving row must carry the ts it was deposited with");
+                assertArrayEquals(bytes(t * 100_003 + i, 256), hit.sectionBytes(),
+                        "TORN ROW: bytes do not match the timestamp they were stored under");
+                survived++;
+            }
+        }
+        // Non-vacuity floor only — deliberately LOW. These producers over-subscribe the
+        // bounded queue on purpose (measured ~40% survival, ~1800 sheds), so a high floor
+        // would be asserting throughput on whatever machine happens to run it, not
+        // correctness. The floor exists solely so the torn-row checks above cannot pass by
+        // examining nothing.
+        int total = threads * perThread;
+        long drops = store.diagnostics().getDepositDrops();
+        assertTrue(survived >= total / 10,
+                "too few rows survived to make the torn-row check meaningful; got "
+                        + survived + "/" + total + " (drops=" + drops + ")");
+        // Shedding must be COUNTED, not silent: a store that quietly dropped deposits
+        // would look identical to one that stored them, and store.deposit_drops is the
+        // only signal an operator has.
+        assertTrue(drops > 0, "over-subscribed producers must record deposit drops");
+        assertTrue(survived + drops >= total,
+                "every owned deposit must be either stored or counted as shed; survived="
+                        + survived + " drops=" + drops + " attempted=" + total);
+        assertEquals(0, store.diagnostics().getErrors(), "concurrent load must not error");
+        assertTrue(store.isHealthy(), "the writer must not latch off under contention");
+        store.shutdown();
+    }
+
     /** Blocks until the eviction counter holds steady across a full gauge interval,
      *  i.e. the cap has converged rather than being observed mid-round. */
     private static void awaitStableEvictions(SqliteLodStore store) throws Exception {
