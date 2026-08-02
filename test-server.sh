@@ -403,6 +403,9 @@ setup_folia() {
     # Folia lags Paper when a new Minecraft version lands — it may not have a build for
     # FOLIA_MC_VERSION yet. Skip the local Folia server gracefully (the Paper plugin jar already
     # carries Folia support) instead of aborting the whole script under `set -e`.
+    # 26.2 status: Folia published its first build (26.2-1) on 2026-07-28, channel BETA.
+    # download_papermc_jar falls back from STABLE to whatever exists, so this resolves the
+    # BETA build — deliberate, since BETA is the only channel Folia 26.2 has.
     if ! curl -fsSL -A "lod-server-support/test-server" -o /dev/null \
             "https://fill.papermc.io/v3/projects/folia/versions/${FOLIA_MC_VERSION}/builds" 2>/dev/null; then
         echo "  NOTE: Folia has no MC ${FOLIA_MC_VERSION} build published upstream yet — skipping the local Folia server."
@@ -421,7 +424,7 @@ setup_folia() {
     write_lss_config "$FOLIA_DIR/plugins/LodServerSupport"
 
     echo "=== Installing Folia plugins ==="
-    echo "  Installing LSS (same jar as Paper — folia-supported: true)..."
+    echo "  Installing LSS (same jar as Paper — folia-supported: true, EXPERIMENTAL on 26.2)..."
     local lss_jar
     lss_jar=$(build_paper_jar)
     rm -f "$plugins_dir"/lod-server-support-paper*.jar
