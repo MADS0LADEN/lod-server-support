@@ -1002,6 +1002,7 @@ public final class SqliteLodStore implements LodStoreService {
                 }
                 this.writer.commit();
                 for (var e : List.copyOf(this.dimIds.entrySet())) {
+                    if (this.shutdown.get()) break; // same reason as inside the drop loop
                     // dropDimensionRows publishes each batch to the sweep-drop
                     // listener and installs the O(1) drop barrier itself; it no
                     // longer needs a tombstone per position.
@@ -1816,6 +1817,15 @@ public final class SqliteLodStore implements LodStoreService {
         int total = 0;
         try {
             while (true) {
+                // Observe shutdown between batches, as runSweep does per-region. Batching
+                // this drop (v0.9.0, to bound its heap) turned it from one DELETE FROM into
+                // tens of seconds of work, which is longer than shutdown()'s join: the
+                // daemon batcher then outlived the store with its writer connection open,
+                // so a same-JVM restart (Fabric singleplayer re-entry, Paper /reload) could
+                // open a SECOND writer against it — breaking the single-writer discipline,
+                // and on Windows leaving held handles that fail a later drop-and-rebuild.
+                // (Round-3 review.)
+                if (this.shutdown.get()) break;
                 List<Long> batch = new ArrayList<>();
                 try (Statement st = this.writer.createStatement();
                      ResultSet rs = st.executeQuery("SELECT pos FROM lods_" + dimId
