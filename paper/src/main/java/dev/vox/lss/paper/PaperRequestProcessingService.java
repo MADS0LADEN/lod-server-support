@@ -319,7 +319,10 @@ public class PaperRequestProcessingService {
         // reason.
         var xrayMasks = PaperXrayMaskManager.activate(config);
         Map<UUID, PaperPlayerRequestState> players = new ConcurrentHashMap<>();
-        var diskReader = new PaperChunkDiskReader(config.diskReaderThreads, config.useBackgroundReadPriority,
+        // Paper/Folia reads ALWAYS route through Moonrise at Priority.LOW, so the prioritized
+        // AUTO tier is unconditional here (unlike Fabric, which must probe for Moonrise).
+        var diskReader = new PaperChunkDiskReader(config.effectiveDiskReaderThreads(true),
+                config.useBackgroundReadPriority,
                 config.useNbtTranscode);
         PaperChunkGenerationService generationService = config.enableChunkGeneration
                 ? new PaperChunkGenerationService(config, plugin) : null;
@@ -327,7 +330,7 @@ public class PaperRequestProcessingService {
         var dataDir = server.getWorldPath(LevelResource.ROOT).resolve("data");
         var offThreadProcessor = new PaperOffThreadProcessor(
                 players, diskReader, generationService != null, dataDir,
-                config.perDimensionTimestampCacheSizeMB, config.missMemoTtlSeconds,
+                config.effectiveTimestampCacheMB(), config.missMemoTtlSeconds,
                 config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
                         + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS);
 

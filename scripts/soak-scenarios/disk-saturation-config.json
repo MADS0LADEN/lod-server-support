@@ -3,5 +3,7 @@
   "diskReaderThreads": 1,
   "generationConcurrencyLimitPerPlayer": 40,
   "generationConcurrencyLimitGlobal": 64,
-  "dirtyBroadcastIntervalSeconds": 5
+  "dirtyBroadcastIntervalSeconds": 5,
+  "lodStore": "off",
+  "lodStoreBackfill": false
 }

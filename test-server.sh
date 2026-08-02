@@ -72,13 +72,15 @@ case "$LSS_ADMISSION_TRACE" in
     *)              ADMISSION_TRACE_FLAG="-Dlss.admissionTrace=true" ;;
 esac
 
-# LOD store for manual play: LSS_LODSTORE=off|full (default off) is written into
+# LOD store for manual play: LSS_LODSTORE=off|full (default full — the shipped default) is written into
 # the staged lss-server-config.json on EVERY run — the staging rewrites that file, so a
 # hand-edit does not survive a re-run; this variable is the supported way to flip it.
 # `run-fabric-store` / `run-paper-store` below force "full". The store DB lives at
 # <world>/lss-lod/store.db and persists across restarts (derived data — deleting the
 # lss-lod/ dir is always safe); eyeball it with '/lsslod store status' in-game.
-LSS_LODSTORE="${LSS_LODSTORE:-off}"
+# Default follows the SHIPPED default (full since 2026-08-02) so a plain ./test-server.sh
+# exercises what players actually get; LSS_LODSTORE=off is the A/B arm.
+LSS_LODSTORE="${LSS_LODSTORE:-full}"
 case "$LSS_LODSTORE" in
     off|full) ;;
     *) echo "LSS_LODSTORE must be off or full (got '$LSS_LODSTORE')" >&2; exit 1 ;;

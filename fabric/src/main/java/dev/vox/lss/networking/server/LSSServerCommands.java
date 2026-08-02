@@ -2,6 +2,7 @@ package dev.vox.lss.networking.server;
 
 import dev.vox.lss.common.Brand;
 import dev.vox.lss.common.DiagnosticsFormatter;
+import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.config.LSSServerConfig;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.minecraft.commands.CommandSourceStack;

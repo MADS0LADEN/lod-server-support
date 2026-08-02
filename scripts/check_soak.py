@@ -173,11 +173,11 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     "lodStoreResweepSeconds",
     # LOD-store on-disk size cap (Phase 5 eviction).
     "lodStoreMaxMB",
-    # LOD-store backfill pace + MSPT ceiling (store-backfill-tuning-plan.md) — added
-    # with the knobs themselves (the R4 lesson: a key missing from this allowlist
-    # means no scenario can ever set it).
+    # LOD-store backfill pace (store-backfill-tuning-plan.md) — added with the knob itself
+    # (the R4 lesson: a key missing from this allowlist means no scenario can ever set it).
+    # lodStoreBackfillTickCeilingMillis was retired to a constant 2026-08-02: its clamp band
+    # was 20..50 and both ends were degenerate by its own documentation.
     "lodStoreBackfillColumnsPerSecond",
-    "lodStoreBackfillTickCeilingMillis",
 })
 # X-ray masking tri-state ("auto"/"on"/"off"), the LOD-store switch ("off"/"full" —
 # scenarios A/B store gates against it; "memory" retired 2026-08-02), + hidden-block

@@ -52,6 +52,14 @@ public final class LodStores {
             // actually RUNNING (store=memory), never the configured aspiration.
             return new MemoryLodStore(LodStoreMode.MEMORY, codec, DEGRADE_MAX_BYTES, diag);
         }
+        // The store defaults ON as of 2026-08-02, so its disk cost now lands on servers that
+        // never asked for it. Say so once, at the point it becomes true, rather than leaving
+        // admins to discover a doubled world folder — a changelog line does not reach someone
+        // who upgraded through a host panel.
+        LSSLogger.info("LOD store active (lodStore=full). It stores served LOD bytes under"
+                + " <world>/lss-lod/ and, once fully warmed, occupies roughly as much space as"
+                + " the region files themselves. It is DERIVED data — deleting lss-lod/ is"
+                + " always safe. Set lodStore=off to disable, lodStoreMaxMB to bound it.");
         return sqlite;
     }
 }

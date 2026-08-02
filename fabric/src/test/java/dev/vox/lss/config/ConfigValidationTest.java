@@ -46,15 +46,20 @@ class ConfigValidationTest {
         c.validate();
         assertEquals(1024, c.bytesPerSecondLimitPerPlayer);
 
+        // Ceiling raised 100 MB -> 1 GiB 2026-08-02 (config review §5): the live server hit
+        // the old one exactly. The DEFAULT is untouched — this bounds only what an admin types.
         c.bytesPerSecondLimitPerPlayer = 200_000_000;
         c.validate();
-        assertEquals(104_857_600, c.bytesPerSecondLimitPerPlayer);
+        assertEquals(200_000_000, c.bytesPerSecondLimitPerPlayer, "200 MB is now inside the band");
+        c.bytesPerSecondLimitPerPlayer = Integer.MAX_VALUE;
+        c.validate();
+        assertEquals(LSSConstants.MAX_BYTES_PER_SECOND_PER_PLAYER, c.bytesPerSecondLimitPerPlayer);
     }
 
     @Test
     void diskReaderThreadsClamped() {
         var c = serverConfig();
-        c.diskReaderThreads = 0;
+        c.diskReaderThreads = 1;
         c.validate();
         assertEquals(1, c.diskReaderThreads);
 
@@ -63,9 +68,41 @@ class ConfigValidationTest {
         assertEquals(64, c.diskReaderThreads);
     }
 
+    /** 0 = AUTO survives validate() (it must not be clamped up to the MIN of 1, which would
+     *  silently destroy the derive-it semantics), and the derived value depends on whether the
+     *  resolved read path carries real priority. */
+    @Test
+    void diskReaderThreadsZeroMeansAutoAndSurvivesValidation() {
+        var c = serverConfig();
+        c.diskReaderThreads = 0;
+        c.validate();
+        assertEquals(0, c.diskReaderThreads, "0 = AUTO must survive validate()");
+        c.diskReaderThreads = -5;
+        c.validate();
+        assertEquals(0, c.diskReaderThreads, "negative nonsense normalizes to AUTO, not to 1");
+
+        assertEquals(LSSConstants.AUTO_DISK_READER_THREADS_SHARED_WORKER,
+                c.effectiveDiskReaderThreads(false),
+                "vanilla's single-threaded IOWorker: concurrency IS the vanilla-delay tradeoff");
+        int prioritized = c.effectiveDiskReaderThreads(true);
+        assertTrue(prioritized >= LSSConstants.AUTO_DISK_READER_THREADS_SHARED_WORKER
+                        && prioritized <= LSSConstants.AUTO_DISK_READER_THREADS_PRIORITIZED_MAX,
+                "the Moonrise Priority.LOW tier scales with cores inside its band, got " + prioritized);
+
+        c.diskReaderThreads = 12;
+        c.validate();
+        assertEquals(12, c.effectiveDiskReaderThreads(true), "an explicit value always wins");
+        assertEquals(12, c.effectiveDiskReaderThreads(false));
+    }
+
+    /** The config review proposed retiring this ("unreachable at its default"); implementation
+     *  reversed the call — lowering it is the only lever that exercises service.queue_full, the
+     *  send-queue breaker, and the bandwidth-throttle soak scenario gates on it firing. */
     @Test
     void sendQueueLimitPerPlayerClamped() {
         var c = serverConfig();
+        assertEquals(LSSConstants.MAX_BATCH_CHUNK_REQUESTS, c.sendQueueLimitPerPlayer,
+                "the default must stay AT the wire batch cap");
         c.sendQueueLimitPerPlayer = 0;
         c.validate();
         assertEquals(1, c.sendQueueLimitPerPlayer);
@@ -94,9 +131,11 @@ class ConfigValidationTest {
         c.validate();
         assertEquals(1, c.generationConcurrencyLimitGlobal);
 
+        // Ceiling raised 256 -> 512 2026-08-02: WantSetBudgetInvariantTest permits up to 536
+        // (slot cap 200 + reserve 64 against the 800 budget), so the headroom was unused.
         c.generationConcurrencyLimitGlobal = 999;
         c.validate();
-        assertEquals(256, c.generationConcurrencyLimitGlobal);
+        assertEquals(LSSConstants.MAX_CONCURRENT_GENERATIONS, c.generationConcurrencyLimitGlobal);
     }
 
     @Test
@@ -132,21 +171,53 @@ class ConfigValidationTest {
 
         // Plain per-field bound: the #28 cross-clamp is gone (no client budget derives
         // from this cap anymore; the successor invariant lives in WantSetBudgetInvariantTest).
+        // Config review §9.1: the per-player ceiling is now the CONFIGURED global, not the
+        // unrelated MAX_CONCURRENCY_LIMIT (1000) — a per-player value above the fleet-wide one
+        // is unreachable by construction, so it used to validate to silent nonsense.
+        c.generationConcurrencyLimitGlobal = 64;
         c.generationConcurrencyLimitPerPlayer = 9999;
         c.validate();
-        assertEquals(LSSConstants.MAX_CONCURRENCY_LIMIT, c.generationConcurrencyLimitPerPlayer);
+        assertEquals(64, c.generationConcurrencyLimitPerPlayer,
+                "per-player must clamp to the configured global, not above it");
     }
 
     @Test
     void perDimensionTimestampCacheSizeMBClamped() {
         var c = serverConfig();
+        // 0 = AUTO now (derived from lodDistanceChunks) and must survive validate().
         c.perDimensionTimestampCacheSizeMB = 0;
         c.validate();
-        assertEquals(1, c.perDimensionTimestampCacheSizeMB);
+        assertEquals(0, c.perDimensionTimestampCacheSizeMB);
 
         c.perDimensionTimestampCacheSizeMB = 9999;
         c.validate();
-        assertEquals(256, c.perDimensionTimestampCacheSizeMB);
+        assertEquals(LSSConstants.MAX_TIMESTAMP_CACHE_SIZE_MB, c.perDimensionTimestampCacheSizeMB);
+    }
+
+    /** The AUTO sizing must track lodDistanceChunks — its whole reason for existing is that a
+     *  fixed value silently under-provisions exactly when an admin raises the distance. The
+     *  512-chunk default disc is ~4x the area of the old 256 one, so AUTO must be materially
+     *  larger there, and it must reproduce the historic hand-tuned 32 MB at 256. */
+    @Test
+    void timestampCacheAutoSizeTracksLodDistance() {
+        var c = serverConfig();
+        c.perDimensionTimestampCacheSizeMB = 0;
+
+        c.lodDistanceChunks = 256;
+        c.validate();
+        int at256 = c.effectiveTimestampCacheMB();
+        assertTrue(at256 >= 28 && at256 <= 36,
+                "AUTO at the historic 256 distance should land near the old hand-tuned 32 MB, got " + at256);
+
+        c.lodDistanceChunks = 512;
+        c.validate();
+        int at512 = c.effectiveTimestampCacheMB();
+        assertTrue(at512 > at256 * 2,
+                "4x the disc area must buy materially more cache: " + at256 + " -> " + at512);
+        assertTrue(at512 <= LSSConstants.MAX_TIMESTAMP_CACHE_SIZE_MB, "AUTO must respect the ceiling");
+
+        c.perDimensionTimestampCacheSizeMB = 77;
+        assertEquals(77, c.effectiveTimestampCacheMB(), "an explicit value always wins");
     }
 
     /** The cap-behavior user decision (store-cap-behavior-plan.md §1): the store ships
@@ -157,7 +228,7 @@ class ConfigValidationTest {
         assertEquals(0, serverConfig().lodStoreMaxMB);
     }
 
-    /** The 0-or-64..32768 clamp: 0 (and negative nonsense) stays uncapped; a nonzero
+    /** The 0-or-64..1048576 clamp: 0 (and negative nonsense) stays uncapped; a nonzero
      *  opt-in cap keeps the 64 floor (a tiny accidental cap would evict constantly). */
     @Test
     void lodStoreMaxMBZeroStaysUncappedAndNonzeroFloorsAt64() {
@@ -174,13 +245,19 @@ class ConfigValidationTest {
         c.validate();
         assertEquals(LSSConstants.MIN_LOD_STORE_MAX_MB, c.lodStoreMaxMB);
 
+        // Ceiling raised 32 GB -> 1 TB 2026-08-02: this bounds the ADMIN'S OWN disk, and a
+        // Chunky-pregenerated world's store can exceed 32 GB, where an artificial ceiling turns
+        // an intentional cap into a silent eviction treadmill.
+        c.lodStoreMaxMB = 999_999;
+        c.validate();
+        assertEquals(999_999, c.lodStoreMaxMB, "999999 MB is now inside the band");
+        c.lodStoreMaxMB = Integer.MAX_VALUE;
+        c.validate();
+        assertEquals(LSSConstants.MAX_LOD_STORE_MAX_MB, c.lodStoreMaxMB);
+
         c.lodStoreMaxMB = 63;
         c.validate();
         assertEquals(LSSConstants.MIN_LOD_STORE_MAX_MB, c.lodStoreMaxMB);
-
-        c.lodStoreMaxMB = 999_999;
-        c.validate();
-        assertEquals(LSSConstants.MAX_LOD_STORE_MAX_MB, c.lodStoreMaxMB);
     }
 
     /** lodStoreMaxBytes(): the 0-semantics both platforms wire into the store env.
@@ -197,12 +274,13 @@ class ConfigValidationTest {
         assertEquals(100L * 1024 * 1024, c.lodStoreMaxBytes());
     }
 
-    /** Drift guards for the backfill-tuning defaults (store-backfill-tuning-plan.md §3
-     *  — the same shape as the resweep-default pins): 100 col/s pace, 45 ms MSPT gate. */
+    /** Drift guards for the backfill-tuning defaults. The pace was raised 100 -> 500 on
+     *  2026-08-02 (config review §2.3) — it is what makes a default-ON backfill tolerable, by
+     *  turning a ~2 h background walk into a ~23 min one. The MSPT gate is a constant now. */
     @Test
-    void backfillTuningDefaultsAre100ColumnsPerSecondAnd45MsCeiling() {
-        assertEquals(100, serverConfig().lodStoreBackfillColumnsPerSecond);
-        assertEquals(45, serverConfig().lodStoreBackfillTickCeilingMillis);
+    void backfillTuningDefaultsAre500ColumnsPerSecondAnd45MsCeiling() {
+        assertEquals(500, serverConfig().lodStoreBackfillColumnsPerSecond);
+        assertEquals(45, LSSConstants.LOD_STORE_BACKFILL_TICK_CEILING_MS);
     }
 
     @Test
@@ -215,20 +293,6 @@ class ConfigValidationTest {
         c.lodStoreBackfillColumnsPerSecond = 99999;
         c.validate();
         assertEquals(LSSConstants.MAX_LOD_STORE_BACKFILL_CPS, c.lodStoreBackfillColumnsPerSecond);
-    }
-
-    @Test
-    void lodStoreBackfillTickCeilingMillisClamped() {
-        var c = serverConfig();
-        c.lodStoreBackfillTickCeilingMillis = 0;
-        c.validate();
-        assertEquals(LSSConstants.MIN_LOD_STORE_BACKFILL_TICK_CEILING_MS,
-                c.lodStoreBackfillTickCeilingMillis);
-
-        c.lodStoreBackfillTickCeilingMillis = 999;
-        c.validate();
-        assertEquals(LSSConstants.MAX_LOD_STORE_BACKFILL_TICK_CEILING_MS,
-                c.lodStoreBackfillTickCeilingMillis);
     }
 
     // --- X-ray masking keys (docs/planning/antixray-compat-design.md §3) ---
@@ -315,7 +379,9 @@ class ConfigValidationTest {
             // deliberately negative — every other numeric floor is >= 1.
             int floor = switch (f.getName()) {
                 case "missMemoTtlSeconds", "lodStoreResweepSeconds", "lodStoreMaxMB",
-                        "outboundBufferCeilingKB" -> 0;
+                        "outboundBufferCeilingKB",
+                        // 0 = AUTO (derived), the default for both since 2026-08-02.
+                        "diskReaderThreads", "perDimensionTimestampCacheSizeMB" -> 0;
                 case "xrayMaxBlockHeight" -> LSSConstants.MIN_XRAY_MAX_BLOCK_HEIGHT;
                 default -> 1;
             };
@@ -342,11 +408,32 @@ class ConfigValidationTest {
         }
     }
 
-    /** LOD reads yield to gameplay out of the box; false is the documented rollback. */
+    /** Read protection is UNCONDITIONAL since useBackgroundReadPriority was retired (config
+     *  review §6). Its real failure modes are handled by automatic one-way latches
+     *  (backgroundIncompatible / moonriseIncompatible), not by config, so a chunk-IO-overhaul
+     *  mod still degrades to foreground reads plus the adaptive throttle with no file edit. */
+    /** LOD reads yield to gameplay out of the box; false is the documented rollback and the
+     *  arm selector for benchmark_compare.sh's foreground-vs-background comparison. */
     @Test
     void backgroundReadPriorityDefaultsOn() {
         assertTrue(serverConfig().useBackgroundReadPriority,
                 "background read priority must default on");
+    }
+
+    @Test
+    void autoDiskReaderThreadConstantsAreCoherent() {
+        // The retired key no longer exists as a field, so there is nothing to default-check;
+        // what must hold is that the constants the auto-sizing leans on are still coherent
+        // (both tiers inside the band, floor <= ceiling). JsonConfigLoadTest covers the
+        // "an old file still carrying the key parses fine" half.
+        assertTrue(LSSConstants.AUTO_DISK_READER_THREADS_SHARED_WORKER
+                        <= LSSConstants.AUTO_DISK_READER_THREADS_PRIORITIZED_MAX,
+                "the AUTO floor must not exceed the prioritized ceiling");
+        assertTrue(LSSConstants.AUTO_DISK_READER_THREADS_SHARED_WORKER
+                        >= LSSConstants.MIN_DISK_READER_THREADS,
+                "the AUTO value must itself be a legal explicit value");
+        assertTrue(LSSConstants.AUTO_DISK_READER_THREADS_PRIORITIZED_MAX
+                        <= LSSConstants.MAX_DISK_READER_THREADS);
     }
 
     /** Disk serves transcode NBT straight to wire bytes out of the box; false is the

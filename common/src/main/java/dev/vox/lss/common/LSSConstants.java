@@ -72,11 +72,28 @@ public final class LSSConstants {
     public static final int MIN_LOD_DISTANCE = 1;
     public static final int MAX_LOD_DISTANCE = 2048;
     public static final int MIN_BYTES_PER_SECOND = 1024;
-    public static final int MAX_BYTES_PER_SECOND_PER_PLAYER = 104_857_600;
+    /** Per-player bandwidth ceiling. Raised 100 MB -> 1 GiB 2026-08-02 (config review
+     *  section 5): the live server hit the old ceiling exactly, and this bounds only what an
+     *  admin deliberately types. The DEFAULT stays 20 MiB — the cap charges RAW bytes
+     *  because it bounds client decode work (the confirmed receiver-limited bottleneck),
+     *  so wire compression did not loosen the constraint it exists to enforce. */
+    public static final int MAX_BYTES_PER_SECOND_PER_PLAYER = 1_073_741_824;
+    /** Disk-reader pool bounds. 0 is a first-class value ABOVE this floor — it means
+     *  AUTO (see ServerConfigBase.effectiveDiskReaderThreads), so validate() only clamps
+     *  nonzero values, the same 0-means-derive shape as lodStoreMaxMB. */
     public static final int MIN_DISK_READER_THREADS = 1;
-    public static final int MAX_DISK_READER_THREADS = 64;
     public static final int MIN_SEND_QUEUE_SIZE = 1;
     public static final int MAX_SEND_QUEUE_SIZE = 100_000;
+    /** AUTO disk-reader pool size where no real read priority exists — vanilla's
+     *  single-threaded IOWorker (LSS concurrency IS the vanilla-delay tradeoff there) and the
+     *  chunk-IO-overhaul fallback (the AdaptiveReadThrottle owns the real limit; this is a
+     *  ceiling). Also the FLOOR of the prioritized tier, so a 2-core box never drops below it. */
+    public static final int AUTO_DISK_READER_THREADS_SHARED_WORKER = 3;
+    /** AUTO ceiling where Moonrise Priority.LOW defers to gameplay independently of
+     *  concurrency (all Paper/Folia, Fabric+Moonrise): the limit is parse/serialize CPU, so
+     *  scale with cores but stop well short of starving the rest of the server. */
+    public static final int AUTO_DISK_READER_THREADS_PRIORITIZED_MAX = 8;
+    public static final int MAX_DISK_READER_THREADS = 64;
     /** Transport-deference ceiling bounds (0 = disabled, the default — see
      *  {@code outboundBufferCeilingKB}). The floor is well above one legal maximum-size
      *  column so a single admissible payload can never trip the gate on its own. */
@@ -84,7 +101,12 @@ public final class LSSConstants {
     public static final int MAX_OUTBOUND_BUFFER_CEILING_KB = 262_144;
     public static final long MAX_BYTES_PER_SECOND_GLOBAL_LIMIT = 1_073_741_824;
     public static final int MIN_CONCURRENT_GENERATIONS = 1;
-    public static final int MAX_CONCURRENT_GENERATIONS = 256;
+    /** Global generation ceiling. Raised 256 -> 512 2026-08-02: WantSetBudgetInvariantTest
+     *  requires SYNC_ON_LOAD_SLOT_CAP(200) + this + WANT_SET_FRONTIER_RESERVE(64) <=
+     *  WANT_SET_BUDGET(800), so the true ceiling is 536 and the headroom was unused. This
+     *  is the CEILING only — the defaults are unchanged (no measurement justifies raising
+     *  them, and on Fabric there is no priority hand-off or MSPT gate under worldgen). */
+    public static final int MAX_CONCURRENT_GENERATIONS = 512;
     /** Generation order-spread gate: a NEW generation ticket may enter at most this many
      *  Chebyshev rings (measured from the player's declared want-set center) beyond that
      *  player's OLDEST outstanding ticket. The platform scheduler owns completion order and
@@ -101,8 +123,17 @@ public final class LSSConstants {
     public static final int MAX_DIRTY_BROADCAST_INTERVAL = 300;
     public static final int MIN_CONCURRENCY_LIMIT = 1;
     public static final int MAX_CONCURRENCY_LIMIT = 1000;
+    /** Per-DIMENSION timestamp-cache bounds (multiply by dimension count for the real heap
+     *  budget). Ceiling raised 256 -> 512 2026-08-02: reachable on a large-distance server.
+     *  0 means AUTO — derived from lodDistanceChunks, see
+     *  ServerConfigBase.effectiveTimestampCacheMB — so validate() clamps only nonzero. */
     public static final int MIN_TIMESTAMP_CACHE_SIZE_MB = 1;
-    public static final int MAX_TIMESTAMP_CACHE_SIZE_MB = 256;
+    public static final int MAX_TIMESTAMP_CACHE_SIZE_MB = 512;
+    /** Approximate LIVE heap per timestamp-cache entry — mirrors
+     *  ColumnTimestampCache.HEAP_BYTES_PER_ENTRY, exposed here so the config's AUTO sizing
+     *  (ServerConfigBase.effectiveTimestampCacheMB) converts entries to MB with the same
+     *  constant the cache itself uses. A drift guard pins the two together. */
+    public static final int TIMESTAMP_CACHE_HEAP_BYTES_PER_ENTRY = 64;
 
     /** Miss-memo TTL clamp (docs/planning/miss-memo-design.md): 0 disables the memo
      *  wholesale (the config kill switch). The ceiling bounds the staleness window — the
@@ -111,14 +142,15 @@ public final class LSSConstants {
     public static final int MIN_MISS_MEMO_TTL_SECONDS = 0;
     public static final int MAX_MISS_MEMO_TTL_SECONDS = 60;
 
-    // LOD-store periodic freshness re-sweep cadence (0 = off). Paper's stale bound —
-    // its unfired-event gaps (walk-in generation etc.) heal within ≈ autosave + sweep.
     // LOD-store on-disk size cap (Phase 5 eviction): oldest-ts rows are batch-evicted
     // and pages returned via incremental_vacuum once db+wal exceed the cap. 0 =
     // UNCAPPED (the default since store-cap-behavior-plan.md); the 64-floor applies
     // only to a nonzero opt-in cap — a tiny accidental cap would evict constantly.
+    // Ceiling raised 32 GB -> 1 TB 2026-08-02: this bounds the ADMIN'S OWN disk, opted
+    // into deliberately, and a Chunky-pregenerated world's store can exceed 32 GB —
+    // where an artificial ceiling silently turns an intentional cap into a treadmill.
     public static final int MIN_LOD_STORE_MAX_MB = 64;
-    public static final int MAX_LOD_STORE_MAX_MB = 32768;
+    public static final int MAX_LOD_STORE_MAX_MB = 1_048_576;
 
     public static final int MIN_LOD_STORE_RESWEEP_SECONDS = 0;
     public static final int MAX_LOD_STORE_RESWEEP_SECONDS = 3600;
@@ -130,10 +162,11 @@ public final class LSSConstants {
      *  value would only mislead. */
     public static final int MIN_LOD_STORE_BACKFILL_CPS = 10;
     public static final int MAX_LOD_STORE_BACKFILL_CPS = 1000;
-    /** Backfill MSPT-ceiling clamp: keeps the tick-health gate meaningfully below the
-     *  50 ms tick (a ceiling >= 50 never pauses; one <= 20 never runs on a busy server). */
-    public static final int MIN_LOD_STORE_BACKFILL_TICK_CEILING_MS = 20;
-    public static final int MAX_LOD_STORE_BACKFILL_TICK_CEILING_MS = 50;
+    /** Backfill tick-health ceiling (smoothed MSPT): the walk pauses above this. RETIRED
+     *  as config 2026-08-02 (config review section 6) — its clamp band was 20..50 and its own
+     *  comment conceded that >= 50 never pauses and <= 20 never runs on a busy server, so a
+     *  30-unit window with two degenerate ends is not a tuning range. Now a constant. */
+    public static final int LOD_STORE_BACKFILL_TICK_CEILING_MS = 45;
 
     /** X-ray mask height clamp (docs/planning/antixray-compat-design.md §3): comfortably
      *  outside any MC build height so any real world Y is expressible, while bounding

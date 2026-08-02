@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -83,11 +84,16 @@ class PaperConfigValidationTest {
         assertEquals(0, c.outboundBufferCeilingKB, "0 stays 0 — it is the off switch");
     }
 
-    /** Paper inherits the shared read-priority default: LOD reads yield to gameplay out of the box. */
+    /** Paper's Folia override (config review §2.1): the store defaults ON everywhere else as of
+     *  2026-08-02, but it has never been gated on Folia, so a default-on store would arm an
+     *  unvalidated storage engine on every Folia server that upgrades. Not a hard gate — an
+     *  explicit lodStore="full" still works there. Off-Folia (this test JVM) it must be "full". */
     @Test
-    void backgroundReadPriorityDefaultsOn() {
-        assertTrue(new PaperConfig().useBackgroundReadPriority,
-                "background read priority must default on (Paper)");
+    void lodStoreDefaultsFullOffFoliaAndOffOnFolia() {
+        assertFalse(FoliaSupport.IS_FOLIA, "test JVM is not Folia — the other arm is the guard");
+        var c = new PaperConfig();
+        assertEquals("full", c.lodStore, "Paper must inherit the shared store-on default");
+        assertTrue(c.lodStoreBackfill, "Paper must inherit the shared backfill-on default");
     }
 
     /** Paper inherits the shared transcode default: disk serves transcode NBT straight to
@@ -111,10 +117,6 @@ class PaperConfigValidationTest {
                     new Bounds(LSSConstants.MIN_LOD_DISTANCE, LSSConstants.MAX_LOD_DISTANCE)),
             Map.entry("bytesPerSecondLimitPerPlayer",
                     new Bounds(LSSConstants.MIN_BYTES_PER_SECOND, LSSConstants.MAX_BYTES_PER_SECOND_PER_PLAYER)),
-            Map.entry("diskReaderThreads",
-                    new Bounds(LSSConstants.MIN_DISK_READER_THREADS, LSSConstants.MAX_DISK_READER_THREADS)),
-            Map.entry("sendQueueLimitPerPlayer",
-                    new Bounds(LSSConstants.MIN_SEND_QUEUE_SIZE, LSSConstants.MAX_SEND_QUEUE_SIZE)),
             Map.entry("bytesPerSecondLimitGlobal",
                     new Bounds(LSSConstants.MIN_BYTES_PER_SECOND,
                             Math.toIntExact(LSSConstants.MAX_BYTES_PER_SECOND_GLOBAL_LIMIT))),
@@ -126,10 +128,12 @@ class PaperConfigValidationTest {
                     new Bounds(LSSConstants.MIN_MISS_MEMO_TTL_SECONDS, LSSConstants.MAX_MISS_MEMO_TTL_SECONDS)),
             Map.entry("dirtyBroadcastIntervalSeconds",
                     new Bounds(LSSConstants.MIN_DIRTY_BROADCAST_INTERVAL, LSSConstants.MAX_DIRTY_BROADCAST_INTERVAL)),
-            Map.entry("generationConcurrencyLimitPerPlayer",
-                    new Bounds(LSSConstants.MIN_CONCURRENCY_LIMIT, LSSConstants.MAX_CONCURRENCY_LIMIT)),
-            Map.entry("perDimensionTimestampCacheSizeMB",
-                    new Bounds(LSSConstants.MIN_TIMESTAMP_CACHE_SIZE_MB, LSSConstants.MAX_TIMESTAMP_CACHE_SIZE_MB)),
+            Map.entry("sendQueueLimitPerPlayer",
+                    new Bounds(LSSConstants.MIN_SEND_QUEUE_SIZE, LSSConstants.MAX_SEND_QUEUE_SIZE)),
+            // generationConcurrencyLimitPerPlayer and perDimensionTimestampCacheSizeMB left the
+            // table-driven sweep 2026-08-02: the first clamps to the CONFIGURED global (§9.1) and
+            // the second treats 0 as AUTO, so neither has fixed both-ends bounds. Named tests in
+            // the Fabric twin cover them.
             // lodStoreMaxMB's legal floor is 0 (= uncapped, the default); the 64 floor
             // applies only to nonzero opt-in caps, pinned by the named test below.
             Map.entry("lodStoreMaxMB",
@@ -144,9 +148,6 @@ class PaperConfigValidationTest {
             Map.entry("lodStoreBackfillColumnsPerSecond",
                     new Bounds(LSSConstants.MIN_LOD_STORE_BACKFILL_CPS,
                             LSSConstants.MAX_LOD_STORE_BACKFILL_CPS)),
-            Map.entry("lodStoreBackfillTickCeilingMillis",
-                    new Bounds(LSSConstants.MIN_LOD_STORE_BACKFILL_TICK_CEILING_MS,
-                            LSSConstants.MAX_LOD_STORE_BACKFILL_TICK_CEILING_MS)),
             Map.entry("xrayMaxBlockHeight",
                     new Bounds(LSSConstants.MIN_XRAY_MAX_BLOCK_HEIGHT, LSSConstants.MAX_XRAY_MAX_BLOCK_HEIGHT)));
 
@@ -157,9 +158,16 @@ class PaperConfigValidationTest {
      */
     @Test
     void everyNumericFieldClampsToExactSharedBoundsAtBothEnds() throws Exception {
+        // Excluded 2026-08-02: diskReaderThreads and perDimensionTimestampCacheSizeMB treat 0 as
+        // AUTO, and generationConcurrencyLimitPerPlayer clamps to the CONFIGURED global (§9.1) —
+        // none has fixed both-ends bounds, so a table-driven sweep cannot express them. Named
+        // tests in the Fabric twin cover all three.
+        var derived = java.util.Set.of("diskReaderThreads", "perDimensionTimestampCacheSizeMB",
+                "generationConcurrencyLimitPerPlayer");
         List<Field> fields = Arrays.stream(PaperConfig.class.getFields())
                 .filter(f -> !Modifier.isStatic(f.getModifiers()))
                 .filter(f -> f.getType().isPrimitive() && f.getType() != boolean.class)
+                .filter(f -> !derived.contains(f.getName()))
                 .toList();
         // Anti-vacuity twin of the Fabric sweep guards: the sweep must keep seeing every field.
         assertEquals(SHARED_BOUNDS.keySet(),

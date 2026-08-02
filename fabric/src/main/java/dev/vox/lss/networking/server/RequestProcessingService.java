@@ -114,8 +114,17 @@ public class RequestProcessingService {
 
         this.dirtyTracker = new DirtyColumnTracker();
 
-        this.diskReader = new ChunkDiskReader(config.diskReaderThreads, config.useBackgroundReadPriority,
-                config.useNbtTranscode);
+        // Pool size honours diskReaderThreads=0 (AUTO). The tier question is whether the
+        // resolved read path carries REAL priority: Moonrise's Priority.LOW defers to gameplay
+        // regardless of how many reads we have outstanding, whereas on vanilla's
+        // single-threaded IOWorker our concurrency IS the vanilla-delay tradeoff. Probing the
+        // bridge here is the same per-JVM resolution the read path itself uses, so the two
+        // cannot disagree at startup. (If it latches incompatible LATER the pool is already
+        // sized — acceptable: every latched fallback engages the adaptive throttle, which
+        // narrows hasHeadroom() and makes the pool size non-binding.)
+        boolean prioritizedReads = dev.vox.lss.compat.MoonriseReadCompat.resolveOrNull() != null;
+        this.diskReader = new ChunkDiskReader(config.effectiveDiskReaderThreads(prioritizedReads),
+                config.useBackgroundReadPriority, config.useNbtTranscode);
         if (config.enableChunkGeneration) {
             this.generationService = new ChunkGenerationService(config);
             this.generationService.setDirtyContentFilter(this.dirtyContentFilter);
@@ -128,7 +137,7 @@ public class RequestProcessingService {
         this.offThreadProcessor = new FabricOffThreadProcessor(
                 this.players,
                 this.diskReader, this.generationService != null, dataDir,
-                config.perDimensionTimestampCacheSizeMB, config.missMemoTtlSeconds,
+                config.effectiveTimestampCacheMB(), config.missMemoTtlSeconds,
                 config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
                         + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS);
 
@@ -241,7 +250,7 @@ public class RequestProcessingService {
                         // Tick-health ceiling: pause the backfill while the smoothed
                         // tick time is over the configured MSPT gate.
                         () -> server.getCurrentSmoothedTickTime()
-                                < config.lodStoreBackfillTickCeilingMillis,
+                                < LSSConstants.LOD_STORE_BACKFILL_TICK_CEILING_MS,
                         config.lodStoreBackfillColumnsPerSecond);
                 if (config.lodStoreBackfill) {
                     this.storeBackfill.start();

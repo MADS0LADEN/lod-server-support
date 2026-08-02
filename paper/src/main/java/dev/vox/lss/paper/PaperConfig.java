@@ -20,6 +20,15 @@ public class PaperConfig extends ServerConfigBase {
         // keeps the shared 0: its content-hash save hook invalidates at runtime, and a
         // periodic resweep there would only churn-drop rows on metadata re-saves.
         lodStoreResweepSeconds = 300;
+        // FOLIA override: the LOD store defaults ON as of 2026-08-02, but it has never been
+        // gated on Folia (the recorded stance is "untested, leave it off"). A default-on
+        // store would arm an unvalidated storage engine on every Folia server that upgrades,
+        // silently — so Folia keeps the old default and an admin must opt in explicitly.
+        // This is a DEFAULT, not a hard gate: lodStore="full" in the file still works.
+        if (FoliaSupport.IS_FOLIA) {
+            lodStore = "off";
+            lodStoreBackfill = false;
+        }
     }
 
     // Bukkit events that mark a chunk dirty for LOD re-send. Broadened to better match the

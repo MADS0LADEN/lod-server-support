@@ -2,6 +2,7 @@ package dev.vox.lss.paper;
 
 import dev.vox.lss.common.Brand;
 import dev.vox.lss.common.DiagnosticsFormatter;
+import dev.vox.lss.common.LSSConstants;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
