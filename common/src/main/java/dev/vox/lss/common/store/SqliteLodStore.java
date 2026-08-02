@@ -1525,8 +1525,11 @@ public final class SqliteLodStore implements LodStoreService {
         boolean busy = false;
         // Read the (busy, log, checkpointed) result row: a busy checkpoint is a silent
         // no-op, and ignoring it recorded a fast checkpoint_ms while the WAL kept
-        // growing (R1 review). Best-effort here — the next interval retries; the size
-        // cap deliberately excludes WAL bytes so a stuck WAL cannot trigger eviction.
+        // growing (R1 review). Best-effort here — the next interval retries. (This used
+        // to add that the size cap "deliberately excludes WAL bytes"; it did not — it
+        // added a bounded WAL term. The cap now measures logical bytes, for which the
+        // question does not arise: page_count already accounts for committed WAL
+        // frames. See maybeRefreshGauges.)
         try (Statement st = this.writer.createStatement();
              ResultSet rs = st.executeQuery("PRAGMA wal_checkpoint(TRUNCATE)")) {
             busy = rs.next() && rs.getInt(1) != 0;

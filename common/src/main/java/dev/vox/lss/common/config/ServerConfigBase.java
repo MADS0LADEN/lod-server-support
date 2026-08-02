@@ -180,7 +180,10 @@ public abstract class ServerConfigBase extends JsonConfig {
      * ~10.6 KB/chunk of region data). It is derived data: deleting the {@code lss-lod/} folder
      * is always safe, and the service logs the expected growth once at startup.
      *
-     * <p>PaperConfig forces this back to "off" on FOLIA, where the store is untested.
+     * <p>PaperConfig DEFAULTS this to "off" on FOLIA, where the store is untested. It is a
+     * default, not a gate: an explicit "full" in the file still arms it (PaperConfig's own
+     * comment says so). Both this javadoc and CLAUDE.md used to say "forces", which reads
+     * as a guarantee that copying a Paper config onto a Folia server cannot bypass.
      * Unknown values normalize to "off" — the SAFE value, deliberately unlike
      * xrayObfuscation's normalize-to-auto: a typo must never enable a storage engine.
      * "memory" was a third value until 2026-08-02 and is now one of those unknowns;

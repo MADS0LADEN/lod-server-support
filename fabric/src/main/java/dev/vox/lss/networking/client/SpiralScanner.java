@@ -254,9 +254,12 @@ class SpiralScanner {
      * reverses adaptive-scan-cadence-design.md §5.5 — a review-round decision taken on an
      * ANALYTIC cost estimate; the trace measured it.
      *
-     * <p>Caller contract: the halt thresholds must be positive (production passes the
-     * constants; a zero threshold would divide-by-zero on count/ingest and fail closed on
-     * bytes).
+     * <p>Caller contract: the halt thresholds should be positive (production passes the
+     * constants). A zero threshold cannot throw — the divisions are by the constant
+     * {@link #FAST_RESCAN_PRESSURE_DIVISOR}, not by the threshold — it simply fails closed
+     * on all three pipes, which is the safe direction. (The javadoc previously claimed a
+     * divide-by-zero here; the only threshold-denominated division is the taper in
+     * {@code maybeScan}, and that yields {@code -Infinity} → a budget of 1, also no throw.)
      */
     private boolean fastRescanDue(int ticksSinceFire, int playerCx, int playerCz, int viewDistance,
                                   ColumnStateMap columns,
@@ -282,11 +285,31 @@ class SpiralScanner {
 
     /**
      * Ring positions the NEXT walk will examine, from the two fields that already describe
-     * it: it starts at {@link #confirmedRing} and runs to the frontier
-     * ({@link #scanRing}, where the previous walk's budget ran out). Ring {@code r} holds
-     * {@code 8r} positions, so the span costs
-     * {@code Σ 8r = 4·(s(s+1) − c(c+1))} — exact for budget-truncated walks too, since a
-     * truncated walk stops at {@code scanRing} by construction.
+     * it. It starts at {@link #confirmedRing} and runs to {@code s}, which is
+     * {@link #scanRing} only for a budget-TRUNCATED walk; otherwise the walk iterates every
+     * ring out to {@link #getEffectiveLodDistance} (see the comment in the body — predicting
+     * off {@code scanRing} unconditionally under-reports by three orders of magnitude on a
+     * warm disc). Ring {@code r} holds {@code 8r} positions, so the span costs
+     * {@code Σ_{r=c}^{s} 8r = 4·(s(s+1) − c(c−1))} — note {@code c(c−1)}, not {@code c(c+1)}:
+     * the loop starts AT {@code confirmedRing}. Getting that term wrong once already cost a
+     * mis-sized budget constant.
+     *
+     * <p><b>Coverage limit — deliberate, and load-bearing for what the release notes may
+     * claim.</b> {@link #recenter} zeroes {@code confirmedRing} on every chunk crossing and
+     * nothing re-derives it until the next walk, so under sustained movement {@code c} is 0
+     * and this reduces to {@code 4·s(s+1)}. Against
+     * {@link #FAST_RESCAN_MAX_WALK_COST} = 65536 that admits {@code s ≤ 127}
+     * (4·127·128 = 65024) and refuses {@code s = 128} (4·128·129 = 66048). So on the shipped
+     * {@code lodDistanceChunks} = 256 the fast cadence covers rings 0–127 — 65024 of the
+     * disc's 263168 positions, about a quarter — and a MOVING client falls back to 1 Hz once
+     * the frontier passes ring 128. Stationary clients are unaffected ({@code confirmedRing}
+     * survives, so the span stays narrow at any depth). This is a partial fix to the elytra
+     * chunk wall, not a complete one, and it is the conservative direction the investigation
+     * argued for: docs/planning/elytra-chunk-wall-investigation-2026-08-01.md warns that
+     * lifting the flight regime toward the stationary 2–3 Hz would put it at 50–75 MB/s and
+     * walk back toward the wall. Raising the constant only moves the cliff; extending the
+     * coverage means decoupling the prefix from {@code recenter}, which is a separate design
+     * change with that throughput consequence attached.
      *
      * <p>Deliberately a PREDICTION, not a measurement of the last walk. The two differ
      * exactly where this gate matters: after {@link #recenter} the next walk restarts at

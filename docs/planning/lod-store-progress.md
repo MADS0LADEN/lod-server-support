@@ -992,7 +992,7 @@ SQLException = row loss); tombstone map swept only on idle batcher iterations
 (unbounded growth while busy; fix preserves the never-expire-while-predating-deposit-
 queued invariant); WAL checkpoint result ignored + size cap counting db+wal (busy
 checkpoints → WAL growth → eviction shreds live rows while the real DB is under cap;
-cap now compares db only); drop-and-rebuild never verified deletion (a surviving file
+cap now compares db only) — SUPERSEDED 2026-08-02 by the v0.9.0 review: the shipped code never did compare db only (it added min(walBytes, 64MB)), and both that term and Files.size() were wrong for the job. The cap now measures LOGICAL bytes, (page_count - freelist_count) * page_size, read through the writer's snapshot so committed WAL frames are already counted and no WAL term is needed; drop-and-rebuild never verified deletion (a surviving file
 + next wire bump = silent garbage serves; now verified, degrade on failure);
 same-second mtime granularity skipping a raced region forever (post-read re-stat);
 `usize` unbounded pre-validation alloc. R2: `MemoryLodStore.deposit` wrote the

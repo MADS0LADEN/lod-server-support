@@ -545,9 +545,30 @@ post-`recenter()` walk restarts at ring 0 and is therefore expensive. That reaso
   regime that actually matters.
 
 **The replacement.** `predictedWalkCost() <= FAST_RESCAN_MAX_WALK_COST` (65,536), where the
-prediction is `4·(scanRing·(scanRing+1) − confirmedRing·(confirmedRing+1))` — the ring-sum
-over the span the *next* walk will cover, from two fields the scanner already keeps. No new
-state, no counter in the hot loop.
+prediction is `4·(s·(s+1) − confirmedRing·(confirmedRing−1))` — the ring-sum over the span
+the *next* walk will cover, from two fields the scanner already keeps. `s` is `scanRing` only
+for a budget-truncated walk; otherwise it is the effective LOD distance, because an untruncated
+walk iterates every satisfied ring out to it. No new state, no counter in the hot loop.
+
+> **Coverage limit (recorded 2026-08-02, v0.9.0 review — decided: accept and document).**
+> `recenter()` zeroes `confirmedRing` on every chunk crossing and nothing re-derives it until
+> the next walk, so under sustained movement the prediction reduces to `4·s(s+1)`. Against the
+> 65,536 budget that admits `s ≤ 127` (`4·127·128 = 65,024`) and refuses `s = 128`
+> (`4·128·129 = 66,048`). On the shipped `lodDistanceChunks = 256` the fast cadence therefore
+> covers rings 0–127 — 65,024 of the disc's 263,168 positions, **about a quarter** — and a
+> MOVING client returns to 1 Hz once the frontier passes ring 128. Stationary clients are
+> unaffected: `confirmedRing` survives, so the span stays narrow at any frontier depth.
+>
+> This makes the feature a **partial** fix to the elytra chunk wall. It is the conservative
+> direction §8.6.3 of the elytra investigation argued for — lifting the flight regime toward
+> the stationary 2–3 Hz would put it at 50–75 MB/s and walk back toward the wall — but it was
+> undocumented and discontinuous at a specific ring, and the in-code rationale ("a disc already
+> satisfied out to the LOD distance has little left to fetch") describes the *converged* case,
+> not this one: here the interior is satisfied to the frontier with ~110k positions still
+> wanted beyond it. Consequences: release notes must not claim "4 Hz while flying" without
+> qualification, and raising the constant only moves the cliff — extending coverage means
+> decoupling the prefix from `recenter()`, a separate design change with the throughput
+> consequence above attached.
 
 Three things this gets right that a `lastWalkVisited` counter (§11's proposed escalation,
 §12's listed non-goal) would not:
