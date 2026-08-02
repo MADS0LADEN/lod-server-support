@@ -58,6 +58,20 @@ public final class StoreBackfill {
      *  provably wasted work (each deposit evicts an OLDER, nearer-spawn row), and the
      *  5% margin absorbs the ~5 s gauge staleness. */
     static final double CAP_STOP_FRACTION = 0.95;
+    /** Stop the walk with at least this much free on the store's volume. Sized to
+     *  leave a server room to keep saving its own region files after LSS stops. */
+    static final long MIN_FREE_SPACE_BYTES = 2L << 30; // 2 GiB
+
+    /** Free bytes on the store's volume, or -1 if it cannot be determined — in which
+     *  case the walk proceeds, since a failed stat must not be treated as "full". */
+    private long usableSpaceBytes() {
+        try {
+            Path dir = this.store.storeDir();
+            return dir == null ? -1L : Files.getFileStore(dir).getUsableSpace();
+        } catch (Exception e) {
+            return -1L;
+        }
+    }
 
     /** Platform seam: synchronously read + serialize one column's wire bytes from
      *  region NBT (the SAME path serves use); null = not servable (absent/all-air is
@@ -214,6 +228,27 @@ public final class StoreBackfill {
                     // claiming progress — burning a world's worth of IO for nothing.
                     this.statusLine = "aborted: store unhealthy (latched off?)";
                     LSSLogger.warn("Store backfill aborted — store no longer healthy");
+                    return;
+                }
+                // Free-space floor. The cap gate above is opt-in and OFF by default
+                // (lodStoreMaxMB=0), so on the shipped configuration nothing else
+                // bounds this walk: v0.9.0 turns the store and its backfill on by
+                // default, and the walk writes roughly the size of the region files it
+                // reads. On a quota-limited host (a panel-provisioned server sized just
+                // above its world) that fills the volume in minutes — and the first
+                // casualty is not LSS, which degrades correctly, but Minecraft's own
+                // region saves. Stopping is always safe: unwalked regions stay
+                // unmarked, so freeing space and restarting resumes here. (v0.9.0
+                // review — nothing in the codebase consulted free space at all.)
+                long usable = usableSpaceBytes();
+                if (usable >= 0 && usable < MIN_FREE_SPACE_BYTES) {
+                    this.statusLine = "stopped: low disk (" + (usable >> 20) + " MB free), "
+                            + regionsDone + " regions done, " + (plan.size() - ri) + " unwalked";
+                    LSSLogger.warn("Store backfill stopped — only " + (usable >> 20)
+                            + " MB free on the store volume (floor "
+                            + (MIN_FREE_SPACE_BYTES >> 20) + " MB). " + (plan.size() - ri)
+                            + " regions left unwalked; they resume once space is freed. "
+                            + "Set lodStoreMaxMB to bound the store, or lodStore=off.");
                     return;
                 }
                 int[] present = presentChunks(region.mca());

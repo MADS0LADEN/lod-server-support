@@ -173,7 +173,24 @@ public class RequestProcessingService {
         // mask fingerprints (deposited bytes are post-mask; a mask change drops the
         // dimension's rows at the sweep). A failed codec/native probe degrades to
         // store-off with one warning — never a crash.
-        var storeMode = dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore);
+        // `enabled: false` must mean the LOD store is not opened and the backfill does
+        // not run. tick() checks the flag, but the store is built HERE, in the
+        // constructor, and SERVER_STARTED constructs the service unconditionally — so
+        // before this guard a server with LSS switched off still created
+        // <world>/lss-lod/, walked every region file in every dimension at
+        // lodStoreBackfillColumnsPerSecond, and wrote a DB roughly the size of the
+        // region files, for a feature the admin had turned off and with nothing to
+        // read any of it. Unreachable until v0.9.0 defaulted lodStore=full +
+        // lodStoreBackfill=true; the enabled-false soak scenario cannot catch it,
+        // because its config pins lodStore=off. (v0.9.0 review.)
+        var storeMode = config.enabled
+                ? dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore)
+                : dev.vox.lss.common.store.LodStoreMode.OFF;
+        if (!config.enabled && !dev.vox.lss.common.store.LodStoreMode
+                .normalize(config.lodStore).equals(dev.vox.lss.common.store.LodStoreMode.OFF)) {
+            LSSLogger.info("LSS is disabled (enabled=false) — the LOD store and its "
+                    + "backfill stay off; no store is created and no regions are walked");
+        }
         if (storeMode != dev.vox.lss.common.store.LodStoreMode.OFF) {
             var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
             var regionDirs = new HashMap<String, java.nio.file.Path>();

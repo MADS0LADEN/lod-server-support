@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * The SQLite LOD store tier (plan §2, Phase 2). Pins the parts a live server cannot
@@ -604,32 +605,106 @@ class SqliteLodStoreTest {
 
     // ---- misc contract ----
 
-    /** Phase 5 size cap: above maxDbBytes the batcher evicts oldest-ts batches and
-     *  vacuums; newest rows survive, evicted ones read as misses (re-warm on serve). */
+    /** Phase 5 size cap: above maxDbBytes the batcher evicts oldest-ts rows and
+     *  vacuums; newest rows survive, evicted ones read as misses (re-warm on serve).
+     *
+     *  <p>The cap here is ~2 MB rather than the ~200 KB it used to be: on 16 KB pages
+     *  the schema's own tables and indices occupy a floor of roughly 150 KB, so a
+     *  200 KB cap leaves no room for ANY row and evicting the store empty is the
+     *  correct answer to it — which makes it useless as a survivor pin. Production
+     *  cannot reach that regime anyway ({@code lodStoreMaxMB} clamps at 64 MB). */
     @Test
     void sizeCapEvictsOldestRowsAndKeepsNewest() throws Exception {
         writeRegion(OW, 0, 0, Map.of());
         var env = new SqliteLodStore.Environment(storeDir(), "26.2-test", WIRE,
-                this::regionDir, d -> "", 0, 200_000L); // ~200 KB cap
+                this::regionDir, d -> "", 0, 2_000_000L); // ~2 MB cap
         SqliteLodStore store = SqliteLodStore.createOrNull(LodStoreMode.FULL, env,
                 new LodStoreDiagnostics());
         assertNotNull(store);
         assertTrue(store.awaitSweep(10_000));
-        // ~40 x 20 KB (incompressible) rows ≈ 800 KB >> the cap; ts ascending.
-        for (int i = 0; i < 40; i++) {
+        // ~200 x 20 KB (incompressible) rows ≈ 4 MB >> the cap; ts ascending.
+        for (int i = 0; i < 200; i++) {
             store.deposit(OW, PositionUtil.packPosition(i, 12), bytes(100 + i, 20_000), 1000 + i);
         }
-        assertNotNull(awaitHit(store, OW, PositionUtil.packPosition(39, 12)));
+        assertNotNull(awaitHit(store, OW, PositionUtil.packPosition(199, 12)));
         boolean evicted = false;
         for (int i = 0; i < 600 && !evicted; i++) { // gauge cadence is 5 s
             evicted = store.get(OW, PositionUtil.packPosition(0, 12)) == null;
             Thread.sleep(50);
         }
         assertTrue(evicted, "the oldest-ts row must be evicted under the size cap");
-        assertNotNull(store.get(OW, PositionUtil.packPosition(39, 12)),
+        // Assert the SURVIVOR only after the cap has converged. lastGaugeRefreshNanos
+        // starts at 0, so the batcher's very first loop iteration runs a gauge refresh
+        // with a single row committed — an assertion taken at the first eviction
+        // observes that boot artifact rather than the cap's steady state. This pin
+        // passed there while the store went on to evict itself to zero (v0.9.0
+        // review); awaiting convergence is what makes the survivor claim real.
+        awaitStableEvictions(store);
+        assertNotNull(store.get(OW, PositionUtil.packPosition(199, 12)),
                 "the newest row must survive eviction");
         assertEquals(0, store.diagnostics().getErrors());
         store.shutdown();
+    }
+
+    /** Blocks until the eviction counter holds steady across a full gauge interval,
+     *  i.e. the cap has converged rather than being observed mid-round. */
+    private static void awaitStableEvictions(SqliteLodStore store) throws Exception {
+        long last = -1;
+        for (int i = 0; i < 10; i++) { // ~60 s worst case; typically two samples
+            Thread.sleep(6_000); // > the 5 s gauge cadence
+            long now = store.diagnostics().getSqlEvictions();
+            if (now > 0 && now == last) return;
+            last = now;
+        }
+        fail("size-cap eviction never converged");
+    }
+
+    /** The size cap must converge on a working set, not treadmill.
+     *
+     *  <p>Before v0.9.0 the cap compared against {@code Files.size()} while
+     *  {@code PRAGMA incremental_vacuum} reclaimed exactly ONE page per JDBC call, so
+     *  the file could never fall back under the cap and the store evicted every
+     *  deposit forever. Measured on the real engine: 448 rows / ~9 MB alive against a
+     *  64 MB cap (14% utilisation), and a one-shot burst ended at ZERO rows with the
+     *  file stuck permanently above its cap — dead for the life of that DB. This
+     *  deposits well over the cap, lets eviction settle, and pins both halves the old
+     *  test could not: a substantial working set survives, and an IDLE capped store
+     *  stops evicting. */
+    @Test
+    void sizeCapConvergesToAWorkingSetInsteadOfEvictingEverything() throws Exception {
+        writeRegion(OW, 0, 0, Map.of());
+        // ~2 MB cap; 20 KB incompressible rows on 16 KB pages ≈ 60 rows of headroom.
+        var env = new SqliteLodStore.Environment(storeDir(), "26.2-test", WIRE,
+                this::regionDir, d -> "", 0, 2_000_000L);
+        SqliteLodStore store = SqliteLodStore.createOrNull(LodStoreMode.FULL, env,
+                new LodStoreDiagnostics());
+        assertNotNull(store);
+        assertTrue(store.awaitSweep(10_000));
+        int total = 300; // ~6 MB deposited against a ~2 MB cap
+        for (int i = 0; i < total; i++) {
+            store.deposit(OW, PositionUtil.packPosition(i, 12), bytes(100 + i, 20_000), 1000 + i);
+        }
+        assertNotNull(awaitHit(store, OW, PositionUtil.packPosition(total - 1, 12)));
+        awaitStableEvictions(store);
+
+        int alive = countAlive(store, total);
+        assertTrue(alive >= 25,
+                "a capped store must retain a working set, not evict itself empty; alive=" + alive);
+        // ...and must STAY retained with nothing further deposited. The treadmill's
+        // signature is a row count that keeps falling while the store is idle.
+        Thread.sleep(6_000);
+        assertEquals(alive, countAlive(store, total),
+                "an idle capped store must stop evicting once under its cap");
+        assertEquals(0, store.diagnostics().getErrors());
+        store.shutdown();
+    }
+
+    private static int countAlive(SqliteLodStore store, int total) {
+        int alive = 0;
+        for (int i = 0; i < total; i++) {
+            if (store.get(OW, PositionUtil.packPosition(i, 12)) != null) alive++;
+        }
+        return alive;
     }
 
     /** Cap-behavior §2: the size-cap eviction INFO latches after its FIRST emission —
@@ -718,6 +793,61 @@ class SqliteLodStoreTest {
         assertTrue(store.diagnostics().getErrors() >= 1, "the injected failure must count");
         assertEquals(0, sqlRowCount(OW),
                 "the committed delete must survive the later rollback (R1-M1)");
+        store.shutdown();
+    }
+
+    /** A tombstone must outlive its OWN queued delete, not merely the deposit queue.
+     *
+     *  <p>The expiry floor used to consider only queued deposits, justified by
+     *  "control ops never consult tombstones" — true, but the tombstone's other job is
+     *  suppressing READERS until the delete applies. Across a batcher stall longer
+     *  than the TTL (a large sweep, a whole-dimension drop, a WAL TRUNCATE, the vacuum
+     *  drain) the first resumed iteration applied one delete and then expired every
+     *  tombstone whose delete was still queued behind it, so {@code get()} served the
+     *  PRE-EDIT row. Silent, and it does not self-heal — the client ingests it and the
+     *  position leaves the want-set. (v0.9.0 review.)
+     *
+     *  <p>Note the fix cannot be an age floor: a tombstone is stamped just BEFORE its
+     *  delete is enqueued, so any timestamp derived from the control queue still
+     *  expires the tombstone it was meant to protect. It is an identity check. */
+    @Test
+    void tombstonesOutliveTheirOwnQueuedDeletes() throws Exception {
+        writeRegion(OW, 0, 0, Map.of());
+        SqliteLodStore store = open(defaultEnv());
+        int n = 60;
+        long[] positions = new long[n];
+        for (int i = 0; i < n; i++) {
+            positions[i] = PositionUtil.packPosition(i, 5);
+            store.deposit(OW, positions[i], bytes(i + 1, 512), 1000 + i);
+        }
+        assertNotNull(awaitHit(store, OW, positions[n - 1]));
+
+        // Pause the batcher, then invalidate each position SEPARATELY so the control
+        // queue holds n distinct DeleteRows: one applies per step, the rest wait.
+        var permits = store.pauseBatcherForTest();
+        for (long p : positions) store.invalidate(OW, new long[]{p});
+        assertEquals(n, store.tombstoneCountForTest(OW), "every invalidate stamps a tombstone");
+        Thread.sleep(11_000); // age them past the 10 s TTL while the deletes cannot drain
+
+        // Exactly ONE step: applies delete #1, then runs the (now due) tombstone sweep
+        // with n-1 deletes still queued. This is the moment the bug fired.
+        permits.release();
+        for (int i = 0; i < 400 && sqlRowCount(OW) > n - 1; i++) Thread.sleep(25);
+        assertEquals(n - 1, sqlRowCount(OW), "exactly one delete applies per step");
+
+        // The batcher is parked again, so this is a still frame, not a race: every
+        // position whose delete is still queued must remain suppressed.
+        for (int i = 1; i < n; i++) {
+            assertNull(store.get(OW, positions[i]),
+                    "a position whose delete is still queued must stay suppressed");
+        }
+        assertEquals(n - 1, store.tombstoneCountForTest(OW),
+                "the sweep must not expire a tombstone whose own delete is still queued");
+
+        permits.release(Integer.MAX_VALUE - 1);
+        for (int i = 0; i < 400 && sqlRowCount(OW) > 0; i++) Thread.sleep(25);
+        assertEquals(0, sqlRowCount(OW), "every delete must apply");
+        assertEquals(0, store.diagnostics().getErrors());
         store.shutdown();
     }
 

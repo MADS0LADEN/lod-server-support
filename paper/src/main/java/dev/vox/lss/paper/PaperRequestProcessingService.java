@@ -361,7 +361,12 @@ public class PaperRequestProcessingService {
         // unfired-event dirty gaps. A failed codec/native probe degrades to store-off
         // with one warning (the Fabric twin is identical).
         dev.vox.lss.common.store.LodStoreService lodStore = null;
-        var storeMode = dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore);
+        // enabled=false must not open the store (Fabric twin: the same guard). Paper
+        // has no backfill so the cost is a DB file and a sweep thread rather than a
+        // full-world walk, but "LSS is off" should still mean nothing is created.
+        var storeMode = config.enabled
+                ? dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore)
+                : dev.vox.lss.common.store.LodStoreMode.OFF;
         if (storeMode != dev.vox.lss.common.store.LodStoreMode.OFF) {
             var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
             var regionDirs = new java.util.HashMap<String, java.nio.file.Path>();

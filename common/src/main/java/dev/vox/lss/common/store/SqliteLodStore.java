@@ -4,6 +4,7 @@ import dev.vox.lss.common.Brand;
 import dev.vox.lss.common.LSSLogger;
 import dev.vox.lss.common.PositionUtil;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -13,8 +14,10 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -87,6 +90,21 @@ public final class SqliteLodStore implements LodStoreService {
     private static final long GAUGE_REFRESH_NANOS = TimeUnit.SECONDS.toNanos(5);
     /** Firm-cap runaway stop (review B12): max eviction batches per gauge tick. */
     private static final int MAX_EVICTION_PASSES_PER_TICK = 8;
+    // Per-pass, per-dimension row ceiling. The pass normally stops far short of this,
+    // as soon as it has covered the byte deficit; this only bounds how long one pass
+    // can hold the batcher when the store is enormously over cap.
+    private static final int EVICTION_MAX_ROWS_PER_DIM = 512;
+    // Whole-dimension drops materialize at most this many positions at a time.
+    private static final int DROP_BATCH_ROWS = 4096;
+    // Evict down to this fraction of the cap rather than to exactly the cap, so a
+    // store sitting at its limit does not re-enter eviction on every 5 s gauge tick.
+    private static final double EVICTION_TARGET_FRACTION = 0.95;
+    // One PRAGMA execute reclaims ONE page (see drainIncrementalVacuum), so this is
+    // both a page budget and a statement budget: 2048 * 16 KB = 32 MB returned to the
+    // filesystem per 5 s tick, comfortably ahead of the ~2.5 MB/s a max-pace backfill
+    // deposits, while bounding how long the batcher sits in the drain (a long batcher
+    // stall is what lets tombstones expire under their own queued deletes).
+    private static final int MAX_VACUUM_PAGES_PER_TICK = 2048;
     /** Writer-side failures within one session before the one-way off latch. */
     private static final int WRITE_FAILURE_LATCH = 20;
     /** Sanity ceiling on a row's self-declared uncompressed size (real columns are
@@ -200,6 +218,20 @@ public final class SqliteLodStore implements LodStoreService {
     private int txnRows;
     private long lastGaugeRefreshNanos;
     private long nextResweepNanos;
+    /** Test-only batcher step gate (see the top of {@code batcherLoop}); production
+     *  leaves it null. Volatile: set from the test thread, read by the batcher. */
+    private volatile java.util.concurrent.Semaphore batcherStepsForTest;
+    /** Per-dimension whole-drop barrier (nanoTime): deposits enqueued at or before it
+     *  are refused, replacing the per-position tombstones a full drop used to stamp.
+     *  See {@link #dropDimensionRows}. */
+    private final Map<String, Long> dropBarrierNanos = new ConcurrentHashMap<>();
+    /** Dimensions whose rows are mid-drop — readers are suppressed wholesale, so a
+     *  half-dropped dimension never serves its surviving rows. */
+    private final Set<String> droppingDims = ConcurrentHashMap.newKeySet();
+    /** Resolved from the DB on first use rather than assumed to be {@link #PAGE_SIZE}:
+     *  an existing store carries whatever page size it was created with, and the size
+     *  cap multiplies by this. Batcher-confined, like the writer it is read through. */
+    private long pageSizeBytes;
 
     // Reader connections, thread-confined (reader-pool threads via ThreadLocal). Tracked
     // for shutdown closing. Readers only ever see dimensions that exist at their first
@@ -411,6 +443,8 @@ public final class SqliteLodStore implements LodStoreService {
         if (!this.serving || this.latchedOff) return null;
         var tombs = this.tombstones.get(dimension);
         if (tombs != null && tombs.containsKey(packed)) return null;
+        // A dimension mid-drop must not serve the rows it has not reached yet.
+        if (this.droppingDims.contains(dimension)) return null;
         Integer dimId = this.dimIdsShared.get(dimension);
         if (dimId == null) return null;
         try {
@@ -471,6 +505,8 @@ public final class SqliteLodStore implements LodStoreService {
         if (!this.serving || this.latchedOff) return null;
         var tombs = this.tombstones.get(dimension);
         if (tombs != null && tombs.containsKey(packed)) return null;
+        // A dimension mid-drop must not serve the rows it has not reached yet.
+        if (this.droppingDims.contains(dimension)) return null;
         Integer dimId = this.dimIdsShared.get(dimension);
         if (dimId == null) return null;
         try {
@@ -652,6 +688,9 @@ public final class SqliteLodStore implements LodStoreService {
         if (!this.serving || this.latchedOff) return false;
         var tombs = this.tombstones.get(dimension);
         if (tombs != null && tombs.containsKey(packed)) return false;
+        // A dimension mid-drop must not report rows it has not reached yet — the
+        // backfill's hasRow skip would otherwise treat them as already warm.
+        if (this.droppingDims.contains(dimension)) return false;
         Integer dimId = this.dimIdsShared.get(dimension);
         if (dimId == null) return false;
         try {
@@ -804,6 +843,20 @@ public final class SqliteLodStore implements LodStoreService {
                 ? System.nanoTime() + TimeUnit.SECONDS.toNanos(this.env.resweepSeconds())
                 : Long.MAX_VALUE;
         while (!this.shutdown.get() && !this.latchedOff) {
+            // Test seam: lets a test single-step the batcher, so the window between
+            // "one op applied" and "the rest still queued" — which real stalls open
+            // (runSweep on a large store, dropDimensionRows, a WAL TRUNCATE, the
+            // vacuum drain) but which drains far too fast to observe from another
+            // thread — becomes deterministic. Null in production: one reference read
+            // per iteration. See pauseBatcherForTest.
+            var steps = this.batcherStepsForTest;
+            if (steps != null) {
+                try {
+                    steps.acquire();
+                } catch (InterruptedException e) {
+                    break;
+                }
+            }
             Op op = this.controlQueue.poll(); // deletes first: they must never wait behind deposits
             if (op == null) {
                 try {
@@ -930,11 +983,10 @@ public final class SqliteLodStore implements LodStoreService {
                 commitTxn();
                 long now = System.nanoTime();
                 for (var e : List.copyOf(this.dimIds.entrySet())) {
-                    List<Long> dropped = dropDimensionRows(e.getValue());
-                    var tombs = this.tombstones.computeIfAbsent(e.getKey(),
-                            k -> new ConcurrentHashMap<>());
-                    for (long pos : dropped) tombs.put(pos, now);
-                    notifySweepDrops(e.getKey(), dropped);
+                    // dropDimensionRows publishes each batch to the sweep-drop
+                    // listener and installs the O(1) drop barrier itself; it no
+                    // longer needs a tombstone per position.
+                    dropDimensionRows(e.getKey(), e.getValue());
                 }
                 // The backfill progress table must reset with the rows it describes
                 // (4-agent round R3-M1): done-marks surviving the drop made the
@@ -971,6 +1023,14 @@ public final class SqliteLodStore implements LodStoreService {
                 this.diag.recordDepositSkip();
                 return;
             }
+        }
+        // Whole-dimension drop barrier — the O(1) stand-in for the per-position
+        // tombstones a full drop used to stamp (see dropDimensionRows). Same rule: a
+        // deposit enqueued at or before the drop must not resurrect a dropped row.
+        Long barrier = this.dropBarrierNanos.get(dep.dim());
+        if (barrier != null && dep.enqueuedNanos() - barrier <= 0) {
+            this.diag.recordDepositSkip();
+            return;
         }
         int dimId = dimIdFor(dep.dim());
         // Pre-framed deposits (compressed sessions) carry the wire frame + caller-computed
@@ -1111,17 +1171,52 @@ public final class SqliteLodStore implements LodStoreService {
     private void sweepTombstones(long nowNanos) {
         if (nowNanos - this.lastTombstoneSweepNanos < TOMBSTONE_TTL_NANOS) return;
         this.lastTombstoneSweepNanos = nowNanos;
-        // Expiry floor: a tombstone gates queued deposits with enqueuedNanos <= stamp,
-        // so one may only expire once it is OLDER than the oldest still-queued deposit
-        // (the head of the bounded queue — control ops never consult tombstones). This
-        // is what makes busy-period sweeping safe; the old idle-only gate enforced the
-        // same invariant by only sweeping when the queue was empty.
+        // A tombstone has TWO jobs and expiry must respect both:
+        //   1. it gates queued DEPOSITS with enqueuedNanos <= stamp, so it may only
+        //      expire once older than the oldest still-queued deposit (the age floor);
+        //   2. it suppresses READERS (get/getFrame/hasRow) for a position whose
+        //      invalidate/delete the batcher has not applied yet, so it must survive
+        //      for as long as its own delete is queued.
+        // Only (1) used to be enforced, justified by "control ops never consult
+        // tombstones" — true, but it answers the wrong question. With the control queue
+        // ignored, a batcher that stalled longer than the TTL inside one op (runSweep
+        // on a large store, dropDimensionRows, a WAL TRUNCATE checkpoint, the vacuum
+        // drain) resumed to find its first iteration apply delete #1 and then expire
+        // the tombstones of deletes #2..#N still queued behind it — so get() served the
+        // PRE-EDIT row for each until its delete drained. Silent, and it does not
+        // self-heal: the client ingests it, the position leaves the want-set, and the
+        // stale LOD survives until another edit there or a rejoin. (v0.9.0 review.)
+        //
+        // (2) is an IDENTITY question, not an age one: a tombstone is stamped just
+        // BEFORE its delete is enqueued, so any age-based floor derived from the
+        // control queue still expires the very tombstone it was meant to protect.
+        // Hence the explicit position check below. The control queue is drained one op
+        // per loop iteration and is normally empty; this runs at most once per TTL, on
+        // the batcher thread — the only thread that removes from it, so the weakly
+        // consistent iteration can only miss a just-added delete, whose tombstone is
+        // far too young to be expiring anyway.
         Op head = this.queue.peek();
-        long floor = head instanceof Op.Deposit dep ? dep.enqueuedNanos() : nowNanos;
-        for (var tombs : this.tombstones.values()) {
-            tombs.values().removeIf(stamp ->
-                    nowNanos - stamp > TOMBSTONE_TTL_NANOS && stamp < floor);
+        final long ageFloor = head instanceof Op.Deposit dep ? dep.enqueuedNanos() : nowNanos;
+        for (var dimEntry : this.tombstones.entrySet()) {
+            Set<Long> undeleted = queuedDeletePositions(dimEntry.getKey());
+            dimEntry.getValue().entrySet().removeIf(e ->
+                    nowNanos - e.getValue() > TOMBSTONE_TTL_NANOS
+                            && e.getValue() - ageFloor < 0
+                            && !undeleted.contains(e.getKey()));
         }
+    }
+
+    /** Positions in {@code dimension} whose DeleteRows is still queued, and whose
+     *  tombstones must therefore not expire however old they are. */
+    private Set<Long> queuedDeletePositions(String dimension) {
+        Set<Long> pending = null;
+        for (Op op : this.controlQueue) {
+            if (op instanceof Op.DeleteRows del && del.dim().equals(dimension)) {
+                if (pending == null) pending = new HashSet<>();
+                for (long p : del.positions()) pending.add(p);
+            }
+        }
+        return pending == null ? Set.of() : pending;
     }
 
     private void maybeRefreshGauges(long nowNanos) {
@@ -1140,24 +1235,47 @@ public final class SqliteLodStore implements LodStoreService {
             }
             // Phase 5 size cap: above it, evict the oldest-ts rows in batches and
             // return the pages (auto_vacuum=INCREMENTAL, armed at DB creation).
-            // Evicted columns re-warm on their next serve. WAL bytes count toward the
-            // cap only up to the checkpoint threshold: recent data legitimately lives
-            // in the WAL until the TRUNCATE (db-only accounting would blind the cap
-            // between checkpoints), but an UNbounded WAL contribution let a
-            // busy-wedged WAL drive eviction of live rows while the real DB was far
-            // under cap (R1 review — the checkpoint result is now also observed).
-            long dbBytes = this.diag.getDbBytes()
-                    + Math.min(walBytes, WAL_CHECKPOINT_BYTES);
-            if (dbBytes > this.env.maxDbBytes()) {
+            // Evicted columns re-warm on their next serve.
+            //
+            // The cap is measured against the LOGICAL size — (page_count -
+            // freelist_count) * page_size — never Files.size(). Two defects lived in
+            // the file-size version and they compounded (v0.9.0 review, both measured
+            // against the real engine):
+            //   * WAL mode does not touch the main DB file until a checkpoint, so
+            //     Files.size() is frozen while deposits accumulate. The old code
+            //     compensated with a bounded WAL term, but that term only ever GREW
+            //     inside a tick (eviction writes its own deletes into the WAL), so the
+            //     re-measurement at the bottom of the loop could never fall and all 8
+            //     passes always ran once entered — up to 4096 rows/dim. An 8 MB cap
+            //     25% over was observed evicting its ENTIRE contents. That term also
+            //     contradicted both checkpointTruncate's own comment below and the R1
+            //     disposition in lod-store-progress.md, which record the cap as
+            //     db-only. page_count is read through the writer's snapshot, so it
+            //     already accounts for committed WAL frames and needs no WAL term.
+            //   * Deleted rows return pages to the freelist, but the file shrinks only
+            //     when the vacuum reclaims them — which it did not, one page per tick
+            //     (see drainIncrementalVacuum). File size therefore never fell back
+            //     under the cap and the store treadmilled permanently: measured 448
+            //     rows / ~9 MB alive against a 64 MB cap (14% utilisation), evicting
+            //     every deposit within 5 s, forever; one run ended at 0 rows with the
+            //     file stuck 34 MB above its cap for the life of the DB.
+            // Logical size falls the instant rows are deleted, so the loop converges
+            // whether or not the vacuum keeps up; the vacuum is now purely about
+            // returning space to the filesystem.
+            long liveBytes = logicalDbBytes();
+            if (liveBytes > this.env.maxDbBytes()) {
                 commitTxn();
                 // Firm cap (review B12): ONE 512-row/dim batch per 5 s tick
                 // (~780 KB/s) is out-runnable by deposits — the backfill default alone
                 // approaches it — so the cap silently did not bind. Loop batches
                 // within this tick until under cap; the pass bound is a runaway stop,
                 // and with the ts index each pass is an index walk, not a table scan.
+                // Evict to a little UNDER the cap: landing exactly on it puts the
+                // store back into this branch on the very next gauge tick.
+                long target = (long) (this.env.maxDbBytes() * EVICTION_TARGET_FRACTION);
                 for (int pass = 0; pass < MAX_EVICTION_PASSES_PER_TICK
-                        && dbBytes > this.env.maxDbBytes(); pass++) {
-                    int evicted = evictOldestBatch();
+                        && liveBytes > this.env.maxDbBytes(); pass++) {
+                    int evicted = evictOldestBatch(liveBytes - target);
                     if (evicted == 0) break;
                     // Count + (once) log BEFORE the vacuum: evictOldestBatch has
                     // already committed its deletions, and a vacuum/commit throw is
@@ -1175,24 +1293,30 @@ public final class SqliteLodStore implements LodStoreService {
                     if (this.capLogLatch.compareAndSet(false, true)) {
                         this.capLogEmissions++;
                         LSSLogger.info("LOD store size cap: evicted " + evicted
-                                + " oldest rows (db " + (dbBytes >> 20) + " MB > cap "
+                                + " oldest rows (live " + (liveBytes >> 20) + " MB > cap "
                                 + (this.env.maxDbBytes() >> 20) + " MB) — the store is at "
                                 + "its size cap and will keep evicting silently; running "
                                 + "totals in '/lsslod store status' (evicted=), raise or "
                                 + "zero lodStoreMaxMB (0 = uncapped) for full retention");
                     }
-                    try (Statement st = this.writer.createStatement()) {
-                        st.execute("PRAGMA incremental_vacuum");
-                    }
-                    this.writer.commit();
-                    this.diag.setDbBytes(Files.exists(this.dbPath) ? Files.size(this.dbPath) : 0);
-                    long walNow = Files.exists(wal) ? Files.size(wal) : 0;
-                    dbBytes = this.diag.getDbBytes() + Math.min(walNow, WAL_CHECKPOINT_BYTES);
+                    liveBytes = logicalDbBytes();
                 }
+                // Return the freed pages to the filesystem ONCE per tick, after the
+                // eviction passes rather than inside each one: the cap has already
+                // converged on logical bytes above, so this is disk hygiene and its
+                // budget bounds the batcher's time here.
+                drainIncrementalVacuum(MAX_VACUUM_PAGES_PER_TICK);
+                this.writer.commit();
+                this.diag.setDbBytes(Files.exists(this.dbPath) ? Files.size(this.dbPath) : 0);
             }
         } catch (Throwable ignored) {
             // gauge refresh is best-effort; a failed checkpoint retries next interval
         }
+    }
+
+    /** The directory holding the store, for the backfill's free-space floor. */
+    Path storeDir() {
+        return this.dbPath.getParent();
     }
 
     /** The active size cap in bytes (Long.MAX_VALUE = uncapped); the backfill's
@@ -1228,10 +1352,76 @@ public final class SqliteLodStore implements LodStoreService {
         return "ok";
     }
 
-    /** Cap-accounted current size: db + WAL contribution bounded at the checkpoint
-     *  threshold — the SAME accounting the eviction check uses, so the backfill's
-     *  stop gate and the evictor cannot disagree about "at the cap". Statted LIVE
-     *  (called once per backfill region — negligible) rather than read from the
+    /** Reads a single-value PRAGMA off the writer connection. Batcher-thread only. */
+    private long pragmaLong(String pragma) throws SQLException {
+        try (Statement st = this.writer.createStatement();
+             ResultSet rs = st.executeQuery("PRAGMA " + pragma)) {
+            return rs.next() ? rs.getLong(1) : -1L;
+        }
+    }
+
+    /** Live data size: {@code (page_count - freelist_count) * page_size}. This — not
+     *  {@link Files#size} — is what the size cap compares against; see the rationale
+     *  at the cap check in {@link #maybeRefreshGauges}. Read through the writer's
+     *  snapshot, so committed WAL frames are already counted and no WAL term is
+     *  needed. Batcher-thread only. On any pragma failure it falls back to the file
+     *  size, which over-reports (freed pages included) and therefore errs toward
+     *  evicting rather than toward an unbounded store. */
+    private long logicalDbBytes() {
+        try {
+            if (this.pageSizeBytes <= 0) this.pageSizeBytes = pragmaLong("page_size");
+            long pageSize = this.pageSizeBytes > 0 ? this.pageSizeBytes : PAGE_SIZE;
+            long pages = pragmaLong("page_count");
+            long free = pragmaLong("freelist_count");
+            if (pages <= 0 || free < 0 || free > pages) return fileSizeOrZero();
+            return (pages - free) * pageSize;
+        } catch (Exception e) {
+            return fileSizeOrZero();
+        }
+    }
+
+    private long fileSizeOrZero() {
+        try {
+            return Files.exists(this.dbPath) ? Files.size(this.dbPath) : 0;
+        } catch (IOException e) {
+            return this.diag.getDbBytes();
+        }
+    }
+
+    /** Returns freed pages to the filesystem, bounded at {@code maxPages}.
+     *
+     *  <p>{@code PRAGMA incremental_vacuum} moves ONE page per {@code sqlite3_step},
+     *  and a JDBC {@code execute()} steps the statement exactly once before
+     *  finalizing it — so the single call this used to make reclaimed one page
+     *  (16 KB) per 5 s tick no matter how much had just been evicted. Measured on the
+     *  real engine during the v0.9.0 review: {@code freelist_count} 1874 → 1873 →
+     *  1872 across three production-shaped calls, while {@code page_count} fell by ~1
+     *  per tick under a sustained deposit stream. The file consequently never shrank.
+     *  Loop instead, stopping when the freelist empties, the budget is spent, or a
+     *  pass makes no progress (never spin on a vacuum that cannot advance — e.g. an
+     *  open read snapshot pinning the pages). */
+    private void drainIncrementalVacuum(int maxPages) throws SQLException {
+        int budget = maxPages;
+        while (budget > 0) {
+            long before = pragmaLong("freelist_count");
+            if (before <= 0) return;
+            int batch = (int) Math.min(budget, before);
+            try (Statement st = this.writer.createStatement()) {
+                for (int i = 0; i < batch; i++) st.execute("PRAGMA incremental_vacuum");
+            }
+            budget -= batch;
+            if (pragmaLong("freelist_count") >= before) return;
+        }
+    }
+
+    /** Cap-accounted current size for the BACKFILL's stop gate. Deliberately the file
+     *  size (plus a bounded WAL term), not {@link #logicalDbBytes}: this is called
+     *  from the backfill worker thread, and the writer connection the pragmas need is
+     *  batcher-confined. The two therefore differ by the freelist, and only in the
+     *  safe direction — the walk stops slightly EARLIER than the evictor starts,
+     *  which is the conservative error for a gate whose job is "do not fill the
+     *  disk". With the vacuum now actually draining, the gap stays small.
+     *  Statted LIVE (once per backfill region — negligible) rather than read from the
      *  ~5 s gauge: a fast walk deposits up to ~40 MB per gauge interval at max
      *  pace, which ate the stop gate's 5% margin at small caps (review MINOR).
      *  Falls back to the gauges if the stat fails. */
@@ -1247,23 +1437,60 @@ public final class SqliteLodStore implements LodStoreService {
         }
     }
 
+    /** Pauses the batcher at the top of its loop and returns the permit source that
+     *  releases it — one permit, one op. Test-only: tombstone expiry is only
+     *  observable in the window between applying one delete and the next, and real
+     *  stalls (large sweeps, whole-dimension drops, WAL checkpoints) neither happen on
+     *  demand nor hold still long enough to sample. */
+    java.util.concurrent.Semaphore pauseBatcherForTest() {
+        var permits = new java.util.concurrent.Semaphore(0);
+        this.batcherStepsForTest = permits;
+        return permits;
+    }
+
+    /** Package-visible for the tombstone-floor pin: how many positions are currently
+     *  suppressed for readers in {@code dimension}. */
+    int tombstoneCountForTest(String dimension) {
+        var tombs = this.tombstones.get(dimension);
+        return tombs == null ? 0 : tombs.size();
+    }
+
     /** Cap-log one-shot emissions (package-visible: the §2 latch pin counts CALLS —
      *  two eviction batches must produce exactly one log line). */
     int capLogEmissionCount() {
         return this.capLogEmissions;
     }
 
-    /** Oldest-ts batch eviction across all dims (512 rows/dim per pass). Evicted
-     *  positions go through the tombstone protocol like any delete so readers cannot
-     *  race a half-removed row. */
-    private int evictOldestBatch() throws SQLException {
+    /** Oldest-ts eviction across all dims, sized to the DEFICIT rather than to a fixed
+     *  batch, and bounded at {@link #EVICTION_MAX_ROWS_PER_DIM} rows/dim per pass so
+     *  one pass cannot monopolise the batcher.
+     *
+     *  <p>This used to delete a flat 512 rows/dim however far over the cap the store
+     *  actually was, and {@link #MAX_EVICTION_PASSES_PER_TICK} compounded that to 4096
+     *  rows/dim per tick — so a store a few MB over its cap was emptied in a single
+     *  gauge tick (measured: 87% of the store gone in one tick, and a small cap taken
+     *  to zero rows). Correct accounting alone does not fix that: the loop re-checks
+     *  between passes, but the FIRST pass already overshoots. Reading each candidate's
+     *  {@code length(blob)} lets the pass stop the moment enough bytes are covered.
+     *
+     *  <p>Freed pages are ≥ freed blob bytes (page granularity), so covering the
+     *  deficit in blob bytes always clears it in page bytes; the caller re-measures
+     *  and runs another pass if not. Evicted positions go through the tombstone
+     *  protocol like any delete so readers cannot race a half-removed row. */
+    private int evictOldestBatch(long bytesToFree) throws SQLException {
         int evicted = 0;
+        long remaining = bytesToFree;
         for (var entry : List.copyOf(this.dimIds.entrySet())) {
+            if (remaining <= 0) break;
             List<Long> oldest = new ArrayList<>();
             try (Statement st = this.writer.createStatement();
-                 ResultSet rs = st.executeQuery("SELECT pos FROM lods_" + entry.getValue()
-                         + " ORDER BY ts ASC LIMIT 512")) {
-                while (rs.next()) oldest.add(rs.getLong(1));
+                 ResultSet rs = st.executeQuery("SELECT pos, length(\"blob\") FROM lods_"
+                         + entry.getValue() + " ORDER BY ts ASC LIMIT "
+                         + EVICTION_MAX_ROWS_PER_DIM)) {
+                while (rs.next() && remaining > 0) {
+                    oldest.add(rs.getLong(1));
+                    remaining -= Math.max(1L, rs.getLong(2));
+                }
             }
             if (oldest.isEmpty()) continue;
             var tombs = this.tombstones.computeIfAbsent(entry.getKey(),
@@ -1349,11 +1576,10 @@ public final class SqliteLodStore implements LodStoreService {
                 regionDir = null;
             }
             if (regionDir == null || !Files.isDirectory(regionDir)) {
-                List<Long> dropped = dropDimensionRows(dimId);
-                notifySweepDrops(dimension, dropped);
-                if (!dropped.isEmpty()) {
+                int dropped = dropDimensionRows(dimension, dimId);
+                if (dropped > 0) {
                     LSSLogger.warn("LOD store: region directory for " + dimension
-                            + " is unresolvable — dropped its " + dropped.size()
+                            + " is unresolvable — dropped its " + dropped
                             + " stored rows (fail-safe)");
                 }
                 continue;
@@ -1362,8 +1588,7 @@ public final class SqliteLodStore implements LodStoreService {
             String fp = currentMaskFingerprint(dimension);
             String storedFp = storedMaskFingerprint(dimId);
             if (!fp.equals(storedFp)) {
-                List<Long> dropped = dropDimensionRows(dimId);
-                notifySweepDrops(dimension, dropped);
+                int dropped = dropDimensionRows(dimension, dimId);
                 try (PreparedStatement ps = this.writer.prepareStatement(
                         "UPDATE dims SET mask_fingerprint=? WHERE id=?")) {
                     ps.setString(1, fp);
@@ -1371,9 +1596,9 @@ public final class SqliteLodStore implements LodStoreService {
                     ps.executeUpdate();
                 }
                 this.writer.commit();
-                if (!dropped.isEmpty()) {
+                if (dropped > 0) {
                     LSSLogger.info("LOD store: x-ray mask changed for " + dimension
-                            + " — dropped " + dropped.size() + " rows (rebuilds from serves)");
+                            + " — dropped " + dropped + " rows (rebuilds from serves)");
                 }
                 continue; // fresh slate; mtimes recorded below next pass
             }
@@ -1538,17 +1763,42 @@ public final class SqliteLodStore implements LodStoreService {
 
     /** Drops every row of a dimension, returning the dropped positions (the sweep-drop
      *  fan-out needs them — the memory tier must evict its copies too). */
-    private List<Long> dropDimensionRows(int dimId) throws SQLException {
-        List<Long> positions = new ArrayList<>();
-        try (Statement st = this.writer.createStatement();
-             ResultSet rs = st.executeQuery("SELECT pos FROM lods_" + dimId)) {
-            while (rs.next()) positions.add(rs.getLong(1));
+    /** Drops every row of one dimension in bounded batches, publishing each batch to
+     *  the sweep-drop listener. Returns the number of rows removed.
+     *
+     *  <p>This used to SELECT every position into one unbounded {@code ArrayList}, and
+     *  the DropAll caller stamped a tombstone per position on top of that — roughly
+     *  240 MB of list plus 800 MB of concurrent-map nodes on a 50 GB store, all live
+     *  at once on the batcher thread, with {@code lodStoreMaxMB} defaulting to
+     *  uncapped so nothing bounded the row count. Nor is it admin-only: the sweep
+     *  drops a whole dimension for an unresolvable region directory and for
+     *  mask-fingerprint drift, and Fabric's {@code transient:} nonce makes that drift
+     *  routine on some AntiXray boots. (v0.9.0 review.)
+     *
+     *  <p>The per-position tombstones are replaced by two O(1) guards: readers are
+     *  suppressed for the whole dimension while the drop runs (a half-dropped
+     *  dimension must not serve its survivors), and the drop barrier refuses deposits
+     *  that were enqueued before it — which is exactly what those tombstones did. */
+    private int dropDimensionRows(String dimension, int dimId) throws SQLException {
+        this.dropBarrierNanos.put(dimension, System.nanoTime());
+        this.droppingDims.add(dimension);
+        int total = 0;
+        try {
+            while (true) {
+                List<Long> batch = new ArrayList<>();
+                try (Statement st = this.writer.createStatement();
+                     ResultSet rs = st.executeQuery("SELECT pos FROM lods_" + dimId
+                             + " LIMIT " + DROP_BATCH_ROWS)) {
+                    while (rs.next()) batch.add(rs.getLong(1));
+                }
+                if (batch.isEmpty()) break;
+                total += deleteRows(dimId, batch); // commits immediately, per the delete rule
+                notifySweepDrops(dimension, batch);
+            }
+        } finally {
+            this.droppingDims.remove(dimension);
         }
-        try (Statement st = this.writer.createStatement()) {
-            st.executeUpdate("DELETE FROM lods_" + dimId);
-            this.writer.commit();
-        }
-        return positions;
+        return total;
     }
 
     /** One region's rows via 32 indexed range seeks on the pos PRIMARY KEY (review A1):
