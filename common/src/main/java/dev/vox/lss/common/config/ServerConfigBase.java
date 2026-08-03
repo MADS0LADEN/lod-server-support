@@ -180,16 +180,21 @@ public abstract class ServerConfigBase extends JsonConfig {
      * ~10.6 KB/chunk of region data). It is derived data: deleting the {@code lss-lod/} folder
      * is always safe, and the service logs the expected growth once at startup.
      *
-     * <p>PaperConfig DEFAULTS this to "off" on FOLIA, where the store is untested. It is a
-     * default, not a gate: an explicit "full" in the file still arms it (PaperConfig's own
-     * comment says so). Both this javadoc and CLAUDE.md used to say "forces", which reads
-     * as a guarantee that copying a Paper config onto a Folia server cannot bypass.
-     * Unknown values normalize to "off" — the SAFE value, deliberately unlike
+     * <p>DEFAULT IS OFF on every platform (user decision, 2026-08-03). It briefly defaulted
+     * to "full" during v0.9.0 development and that was reverted before release for one
+     * reason: an upgrade must never silently double the size of somebody's world folder.
+     * A server operator who has not read the release notes cannot consent to that, and
+     * disk exhaustion is not a failure they can undo cheaply. So the store is opt-in, and
+     * the documentation recommends turning it on rather than the default deciding for
+     * them. {@code lodStoreBackfill} deliberately stays ON so that flipping this one key
+     * to "full" also gets the background warm-up — one switch, not two.
+     *
+     * <p>Unknown values normalize to "off" — the SAFE value, deliberately unlike
      * xrayObfuscation's normalize-to-auto: a typo must never enable a storage engine.
      * "memory" was a third value until 2026-08-02 and is now one of those unknowns;
      * the in-memory tier survives only as the SQLite-init degrade (see LodStores).
      */
-    public String lodStore = "full";
+    public String lodStore = "off";
     // NOTE: lodStoreMemoryMB is RETIRED (2026-08-02) along with the "memory" mode — the
     // in-memory tier survives only as the boot-time degrade when SQLite cannot init, at
     // a fixed budget (LodStores.DEGRADE_MAX_BYTES). GSON ignores the key on load and
@@ -220,7 +225,11 @@ public abstract class ServerConfigBase extends JsonConfig {
      * because the restraint architecture is not tunable: MIN_PRIORITY thread, one read at a
      * time, the reader-headroom gate, the MSPT ceiling, 500 ms pause polling. The walk is
      * resumable across restarts via per-region done-marks and logs a size estimate up front.
-     * No clamp: boolean.
+     *
+     * <p>Stays TRUE even though {@code lodStore} now defaults to "off" (2026-08-03): the key
+     * is INERT while the store is off, so the only thing this default decides is what an
+     * operator gets when they DO opt in — and they should get the whole feature from one
+     * switch rather than discovering a second one later. No clamp: boolean.
      */
     public boolean lodStoreBackfill = true;
     /**

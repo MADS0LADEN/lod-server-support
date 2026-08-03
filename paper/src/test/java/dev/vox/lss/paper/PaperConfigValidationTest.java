@@ -84,16 +84,23 @@ class PaperConfigValidationTest {
         assertEquals(0, c.outboundBufferCeilingKB, "0 stays 0 — it is the off switch");
     }
 
-    /** Paper's Folia override (config review §2.1): the store defaults ON everywhere else as of
-     *  2026-08-02, but it has never been gated on Folia, so a default-on store would arm an
-     *  unvalidated storage engine on every Folia server that upgrades. Not a hard gate — an
-     *  explicit lodStore="full" still works there. Off-Folia (this test JVM) it must be "full". */
+    /** The store is OPT-IN on every platform (user decision, 2026-08-03): it briefly
+     *  defaulted to "full" during v0.9.0 development and was reverted before release,
+     *  because an upgrade must never silently double the size of an operator's world
+     *  folder. Paper inherits that default with no Folia-specific override any more — the
+     *  shared default already is the safe one, and the override was leaky besides (a Paper
+     *  run persisted lodStore=full into the file, so carrying that folder to Folia armed
+     *  the store anyway).
+     *
+     *  <p>lodStoreBackfill stays ON, and that pairing is the point: it is inert while the
+     *  store is off, so flipping the single lodStore key to "full" gets the background
+     *  warm-up too rather than leaving a second switch to discover. */
     @Test
-    void lodStoreDefaultsFullOffFoliaAndOffOnFolia() {
-        assertFalse(FoliaSupport.IS_FOLIA, "test JVM is not Folia — the other arm is the guard");
+    void lodStoreIsOptInWhileBackfillStaysArmedForWhenItIsEnabled() {
         var c = new PaperConfig();
-        assertEquals("full", c.lodStore, "Paper must inherit the shared store-on default");
-        assertTrue(c.lodStoreBackfill, "Paper must inherit the shared backfill-on default");
+        assertEquals("off", c.lodStore, "the store must be opt-in — never a silent 2x world folder");
+        assertTrue(c.lodStoreBackfill,
+                "backfill stays on so ONE key enables the whole feature; it is inert while off");
     }
 
     /** Paper inherits the shared transcode default: disk serves transcode NBT straight to

@@ -78,9 +78,11 @@ esac
 # `run-fabric-store` / `run-paper-store` below force "full". The store DB lives at
 # <world>/lss-lod/store.db and persists across restarts (derived data — deleting the
 # lss-lod/ dir is always safe); eyeball it with '/lsslod store status' in-game.
-# Default follows the SHIPPED default (full since 2026-08-02) so a plain ./test-server.sh
-# exercises what players actually get; LSS_LODSTORE=off is the A/B arm.
-LSS_LODSTORE="${LSS_LODSTORE:-full}"
+# Default follows the SHIPPED default, which is OFF again as of 2026-08-03 (the store is
+# opt-in so an upgrade never silently doubles a world folder). So a plain ./test-server.sh
+# exercises what players actually get, and run-fabric-store / run-paper-store are once more
+# the meaningful store arm rather than aliases of the plain entrypoints.
+LSS_LODSTORE="${LSS_LODSTORE:-off}"
 case "$LSS_LODSTORE" in
     off|full) ;;
     *) echo "LSS_LODSTORE must be off or full (got '$LSS_LODSTORE')" >&2; exit 1 ;;
@@ -90,8 +92,8 @@ esac
 # pre-warms the store, yielding to players and tick health (default 500 col/s cap —
 # LSS_LODSTORE_BACKFILL_CPS below overrides — pauses under load). run-fabric-store
 # forces it on; '/lsslod store backfill status|stop' to steer.
-# Default follows the SHIPPED default (true since 2026-08-02), like LSS_LODSTORE above,
-# so a plain ./test-server.sh exercises what players actually get.
+# Stays TRUE like the shipped default: the key is inert while the store is off, so this
+# only decides what the store arms WITH once LSS_LODSTORE=full.
 LSS_LODSTORE_BACKFILL="${LSS_LODSTORE_BACKFILL:-true}"
 case "$LSS_LODSTORE_BACKFILL" in
     true|false) ;;
@@ -723,18 +725,15 @@ case "${1:-run}" in
         echo "  run-fabric-antixray - Same as run-fabric plus DrexHD AntiXray — the live gate"
         echo "               for the AntiXray compat shim + masking (current builds must"
         echo "               survive a client join and serve masked; only pre-shim builds crash)"
-        echo "  run-fabric-store - run-fabric with the store and backfill FORCED on, i.e."
-        echo "               immune to LSS_LODSTORE=off in your environment. Since both are"
-        echo "               now shipped defaults this matches plain run-fabric unless you"
-        echo "               have set that variable — it is kept as the explicit arm for"
-        echo "               store A/Bs. Warm rejoins serve from world/lss-lod/store.db;"
+        echo "  run-fabric-store - run-fabric with the store and backfill on (the store is"
+        echo "               opt-in, so this is the store arm; plain run-fabric has it off)."
+        echo "               Warm rejoins serve from world/lss-lod/store.db;"
         echo "               '/lsslod store status' + client /lss trace src:3 are the"
         echo "               eyeball instruments"
         echo "  run-paper  - Set up and start Paper server only (port 25566; native anti-xray on)"
-        echo "  run-paper-store - run-paper with the store FORCED on (immune to"
-        echo "               LSS_LODSTORE=off); matches plain run-paper otherwise, since"
-        echo "               lodStore=full is now the default. No backfill on Paper"
-        echo "               (Fabric-only) — the store warms from serves"
+        echo "  run-paper-store - run-paper with the store on (opt-in, so plain run-paper"
+        echo "               has it off). No backfill on Paper (Fabric-only) — the store"
+        echo "               warms from serves"
         echo "  run-folia  - Set up and start Folia server only (port 25567)"
         echo "  run-legacy - Set up and start an OLD LSS v${LEGACY_LSS_VERSION} (protocol 16) server (port 25568),"
         echo "               for eyeballing the client-side v16 backward-compat path"
@@ -746,12 +745,12 @@ case "${1:-run}" in
         echo "  LSS_ADMISSION_TRACE - Fabric [lss-adm] generation-admission trace (default: 1)."
         echo "                        Set to 0 to silence it — it is verbose during backfill."
         echo "  LSS_LODSTORE - lodStore mode written into EVERY staged lss-server-config.json"
-        echo "                 (off|full, default: full — the shipped default; use off for"
-        echo "                 the A/B arm). Hand-edits to the config do NOT survive a re-run"
+        echo "                 (off|full, default: off — the shipped default; the store is"
+        echo "                 opt-in). Hand-edits to the config do NOT survive a re-run"
         echo "                 — the staging rewrites it; this variable is the supported knob."
         echo "  LSS_LODSTORE_BACKFILL - lodStoreBackfill written the same way (true|false,"
-        echo "                 default: true — the shipped default). Fabric-only — the key"
-        echo "                 is inert on Paper/Folia."
+        echo "                 default: true, matching the shipped default; inert unless"
+        echo "                 LSS_LODSTORE=full). Fabric-only — inert on Paper/Folia too."
         echo "  LSS_LODSTORE_BACKFILL_CPS - optional backfill pace (columns/second, server"
         echo "                 clamps 10..1000). Unset = key omitted, server default (500)"
         echo "                 rules; run-fabric-store keeps the default."

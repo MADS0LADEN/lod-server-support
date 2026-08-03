@@ -221,6 +221,24 @@ class ConfigValidationTest {
         assertEquals(77, c.effectiveTimestampCacheMB(), "an explicit value always wins");
     }
 
+    /** The LOD store is OPT-IN on every platform (user decision, 2026-08-03). It briefly
+     *  defaulted to "full" during v0.9.0 development; that was reverted before release
+     *  because an upgrade must never silently double the size of an operator's world
+     *  folder — that is not a cost someone can consent to without reading the notes, and
+     *  a full disk is not cheap to undo. The docs recommend enabling it instead.
+     *
+     *  <p>lodStoreBackfill stays ON deliberately: it is inert while the store is off, so
+     *  the only thing it decides is what an operator gets when they DO opt in, and they
+     *  should get the whole feature from the one key rather than find a second switch
+     *  later. Pinning both together is what keeps that one-switch property true. */
+    @Test
+    void lodStoreIsOptInWhileBackfillStaysArmedForWhenItIsEnabled() {
+        assertEquals("off", serverConfig().lodStore,
+                "the store must be opt-in — never a silent 2x world folder on upgrade");
+        assertTrue(serverConfig().lodStoreBackfill,
+                "backfill stays on so ONE key enables the whole feature; it is inert while off");
+    }
+
     /** The cap-behavior user decision (store-cap-behavior-plan.md §1): the store ships
      *  UNCAPPED — 0 means no size cap, and it is the default. A silent revert to a
      *  nonzero default would re-enter the backfill<->eviction treadmill. */
