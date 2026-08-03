@@ -6,34 +6,128 @@ import dev.vox.lss.compat.ModCompat;
 import dev.vox.lss.config.LSSClientConfig;
 import dev.vox.lss.networking.payloads.SessionConfigS2CPayload;
 
+import java.util.function.BooleanSupplier;
 import java.util.function.IntSupplier;
 
 /**
  * Expanding Chebyshev ring scanner that produces the client's want-set: every position it
  * still wants, closest-first, written straight into {@link LodRequestManager}'s send buffers
- * and shipped whole in the same tick. Owns the scan policy — the 20-tick cadence and the
+ * and shipped whole in the same tick. Owns the scan policy — the adaptive cadence (a 20-tick
+ * fallback plus the completion-triggered fast re-scan, see {@link #fastRescanDue}) and the
  * budget with its queue-pressure scale (the vanilla-load scale is retired: server-side
  * priority/throttling owns that protection under v17).
  *
  * <p>The scan does NOT suppress in-flight positions: under want-set semantics the server may
- * silently supersede any not-yet-admitted ask, and the 1 Hz re-declare is the only thing that
- * heals it. An awaited position is therefore an ordinary unsatisfied want-set member, which
- * also means it blocks ring confirmation until its data actually lands.
+ * silently supersede any not-yet-admitted ask, and the periodic re-declare is the only thing
+ * that heals it. An awaited position is therefore an ordinary unsatisfied want-set member,
+ * which also means it blocks ring confirmation until its data actually lands. The adaptive
+ * fast trigger reads the awaiting-set SIZE as a cadence input — it never filters what the
+ * walk declares.
  */
 class SpiralScanner {
+
+    /**
+     * Adaptive cadence (docs/planning/adaptive-scan-cadence-design.md): minimum ticks
+     * between consecutive fires — 5 ticks = 250 ms, capping the fast cadence at 4 Hz. Bounds
+     * the worst-case C2S declaration rate (and its ~12.8 KB/batch upstream cost) and the
+     * render-thread walk rate.
+     */
+    static final int FAST_RESCAN_MIN_INTERVAL_TICKS = 5;
+    /**
+     * Fast fires require ≥95% of the last declared batch answered:
+     * {@code outstanding <= lastSentCount / 20}. Integer math — declares under 20 degenerate
+     * to "outstanding == 0", the strictest (correct) form for tiny tails. Also bounds the
+     * redundant in-flight re-asks a fast batch can carry at 5%, and makes straggler chatter
+     * self-limiting: a fast walk that declares only the stragglers shrinks the next
+     * threshold 20-fold (geometric tightening).
+     */
+    static final int FAST_RESCAN_OUTSTANDING_DIVISOR = 20;
+    /**
+     * Fast fires require MILD downstream pressure at most: each pipe signal below 1/4 of its
+     * halt threshold (decode queue &lt; 1500 columns AND &lt; 48 MiB queued bytes — the byte
+     * halt is the one that binds for real terrain columns — and consumer ingest backlog
+     * &lt; 1536 sections at the production constants). Deliberately proportional, NOT strict
+     * zero: a
+     * received column leaves the awaiting set and enters the decode queue in the same
+     * network-handler statement pair, so at the instant outstanding reaches 5% the queue
+     * holds that batch's peak — a strict-zero gate would suppress the fast path in exactly
+     * the data-bearing warm-backfill case it exists for. Under a sustained decode
+     * bottleneck the cadence bang-bangs around this line, i.e. rate-matches the decoder;
+     * deeper pressure (including the tick recovering out of a backpressure halt) stays at
+     * the 1 Hz fallback where the budget taper + halt own regulation.
+     */
+    static final int FAST_RESCAN_PRESSURE_DIVISOR = 4;
+    /**
+     * Fast fires require the NEXT walk to be cheap: at most this many ring positions
+     * examined (see {@link #predictedWalkCost()}). Replaces the original
+     * {@code confirmedRing > 0} term, which was a PROXY for walk cost and — because
+     * {@link #recenter()} zeroes the prefix on every chunk-boundary crossing while nothing
+     * re-derives it until the next walk — measured movement instead. At 33 blocks/s
+     * crossings run 2.76 Hz against 1 Hz scans, so the proxy was structurally inert for the
+     * whole of any sustained flight: the elytra trace of 2026-08-01 measured 2–3 Hz standing
+     * still and exactly 1.000 s gaps for 23 consecutive seconds of flight
+     * (docs/planning/elytra-chunk-wall-investigation-2026-08-01.md §8.6.3).
+     *
+     * <p>Calibration: a walk to ring R costs {@code 4R(R+1)} — NOT 4R² — so the measured
+     * flight walk (frontier ring 75) is 22,800 and a full walk at the default 256 LOD
+     * distance is 263,168. 65,536 gives the flight case ~2.9× headroom while refusing the
+     * warm full-disc walk by 4×. The budget is a FRAME budget, not a per-second one: an
+     * admitted walk spends its whole cost inside one client tick (~65k × 50–100 ns ≈
+     * 3–7 ms), and the 250 ms floor lets that happen at most 4×/s.
+     *
+     * <p>Refusing the expensive case is deliberate policy, not a limitation: a disc already
+     * satisfied out to the LOD distance is both expensive to walk AND has little left to
+     * fetch, so the 1 Hz fallback is right there. It is never a regression — movement rides
+     * 1 Hz unconditionally today.
+     */
+    static final int FAST_RESCAN_MAX_WALK_COST = 65_536;
 
     private SessionConfigS2CPayload sessionConfig;
 
     private int confirmedRing = 0;
     private int scanRing = 0;
+    /**
+     * Did the last walk stop early because the budget filled? Decides which end
+     * {@link #predictedWalkCost()} measures to: a truncated walk stops at {@link #scanRing},
+     * an untruncated one iterates every ring out to the LOD distance. Starts false so a
+     * never-walked scanner predicts the full disc — fail-closed.
+     */
+    private boolean lastWalkTruncated = false;
     private int scanTickCounter = LSSConstants.TICKS_PER_SECOND - 1; // starts at max so first scan fires immediately on join
     private int missingVanillaChunks = Integer.MAX_VALUE;
+
+    // --- Adaptive-cadence state (see fastRescanDue) ---
+    /**
+     * The armed state: the count of the last want-set batch the manager DECLARED (tracker
+     * replaced + send attempted). Written only by {@link #noteDeclared} from
+     * {@link LodRequestManager#tickScanPhase} beside {@code tracker.replaceWith} — so
+     * "lastSentCount == what the awaiting set was replaced with" holds by construction —
+     * and re-zeroed by the send-failure catch, {@code disconnect()}, {@link #reset()} and
+     * {@link #resetScanCounter()}. 0 = disarmed: a converged client (0-count walk) must
+     * fall back to the 1 Hz re-walk, never a 250 ms walk loop, and a dying connection must
+     * not retry at 4 Hz. Rigs that drive {@link #maybeScan} directly without
+     * {@code tickScanPhase} never arm and see pre-adaptive behavior bit-identically.
+     */
+    private int lastSentCount;
+    /** The awaiting-set size ({@code tracker::size} in production; main-client-thread only).
+     *  Null = fast path off (bare test rigs). */
+    private IntSupplier outstandingSupplier;
+    /** Config seam ({@code enableAdaptiveScanCadence} kill switch) — injectable so tests
+     *  don't mutate the global CONFIG (the ingestBacklogSupplier pattern). */
+    BooleanSupplier adaptiveCadenceEnabled =
+            () -> LSSClientConfig.CONFIG.enableAdaptiveScanCadence;
+    private boolean lastScanWasFast;
+    private long fastScans; // session-scoped diagnostic counter (reset() zeroes it)
 
     // Last scan budget tracking
     private int lastBudget;
     private int lastQueued;
 
-    // Cached Voxy view distance — rechecked once per second (20 ticks)
+    // Cached Voxy view distance — refreshed every 20th getEffectiveLodDistance()
+    // INVOCATION, and the walk is not the dominant caller: getPruneDistance() reads it per
+    // received column and per movement crossing, so the effective window is sub-second
+    // whenever columns are arriving (pinned by voxyDistanceRefreshIsInvocationCountBased…).
+    // The lookup is a cheap MethodHandle call, so fresher is fine.
     private int cachedVoxyDistance = -1; // -1 = not present
     private int voxyDistanceStaleness = 0;
 
@@ -46,7 +140,8 @@ class SpiralScanner {
      * Advance the scan cadence and, when it fires with a nonzero budget, walk the rings
      * and write the complete want-set (closest-first) into {@code posOut}/{@code tsOut}.
      *
-     * @param missingVanilla evaluated only when the cadence fires (diagnostics only)
+     * @param missingVanilla evaluated only on PERIODIC fires (diagnostics only — fast fires
+     *        keep the last value rather than 4×-ing an O((2·vd+1)²) hasChunk sweep)
      * @return -1 when no walk happened this tick (cadence not fired); otherwise the
      *         number of want-set entries written
      *         (0 = walked and found nothing — the converged case; the caller must then
@@ -54,14 +149,30 @@ class SpiralScanner {
      */
     int maybeScan(int playerCx, int playerCz, int viewDistance,
                   int columnQueueSize, int columnQueueHaltThreshold,
+                  long columnQueueBytes, long columnQueueByteHaltThreshold,
                   int ingestBacklogSections, int ingestBacklogHaltThreshold,
                   IntSupplier missingVanilla,
                   ColumnStateMap columns,
                   long[] posOut, long[] tsOut) {
-        if (++this.scanTickCounter < LSSConstants.TICKS_PER_SECOND) return -1;
+        int ticksSinceFire = ++this.scanTickCounter;
+        boolean fast = ticksSinceFire < LSSConstants.TICKS_PER_SECOND;
+        if (fast && !fastRescanDue(ticksSinceFire, playerCx, playerCz, viewDistance, columns,
+                columnQueueSize, columnQueueHaltThreshold,
+                columnQueueBytes, columnQueueByteHaltThreshold,
+                ingestBacklogSections, ingestBacklogHaltThreshold)) {
+            return -1;
+        }
+        // Either fire resets the counter: the 20-tick fallback measures from the LAST batch
+        // ("more than 1 s since the last declaration ⇒ fire regardless"). A position a fast
+        // walk omitted (budget/center shift under movement) waits at most
+        // 2*TICKS_PER_SECOND - 1 = 39 ticks for its re-declaration when ONE fast fire
+        // intervenes; a chain of budget-truncated fast walks can extend that, all
+        // self-healing by re-declaration.
         this.scanTickCounter = 0;
 
-        this.missingVanillaChunks = missingVanilla.getAsInt();
+        // "Last" can be arbitrarily old under SUSTAINED fast cadence (a long warm backfill
+        // never takes the periodic branch) — acceptable for a diagnostic-only stat.
+        if (!fast) this.missingVanillaChunks = missingVanilla.getAsInt();
 
         // Compute scan budget: base × pressure-scale. The base is
         // the ONE want-set budget — a constant; no client budget derives from any server cap
@@ -99,7 +210,149 @@ class SpiralScanner {
 
         if (budget <= 0) return -1;
 
+        // Counted after the budget guard: a non-walk must not read as a fast scan (the
+        // guard is unreachable in production — the taper floors at 1 and the buffers are
+        // batch-cap length — but a zero-length test buffer reaches it).
+        this.lastScanWasFast = fast;
+        if (fast) this.fastScans++;
+
         return scan(playerCx, playerCz, viewDistance, columns, posOut, tsOut, budget);
+    }
+
+    /**
+     * The adaptive-cadence fast trigger (docs/planning/adaptive-scan-cadence-design.md):
+     * between 20-tick fallback fires, fire early — at most every
+     * {@link #FAST_RESCAN_MIN_INTERVAL_TICKS} — once the last declared batch is ≥95%
+     * answered and the downstream pipeline is at most mildly loaded. Conditions cheap-first;
+     * the supplier read comes last so non-firing ticks stay O(1).
+     *
+     * <p>The v16 gate is non-optional, not merely polite: besides the legacy server's real
+     * rate limiter, Tier B's onColumnNotGenerated removes a bounced position from the
+     * awaiting set before its transient-heal early return, so every legacy gen-slot bounce
+     * drops outstanding — a v16 session would fast-fire on exactly that churn loop and
+     * hammer the old server's gen slots at 4 Hz. ClientSessionGate admits only the current
+     * and the v16 protocol versions, so {@code != 16} is exact today and stays conservative
+     * if an intermediate legacy dialect ever lands.
+     *
+     * <p>The walk-cost gate has two halves, because the prefix resets in two tempos. The
+     * {@link #predictedWalkCost()} term sees the SYNCHRONOUS invalidations — movement
+     * ({@link #recenter}) and dirty re-opens ({@link #resetConfirmedRing}) zero
+     * {@code confirmedRing} before the next tick's predicate, so the prediction becomes the
+     * full from-ring-0 re-walk those force. The {@code hasActionableRetries} term sees the
+     * IN-WALK one: an actionable retry mark resets the prefix inside {@code scan()} (after
+     * this predicate already ran) and the walk always re-derives {@code confirmedRing >= 1}
+     * (ring 0 is empty), so no prefix-derived value can gate it. Either way a zero-prefix
+     * walk re-walks from ring 0 (the render-thread-hitch shape documented at the 2048
+     * ceiling above) — but only walks that are actually EXPENSIVE stay at the 1 Hz
+     * fallback now, rather than every reset regardless of cost.
+     *
+     * <p>The predecessor of the cost term was {@code confirmedRing > 0}, which conflated
+     * "the prefix was invalidated" with "the walk is expensive". Those coincide for a
+     * stationary client and diverge completely for a moving one, where the prefix is
+     * invalidated ~3×/s and the resulting walk still costs ~22,800 iterations (~0.9 ms,
+     * fps flat at 60 in the measured trace). See {@link #FAST_RESCAN_MAX_WALK_COST}. This
+     * reverses adaptive-scan-cadence-design.md §5.5 — a review-round decision taken on an
+     * ANALYTIC cost estimate; the trace measured it.
+     *
+     * <p>Caller contract: the halt thresholds should be positive (production passes the
+     * constants). A zero threshold cannot throw — the divisions are by the constant
+     * {@link #FAST_RESCAN_PRESSURE_DIVISOR}, not by the threshold — it simply fails closed
+     * on all three pipes, which is the safe direction. (The javadoc previously claimed a
+     * divide-by-zero here; the only threshold-denominated division is the taper in
+     * {@code maybeScan}, and that yields {@code -Infinity} → a budget of 1, also no throw.)
+     */
+    private boolean fastRescanDue(int ticksSinceFire, int playerCx, int playerCz, int viewDistance,
+                                  ColumnStateMap columns,
+                                  int columnQueueSize, int columnQueueHaltThreshold,
+                                  long columnQueueBytes, long columnQueueByteHaltThreshold,
+                                  int ingestBacklogSections, int ingestBacklogHaltThreshold) {
+        if (ticksSinceFire < FAST_RESCAN_MIN_INTERVAL_TICKS) return false;
+        if (!this.adaptiveCadenceEnabled.getAsBoolean()) return false;
+        if (this.lastSentCount <= 0) return false; // disarmed: converged, send-failed, or never declared
+        if (this.outstandingSupplier == null) return false;
+        if (this.sessionConfig == null
+                || this.sessionConfig.protocolVersion() == LSSConstants.V16_COMPAT_PROTOCOL_VERSION) {
+            return false;
+        }
+        if (predictedWalkCost() > FAST_RESCAN_MAX_WALK_COST) return false;
+        if (columnQueueSize >= columnQueueHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR) return false;
+        if (columnQueueBytes >= columnQueueByteHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR) return false;
+        if (ingestBacklogSections >= ingestBacklogHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR) return false;
+        if (columns.hasActionableRetries(playerCx, playerCz, viewDistance)) return false;
+        return this.outstandingSupplier.getAsInt()
+                <= this.lastSentCount / FAST_RESCAN_OUTSTANDING_DIVISOR;
+    }
+
+    /**
+     * Ring positions the NEXT walk will examine, from the two fields that already describe
+     * it. It starts at {@link #confirmedRing} and runs to {@code s}, which is
+     * {@link #scanRing} only for a budget-TRUNCATED walk; otherwise the walk iterates every
+     * ring out to {@link #getEffectiveLodDistance} (see the comment in the body — predicting
+     * off {@code scanRing} unconditionally under-reports by three orders of magnitude on a
+     * warm disc). Ring {@code r} holds {@code 8r} positions, so the span costs
+     * {@code Σ_{r=c}^{s} 8r = 4·(s(s+1) − c(c−1))} — note {@code c(c−1)}, not {@code c(c+1)}:
+     * the loop starts AT {@code confirmedRing}. Getting that term wrong once already cost a
+     * mis-sized budget constant.
+     *
+     * <p><b>Coverage limit — deliberate, and load-bearing for what the release notes may
+     * claim.</b> {@link #recenter} zeroes {@code confirmedRing} on every chunk crossing and
+     * nothing re-derives it until the next walk, so under sustained movement {@code c} is 0
+     * and this reduces to {@code 4·s(s+1)}. Against
+     * {@link #FAST_RESCAN_MAX_WALK_COST} = 65536 that admits {@code s ≤ 127}
+     * (4·127·128 = 65024) and refuses {@code s = 128} (4·128·129 = 66048). So on the shipped
+     * {@code lodDistanceChunks} = 256 the fast cadence covers rings 0–127 — 65024 of the
+     * disc's 263168 positions, about a quarter — and a MOVING client falls back to 1 Hz once
+     * the frontier passes ring 128. Stationary clients are unaffected ({@code confirmedRing}
+     * survives, so the span stays narrow at any depth). This is a partial fix to the elytra
+     * chunk wall, not a complete one, and it is the conservative direction the investigation
+     * argued for: docs/planning/elytra-chunk-wall-investigation-2026-08-01.md warns that
+     * lifting the flight regime toward the stationary 2–3 Hz would put it at 50–75 MB/s and
+     * walk back toward the wall. Raising the constant only moves the cliff; extending the
+     * coverage means decoupling the prefix from {@code recenter}, which is a separate design
+     * change with that throughput consequence attached.
+     *
+     * <p>Deliberately a PREDICTION, not a measurement of the last walk. The two differ
+     * exactly where this gate matters: after {@link #recenter} the next walk restarts at
+     * ring 0 while the last one started at the frontier, so a remembered cost would admit
+     * one full-price walk after every prefix collapse — and would split two
+     * identically-shaped events, letting movement resets run fast while
+     * {@code hasActionableRetries} resets (also "next walk starts at ring 0") stay at 1 Hz.
+     *
+     * <p>Costs nothing in the walk itself: no counter in the hot loop. The long math and
+     * the saturation are belt-and-braces — {@code scanRing} is clamped to the LOD distance,
+     * so the worst real product (~16.8M at the 2048 ceiling) fits an int comfortably.
+     */
+    int predictedWalkCost() {
+        if (this.sessionConfig == null) return Integer.MAX_VALUE; // fail closed
+        // WHERE the walk stops is not scanRing. scan()'s ONLY early exit is the budget
+        // `break outer`; without it the loop runs all the way to lodDistance, and scanRing
+        // is merely the outermost ring that QUEUED something. Those coincide only for a
+        // truncated walk. On a warm disc — the shipped server's own regime — a moving
+        // client finds work solely in the trailing view-edge crescents near ring
+        // ~viewDistance, so scanRing stays tiny while the walk still iterates every
+        // satisfied ring out to lodDistance. Predicting off scanRing there under-reports by
+        // three orders of magnitude and admits exactly the walk this gate exists to refuse.
+        int s = this.lastWalkTruncated ? this.scanRing : getEffectiveLodDistance();
+        int c = this.confirmedRing;
+        if (s < c) return 0;
+        // Σ 8r for r in [c, s] — the loop starts AT confirmedRing, so the lower term is
+        // c(c-1), not c(c+1).
+        long cost = 4L * ((long) s * (s + 1) - (long) c * (c - 1));
+        return cost <= 0 ? 0 : (int) Math.min(cost, Integer.MAX_VALUE);
+    }
+
+    /**
+     * Arm/disarm the fast cadence with the count the manager just declared (awaiting set
+     * replaced + send attempted). See {@link #lastSentCount} for the contract; called with
+     * 0 by the converged walk, the send-failure catch, and {@code disconnect()}.
+     */
+    void noteDeclared(int count) {
+        this.lastSentCount = count;
+    }
+
+    /** Production: {@code tracker::size}. Absent (null) in bare rigs ⇒ fast path off. */
+    void setOutstandingSupplier(IntSupplier supplier) {
+        this.outstandingSupplier = supplier;
     }
 
     /**
@@ -118,6 +371,7 @@ class SpiralScanner {
         int[] chunkCoords = new int[2];
         int localScanRing = -1;
         int queued = 0;
+        boolean truncated = false;
 
         // Only an ACTIONABLE retry mark (outside the vanilla-view exclusion) resets the
         // confirmed ring. A mark whose position slipped INSIDE the exclusion after it was
@@ -140,7 +394,7 @@ class SpiralScanner {
             boolean ringFullySatisfied = true;
             int ringSize = 8 * r;
             for (int i = 0; i < ringSize; i++) {
-                if (count >= budget) { ringFullySatisfied = false; break outer; }
+                if (count >= budget) { ringFullySatisfied = false; truncated = true; break outer; }
 
                 ringIndexToCoord(r, i, playerCx, playerCz, chunkCoords);
                 int cx = chunkCoords[0];
@@ -185,6 +439,7 @@ class SpiralScanner {
 
         this.confirmedRing = localConfirmedRing;
         this.scanRing = localScanRing >= 0 ? localScanRing : localConfirmedRing;
+        this.lastWalkTruncated = truncated;
         this.lastBudget = budget;
         this.lastQueued = queued;
 
@@ -221,15 +476,23 @@ class SpiralScanner {
     void reset() {
         this.confirmedRing = 0;
         this.scanRing = 0;
+        this.lastWalkTruncated = false; // fresh session predicts the full disc — fail closed
         this.scanTickCounter = LSSConstants.TICKS_PER_SECOND - 1;
         this.missingVanillaChunks = Integer.MAX_VALUE;
         this.cachedVoxyDistance = -1;
         this.voxyDistanceStaleness = 0;
+        this.lastSentCount = 0; // disarm the fast cadence with the rest of the session state
+        this.lastScanWasFast = false;
+        this.fastScans = 0;
     }
 
     void resetScanCounter() {
         this.confirmedRing = 0;
         this.scanTickCounter = 0;
+        // Disarm too: this is the deliberate post-dimension-change 20-tick wait, and the
+        // fresh dimension's empty awaiting set would otherwise satisfy the fast trigger
+        // trivially against a stale armed count.
+        this.lastSentCount = 0;
     }
 
     /** Movement re-center: re-walk from ring 0 at the new center WITHOUT touching the
@@ -300,4 +563,6 @@ class SpiralScanner {
     int getMissingVanillaChunks() { return this.missingVanillaChunks; }
     int getLastBudget() { return this.lastBudget; }
     int getLastQueued() { return this.lastQueued; }
+    boolean wasLastScanFast() { return this.lastScanWasFast; }
+    long getFastScans() { return this.fastScans; }
 }

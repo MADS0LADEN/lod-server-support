@@ -17,10 +17,32 @@ repositories {
 
 dependencies {
     implementation project(':common')
+    // LOD store engine + codec (plan §3): shaded into the plugin jar WITHOUT relocating
+    // org.sqlite / com.github.luben (relocation breaks their native loaders; per-plugin
+    // classloaders make collisions acceptable). Natives are stripped to the supported
+    // matrix by the exclude closure on the shadow tasks below.
+    implementation 'org.xerial:sqlite-jdbc:3.49.1.0'
+    implementation 'com.github.luben:zstd-jni:1.5.7-3'
     paperweight.paperDevBundle('26.2.build.84-stable')
     testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
     testImplementation 'org.mockito:mockito-core:5.20.0'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// Native strip lists — keep in sync with fabric/build.gradle's slimStoreDepJars
+// (linux/win/mac × x64/arm64, + Linux-Musl for sqlite; zstd-jni has no musl natives).
+def storeNativeKeep = [
+    'org/sqlite/native/Linux/x86_64/', 'org/sqlite/native/Linux/aarch64/',
+    'org/sqlite/native/Linux-Musl/x86_64/', 'org/sqlite/native/Linux-Musl/aarch64/',
+    'org/sqlite/native/Windows/x86_64/', 'org/sqlite/native/Windows/aarch64/',
+    'org/sqlite/native/Mac/x86_64/', 'org/sqlite/native/Mac/aarch64/',
+    'linux/amd64/', 'linux/aarch64/', 'win/amd64/', 'win/aarch64/',
+    'darwin/x86_64/', 'darwin/aarch64/',
+]
+def storeNativeRoots = ['org/sqlite/native/', 'linux/', 'win/', 'darwin/', 'freebsd/', 'aix/']
+def storeNativeStrip = { el ->
+    def p = el.relativePath.pathString
+    storeNativeRoots.any { p.startsWith(it) } && !storeNativeKeep.any { p.startsWith(it) }
 }
 
 test {
@@ -50,6 +72,7 @@ shadowJar {
     configurations = [project.configurations.runtimeClasspath]
     exclude 'org/slf4j/**'
     exclude 'META-INF/maven/org.slf4j/**'
+    exclude storeNativeStrip
 
     // The soak harness is a dev-only tool (-Dlss.soak.scenario); keep it out of release
     // jars. PaperSoakBridge no-ops when the classes are absent (mirrors fabric/build.gradle's
@@ -59,6 +82,9 @@ shadowJar {
     from(rootProject.file("LICENSE")) {
         rename { "${it}_lod-server-support-paper" }
     }
+    // zstd-jni's BSD-2 notice must accompany the natives we redistribute (4-agent
+    // round R4 — the shadow jar's only inherited LICENSE.txt is SLF4J's leftover).
+    from(rootProject.file("THIRD-PARTY-NOTICES"))
 }
 
 // Dev-only variant of the plugin jar that keeps the soak package; consumed exclusively
@@ -75,6 +101,7 @@ def soakShadowJar = tasks.register('soakShadowJar',
     configurations = [project.configurations.runtimeClasspath]
     exclude 'org/slf4j/**'
     exclude 'META-INF/maven/org.slf4j/**'
+    exclude storeNativeStrip
     // paperweight stamps 'paperweight-mappings-namespace: mojang' on the jar task; without
     // it Paper assumes spigot mappings and remaps (= corrupts) this mojang-mapped jar.
     manifest.inheritFrom(tasks.jar.manifest)
@@ -88,6 +115,10 @@ tasks.register('runSoakServer', xyz.jpenilla.runpaper.task.RunServer) {
     runDirectory(file('build/run/soak-server'))
     pluginJars(soakShadowJar.flatMap { it.archiveFile })
     systemProperty 'lss.soak.scenario', findProperty('soak.scenario') ?: ''
+    // Server-side probe hashes (probe_hashes in server.jsonl — the store byte-parity
+    // gate): armed per scenario via soak.sh SERVER_EXTRA_ARGS, twin of the Fabric
+    // soakServer vmArg.
+    systemProperty 'lss.soak.probes', findProperty('soak.probes') ?: ''
     maxHeapSize = '2G'
 }
 
@@ -107,6 +138,10 @@ runPaper.folia.registerTask {
     runDirectory(file('build/run/folia-soak-server'))
     pluginJars(soakShadowJar.flatMap { it.archiveFile })
     systemProperty 'lss.soak.scenario', findProperty('soak.scenario') ?: ''
+    // Server-side probe hashes (probe_hashes in server.jsonl — the store byte-parity
+    // gate): armed per scenario via soak.sh SERVER_EXTRA_ARGS, twin of the Fabric
+    // soakServer vmArg.
+    systemProperty 'lss.soak.probes', findProperty('soak.probes') ?: ''
     maxHeapSize = '2G'
 }
 

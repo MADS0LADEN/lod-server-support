@@ -165,7 +165,7 @@ class V16ClientWireDecodeTest {
         assertEquals("minecraft:overworld", p.dimension().identifier().toString());
         assertEquals(4321L, p.columnTimestamp());
         assertEquals((byte) -1, p.source(), "no source byte on the wire → the 'unknown' sentinel");
-        assertArrayEquals(sections, p.decompressedSections(),
+        assertArrayEquals(sections, p.shippedSections(),
                 "the byte array aligns only if the source byte was correctly skipped");
     }
 
@@ -178,7 +178,8 @@ class V16ClientWireDecodeTest {
             b.writeInt(20);
             b.writeUtf("minecraft:the_nether");
             b.writeLong(99L);
-            b.writeByte(LSSConstants.COLUMN_SOURCE_DISK); // present in v18
+            b.writeByte(LSSConstants.COLUMN_SOURCE_DISK); // present in v18+
+            b.writeByte(LSSConstants.COLUMN_CODEC_RAW);   // present in v19+
             b.writeByteArray(sections);
         });
 
@@ -189,7 +190,7 @@ class V16ClientWireDecodeTest {
         assertEquals(99L, p.columnTimestamp());
         assertEquals(LSSConstants.COLUMN_SOURCE_DISK, p.source(),
                 "the source byte is read verbatim when the flag is clear");
-        assertArrayEquals(sections, p.decompressedSections());
+        assertArrayEquals(sections, p.shippedSections());
     }
 
     @Test
@@ -221,7 +222,7 @@ class V16ClientWireDecodeTest {
 
         assertEquals(1, col.chunkX());
         assertEquals((byte) -1, col.source());
-        assertArrayEquals(sections, col.decompressedSections(),
+        assertArrayEquals(sections, col.shippedSections(),
                 "the column read off the SessionConfig-armed flag aligns");
     }
 
@@ -278,11 +279,12 @@ class V16ClientWireDecodeTest {
             b.writeUtf("minecraft:overworld");
             b.writeLong(11L);
             b.writeByte(LSSConstants.COLUMN_SOURCE_GENERATION);
+            b.writeByte(LSSConstants.COLUMN_CODEC_RAW);
             b.writeByteArray(sections);
         });
         var col = decode(VoxelColumnS2CPayload.CODEC, v18Frame);
         assertEquals(LSSConstants.COLUMN_SOURCE_GENERATION, col.source(),
                 "the in-flight v18 column behind the prompt reads its source byte verbatim");
-        assertArrayEquals(sections, col.decompressedSections());
+        assertArrayEquals(sections, col.shippedSections());
     }
 }

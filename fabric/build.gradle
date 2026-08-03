@@ -33,13 +33,34 @@ repositories {
     }
 }
 
+// LOD store engine/codec deps, nested into the release jar as native-stripped copies.
+configurations {
+    storeDeps
+}
+
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
     implementation "net.fabricmc:fabric-loader:${project.loader_version}"
     implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
     testImplementation "net.fabricmc:fabric-loader-junit:${project.loader_version}"
+    // LOD-store Phase 0 experiment deps (docs/planning/lod-store-implementation-plan.md):
+    // the codec/schema decision tool (LodStoreExperimentTool, gated on
+    // -Plss.store.experiment.regionDir) measures decompress throughput + SQLite page-shape
+    // arms on the real benchmark corpus. TEST classpath only — zero packaging risk; the
+    // shipping engine dependency is a separate, deliberate step (plan §3).
+    testImplementation "org.xerial:sqlite-jdbc:3.49.1.0"
+    testImplementation "com.github.luben:zstd-jni:1.5.7-3"
+    testImplementation "org.lz4:lz4-java:1.8.1"
     implementation project(':common')
     include project(':common')
+    // LOD store runtime deps (plan §3). Release jars carry NATIVE-STRIPPED nested copies
+    // (slimStoreDepJars -> META-INF/jars + the fabric.mod.json "jars" entries); the dev
+    // runtime runs from class dirs where nested jars don't exist, so localRuntime supplies
+    // the full jars there. compileOnly on common declares the API.
+    storeDeps "org.xerial:sqlite-jdbc:3.49.1.0"
+    storeDeps "com.github.luben:zstd-jni:1.5.7-3"
+    localRuntime "org.xerial:sqlite-jdbc:3.49.1.0"
+    localRuntime "com.github.luben:zstd-jni:1.5.7-3"
     compileOnly "maven.modrinth:sodium:mc26.2-0.9.1-beta.3-fabric"
     compileOnly "maven.modrinth:modmenu:20.0.0-beta.4"
     // Compat validation arm: -Pbenchmark.moonrise=true puts Moonrise on the dev runtime
@@ -68,6 +89,15 @@ test {
     // task UP-TO-DATE locally and the contract never re-checks.
     inputs.dir("src/gametest/java").withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.file("src/gametest/resources/fabric.mod.json").withPathSensitivity(PathSensitivity.RELATIVE)
+    // LOD-store Phase 0 experiment pass-through (inert unless -Plss.store.experiment.regionDir
+    // is given; the tool test skips itself without it). Extra heap only when engaged.
+    ['lss.store.experiment.regionDir', 'lss.store.experiment.out',
+     'lss.store.experiment.maxColumns', 'lss.store.experiment.warmup'].each { p ->
+        if (findProperty(p) != null) systemProperty p, findProperty(p).toString()
+    }
+    if (findProperty('lss.store.experiment.regionDir') != null) {
+        maxHeapSize = '3g'
+    }
 }
 
 fabricApi {
@@ -106,6 +136,9 @@ loom {
             runDir "build/run/soak-server"
             vmArg "-Dlss.soak.scenario=${findProperty('soak.scenario') ?: ''}"
             vmArg "-Dlss.soak.dirtydebug=${findProperty('soak.dirtydebug') ?: 'false'}"
+            // Server-side probe hashes (probe_hashes in server.jsonl — the store
+            // byte-parity gate): armed per scenario via soak.sh SERVER_EXTRA_ARGS.
+            vmArg "-Dlss.soak.probes=${findProperty('soak.probes') ?: ''}"
             programArg "--nogui"
         }
         register("soakClient") {
@@ -151,6 +184,80 @@ tasks.withType(JavaCompile).configureEach {
     it.options.release = 25
 }
 
+// ---- LOD store nested dependency jars (plan §3 packaging) -----------------------------
+//
+// sqlite-jdbc + zstd-jni ship as Jar-in-Jar, NATIVE-STRIPPED to the supported server
+// matrix: linux/win/mac × x64/arm64, plus Linux-Musl x64/arm64 for sqlite (Alpine docker
+// servers are common; zstd-jni publishes no musl natives). An unsupported platform fails
+// native load at store INIT and the containment latch degrades to lodStore=off with one
+// warning — never a crash. Each slim jar gets a minimal generated fabric.mod.json
+// (nested jars must be mods for Fabric Loader) and a VERSION-FREE file name so the
+// hand-maintained "jars" entries in src fabric.mod.json never chase version bumps.
+// Loom MERGES its own include-generated entries (the common jar) into that array.
+def storeDepSlimDir = layout.buildDirectory.dir('store-jars')
+def storeNativeKeep = [
+    'org/sqlite/native/Linux/x86_64/', 'org/sqlite/native/Linux/aarch64/',
+    'org/sqlite/native/Linux-Musl/x86_64/', 'org/sqlite/native/Linux-Musl/aarch64/',
+    'org/sqlite/native/Windows/x86_64/', 'org/sqlite/native/Windows/aarch64/',
+    'org/sqlite/native/Mac/x86_64/', 'org/sqlite/native/Mac/aarch64/',
+    'linux/amd64/', 'linux/aarch64/', 'win/amd64/', 'win/aarch64/',
+    'darwin/x86_64/', 'darwin/aarch64/',
+]
+def storeNativeRoots = ['org/sqlite/native/', 'linux/', 'win/', 'darwin/', 'freebsd/', 'aix/']
+
+tasks.register('slimStoreDepJars') {
+    description = 'Repackages the LOD-store deps as native-stripped nested mod jars.'
+    inputs.files(configurations.storeDeps)
+    // The keep/root lists are task inputs too — without this, editing them leaves the
+    // cached slim jars stale until a clean (Phase 0 correctness-review F3).
+    inputs.property('storeNativeKeep', storeNativeKeep)
+    inputs.property('storeNativeRoots', storeNativeRoots)
+    outputs.dir(storeDepSlimDir)
+    doLast {
+        def outDir = storeDepSlimDir.get().asFile
+        outDir.deleteDir()
+        outDir.mkdirs()
+        configurations.storeDeps.resolvedConfiguration.resolvedArtifacts.each { art ->
+            def name = art.name                        // sqlite-jdbc / zstd-jni
+            def version = art.moduleVersion.id.version
+            def modId = 'lss-' + name.replaceAll('[^a-z0-9-]', '-')
+            def outFile = new File(outDir, "${name}-slim.jar")
+            def zf = new ZipFile(art.file)
+            try {
+                new ZipOutputStream(new FileOutputStream(outFile)).withCloseable { zos ->
+                    def entries = zf.entries()
+                    while (entries.hasMoreElements()) {
+                        def e = entries.nextElement()
+                        def isNative = storeNativeRoots.any { e.name.startsWith(it) }
+                        if (isNative && !storeNativeKeep.any { e.name.startsWith(it) }) {
+                            continue
+                        }
+                        // Directory entries for stripped dirs are harmless; copy all.
+                        def ne = new ZipEntry(e.name)
+                        ne.method = e.method
+                        if (e.method == ZipEntry.STORED) {
+                            ne.size = e.size
+                            ne.compressedSize = e.compressedSize
+                            ne.crc = e.crc
+                        }
+                        zos.putNextEntry(ne)
+                        zf.getInputStream(e).withCloseable { is -> zos << is }
+                        zos.closeEntry()
+                    }
+                    zos.putNextEntry(new ZipEntry('fabric.mod.json'))
+                    zos.write(groovy.json.JsonOutput.toJson([
+                            schemaVersion: 1, id: modId, version: version,
+                            name: "${name} (LSS LOD store)".toString(),
+                    ]).getBytes('UTF-8'))
+                    zos.closeEntry()
+                }
+            } finally {
+                zf.close()
+            }
+        }
+    }
+}
+
 jar {
     inputs.property "archivesName", project.base.archivesName
 
@@ -159,9 +266,17 @@ jar {
     // and BenchmarkBridge no-ops when the classes are absent.
     exclude 'dev/vox/lss/benchmark/**'
 
+    dependsOn slimStoreDepJars
+    from(storeDepSlimDir) {
+        into 'META-INF/jars'
+    }
+
     from(rootProject.file("LICENSE")) {
         rename { "${it}_${inputs.properties.archivesName}" }
     }
+    // zstd-jni's BSD-2 notice must accompany the natives we redistribute (4-agent
+    // round R4 — upstream's slim jar carries no license text of its own).
+    from(rootProject.file("THIRD-PARTY-NOTICES"))
 }
 
 // ---- Voxy Server Side (VSS) branded variant -------------------------------------------

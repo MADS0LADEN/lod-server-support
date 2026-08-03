@@ -181,6 +181,6 @@ class HandshakeGateTest {
         }
         var current = HandshakeGate.evaluate(V, VOXEL_CAPS, true, true, true);
         assertEquals(Outcome.REGISTER, current.outcome());
-        assertEquals(HandshakeGate.WireDialect.V18, current.dialect());
+        assertEquals(HandshakeGate.WireDialect.CURRENT, current.dialect());
     }
 }

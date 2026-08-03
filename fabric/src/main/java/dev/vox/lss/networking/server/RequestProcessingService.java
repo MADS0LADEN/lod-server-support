@@ -48,8 +48,17 @@ public class RequestProcessingService {
     private final ChunkGenerationService generationService;
     private final SharedBandwidthLimiter bandwidthLimiter;
     private final FabricOffThreadProcessor offThreadProcessor;
+    // Null while lodStore=off or when the codec native cannot load (degrade, never crash).
+    private final dev.vox.lss.common.store.LodStoreService lodStore;
+    // Null unless lodStore=full with a live SQLite store (the backfill's only target).
+    private final dev.vox.lss.common.store.StoreBackfill storeBackfill;
+
     private final DirtyColumnTracker dirtyTracker;
     private final DirtyContentFilter dirtyContentFilter = new DirtyContentFilter();
+    // Compressed-column shipping is live: useCompressedColumns AND the server-side zstd
+    // native probe succeeded (latched once in the ctor — plan §0.11). A term of every
+    // session's wantsCompressedColumns derivation at registration.
+    private final boolean wireCompressionLive;
 
     private final long startTimeNanos = System.nanoTime();
 
@@ -105,8 +114,23 @@ public class RequestProcessingService {
 
         this.dirtyTracker = new DirtyColumnTracker();
 
-        this.diskReader = new ChunkDiskReader(config.diskReaderThreads, config.useBackgroundReadPriority,
-                config.useNbtTranscode);
+        // Pool size honours diskReaderThreads=0 (AUTO). The tier question is whether the
+        // resolved read path carries REAL priority: Moonrise's Priority.LOW defers to gameplay
+        // regardless of how many reads we have outstanding, whereas on vanilla's
+        // single-threaded IOWorker our concurrency IS the vanilla-delay tradeoff. Probing the
+        // bridge here is the same per-JVM resolution the read path itself uses, so the two
+        // cannot disagree at startup. (If it latches incompatible LATER the pool is already
+        // sized — acceptable: every latched fallback engages the adaptive throttle, which
+        // narrows hasHeadroom() and makes the pool size non-binding.)
+        // useBackgroundReadPriority=false short-circuits chooseReadPath to foregroundRead,
+        // so the Moonrise rung never runs and the pool must be sized by the UNprioritized
+        // tier. Sizing it off Moonrise presence alone gave an admin who disabled background
+        // priority — precisely because LSS reads were hurting vanilla chunk loading — up to
+        // 8 FOREGROUND readers where the historic default was 5. (v0.9.0 review.)
+        boolean prioritizedReads = config.useBackgroundReadPriority
+                && dev.vox.lss.compat.MoonriseReadCompat.resolveOrNull() != null;
+        this.diskReader = new ChunkDiskReader(config.effectiveDiskReaderThreads(prioritizedReads),
+                config.useBackgroundReadPriority, config.useNbtTranscode);
         if (config.enableChunkGeneration) {
             this.generationService = new ChunkGenerationService(config);
             this.generationService.setDirtyContentFilter(this.dirtyContentFilter);
@@ -119,9 +143,149 @@ public class RequestProcessingService {
         this.offThreadProcessor = new FabricOffThreadProcessor(
                 this.players,
                 this.diskReader, this.generationService != null, dataDir,
-                config.perDimensionTimestampCacheSizeMB, config.missMemoTtlSeconds,
+                config.effectiveTimestampCacheMB(), config.missMemoTtlSeconds,
                 config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
                         + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS);
+
+        // Compressed-column shipping (protocol 19, plan §0.11): the server-side native
+        // probe latches ONCE here. Probe failure (musl servers — zstd-jni publishes no
+        // musl natives) degrades to raw sessions with one warning; without this term a
+        // capable client against a natives-less default-on server would throw at every
+        // payload build, forever. Independent of the store's own probe below.
+        boolean wireCompressionLive = false;
+        if (config.useCompressedColumns) {
+            var wireCodec = dev.vox.lss.common.store.StoreCodec.zstdOrNull();
+            if (wireCodec == null) {
+                LSSLogger.warn("useCompressedColumns is enabled but the "
+                        + dev.vox.lss.common.store.StoreCodec.NAME + " native cannot load"
+                        + " on this platform — LOD columns will ship uncompressed for"
+                        + " every session");
+            } else {
+                this.offThreadProcessor.attachWireCodec(wireCodec);
+                // Frame-form store serving (plan §3): with compression live, the store
+                // rung ships stored frames verbatim instead of decompress-then-recompress.
+                this.diskReader.setServeStoreFrames(true);
+                wireCompressionLive = true;
+            }
+        }
+        this.wireCompressionLive = wireCompressionLive;
+
+        // LOD store (docs/planning/lod-store-implementation-plan.md): memory tier for
+        // "memory", memory + SQLite for "full". Attached to BOTH consumers before any
+        // submit/tick: the reader owns the hit rung, the processor owns deposits +
+        // invalidation fan-out. Environment resolved eagerly on the main thread (levels
+        // are loaded at SERVER_STARTED): per-dimension region dirs via the same API the
+        // game uses (getStorageFolder — never hand-derived layouts), and per-dimension
+        // mask fingerprints (deposited bytes are post-mask; a mask change drops the
+        // dimension's rows at the sweep). A failed codec/native probe degrades to
+        // store-off with one warning — never a crash.
+        // `enabled: false` must mean the LOD store is not opened and the backfill does
+        // not run. tick() checks the flag, but the store is built HERE, in the
+        // constructor, and SERVER_STARTED constructs the service unconditionally — so
+        // before this guard a server with LSS switched off still created
+        // <world>/lss-lod/, walked every region file in every dimension at
+        // lodStoreBackfillColumnsPerSecond, and wrote a DB roughly the size of the
+        // region files, for a feature the admin had turned off and with nothing to
+        // read any of it. Unreachable until v0.9.0 defaulted lodStore=full +
+        // lodStoreBackfill=true; the enabled-false soak scenario cannot catch it,
+        // because its config pins lodStore=off. (v0.9.0 review.)
+        var storeMode = config.enabled
+                ? dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore)
+                : dev.vox.lss.common.store.LodStoreMode.OFF;
+        if (!config.enabled && !dev.vox.lss.common.store.LodStoreMode
+                .normalize(config.lodStore).equals(dev.vox.lss.common.store.LodStoreMode.OFF)) {
+            LSSLogger.info("LSS is disabled (enabled=false) — the LOD store and its "
+                    + "backfill stay off; no store is created and no regions are walked");
+        }
+        if (storeMode != dev.vox.lss.common.store.LodStoreMode.OFF) {
+            var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
+            var regionDirs = new HashMap<String, java.nio.file.Path>();
+            var maskFingerprints = new HashMap<String, String>();
+            for (ServerLevel level : server.getAllLevels()) {
+                String dim = level.dimension().identifier().toString();
+                regionDirs.put(dim, net.minecraft.world.level.dimension.DimensionType
+                        .getStorageFolder(level.dimension(), worldRoot)
+                        .resolve("region").normalize());
+                var maskEntry = XrayMaskManager.entryForActive(level);
+                String maskFp = maskEntry == null ? "off"
+                        : maskEntry.sourceLabel() + ":"
+                                + Long.toHexString(maskEntry.mask().fingerprint());
+                // Review B11: a NON-TERMINAL AntiXray probe (controller not yet
+                // registered at SERVER_STARTED) serves an uncached config fallback
+                // that later serves may replace with the engine mask — snapshotting
+                // it could KEEP engine-masked rows under a config label across two
+                // transient boots. A per-boot nonce never matches across boots, so
+                // the affected dimension drops-and-re-warms instead (the safe
+                // direction; churn only while the engine keeps resolving late).
+                if (!XrayMaskManager.isTerminalForActive(level)) {
+                    maskFp = "transient:" + Long.toHexString(System.nanoTime());
+                }
+                maskFingerprints.put(dim, maskFp);
+            }
+            var env = new dev.vox.lss.common.store.SqliteLodStore.Environment(
+                    worldRoot.resolve("lss-lod"), server.getServerVersion(),
+                    LSSConstants.PROTOCOL_VERSION, regionDirs::get, maskFingerprints::get,
+                    config.lodStoreResweepSeconds, config.lodStoreMaxBytes(),
+                    storeRegistryFingerprint(server));
+            this.lodStore = dev.vox.lss.common.store.LodStores.createOrNull(env);
+            if (this.lodStore == null) {
+                LSSLogger.warn("lodStore=" + storeMode.configValue() + " requested but the "
+                        + dev.vox.lss.common.store.StoreCodec.NAME + " codec native cannot "
+                        + "load on this platform — running WITHOUT the LOD store");
+            } else {
+                this.diskReader.attachStore(this.lodStore);
+                this.offThreadProcessor.attachStore(this.lodStore);
+            }
+            // Opt-in background backfill (Phase 4): built only over the SQLite store
+            // (a memory store's backfill would evaporate at restart). Config-started;
+            // /lsslod store backfill start|stop controls it at runtime either way.
+            if (this.lodStore instanceof dev.vox.lss.common.store.SqliteLodStore sqlite) {
+                var levelByDim = new HashMap<String, ServerLevel>();
+                for (ServerLevel level : server.getAllLevels()) {
+                    levelByDim.put(level.dimension().identifier().toString(), level);
+                }
+                this.storeBackfill = new dev.vox.lss.common.store.StoreBackfill(
+                        sqlite, regionDirs::get,
+                        // Traversal anchor: the real shared spawn via the 26.2
+                        // respawn-data accessor (review B7 — the cap-stop made
+                        // "nearest-spawn first" load-bearing: a far-spawn world with
+                        // an opt-in cap warmed the wrong terrain, then stopped).
+                        // Origin fallback on any shape drift: the anchor only ORDERS
+                        // the walk.
+                        dim -> {
+                            try {
+                                var level = levelByDim.get(dim);
+                                var pos = level == null ? null
+                                        : level.getRespawnData().pos();
+                                return pos == null ? new long[]{0, 0}
+                                        : new long[]{pos.getX() >> 4, pos.getZ() >> 4};
+                            } catch (Throwable t) {
+                                return new long[]{0, 0};
+                            }
+                        },
+                        List.copyOf(levelByDim.keySet()),
+                        (dim, cx, cz) -> {
+                            var level = levelByDim.get(dim);
+                            return level == null ? null
+                                    : this.diskReader.readColumnBytesSyncForBackfill(level, cx, cz);
+                        },
+                        this.diskReader::hasHeadroom,
+                        // Tick-health ceiling: pause the backfill while the smoothed
+                        // tick time is over the configured MSPT gate.
+                        () -> server.getCurrentSmoothedTickTime()
+                                < LSSConstants.LOD_STORE_BACKFILL_TICK_CEILING_MS,
+                        config.lodStoreBackfillColumnsPerSecond);
+                if (config.lodStoreBackfill) {
+                    this.storeBackfill.start();
+                }
+            } else {
+                this.storeBackfill = null;
+            }
+        } else {
+            this.lodStore = null;
+            this.storeBackfill = null;
+        }
+
         this.offThreadProcessor.start();
 
         this.dirtyBroadcaster = new DirtyColumnBroadcaster(
@@ -136,10 +300,22 @@ public class RequestProcessingService {
             // Session identity for the router's stale-snapshot guard (set before the map
             // publish so the processing thread never sees it null on a live state).
             s.setRegisteredDimension(player.level().dimension().identifier().toString());
+            // Transport-pressure gauge (elytra-wall §8.3). The probe re-reads the player's
+            // channel on every call, so a reconnect on the SAME ServerPlayer is picked up;
+            // a player-object swap that keeps this state degrades to isActive()==false =>
+            // no signal, never a wrong number.
+            s.setChannelPressureProbe(FabricChannelPressure.forPlayer(player));
             return s;
         });
         this.diskReader.registerPlayer(player.getUUID());
         state.setCapabilities(capabilities);
+        // The four-term AND (plan §2): capability bit x config+native latch x NOT-v16.
+        // The v16 manager is marked BEFORE registerPlayer on the handshake path (and a
+        // dimension-change re-registration re-derives), so the dialect term is reliable
+        // here — a v16 handshake maliciously setting 0x2 never gets a codec byte.
+        state.setWantsCompressedColumns(this.wireCompressionLive
+                && (capabilities & LSSConstants.CAPABILITY_ZSTD_COLUMNS) != 0
+                && !this.v16Compat.isV16(player.getUUID()));
         state.markHandshakeComplete();
         return state;
     }
@@ -371,7 +547,8 @@ public class RequestProcessingService {
         long perPlayerAllocation = this.bandwidthLimiter.getPerPlayerAllocation(activeCount);
         long perPlayerCap = Math.min(perPlayerAllocation, config.bytesPerSecondLimitPerPlayer);
         flushSendQueues(this.players.values(), perPlayerCap, this.bandwidthLimiter, this.diag,
-                this::sendColumnPayload, this.offThreadProcessor);
+                this::sendColumnPayload, this.offThreadProcessor,
+                (long) config.outboundBufferCeilingKB * 1024L);
     }
 
     /** Warn-once latch for the v16 egress guard (MAIN thread only). */
@@ -385,6 +562,16 @@ public class RequestProcessingService {
      *  guard cannot convert is DROPPED with a warn-once (design §5): a dropped frame
      *  self-heals by re-declaration, a wrong-shaped one kicks the client. Unreachable
      *  today — only buildAndEnqueueColumnPayload feeds this queue. */
+    /** Whether a column may be converted to the legacy v16 shape. Extracted so the
+     *  guard's decision is pinnable: {@code sendColumnPayload} is private and needs a
+     *  live server, so this — the only thing standing between a codec-1 payload and a
+     *  hard-kicked v16 client — had no test on either side of the Fabric module, while
+     *  Paper pins its equivalent twice. (v0.9.0 review.) The legacy layout has nowhere
+     *  to carry a codec byte, so only RAW converts; anything else must be dropped. */
+    static boolean isV16Convertible(dev.vox.lss.networking.payloads.VoxelColumnS2CPayload col) {
+        return col.codec() == LSSConstants.COLUMN_CODEC_RAW;
+    }
+
     private void sendColumnPayload(PlayerRequestState state, CustomPacketPayload payload)
             throws Exception {
         var uuid = state.getPlayerUUID();
@@ -394,6 +581,25 @@ public class RequestProcessingService {
                     this.v16UnconvertibleWarned = true;
                     LSSLogger.warn("v16-compat: dropping unconvertible column-queue payload "
                             + payload.getClass().getName() + " for " + state.getPlayerName()
+                            + " (further drops are silent)");
+                }
+                return;
+            }
+            if (!isV16Convertible(col)) {
+                // Codec-0 assert at the seam (plan review A6): the legacy layout has
+                // nowhere to carry a codec, so a framed payload converted here would
+                // ship a zstd body the old client decodes as garbage (hard-kick class).
+                // REACHABLE in one narrow window (4-agent round, pipeline F2): an
+                // established v19+0x2 session downgrading to v16 (discovery re-handshake)
+                // can drain already-queued codec-1 payloads into this guard. The drop
+                // self-heals by re-declaration; note it books send-success accounting
+                // (bytes/wire/grace) for a payload that never shipped — bounded to the
+                // downgrade instant, same shape as the unconvertible-payload drop above.
+                if (!this.v16UnconvertibleWarned) {
+                    this.v16UnconvertibleWarned = true;
+                    LSSLogger.warn("v16-compat: dropping codec-" + col.codec()
+                            + " column for v16 session " + state.getPlayerName()
+                            + " — the session flag should have forced raw"
                             + " (further drops are silent)");
                 }
                 return;
@@ -412,13 +618,21 @@ public class RequestProcessingService {
                                  SharedBandwidthLimiter bandwidthLimiter, TickDiagnostics diag,
                                  ColumnPayloadSender sender,
                                  FabricOffThreadProcessor offThreadProcessor) {
+        flushSendQueues(states, perPlayerCap, bandwidthLimiter, diag, sender, offThreadProcessor, 0L);
+    }
+
+    static void flushSendQueues(Iterable<PlayerRequestState> states, long perPlayerCap,
+                                 SharedBandwidthLimiter bandwidthLimiter, TickDiagnostics diag,
+                                 ColumnPayloadSender sender,
+                                 FabricOffThreadProcessor offThreadProcessor,
+                                 long outboundCeilingBytes) {
         for (var state : states) {
             if (!state.hasCompletedHandshake()) continue;
             long[] dropped = state.flushSendQueue(perPlayerCap, bandwidthLimiter, diag,
                     payload -> {
                         if (consumeSendDropFault()) return;
                         sender.send(state, payload);
-                    });
+                    }, outboundCeilingBytes);
             if (dropped.length > 0) {
                 // A send failure discarded resolved-but-undelivered columns: clear their
                 // done-bits so the client's re-requests re-resolve instead of being
@@ -514,7 +728,7 @@ public class RequestProcessingService {
      *       path's equivalent.)</li>
      *   <li>The PUBLISHED want-set covers the other ~19 ticks of each second:
      *       {@code takeIncomingBatch()} nulls the mailbox within ~50 ms of arrival while
-     *       batches arrive at only 1 Hz, so the mailbox alone would see null on almost every
+     *       batches arrive at 1-4 Hz (the client's adaptive cadence), so the mailbox alone would see null on almost every
      *       tick. It stays published exactly while the backlog is non-empty (cleared on
      *       drain-to-empty, republished by {@code restoreBacklog}), which is what carries a
      *       want-set too large for the slot cap across the cycles that work it off.</li>
@@ -683,8 +897,54 @@ public class RequestProcessingService {
         return this.offThreadProcessor;
     }
 
+    /** Registry identity for the LOD store meta guard (4-agent round R2-M3): stored
+     *  wire bytes embed GLOBAL block-state ids and biome ids, both assignment-order
+     *  dependent — a mod or datapack change shifts them while region files stay
+     *  untouched, so only this fingerprint can trigger the rebuild. BOTH halves are
+     *  id-ordered identity hashes (review A3: the old block half was a bare COUNT, so
+     *  an id-permuting registry change of identical total size — a mod swap landing
+     *  on the same state count — served every warm column as the wrong blocks with no
+     *  self-heal; state iteration order of BLOCK_STATE_REGISTRY IS global-id order,
+     *  and BlockState toString carries block id + property values). Textual twin in
+     *  PaperRequestProcessingService; format pinned by StoreEnvironmentWiringTest. */
+    static String storeRegistryFingerprint(MinecraftServer server) {
+        var states = new java.util.ArrayList<String>();
+        for (var state : net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY) {
+            states.add(String.valueOf(state));
+        }
+        var biomeKeys = new java.util.ArrayList<String>();
+        var biomes = server.registryAccess()
+                .lookupOrThrow(net.minecraft.core.registries.Registries.BIOME);
+        for (var biome : biomes) {
+            var key = biomes.getKey(biome);
+            biomeKeys.add(key == null ? "?" : key.toString());
+        }
+        return dev.vox.lss.common.store.RegistryFingerprint.of(states, biomeKeys);
+    }
+
+    /** The live LOD store (null while lodStore=off OR after the codec-probe degrade). */
+    public dev.vox.lss.common.store.LodStoreService getLodStore() {
+        return this.lodStore;
+    }
+
     public DirtyColumnTracker getDirtyTracker() {
         return this.dirtyTracker;
+    }
+
+    /** Phase 5 ops (/lsslod store invalidate all): drop every stored row (batcher-side,
+     *  tombstoned). The tscache is deliberately untouched: its stamps describe REGION
+     *  truth, not store contents — re-asks re-resolve via tscache/probe/NBT as normal
+     *  and re-warm the store. Only meaningful for the persistent store. */
+    public boolean invalidateStoreAllDimensions() {
+        if (this.lodStore instanceof dev.vox.lss.common.store.SqliteLodStore sqlite) {
+            sqlite.requestDropAllRows();
+            return true;
+        }
+        return false;
+    }
+
+    public dev.vox.lss.common.store.StoreBackfill getStoreBackfill() {
+        return this.storeBackfill;
     }
 
     public DirtyContentFilter getDirtyContentFilter() {
@@ -712,6 +972,7 @@ public class RequestProcessingService {
             for (var entry : this.dirtyTracker.drainAll().entrySet()) {
                 this.offThreadProcessor.invalidateTimestamps(entry.getKey(), entry.getValue());
             }
+            if (this.storeBackfill != null) this.storeBackfill.shutdown();
             this.offThreadProcessor.shutdown();
         } catch (Exception e) {
             LSSLogger.error("Error shutting down off-thread processor", e);
@@ -721,6 +982,15 @@ public class RequestProcessingService {
             this.diskReader.shutdown();
         } catch (Exception e) {
             LSSLogger.error("Error shutting down disk reader", e);
+        }
+        try {
+            // After the reader (no more store rung callers) and after the processor (its
+            // sentinel take fanned the final invalidations into the store).
+            if (this.lodStore != null) {
+                this.lodStore.shutdown();
+            }
+        } catch (Exception e) {
+            LSSLogger.error("Error shutting down LOD store", e);
         }
         try {
             if (this.generationService != null) {

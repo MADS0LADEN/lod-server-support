@@ -82,10 +82,17 @@ ANOMALY_OPT_INS = {
     "dirty-during-backfill": frozenset({"saturated"}),
     "dirty-while-offline": frozenset({"saturated"}),
     "clearcache-mid-session": frozenset({"saturated"}),
+    "store-second-join": frozenset({"saturated"}),
+    "store-offline-populate": frozenset({"saturated"}),
+    "store-offline-mutate": frozenset(),
+    "store-offline-verify": frozenset({"saturated"}),
+    "store-save-storm": frozenset({"saturated"}),
+    "store-save-storm-off": frozenset({"saturated"}),
     "dimension-rejoin-warm": frozenset({"saturated"}),
     # Paper/Folia (SOAK_PLATFORM=paper|folia): cold-cache disc resync from the base world, like
     # warm-rejoin run 1, so the same load-shaped opt-ins apply.
     "paper-dirty-falling-block": frozenset({"saturated"}),
+    "paper-store-unfired-event": frozenset({"saturated"}),
 }
 
 # Vacuous-pass floors: minimum number of client-laws windows (the quiescent pairs where
@@ -94,7 +101,7 @@ ANOMALY_OPT_INS = {
 # 27/17, dimension-trip 6/22/16, dirty-broadcast 16. New scenarios get a conservative 3
 # (their converged tails run 40+ s at 5 s snapshot cadence).
 # Scenarios allowed to finish with zero nonzero-delta client-law windows (no LSS traffic).
-TRAFFIC_FLOOR_EXEMPT = frozenset({"enabled-false"})
+TRAFFIC_FLOOR_EXEMPT = frozenset({"enabled-false", "store-offline-mutate"})
 
 MIN_CLIENT_WINDOWS = {
     "fresh-backfill": {(1, 0): 10},
@@ -115,8 +122,15 @@ MIN_CLIENT_WINDOWS = {
     # clearcache splits run 1 into pre/post-action segments (the flushCache counter reset
     # is a segment boundary, like a dimension change)
     "clearcache-mid-session": {(1, 0): 4, (1, 1): 4},
+    "store-second-join": {(1, 0): 4, (1, 1): 4},
+    "store-offline-populate": {(1, 0): 4},
+    "store-offline-mutate": {(1, 0): 3},
+    "store-offline-verify": {(1, 0): 4},
+    "store-save-storm": {(1, 0): 4, (1, 1): 4},
+    "store-save-storm-off": {(1, 0): 4},
     "dimension-rejoin-warm": {(1, 0): 2, (1, 1): 5, (2, 0): 3, (2, 1): 3},
     "paper-dirty-falling-block": {(1, 0): 3},
+    "paper-store-unfired-event": {(1, 0): 4, (1, 1): 4},
 }
 
 # The exclusion circle the client scanner never requests inside: min(client render distance,
@@ -131,10 +145,25 @@ EXCLUSION_RADIUS = 8
 SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBackgroundReadPriority",
                                      # NBT->wire transcode kill switch (round 2, 2026-07-29):
                                      # scenarios may pin it off for object-path A/Bs.
-                                     "useNbtTranscode"})
+                                     "useNbtTranscode",
+                                     # LOD-store backfill opt-in (Phase 4) — the key was
+                                     # missing from this allowlist, so a backfill soak
+                                     # scenario could not be written (4-agent round R4).
+                                     "lodStoreBackfill",
+                                     # Compressed-columns kill switch (protocol 19):
+                                     # scenarios pin it off for the raw-path A/B arm.
+                                     "useCompressedColumns",
+                                     # Legacy-client shim toggle. Absent from this list
+                                     # since it was introduced, so no scenario could
+                                     # ever pin it — the same R4 hole as lodStoreBackfill
+                                     # (v0.9.0 review).
+                                     "enableV16Compat"})
 SERVER_CONFIG_INT_KEYS = frozenset({
     "lodDistanceChunks", "bytesPerSecondLimitPerPlayer", "diskReaderThreads",
     "sendQueueLimitPerPlayer", "bytesPerSecondLimitGlobal",
+    # Transport deference (0 = off, the shipped default). Listed so an A/B scenario can
+    # arm it — the R4 lesson below is exactly this omission.
+    "outboundBufferCeilingKB",
     "generationConcurrencyLimitGlobal", "generationTimeoutSeconds",
     "dirtyBroadcastIntervalSeconds",
     "generationConcurrencyLimitPerPlayer", "perDimensionTimestampCacheSizeMB",
@@ -145,11 +174,24 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     "missMemoTtlSeconds",
     # X-ray masking cutoff (docs/planning/antixray-compat-design.md §3).
     "xrayMaxBlockHeight",
+    # LOD-store periodic freshness re-sweep (Paper's stale bound; 0 = off).
+    "lodStoreResweepSeconds",
+    # LOD-store on-disk size cap (Phase 5 eviction).
+    "lodStoreMaxMB",
+    # LOD-store backfill pace (store-backfill-tuning-plan.md) — added with the knob itself
+    # (the R4 lesson: a key missing from this allowlist means no scenario can ever set it).
+    # lodStoreBackfillTickCeilingMillis was retired to a constant 2026-08-02: its clamp band
+    # was 20..50 and both ends were degenerate by its own documentation.
+    "lodStoreBackfillColumnsPerSecond",
 })
-# X-ray masking tri-state ("auto"/"on"/"off") + hidden-block id list — the only non-bool
-# non-int server config keys; validated loosely (any string / any list of strings).
-SERVER_CONFIG_STRING_KEYS = frozenset({"xrayObfuscation"})
-SERVER_CONFIG_STRING_LIST_KEYS = frozenset({"xrayHiddenBlocks"})
+# X-ray masking tri-state ("auto"/"on"/"off"), the LOD-store switch ("off"/"full" —
+# scenarios A/B store gates against it; "memory" retired 2026-08-02), + hidden-block
+# id list — the only
+# non-bool non-int server config keys; validated loosely (any string / list of strings).
+SERVER_CONFIG_STRING_KEYS = frozenset({"xrayObfuscation", "lodStore"})
+# updateEvents is Paper-only (the Bukkit event class names driving dirty detection);
+# it was absent here, so no Paper scenario could pin its dirty-detection surface.
+SERVER_CONFIG_STRING_LIST_KEYS = frozenset({"xrayHiddenBlocks", "updateEvents"})
 SERVER_CONFIG_KEYS = (SERVER_CONFIG_BOOL_KEYS | SERVER_CONFIG_INT_KEYS
                       | SERVER_CONFIG_STRING_KEYS | SERVER_CONFIG_STRING_LIST_KEYS)
 
@@ -166,7 +208,20 @@ SERVER_MOVING = (
     "generation.completed",
 )
 # Quiescence: gauges that must be ZERO at both endpoints of the pair.
-SERVER_DRAINS = ("disk.pending", "generation.active", "dirty.pending")
+# store.queue (the LOD-store write-batcher depth) is a strict drain: deposits only happen
+# on serves, so a quiescent server has nothing left to batch and the queue must be empty.
+# THE BATCHER CONTRACT THIS GATE IMPOSES (Phase 2 must be designed to it, or every
+# store-on soak reds on law-coverage — Phase 0 correctness-review F1):
+#   1. IDLE FLUSH: a "<64-row txn" batcher must also flush on a timer well inside the 5 s
+#      snapshot cadence — a residual sub-batch tail held until the next serve would keep
+#      store.queue nonzero at EVERY candidate pair and zero out the quiescent windows.
+#   2. DRAIN-SIDE GAUGE: setQueueDepth must be updated when the batcher DRAINS, not only
+#      on enqueue (a stale nonzero gauge has the same window-killing effect).
+#   3. OFF-SERVE PRODUCERS STAY OFF THIS GAUGE: the Paper periodic re-sweep (autosave
+#      cadence — 5 s on the Folia soak staging!) and other timer-driven store ops must
+#      not ride store.queue; give them their own gauge OUTSIDE SERVER_DRAINS (cf.
+#      dirty.pending's tolerance for exactly this shape).
+SERVER_DRAINS = ("disk.pending", "generation.active", "dirty.pending", "store.queue")
 PLAYER_DRAINS = ("held_sync", "held_gen", "send_queue", "backlog")
 # backlog (v17) is a strict drain: a want entry retained by a full slot / exhausted disk pool is
 # real outstanding work that no other gauge reports (held_sync/held_gen count ADMITTED work only).
@@ -193,6 +248,12 @@ SERVER_MONOTONIC = (
     # drop, dedup-primary departure), healed by the client's 1 Hz re-declaration;
     # range_filtered = dropped by the Chebyshev ingress guard (the movement race).
     "service.superseded", "service.range_filtered",
+    # Compressed columns (protocol 19, compressed-columns-implementation-plan.md §4):
+    # wire_bytes = SHIPPED payload volume (zstd frames for capable sessions) — the
+    # observed-bandwidth match next to the raw-denominated bytes_sent (law A2 stays
+    # raw==raw); cols_zstd/cols_raw = per-payload codec outcomes at build. Monotonic
+    # counters; no law consumes them yet — the compress-gate harness reads them.
+    "service.wire_bytes", "service.cols_zstd", "service.cols_raw",
     # Server-owned generation: disk misses resolved into transient silent drops (law A5's
     # dedicated term — a subset of superseded events, counted separately because
     # backlog-replace supersession never touches disk).
@@ -225,6 +286,14 @@ SERVER_MONOTONIC = (
     # accounting landed); this counter is the observability subset, so no law reads it
     # directly.
     "service.grace_skipped",
+    # LOD store (docs/planning/lod-store-implementation-plan.md): monotonic counter half
+    # of the store family (all-zero while lodStore=off — the kill-switch A/B arm shape).
+    # The gauges (store.queue is a SERVER_DRAIN; mem_bytes/db_bytes/wal_bytes/
+    # checkpoint_ms_max/read_avg_us) are deliberately absent from this whitelist.
+    "store.hits", "store.misses", "store.deposits", "store.deposit_drops",
+    "store.deposit_skips",
+    "store.errors", "store.mem_hits", "store.mem_evictions", "store.sweep_drops",
+    "store.backfill_reads", "store.backfill_deposits", "store.backfill_skips",
 )
 CLIENT_MONOTONIC = (
     "received_columns", "received_bytes", "dropped",
@@ -245,7 +314,7 @@ KNOWN_SERVER_KEYS = {
     # additions (sampled per tick by the driver); probe_hashes appears only when the server
     # JVM runs with -Dlss.soak.probes. All are observational — no law requires their presence.
     "snapshot": {"event", "wallMs", "tick", "service", "disk", "generation", "dirty",
-                 "bandwidth", "players", "dedup", "jvm", "tscache",
+                 "bandwidth", "players", "dedup", "jvm", "tscache", "store",
                  "mailbox_depth_hw", "mspt_avg_window", "probe_hashes"},
     # mapped appears only on Folia runs, only when true: the driver acknowledged a timeline
     # command Folia unregisters (save-all) as a deliberate no-op instead of executing it.
@@ -262,10 +331,14 @@ KNOWN_CLIENT_KEYS = {
     # with v17's drip-feed queue; rtt now measures last-declare->answer, not first-ask->answer.
     # queued_bytes: the decode-queue byte gauge (disk-read profile round, presence-optional
     # like the other late additions — older recordings predate it).
+    # wire_received_bytes: shipped (codec-1 frame) volume next to the raw-denominated
+    # received_bytes (compressed columns, protocol 19) — presence-optional like the
+    # other late additions.
     "snapshot": {"event", "wallMs", "dimension", "received_columns", "received_bytes",
                  "dropped", "responses", "requested_total", "send_cycles", "columns",
                  "scan", "tracker_in_flight", "queued", "queued_bytes", "server_enabled",
-                 "probes", "effective_lod", "rtt", "ingest_failures"},
+                 "probes", "effective_lod", "rtt", "ingest_failures",
+                 "wire_received_bytes"},
     # One scripted client-side action (-Dlss.soak.clientActionAt); resets the request
     # metrics, so the loader treats it as a client segment boundary.
     "action": {"event", "wallMs", "action", "atSeconds"},
@@ -561,12 +634,18 @@ def law_A2(ps, cs, pc, cc, window):
 
 def law_A3(ps, cs, window):
     d_sent = delta(ps, cs, "service.columns_sent")
+    # store.hits joined the source side with the LOD store (Phase 1): a store hit serves
+    # a column without touching disk.successful (the rung contract excludes hits from the
+    # disk pair). Hits legitimately OVER-count the right side (an all-air hit resolves
+    # without a column send) — safe for an inequality law.
     d_src = (delta(ps, cs, "service.in_memory")
              + delta(ps, cs, "disk.successful")
-             + delta(ps, cs, "generation.completed"))
+             + delta(ps, cs, "generation.completed")
+             + delta(ps, cs, "store.hits"))
     if d_sent > d_src:
         return [Violation("A3", window,
-                          "columns_sent exceeds in_memory + disk.successful + generation.completed",
+                          "columns_sent exceeds in_memory + disk.successful + "
+                          "generation.completed + store.hits",
                           {"d_columns_sent": d_sent, "d_sources": d_src})]
     return []
 
@@ -1133,18 +1212,24 @@ def check_rate_limit_storm(ctx):
     On a gen-ENABLED server NOT_GENERATED must never fire (the permanence guarantee is
     pinned in generation-capacity-stress where the bottleneck makes it interesting).
 
-    MEASURED (Task 10 live run): superseded == 370, all of it miss-drop churn
-    (miss_dropped == 370 exactly; not_found 579 == gen_submitted 209 + 370 — law A5 exact),
-    fully quiescent tail. Ceiling set to ~2x measured: convergent churn is bounded by the
-    disc (165 positions retrying until the 40/64 gen caps drain them), while a broken
-    healing loop grows superseded by ~150/scan for the whole run (thousands)."""
+    MEASURED (Task 10 live run, fixed 1 Hz cadence): superseded == 370, all of it miss-drop
+    churn (miss_dropped == 370 exactly; not_found 579 == gen_submitted 209 + 370 — law A5
+    exact), fully quiescent tail. RE-MEASURED 2026-08-01 under the client's adaptive scan
+    cadence (docs/planning/adaptive-scan-cadence-design.md): superseded == 742 — the
+    converging TAIL is exactly where >=95% of a batch is answered, so its re-declarations
+    arrive at up to 4 Hz and each replaces a backlog still holding the churning residue
+    (the plan-review round predicted this shift; the storm PEAK is unchanged — high
+    outstanding holds the cadence at 1 Hz there). Ceiling keeps the ~2x-measured
+    convention against the new baseline: convergent churn is bounded by the disc (165
+    positions retrying until the 40/64 gen caps drain them), while a broken healing loop
+    grows superseded by ~150+/scan for the whole run (thousands)."""
     last = ctx.server_snaps[-1]
-    if last["service"]["superseded"] > 800:
+    if last["service"]["superseded"] > 1500:
         yield Violation("rate-limit-storm", "final snapshot",
                         "transient-drop churn did not converge: superseded kept growing, so "
                         "re-declared positions are not being satisfied (the disk-miss "
                         "escalation or the silent-drop healing loop is broken)",
-                        {"expected": "<= 800", "actual": last["service"]["superseded"]})
+                        {"expected": "<= 1500", "actual": last["service"]["superseded"]})
     fc = ctx.final_client(1)
     if fc is None:
         yield Violation("rate-limit-storm", "run1", "no client snapshots in run 1", {})
@@ -1760,6 +1845,482 @@ def check_clearcache_mid_session(ctx):
                         {"wallMs": ctx.server_snaps[-1]["wallMs"]})
 
 
+def make_store_second_join(scenario):
+    """Factory for store-second-join (lodStore=full — the SQLite store alone since the
+    Phase 2 delete-the-tier verdict). Kept a factory because the check is written against
+    the counters, not the engine: store.hits counts whichever store answers, so the old
+    lodStore=memory twin (retired 2026-08-02) shared it verbatim."""
+    @named_check(scenario, ["client.requested_total", "client.received_columns",
+                                       "server.store.hits", "server.store.deposits",
+                                       "server.store.errors", "server.disk.submitted"])
+    def check(ctx):
+        """The Phase 1 LOD-store gate (lod-store-implementation-plan.md §5): the backfill leg
+        populates the memory tier through delivery-path deposits; the mid-session clearcache
+        forces the full ts<=0 re-declaration of the disc, and the re-serve wave must come
+        from the STORE — store.hits carries it, disk.submitted stays nearly still — with
+        byte-identical content (server probe hashes stable across the store-served leg) and
+        zero contained store failures. The loaded disc near the player resolves via the probe
+        rung on BOTH legs (never deposited, never store-served), so the floors are sized to
+        the disk-served annulus, not the whole disc."""
+        acts = [a for a in ctx.run_actions.get(1, []) if a["action"] == "clearcache"]
+        if len(acts) != 1:
+            yield Violation(scenario, "run1",
+                            "expected exactly one clearcache action row — client hook did not fire",
+                            {"actions": len(acts)})
+            return
+        snaps = ctx.runs.get(1)
+        if not snaps:
+            yield Violation(scenario, "run1", "no client snapshots in run 1", {})
+            return
+        segs = client_segments(snaps)
+        if len(segs) != 2:
+            yield Violation(scenario, "run1",
+                            "client series must split into two segments at the clearcache reset",
+                            {"segments": [s[1] for s in segs]})
+            return
+        pre_cli = snaps[segs[0][3]]
+        post_cli = snaps[segs[1][3]]
+        d_recv = post_cli["received_columns"] - pre_cli["received_columns"]
+        if d_recv < 500:
+            yield Violation(scenario, "post-action segment",
+                            "the clearcache re-download wave did not happen — nothing for the "
+                            "store to serve", {"expected": ">= 500", "actual": d_recv})
+            return
+        action_wall = acts[0]["wallMs"]
+        srv_pre = None
+        for s in ctx.server_snaps:
+            if s["wallMs"] <= action_wall:
+                srv_pre = s
+            else:
+                break
+        srv_final = ctx.server_snaps[-1] if ctx.server_snaps else None
+        if srv_pre is None or srv_final is None or srv_pre is srv_final:
+            yield Violation(scenario, "server series",
+                            "need server snapshots on both sides of the action", {})
+            return
+        deposits_pre = get_path(srv_pre, "store.deposits")
+        if deposits_pre < 800:
+            yield Violation(scenario, "populate leg",
+                            "the backfill leg deposited too little — the delivery-path "
+                            "deposit choke point is not firing",
+                            {"expected": ">= 800 before the action", "actual": deposits_pre})
+        hits_delta = get_path(srv_final, "store.hits") - get_path(srv_pre, "store.hits")
+        if hits_delta < 800:
+            yield Violation(scenario, "re-serve leg",
+                            "the re-serve wave was not served from the store",
+                            {"expected": ">= 800 store hits after the action", "actual": hits_delta})
+        disk_delta = get_path(srv_final, "disk.submitted") - get_path(srv_pre, "disk.submitted")
+        ceiling = max(200, int(0.25 * d_recv))
+        if disk_delta > ceiling:
+            yield Violation(scenario, "re-serve leg",
+                            "the store-warm re-serve leg re-read region files — the store "
+                            "rung is not intercepting the second join",
+                            {"disk.submitted delta": disk_delta, "ceiling": ceiling})
+        errors = get_path(srv_final, "store.errors")
+        if errors:
+            yield Violation(scenario, "whole run",
+                            "contained store failures fired", {"store.errors": errors})
+        # Byte parity: the armed probes were NBT-served on the populate leg and store-served
+        # on the re-serve leg; recordServedColumnBytes hashes the exact wire bytes each time,
+        # so a stable hash across the action IS byte identity.
+        pre_hashes = srv_pre.get("probe_hashes") or {}
+        final_hashes = srv_final.get("probe_hashes") or {}
+        proven = 0
+        for token, final_hash in final_hashes.items():
+            pre_hash = pre_hashes.get(token)
+            if pre_hash in (None, -1) or final_hash == -1:
+                continue  # probe not served on one leg — parity unprovable for it
+            proven += 1
+            if final_hash != pre_hash:
+                yield Violation(scenario, "probe " + token,
+                                "store-served bytes differ from the NBT-served bytes — the "
+                                "store round trip is not byte-exact",
+                                {"pre": pre_hash, "post": final_hash})
+        if proven == 0:
+            # An armed-but-all(-1) map means the recorder never fired (the vacuous-parity
+            # hole the first live run exposed) — the parity leg must never pass silently.
+            yield Violation(scenario, "probes",
+                            "no probe proved byte parity — server probes unarmed "
+                            "(-Psoak.probes / SERVER_EXTRA_ARGS) or the serve-path recorder "
+                            "(SoakProbeBridge) is not firing",
+                            {"pre": pre_hashes, "final": final_hashes})
+        if ctx.server_snaps and (len(ctx.server_snaps) - 1) not in ctx.quiescent_server:
+            yield Violation(scenario, "final snapshot",
+                            "last server snapshot is not verified-quiescent (the store-warm "
+                            "leg never converged)",
+                            {"wallMs": ctx.server_snaps[-1]["wallMs"]})
+    return check
+
+
+check_store_second_join = make_store_second_join("store-second-join")
+
+
+@named_check("paper-store-unfired-event", ["server.store.hits", "server.store.errors",
+                                           "server.store.deposits", "client.received_columns"])
+def check_paper_store_unfired_event(ctx):
+    """The Paper staleness-bound gate (lod-store-implementation-plan.md Phase 2): a
+    console setblock fires no Bukkit event, so the store's stale row for the edited
+    column can only be culled by the periodic resweep (lodStoreResweepSeconds) — within
+    ≈ one save + one sweep cycle. The timeline saves at 75 s and clearcaches at 120 s
+    (≥ 2 sweep cycles later): the re-declared edited probe MUST come back with DIFFERENT
+    bytes (stale would be byte-identical), the control probe byte-identical, the sweep
+    must be OBSERVED (store.sweep_drops moved), and the re-serve wave must still be
+    store-served with zero contained failures."""
+    acts = [a for a in ctx.run_actions.get(1, []) if a["action"] == "clearcache"]
+    if len(acts) != 1:
+        yield Violation("paper-store-unfired-event", "run1",
+                        "expected exactly one clearcache action row — client hook did "
+                        "not fire", {"actions": len(acts)})
+        return
+    snaps = ctx.runs.get(1)
+    if not snaps:
+        yield Violation("paper-store-unfired-event", "run1", "no client snapshots", {})
+        return
+    segs = client_segments(snaps)
+    if len(segs) != 2:
+        yield Violation("paper-store-unfired-event", "run1",
+                        "client series must split into two segments at the clearcache "
+                        "reset", {"segments": [s[1] for s in segs]})
+        return
+    d_recv = snaps[segs[1][3]]["received_columns"] - snaps[segs[0][3]]["received_columns"]
+    if d_recv < 500:
+        yield Violation("paper-store-unfired-event", "post-action segment",
+                        "the clearcache re-download wave did not happen",
+                        {"expected": ">= 500", "actual": d_recv})
+        return
+    action_wall = acts[0]["wallMs"]
+    srv_pre = None
+    for s in ctx.server_snaps:
+        if s["wallMs"] <= action_wall:
+            srv_pre = s
+        else:
+            break
+    srv_final = ctx.server_snaps[-1] if ctx.server_snaps else None
+    if srv_pre is None or srv_final is None or srv_pre is srv_final:
+        yield Violation("paper-store-unfired-event", "server series",
+                        "need server snapshots on both sides of the action", {})
+        return
+    # Premise guard: the edit must be INVISIBLE to the event-driven dirty pipeline —
+    # that is what makes the resweep the only healer. A neighbor-reaction event firing
+    # on the setblock (seen live: glowstone tripping a configured event racily) marks
+    # the column dirty, the broadcast re-serves it fresh BEFORE the action, and the
+    # pre/final hash comparison then measures the DIRTY pipeline, not the staleness
+    # bound. That run is a premise failure, not a store verdict either way.
+    if get_path(srv_final, "dirty.marked_total") != 0:
+        # Checked at the FINAL snapshot (covers pre- AND post-action): an event firing
+        # at any point means the dirty pipeline participated and the staleness bound
+        # was not what the probes measured.
+        yield Violation("paper-store-unfired-event", "premise",
+                        "the edit fired a configured Bukkit event (dirty.marked_total "
+                        "moved) — the scenario measured the dirty pipeline, not the "
+                        "unfired-event staleness bound; use an inert edit (in-ground "
+                        "bedrock replace)",
+                        {"dirty.marked_total": get_path(srv_final, "dirty.marked_total")})
+        return
+    if get_path(srv_final, "store.sweep_drops") < 1:
+        yield Violation("paper-store-unfired-event", "resweep",
+                        "store.sweep_drops never moved — the periodic resweep did not "
+                        "cull the un-evented edit (staleness bound unproven)",
+                        {"store.sweep_drops": get_path(srv_final, "store.sweep_drops")})
+    hits_delta = get_path(srv_final, "store.hits") - get_path(srv_pre, "store.hits")
+    if hits_delta < 800:
+        yield Violation("paper-store-unfired-event", "re-serve leg",
+                        "the re-serve wave was not served from the store",
+                        {"expected": ">= 800 store hits after the action",
+                         "actual": hits_delta})
+    errors = get_path(srv_final, "store.errors")
+    if errors:
+        yield Violation("paper-store-unfired-event", "whole run",
+                        "contained store failures fired", {"store.errors": errors})
+    pre_hashes = srv_pre.get("probe_hashes") or {}
+    final_hashes = srv_final.get("probe_hashes") or {}
+    edited_pre, edited_final = pre_hashes.get("20:0"), final_hashes.get("20:0")
+    control_pre, control_final = pre_hashes.get("-20:0"), final_hashes.get("-20:0")
+    if None in (edited_pre, edited_final, control_pre, control_final) \
+            or -1 in (edited_pre, edited_final, control_pre, control_final):
+        yield Violation("paper-store-unfired-event", "probes",
+                        "probes unarmed or unserved on a leg — the staleness comparison "
+                        "is void", {"pre": pre_hashes, "final": final_hashes})
+        return
+    if edited_final == edited_pre:
+        yield Violation("paper-store-unfired-event", "probe 20:0",
+                        "the edited column re-served the PRE-EDIT bytes after the "
+                        "resweep bound — the store is serving stale data past its "
+                        "documented staleness window",
+                        {"pre": edited_pre, "final": edited_final})
+    if control_final != control_pre:
+        yield Violation("paper-store-unfired-event", "probe -20:0",
+                        "the untouched control column's bytes drifted — store re-serve "
+                        "is not byte-exact", {"pre": control_pre, "final": control_final})
+    if (len(ctx.server_snaps) - 1) not in ctx.quiescent_server:
+        yield Violation("paper-store-unfired-event", "final snapshot",
+                        "last server snapshot is not verified-quiescent",
+                        {"wallMs": srv_final["wallMs"]})
+
+
+@named_check("store-save-storm", ["server.store.deposits", "server.store.deposit_drops",
+                                  "server.store.errors", "server.store.misses",
+                                  "client.received_columns"])
+def check_store_save_storm(ctx):
+    """The Phase 3 gate (lod-store-implementation-plan.md), recalibrated for the
+    DELETE-only save hook (4-agent round R2-M2: hook deposits provably never survived
+    the fan-out their own mark triggers, so the hook no longer deposits). The filter
+    must SUPPRESS the storm's metadata re-saves (deposit_drops == 0 — the queue never
+    even pressures), the hook must NOT deposit (deposits <= serve-path misses: every
+    surviving deposit is delivery-path, one miss upstream of each — a positive margin
+    means the doomed write-through crept back), the hook must still PROCESS the wave
+    (marked_total), the mid-storm edit must re-serve fresh through the dirty pipeline,
+    and after the clearcache the edited column must serve fresh (probe 20:0 freshness,
+    disk re-read ceiling = the first-observation invalidation churn)."""
+    acts = [a for a in ctx.run_actions.get(1, []) if a["action"] == "clearcache"]
+    if len(acts) != 1:
+        yield Violation("store-save-storm", "run1",
+                        "expected exactly one clearcache action row", {"actions": len(acts)})
+        return
+    snaps = ctx.runs.get(1)
+    segs = client_segments(snaps) if snaps else []
+    if len(segs) != 2:
+        yield Violation("store-save-storm", "run1",
+                        "client series must split at the clearcache reset",
+                        {"segments": [s[1] for s in segs]})
+        return
+    d_recv = snaps[segs[1][3]]["received_columns"] - snaps[segs[0][3]]["received_columns"]
+    if d_recv < 500:
+        yield Violation("store-save-storm", "post-action segment",
+                        "the clearcache re-download wave did not happen",
+                        {"expected": ">= 500", "actual": d_recv})
+        return
+    action_wall = acts[0]["wallMs"]
+    srv_pre = None
+    for s in ctx.server_snaps:
+        if s["wallMs"] <= action_wall:
+            srv_pre = s
+        else:
+            break
+    srv_final = ctx.server_snaps[-1] if ctx.server_snaps else None
+    if srv_pre is None or srv_final is None or srv_pre is srv_final:
+        yield Violation("store-save-storm", "server series",
+                        "need server snapshots on both sides of the action", {})
+        return
+    drops = get_path(srv_final, "store.deposit_drops")
+    if drops:
+        yield Violation("store-save-storm", "whole run",
+                        "save-hook deposits were shed", {"store.deposit_drops": drops})
+    errors = get_path(srv_final, "store.errors")
+    if errors:
+        yield Violation("store-save-storm", "whole run",
+                        "contained store failures fired", {"store.errors": errors})
+    # DELETE-ONLY pin (R2-M2 regression guard, inverting the old HOOK-ALIVE margin):
+    # with the hook depositing nothing, every applied deposit is delivery-path and has
+    # exactly one store miss upstream (store hits never re-deposit, probe serves never
+    # deposit, backfill is off in this scenario) — so cumulative deposits <= misses.
+    # A positive margin means save-hook write-through deposits crept back in; they are
+    # provably dead on arrival (the fan-out tombstones them) and pure queue pressure.
+    margin = get_path(srv_final, "store.deposits") - get_path(srv_final, "store.misses")
+    if margin > 0:
+        yield Violation("store-save-storm", "whole run",
+                        "deposits exceed serve-path misses — a non-delivery deposit "
+                        "path (the retired save-hook write-through?) is live again",
+                        {"deposits - misses": margin, "expected": "<= 0"})
+    # HOOK-AT-SCALE pin (recalibrated on live data: vanilla save-all SKIPS unchanged
+    # chunks entirely — suppressed_total stayed 0 through a 10x storm because nothing
+    # re-saved, so a suppression floor is unforceable from a scripted timeline; filter
+    # suppression itself is unit-pinned and live-pinned by check_dirty_resave_quiet).
+    # What the first save-all DOES force is the loaded set's first-observation wave
+    # through the hook — marked_total >= 200 proves the hook processed it at scale.
+    marked = get_path(srv_final, "dirty.marked_total")
+    if marked < 200:
+        yield Violation("store-save-storm", "storm window",
+                        "the first save-all's first-observation wave never went "
+                        "through the hook (marked_total too low — hook dead or storm "
+                        "never ran)", {"dirty.marked_total": marked, "expected": ">= 200"})
+    hits_delta = get_path(srv_final, "store.hits") - get_path(srv_pre, "store.hits")
+    if hits_delta < 800:
+        yield Violation("store-save-storm", "re-serve leg",
+                        "the post-clearcache wave was not served from the store",
+                        {"expected": ">= 800", "actual": hits_delta})
+    disk_delta = get_path(srv_final, "disk.submitted") - get_path(srv_pre, "disk.submitted")
+    if disk_delta > 50:
+        # <= 50, not a percentage ceiling (a 25% ceiling let the delete+re-read corner
+        # pass wholesale; measured churn is ~25). The allowed reads are the session's
+        # first-observation invalidation churn: the first save-all marks the loaded set
+        # (first observations), the dirty->store fan-out (kept ON — the Phase 3 engine
+        # review showed it is the correctness backstop against stale in-flight reads
+        # overwriting hook deposits) tombstones those rows, and the subset that has
+        # UNLOADED by clearcache time legitimately re-reads once (measured 25 of ~441;
+        # the loaded majority probe-serves). Wholesale re-reads (hundreds) still red.
+        yield Violation("store-save-storm", "re-serve leg",
+                        "the re-serve leg read region files beyond the session's "
+                        "first-observation invalidation churn",
+                        {"disk.submitted delta": disk_delta, "expected": "<= 50"})
+    # Probe story: earliest hash = pre-edit; srv_pre = after the edit's dirty re-serve;
+    # final = the post-clearcache store serve.
+    edited_first = None
+    for s in ctx.server_snaps:
+        h = (s.get("probe_hashes") or {}).get("20:0")
+        if h is not None and h != -1:
+            edited_first = h
+            break
+    pre_hashes = srv_pre.get("probe_hashes") or {}
+    final_hashes = srv_final.get("probe_hashes") or {}
+    edited_pre = pre_hashes.get("20:0")
+    edited_final = final_hashes.get("20:0")
+    control_first = None
+    for s in ctx.server_snaps:
+        h = (s.get("probe_hashes") or {}).get("-20:0")
+        if h is not None and h != -1:
+            control_first = h
+            break
+    control_final = final_hashes.get("-20:0")
+    if None in (edited_first, edited_pre, edited_final, control_first, control_final) \
+            or -1 in (edited_pre, edited_final, control_final):
+        yield Violation("store-save-storm", "probes",
+                        "probes unarmed or unserved on a leg",
+                        {"first": edited_first, "pre": pre_hashes, "final": final_hashes})
+        return
+    if edited_pre == edited_first:
+        yield Violation("store-save-storm", "probe 20:0",
+                        "the mid-storm edit never re-served fresh before the action "
+                        "(dirty pipeline dead?)",
+                        {"pre-edit": edited_first, "pre-action": edited_pre})
+    if edited_final == edited_first:
+        # Freshness, NOT byte-identity (recalibrated on live data): with the fan-out
+        # ON, the edited row is tombstoned at the drain and the post-clearcache serve
+        # is an NBT re-read of the SAVED region — vanilla re-palettizes containers on
+        # save (first-appearance order), so those bytes legitimately differ from the
+        # LIVE re-serve while carrying identical content (the documented disk/live
+        # parity caveat). The invariant that must hold: the final serve is not the
+        # PRE-edit bytes.
+        yield Violation("store-save-storm", "probe 20:0",
+                        "the post-clearcache serve returned the PRE-edit bytes",
+                        {"pre-edit": edited_first, "final": edited_final})
+    if control_final != control_first:
+        yield Violation("store-save-storm", "probe -20:0",
+                        "the untouched control column's bytes drifted",
+                        {"first": control_first, "final": control_final})
+    if (len(ctx.server_snaps) - 1) not in ctx.quiescent_server:
+        yield Violation("store-save-storm", "final snapshot",
+                        "last server snapshot is not verified-quiescent",
+                        {"wallMs": srv_final["wallMs"]})
+
+
+@named_check("store-offline-populate", ["server.store.deposits", "server.store.errors"])
+def check_store_offline_populate(ctx):
+    """Phase 1 of scripts/store_offline_edit.sh: the backfill must actually charge the
+    store (deposit floor), with zero contained store failures, and BOTH armed probes
+    must have been served — their hashes are the cross-phase baseline the wrapper
+    compares the verify phase against, so an unserved probe here voids the whole
+    offline-edit experiment."""
+    last = ctx.server_snaps[-1] if ctx.server_snaps else None
+    if last is None:
+        yield Violation("store-offline-populate", "server series", "no server snapshots", {})
+        return
+    deposits = get_path(last, "store.deposits")
+    if deposits < 800:
+        yield Violation("store-offline-populate", "whole run",
+                        "the populate leg deposited too little — nothing for the verify "
+                        "phase to serve", {"expected": ">= 800", "actual": deposits})
+    errors = get_path(last, "store.errors")
+    if errors:
+        yield Violation("store-offline-populate", "whole run",
+                        "contained store failures fired", {"store.errors": errors})
+    hashes = last.get("probe_hashes") or {}
+    unserved = sorted(t for t, h in hashes.items() if h == -1)
+    if not hashes or unserved:
+        yield Violation("store-offline-populate", "probes",
+                        "cross-phase baseline probes missing or unserved — arm "
+                        "-Psoak.probes=20:0,-20:0 on the server",
+                        {"hashes": hashes, "unserved": unserved})
+
+
+@named_check("store-offline-mutate", ["server.service.requests_received",
+                                      "server.store.deposits"])
+def check_store_offline_mutate(ctx):
+    """Phase 2: a REAL edit reaches the region file while LSS is disabled end-to-end —
+    what makes the edit 'offline' from the store's point of view. The forceload-add,
+    setblock, and save-all must all be acknowledged (the forceload is LOAD-BEARING: a
+    setblock into an unloaded chunk silently no-ops with a dispatch-level ok — the exact
+    false-green the first live run produced), the client must see server_enabled=false
+    on every snapshot, and no LSS service/disk/store counter may move."""
+    fl = next((c for c in ctx.commands if c["cmd"].startswith("forceload add")), None)
+    if fl is None or not fl.get("ok"):
+        yield Violation("store-offline-mutate", "timeline",
+                        "the forceload-add did not run — the setblock would silently "
+                        "no-op into an unloaded chunk", {"row": fl})
+    sb = next((c for c in ctx.commands if c["cmd"].startswith("setblock")), None)
+    if sb is None or not sb.get("ok"):
+        yield Violation("store-offline-mutate", "timeline",
+                        "the offline edit's setblock did not run/acknowledge",
+                        {"row": sb})
+    sa = next((c for c in ctx.commands if c["cmd"].startswith("save-all")), None)
+    if sa is None or not sa.get("ok"):
+        yield Violation("store-offline-mutate", "timeline",
+                        "the save-all flushing the edit did not run/acknowledge",
+                        {"row": sa})
+    for s in ctx.runs.get(1, []):
+        if s["server_enabled"] is not False:
+            yield Violation("store-offline-mutate", f"run1 wallMs={s['wallMs']}",
+                            "client reports server_enabled true — the phase was not "
+                            "invisible to LSS", {"server_enabled": s["server_enabled"]})
+            break
+    last = ctx.server_snaps[-1] if ctx.server_snaps else None
+    if last is None:
+        yield Violation("store-offline-mutate", "server series", "no server snapshots", {})
+        return
+    for path in ("service.requests_received", "service.columns_sent", "disk.submitted",
+                 "store.deposits", "store.hits"):
+        v = get_path(last, path)
+        if v != 0:
+            yield Violation("store-offline-mutate", "final snapshot",
+                            f"LSS counter {path} moved during the offline-edit phase",
+                            {"field": path, "expected": 0, "actual": v})
+
+
+@named_check("store-offline-verify", ["server.store.hits", "server.store.errors",
+                                      "server.disk.submitted", "client.received_columns"])
+def check_store_offline_verify(ctx):
+    """Phase 3: a cold-cache client joins the carried world + store after the offline
+    edit. The startup sweep must have run cleanly against the mutated region (errors 0),
+    the unedited annulus must re-serve from the STORE (hits floor + disk-read ceiling —
+    the sweep must not have over-dropped), both probes must serve (the WRAPPER compares
+    hashes across phases: edited probe differs, control probe byte-identical), and the
+    run must end verified-quiescent."""
+    last = ctx.server_snaps[-1] if ctx.server_snaps else None
+    snaps = ctx.runs.get(1)
+    if last is None or not snaps:
+        yield Violation("store-offline-verify", "series",
+                        "need both server and client run-1 snapshots", {})
+        return
+    hits = get_path(last, "store.hits")
+    if hits < 800:
+        yield Violation("store-offline-verify", "whole run",
+                        "the carried store did not serve the re-join — the startup "
+                        "sweep over-dropped or the store did not survive the restart",
+                        {"expected": ">= 800 store hits", "actual": hits})
+    errors = get_path(last, "store.errors")
+    if errors:
+        yield Violation("store-offline-verify", "whole run",
+                        "contained store failures fired", {"store.errors": errors})
+    recv = snaps[-1]["received_columns"]
+    disk = get_path(last, "disk.submitted")
+    ceiling = max(250, int(0.25 * recv))
+    if disk > ceiling:
+        yield Violation("store-offline-verify", "whole run",
+                        "the verify leg re-read region files wholesale — the sweep "
+                        "dropped far more than the edit justifies",
+                        {"disk.submitted": disk, "ceiling": ceiling})
+    hashes = last.get("probe_hashes") or {}
+    unserved = sorted(t for t, h in hashes.items() if h == -1)
+    if not hashes or unserved:
+        yield Violation("store-offline-verify", "probes",
+                        "cross-phase comparison probes missing or unserved",
+                        {"hashes": hashes, "unserved": unserved})
+    if (len(ctx.server_snaps) - 1) not in ctx.quiescent_server:
+        yield Violation("store-offline-verify", "final snapshot",
+                        "last server snapshot is not verified-quiescent",
+                        {"wallMs": last["wallMs"]})
+
+
 @named_check("dimension-rejoin-warm", ["client.dimension", "client.responses.up_to_date"])
 def check_dimension_rejoin_warm(ctx):
     """Kick while in the End; the rejoining cold client must land back in the End
@@ -1994,6 +2555,28 @@ CHECKS = {
     "clearcache-mid-session": [check_clearcache_mid_session,
                                make_handshake_check("clearcache-mid-session"),
                                make_disc_completeness("clearcache-mid-session")],
+    "store-second-join": [check_store_second_join,
+                          make_handshake_check("store-second-join"),
+                          make_disc_completeness("store-second-join")],
+    # store_offline_edit.sh phases: each individually law-checked; the cross-phase
+    # probe-hash comparison (edited differs, control identical) lives in the wrapper.
+    "store-offline-populate": [check_store_offline_populate,
+                               make_handshake_check("store-offline-populate"),
+                               make_disc_completeness("store-offline-populate")],
+    # No disc-completeness: a disabled session never builds a disc (like enabled-false).
+    "store-offline-mutate": [check_store_offline_mutate,
+                             make_handshake_check("store-offline-mutate",
+                                                  expect_enabled=False)],
+    "store-offline-verify": [check_store_offline_verify,
+                             make_handshake_check("store-offline-verify"),
+                             make_disc_completeness("store-offline-verify")],
+    # Phase 3 gate: the save-hook deposit path under an autosave storm; the -off twin
+    # exists solely as store_save_storm.sh's MSPT pairing arm (laws only).
+    "store-save-storm": [check_store_save_storm,
+                         make_handshake_check("store-save-storm"),
+                         make_disc_completeness("store-save-storm")],
+    "store-save-storm-off": [make_handshake_check("store-save-storm-off"),
+                             make_disc_completeness("store-save-storm-off")],
     "dimension-rejoin-warm": [check_dimension_rejoin_warm,
                               make_handshake_check("dimension-rejoin-warm"),
                               make_disc_completeness("dimension-rejoin-warm", run=1),
@@ -2003,6 +2586,9 @@ CHECKS = {
     "paper-dirty-falling-block": [check_paper_dirty_falling_block,
                                   make_handshake_check("paper-dirty-falling-block"),
                                   make_disc_completeness("paper-dirty-falling-block")],
+    "paper-store-unfired-event": [check_paper_store_unfired_event,
+                                  make_handshake_check("paper-store-unfired-event"),
+                                  make_disc_completeness("paper-store-unfired-event")],
 }
 
 
@@ -2329,6 +2915,7 @@ def _srv(wall=1000, seg=0, over=None):
     """Schema-complete server snapshot fixture (all GLOBAL_SERVER_FIELDS present, zeros)."""
     snap = {"event": "snapshot", "wallMs": wall, "tick": wall // 50, "_seg": seg,
             "service": {"requests_received": 0, "columns_sent": 0, "bytes_sent": 0,
+                        "wire_bytes": 0, "cols_zstd": 0, "cols_raw": 0,
                         "duplicate_skips": 0, "queue_full": 0, "up_to_date": 0,
                         "in_memory": 0, "disk_resolved": 0, "gen_drained": 0,
                         "superseded": 0, "range_filtered": 0, "re_resolved": 0,
@@ -2339,7 +2926,15 @@ def _srv(wall=1000, seg=0, over=None):
             "generation": {"submitted": 0, "completed": 0, "timeouts": 0,
                            "removed_in_flight": 0, "active": 0,
                            "order_gated": 0, "inversions": 0},
-            "dirty": {"pending": 0, "broadcast_positions": 0, "suppressed_total": 0},
+            "dirty": {"pending": 0, "broadcast_positions": 0, "marked_total": 0,
+                      "suppressed_total": 0},
+            "store": {"hits": 0, "misses": 0, "deposits": 0, "deposit_drops": 0,
+                      "deposit_skips": 0,
+                      "errors": 0, "mem_hits": 0, "mem_evictions": 0, "sweep_drops": 0,
+                      "backfill_reads": 0, "backfill_deposits": 0, "backfill_skips": 0,
+                      "queue": 0,
+                      "mem_bytes": 0, "db_bytes": 0, "wal_bytes": 0,
+                      "checkpoint_ms_max": 0, "read_avg_us": 0, "read_p95_us": 0},
             "bandwidth": {"total_bytes": 0}, "players": []}
     for k, v in (over or {}).items():
         _set_path(snap, k, v)
@@ -2429,6 +3024,9 @@ def selftest():
     cs_bad = _srv(6000, over={"service.columns_sent": 5, "service.in_memory": 1,
                               "disk.successful": 2, "generation.completed": 1})
     hits("A3 conjured column", law_A3(_srv(1000), cs_bad, "selftest"), "A3")
+    cs_store = _srv(6000, over={"service.columns_sent": 5, "service.in_memory": 1,
+                                "disk.successful": 2, "store.hits": 2})
+    clean("A3 store hits are a source", law_A3(_srv(1000), cs_store, "selftest"))
 
     # --- A4: generation accounting ---
     cs = _srv(6000, over={"generation.submitted": 5, "generation.completed": 4,
@@ -2499,6 +3097,15 @@ def selftest():
     hits("A6 suppressed_total decrement", law_A6_server([
         _srv(1000, over={"dirty.suppressed_total": 5}),
         _srv(6000, over={"dirty.suppressed_total": 4})]), "A6")
+    clean("A6 store counters growth", law_A6_server([
+        _srv(1000, over={"store.hits": 5, "store.deposits": 2}),
+        _srv(6000, over={"store.hits": 9, "store.deposits": 4})]))
+    hits("A6 store hits decrement", law_A6_server([
+        _srv(1000, over={"store.hits": 5}),
+        _srv(6000, over={"store.hits": 4})]), "A6")
+    hits("A6 store deposit_drops decrement", law_A6_server([
+        _srv(1000, over={"store.deposit_drops": 2}),
+        _srv(6000, over={"store.deposit_drops": 1})]), "A6")
 
     # --- A6 client: monotonic for the whole run (counters are run-cumulative; a
     # dimension/action boundary does NOT excuse a decrement) ---
@@ -2570,6 +3177,11 @@ def selftest():
     draining["players"] = [dict(quiet_player)]
     cases[0] += 1
     assert not server_pair_quiescent(q1, draining), "quiescence: nonzero drain must disqualify"
+    store_draining = _srv(6000, over={"store.queue": 1})
+    store_draining["players"] = [dict(quiet_player)]
+    cases[0] += 1
+    assert not server_pair_quiescent(q1, store_draining), \
+        "quiescence: a nonzero store batcher queue (undeposited serves) must disqualify"
     held = _srv(6000)
     held["players"] = [{"name": "p", "held_sync": 0, "held_gen": 1, "send_queue": 0,
                         "backlog": 0}]
@@ -2937,8 +3549,10 @@ def selftest():
     # Server-owned generation: the storm declares the full constant want-set (800); misses
     # beyond the gen caps drop superseded (transient) and heal by re-declaration, so a small
     # fresh disc converges with bounded churn. Unbounded superseded growth = the healing
-    # loop is broken. (Ceiling provisional at 500 — re-baselined at Task 10.)
-    storm_srv = {"service.superseded": 180, "generation.completed": 165}
+    # loop is broken. (Ceiling provisional at 500 — re-baselined at Task 10 to 800, and
+    # again 2026-08-01 to 1500 against the adaptive-cadence measurement of 742: the
+    # converging tail re-declares at up to 4 Hz.)
+    storm_srv = {"service.superseded": 1100, "generation.completed": 165}
     storm_cli = {}
     clean("rate-limit-storm clean", list(check_rate_limit_storm(
         stress_ctx(storm_srv, storm_cli))))
@@ -3015,6 +3629,201 @@ def selftest():
         cc_ctx(post_received=2900, actions=cc_action, post_utd=900))), "clearcache-mid-session")
     hits("clearcache action never fired", list(check_clearcache_mid_session(
         cc_ctx(post_received=4250, actions=[]))), "clearcache-mid-session")
+
+    # --- store-second-join: the re-serve wave must be store hits with byte parity ---
+    ssj_action = [{"event": "action", "wallMs": 60_000, "action": "clearcache", "atSeconds": 60}]
+    def ssj_ctx(hits_final=2000, disk_final=2100, deposits_pre=1900, errors=0,
+                pre_hash=111, post_hash=111, actions=None):
+        srv_pre = _srv(55_000, over={"store.deposits": deposits_pre,
+                                     "store.hits": 0, "disk.submitted": 2000})
+        srv_pre["probe_hashes"] = {"20:0": pre_hash}
+        srv_fin = _srv(120_000, over={"store.deposits": deposits_pre + 50,
+                                      "store.hits": hits_final,
+                                      "disk.submitted": disk_final,
+                                      "store.errors": errors})
+        srv_fin["probe_hashes"] = {"20:0": post_hash}
+        return _ctx(
+            server_snaps=[srv_pre, srv_fin],
+            runs={1: [_cli(50_000, seg=0, over={"requested_total": 2200,
+                                                "received_columns": 2200}),
+                      _cli(120_000, seg=1, over={"requested_total": 4400,
+                                                 "received_columns": 4300})]},
+            run_actions={1: actions if actions is not None else ssj_action},
+            quiescent_server={1})
+    clean("store-second-join clean warm re-serve", list(check_store_second_join(ssj_ctx())))
+    hits("store-second-join hits missing (rung not intercepting)",
+         list(check_store_second_join(ssj_ctx(hits_final=100))), "store-second-join")
+    hits("store-second-join disk re-reads (warm leg re-read regions)",
+         list(check_store_second_join(ssj_ctx(disk_final=4100))), "store-second-join")
+    hits("store-second-join deposits missing (choke point dead)",
+         list(check_store_second_join(ssj_ctx(deposits_pre=10))), "store-second-join")
+    hits("store-second-join store errors",
+         list(check_store_second_join(ssj_ctx(errors=2))), "store-second-join")
+    hits("store-second-join byte drift (round trip not exact)",
+         list(check_store_second_join(ssj_ctx(post_hash=999))), "store-second-join")
+    hits("store-second-join action never fired",
+         list(check_store_second_join(ssj_ctx(actions=[]))), "store-second-join")
+
+    # --- store-offline-edit phases (store_offline_edit.sh) ---
+    def sop_ctx(deposits=2000, errors=0, hashes=None):
+        srv = _srv(150_000, over={"store.deposits": deposits, "store.errors": errors})
+        srv["probe_hashes"] = {"20:0": 111, "-20:0": 222} if hashes is None else hashes
+        return _ctx(server_snaps=[srv], runs={1: [_cli(150_000)]})
+    clean("store-offline-populate clean", list(check_store_offline_populate(sop_ctx())))
+    hits("store-offline-populate deposits missing",
+         list(check_store_offline_populate(sop_ctx(deposits=10))), "store-offline-populate")
+    hits("store-offline-populate store errors",
+         list(check_store_offline_populate(sop_ctx(errors=1))), "store-offline-populate")
+    hits("store-offline-populate probe unserved (baseline void)",
+         list(check_store_offline_populate(sop_ctx(hashes={"20:0": 111, "-20:0": -1}))),
+         "store-offline-populate")
+
+    som_cmds = [dict(_cmd(8_000, "forceload add 328 8"), ok=True),
+                dict(_cmd(10_000, "setblock 328 -60 8 minecraft:glowstone"), ok=True),
+                dict(_cmd(15_000, "save-all"), ok=True)]
+    def som_ctx(commands=None, requests=0, enabled=False):
+        return _ctx(
+            server_snaps=[_srv(45_000, over={"service.requests_received": requests})],
+            commands=som_cmds if commands is None else commands,
+            runs={1: [_cli(40_000, over={"server_enabled": enabled})]})
+    clean("store-offline-mutate clean", list(check_store_offline_mutate(som_ctx())))
+    hits("store-offline-mutate forceload missing (setblock would no-op unloaded)",
+         list(check_store_offline_mutate(som_ctx(commands=som_cmds[1:]))),
+         "store-offline-mutate")
+    hits("store-offline-mutate setblock missing",
+         list(check_store_offline_mutate(som_ctx(commands=[som_cmds[0], som_cmds[2]]))),
+         "store-offline-mutate")
+    hits("store-offline-mutate save-all missing",
+         list(check_store_offline_mutate(som_ctx(commands=som_cmds[:2]))),
+         "store-offline-mutate")
+    hits("store-offline-mutate LSS not disabled",
+         list(check_store_offline_mutate(som_ctx(enabled=True))), "store-offline-mutate")
+    hits("store-offline-mutate LSS counters moved",
+         list(check_store_offline_mutate(som_ctx(requests=5))), "store-offline-mutate")
+
+    def sov_ctx(hits_=2000, errors=0, disk=100, hashes=None, quiescent=True):
+        srv = _srv(150_000, over={"store.hits": hits_, "store.errors": errors,
+                                  "disk.submitted": disk})
+        srv["probe_hashes"] = {"20:0": 333, "-20:0": 222} if hashes is None else hashes
+        return _ctx(server_snaps=[srv],
+                    runs={1: [_cli(150_000, over={"received_columns": 2200})]},
+                    quiescent_server={0} if quiescent else set())
+    clean("store-offline-verify clean", list(check_store_offline_verify(sov_ctx())))
+    hits("store-offline-verify store did not serve",
+         list(check_store_offline_verify(sov_ctx(hits_=100))), "store-offline-verify")
+    hits("store-offline-verify store errors",
+         list(check_store_offline_verify(sov_ctx(errors=3))), "store-offline-verify")
+    hits("store-offline-verify sweep over-dropped (disk re-reads)",
+         list(check_store_offline_verify(sov_ctx(disk=1500))), "store-offline-verify")
+    hits("store-offline-verify probe unserved",
+         list(check_store_offline_verify(sov_ctx(hashes={"20:0": -1, "-20:0": 222}))),
+         "store-offline-verify")
+    hits("store-offline-verify never converged",
+         list(check_store_offline_verify(sov_ctx(quiescent=False))), "store-offline-verify")
+
+    # --- paper-store-unfired-event: resweep culls the un-evented edit ---
+    def psu_ctx(edited_final=999, control_final=222, sweep_drops=2, hits_final=2000,
+                errors=0, actions=None):
+        srv_pre = _srv(115_000, over={"store.hits": 0, "store.deposits": 1900})
+        srv_pre["probe_hashes"] = {"20:0": 111, "-20:0": 222}
+        srv_fin = _srv(185_000, over={"store.hits": hits_final,
+                                      "store.sweep_drops": sweep_drops,
+                                      "store.errors": errors,
+                                      "store.deposits": 1950})
+        srv_fin["probe_hashes"] = {"20:0": edited_final, "-20:0": control_final}
+        return _ctx(
+            server_snaps=[srv_pre, srv_fin],
+            runs={1: [_cli(110_000, seg=0, over={"received_columns": 2200}),
+                      _cli(185_000, seg=1, over={"received_columns": 4300})]},
+            run_actions={1: actions if actions is not None else [
+                {"event": "action", "wallMs": 120_000, "action": "clearcache",
+                 "atSeconds": 120}]},
+            quiescent_server={1})
+    clean("paper-store-unfired-event clean staleness-bound pass",
+          list(check_paper_store_unfired_event(psu_ctx())))
+    hits("paper-store-unfired-event stale bytes past the bound",
+         list(check_paper_store_unfired_event(psu_ctx(edited_final=111))),
+         "paper-store-unfired-event")
+    hits("paper-store-unfired-event control drifted",
+         list(check_paper_store_unfired_event(psu_ctx(control_final=888))),
+         "paper-store-unfired-event")
+    hits("paper-store-unfired-event resweep never culled",
+         list(check_paper_store_unfired_event(psu_ctx(sweep_drops=0))),
+         "paper-store-unfired-event")
+    hits("paper-store-unfired-event store not serving the wave",
+         list(check_paper_store_unfired_event(psu_ctx(hits_final=100))),
+         "paper-store-unfired-event")
+    hits("paper-store-unfired-event store errors",
+         list(check_paper_store_unfired_event(psu_ctx(errors=1))),
+         "paper-store-unfired-event")
+    hits("paper-store-unfired-event action never fired",
+         list(check_paper_store_unfired_event(psu_ctx(actions=[]))),
+         "paper-store-unfired-event")
+    premise_ctx = psu_ctx()
+    premise_ctx.server_snaps[-1]["dirty"]["marked_total"] = 1
+    hits("paper-store-unfired-event premise broke (edit fired an event)",
+         list(check_paper_store_unfired_event(premise_ctx)),
+         "paper-store-unfired-event")
+
+    # --- store-save-storm: the delete-only save hook under an autosave storm ---
+    # (deposits default == misses: the delivery path is the ONLY depositor now;
+    #  a positive deposits-misses margin is the R2-M2 write-through regression.)
+    def sst_ctx(edited_pre=555, edited_final=777, deposits=2100, misses=2100,
+                drops=0, errors=0, hits_final=2100, disk_final=2150,
+                control_final=222, marked=441, actions=None):
+        srv_first = _srv(20_000, over={"store.deposits": 2000, "store.misses": 2000,
+                                       "store.hits": 0, "disk.submitted": 2000})
+        srv_first["probe_hashes"] = {"20:0": 111, "-20:0": 222}
+        srv_pre = _srv(125_000, over={"store.deposits": deposits - 20,
+                                      "store.misses": misses - 20,
+                                      "store.hits": 0, "disk.submitted": 2050})
+        srv_pre["probe_hashes"] = {"20:0": edited_pre, "-20:0": 222}
+        srv_fin = _srv(185_000, over={"store.deposits": deposits, "store.misses": misses,
+                                      "store.hits": hits_final,
+                                      "store.deposit_drops": drops,
+                                      "store.errors": errors,
+                                      "dirty.marked_total": marked,
+                                      "disk.submitted": disk_final})
+        srv_fin["probe_hashes"] = {"20:0": edited_final, "-20:0": control_final}
+        return _ctx(
+            server_snaps=[srv_first, srv_pre, srv_fin],
+            runs={1: [_cli(120_000, seg=0, over={"received_columns": 2200}),
+                      _cli(185_000, seg=1, over={"received_columns": 4300})]},
+            run_actions={1: actions if actions is not None else [
+                {"event": "action", "wallMs": 130_000, "action": "clearcache",
+                 "atSeconds": 130}]},
+            quiescent_server={2})
+    clean("store-save-storm clean save-hook pass (first-observation churn reads)",
+          list(check_store_save_storm(sst_ctx(disk_final=2075))))
+    hits("store-save-storm deposits shed under storm",
+         list(check_store_save_storm(sst_ctx(disk_final=2075, drops=7))),
+         "store-save-storm")
+    hits("store-save-storm write-through deposits crept back (deposits > misses)",
+         list(check_store_save_storm(sst_ctx(disk_final=2075, deposits=2600))),
+         "store-save-storm")
+    hits("store-save-storm edit never re-served before the action",
+         list(check_store_save_storm(sst_ctx(disk_final=2075, edited_pre=111))),
+         "store-save-storm")
+    hits("store-save-storm final serve returned pre-edit bytes",
+         list(check_store_save_storm(sst_ctx(disk_final=2075, edited_final=111))),
+         "store-save-storm")
+    hits("store-save-storm control drifted",
+         list(check_store_save_storm(sst_ctx(disk_final=2075, control_final=888))),
+         "store-save-storm")
+    hits("store-save-storm re-serve leg re-read regions beyond churn",
+         list(check_store_save_storm(sst_ctx(disk_final=2200))), "store-save-storm")
+    hits("store-save-storm hook never processed the loaded set",
+         list(check_store_save_storm(sst_ctx(disk_final=2075, marked=12))),
+         "store-save-storm")
+    hits("store-save-storm store did not serve the wave",
+         list(check_store_save_storm(sst_ctx(disk_final=2075, hits_final=100))),
+         "store-save-storm")
+    hits("store-save-storm action never fired",
+         list(check_store_save_storm(sst_ctx(disk_final=2075, actions=[]))),
+         "store-save-storm")
+    hits("store-save-storm store errors",
+         list(check_store_save_storm(sst_ctx(disk_final=2075, errors=1))),
+         "store-save-storm")
 
     # --- dirty-range-filter: drain visible, client silent, follow-up live ---
     drf_cmds = [_cmd(122_000, "setblock -250 310 5 minecraft:stone"),

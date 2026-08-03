@@ -55,6 +55,7 @@ class PayloadCodecNegativeLengthTest {
         b.writeUtf(LSSConstants.DIM_STR_OVERWORLD, LSSConstants.MAX_DIMENSION_STRING_LENGTH);
         b.writeLong(0L);
         b.writeByte(1); // serve-source
+        b.writeByte(0); // codec (raw)
         b.writeVarInt(-1); // sectionBytes length
         try {
             assertThrows(NegativeArraySizeException.class,

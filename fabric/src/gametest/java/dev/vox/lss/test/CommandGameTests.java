@@ -112,6 +112,40 @@ public class CommandGameTests {
     }
 
     /**
+     * C4 (review-fixes round): the /lsslod store tree dispatched through the real
+     * Brigadier dispatcher — Paper's twin is unit-pinned but the Fabric literals had
+     * zero coverage on any tier, so a dropped literal shipped advertised-but-missing
+     * (the release notes name these as the "LODs look stale" remediation lever). The
+     * gametest server runs lodStore=off, so the pinned answers are the documented
+     * off/unavailable rungs.
+     */
+    @GameTest(structure = "fabric-gametest-api-v1:empty")
+    public void lsslodStoreVerbsDispatchThroughTheRealTree(GameTestHelper helper) {
+        ServerLevel level = helper.getLevel();
+        var server = level.getServer();
+        var commands = server.getCommands();
+        var lines = new ArrayList<String>();
+        var source = new CommandSourceStack(recorder(lines), Vec3.ZERO, Vec2.ZERO, level,
+                PermissionSet.ALL_PERMISSIONS, "lss-test", Component.literal("lss-test"),
+                server, null);
+
+        commands.performPrefixedCommand(source, "lsslod store status");
+        helper.assertTrue(anyLineContains(lines, "LOD store: off/unavailable"),
+                "store status with lodStore=off must answer off/unavailable, got: " + lines);
+
+        lines.clear();
+        commands.performPrefixedCommand(source, "lsslod store backfill status");
+        helper.assertTrue(anyLineContains(lines, "Store backfill unavailable"),
+                "backfill status without a SQLite store must answer unavailable, got: " + lines);
+
+        lines.clear();
+        commands.performPrefixedCommand(source, "lsslod store invalidate all");
+        helper.assertTrue(anyLineContains(lines, "LOD store not active"),
+                "invalidate all with no store must answer not-active, got: " + lines);
+        helper.succeed();
+    }
+
+    /**
      * CG-022: /lsslod stats executed through the dispatcher against the LIVE service with a
      * registered player carrying known counters — the command → service → shared formatter
      * wiring. Registration, execution, and cleanup share one synchronous callback so the
@@ -274,9 +308,15 @@ public class CommandGameTests {
                     service.getWindowBandwidthRate(),
                     service.getTickDiag().getTotalSectionsSent(),
                     service.getTickDiag().getTotalBytesSent(),
+                    service.getTickDiag().getTotalWireBytesSent(),
                     service.getOffThreadProcessor().getDiagnostics(), service.getDiskReader(),
                     service.getBandwidthLimiter(),
                     genService != null ? genService.getDiagnostics() : null,
+                    dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore)
+                        == dev.vox.lss.common.store.LodStoreMode.OFF
+                        ? dev.vox.lss.common.store.LodStoreMode.OFF
+                        : (service.getLodStore() != null ? service.getLodStore().mode() : null),
+                    service.getOffThreadProcessor().getStoreDiagnostics(),
                     service.getPlayers().values());
 
             @SuppressWarnings("unchecked")

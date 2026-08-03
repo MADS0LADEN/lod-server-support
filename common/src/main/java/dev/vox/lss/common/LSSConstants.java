@@ -12,13 +12,22 @@ public final class LSSConstants {
     // diagnostic attribution for the client trace. Still the "v17 want-set" design line;
     // the bump makes a mismatched pair fail safe (silent no-session) instead of
     // misaligning the column decode by one byte.
-    public static final int PROTOCOL_VERSION = 18;
+    // 19: VoxelColumn carries a one-byte codec tag after the source tag
+    // (COLUMN_CODEC_RAW/ZSTD — docs/planning/compressed-columns-design.md): capability
+    // sessions ship the section bytes as a zstd-1 frame end-to-end instead of raw bytes
+    // under netty deflate. Same fail-safe rationale as 17->18: the layout must be
+    // version-agreed, the capability bit only carries ABILITY.
+    public static final int PROTOCOL_VERSION = 19;
 
     // VoxelColumn serve-source tag values (one wire byte; unknown values are kept verbatim
     // client-side — same forward-safety stance as the retired response byte 0)
     public static final byte COLUMN_SOURCE_IN_MEMORY = 0;
     public static final byte COLUMN_SOURCE_DISK = 1;
     public static final byte COLUMN_SOURCE_GENERATION = 2;
+    // LOD-store hit (docs/planning/lod-store-implementation-plan.md): served from the
+    // store instead of a region read. Diagnostic attribution only (client /lss trace
+    // src:3); pre-store clients keep the byte verbatim by the unknown-values rule.
+    public static final byte COLUMN_SOURCE_STORE = 3;
 
     // Channel identifiers (used as Minecraft resource location strings)
     public static final String CHANNEL_HANDSHAKE = "lss:handshake_c2s";
@@ -63,14 +72,41 @@ public final class LSSConstants {
     public static final int MIN_LOD_DISTANCE = 1;
     public static final int MAX_LOD_DISTANCE = 2048;
     public static final int MIN_BYTES_PER_SECOND = 1024;
-    public static final int MAX_BYTES_PER_SECOND_PER_PLAYER = 104_857_600;
+    /** Per-player bandwidth ceiling. Raised 100 MB -> 1 GiB 2026-08-02 (config review
+     *  section 5): the live server hit the old ceiling exactly, and this bounds only what an
+     *  admin deliberately types. The DEFAULT is 25 MiB — the cap charges RAW bytes
+     *  because it bounds client decode work (the confirmed receiver-limited bottleneck),
+     *  so wire compression did not loosen the constraint it exists to enforce. */
+    public static final int MAX_BYTES_PER_SECOND_PER_PLAYER = 1_073_741_824;
+    /** Disk-reader pool bounds. 0 is a first-class value ABOVE this floor — it means
+     *  AUTO (see ServerConfigBase.effectiveDiskReaderThreads), so validate() only clamps
+     *  nonzero values, the same 0-means-derive shape as lodStoreMaxMB. */
     public static final int MIN_DISK_READER_THREADS = 1;
-    public static final int MAX_DISK_READER_THREADS = 64;
     public static final int MIN_SEND_QUEUE_SIZE = 1;
     public static final int MAX_SEND_QUEUE_SIZE = 100_000;
+    /** AUTO disk-reader pool size where no real read priority exists — vanilla's
+     *  single-threaded IOWorker (LSS concurrency IS the vanilla-delay tradeoff there) and the
+     *  chunk-IO-overhaul fallback (the AdaptiveReadThrottle owns the real limit; this is a
+     *  ceiling). Also the FLOOR of the prioritized tier, so a 2-core box never drops below it. */
+    public static final int AUTO_DISK_READER_THREADS_SHARED_WORKER = 3;
+    /** AUTO ceiling where Moonrise Priority.LOW defers to gameplay independently of
+     *  concurrency (all Paper/Folia, Fabric+Moonrise): the limit is parse/serialize CPU, so
+     *  scale with cores but stop well short of starving the rest of the server. */
+    public static final int AUTO_DISK_READER_THREADS_PRIORITIZED_MAX = 8;
+    public static final int MAX_DISK_READER_THREADS = 64;
+    /** Transport-deference ceiling bounds (0 = disabled, the default — see
+     *  {@code outboundBufferCeilingKB}). The floor is well above one legal maximum-size
+     *  column so a single admissible payload can never trip the gate on its own. */
+    public static final int MIN_OUTBOUND_BUFFER_CEILING_KB = 4_096;
+    public static final int MAX_OUTBOUND_BUFFER_CEILING_KB = 262_144;
     public static final long MAX_BYTES_PER_SECOND_GLOBAL_LIMIT = 1_073_741_824;
     public static final int MIN_CONCURRENT_GENERATIONS = 1;
-    public static final int MAX_CONCURRENT_GENERATIONS = 256;
+    /** Global generation ceiling. Raised 256 -> 512 2026-08-02: WantSetBudgetInvariantTest
+     *  requires SYNC_ON_LOAD_SLOT_CAP(200) + this + WANT_SET_FRONTIER_RESERVE(64) <=
+     *  WANT_SET_BUDGET(800), so the true ceiling is 536 and the headroom was unused. This
+     *  is the CEILING only — the defaults are unchanged (no measurement justifies raising
+     *  them, and on Fabric there is no priority hand-off or MSPT gate under worldgen). */
+    public static final int MAX_CONCURRENT_GENERATIONS = 512;
     /** Generation order-spread gate: a NEW generation ticket may enter at most this many
      *  Chebyshev rings (measured from the player's declared want-set center) beyond that
      *  player's OLDEST outstanding ticket. The platform scheduler owns completion order and
@@ -87,8 +123,17 @@ public final class LSSConstants {
     public static final int MAX_DIRTY_BROADCAST_INTERVAL = 300;
     public static final int MIN_CONCURRENCY_LIMIT = 1;
     public static final int MAX_CONCURRENCY_LIMIT = 1000;
+    /** Per-DIMENSION timestamp-cache bounds (multiply by dimension count for the real heap
+     *  budget). Ceiling raised 256 -> 512 2026-08-02: reachable on a large-distance server.
+     *  0 means AUTO — derived from lodDistanceChunks, see
+     *  ServerConfigBase.effectiveTimestampCacheMB — so validate() clamps only nonzero. */
     public static final int MIN_TIMESTAMP_CACHE_SIZE_MB = 1;
-    public static final int MAX_TIMESTAMP_CACHE_SIZE_MB = 256;
+    public static final int MAX_TIMESTAMP_CACHE_SIZE_MB = 512;
+    /** Approximate LIVE heap per timestamp-cache entry — mirrors
+     *  ColumnTimestampCache.HEAP_BYTES_PER_ENTRY, exposed here so the config's AUTO sizing
+     *  (ServerConfigBase.effectiveTimestampCacheMB) converts entries to MB with the same
+     *  constant the cache itself uses. A drift guard pins the two together. */
+    public static final int TIMESTAMP_CACHE_HEAP_BYTES_PER_ENTRY = 64;
 
     /** Miss-memo TTL clamp (docs/planning/miss-memo-design.md): 0 disables the memo
      *  wholesale (the config kill switch). The ceiling bounds the staleness window — the
@@ -96,6 +141,32 @@ public final class LSSConstants {
      *  up to the TTL. */
     public static final int MIN_MISS_MEMO_TTL_SECONDS = 0;
     public static final int MAX_MISS_MEMO_TTL_SECONDS = 60;
+
+    // LOD-store on-disk size cap (Phase 5 eviction): oldest-ts rows are batch-evicted
+    // and pages returned via incremental_vacuum once db+wal exceed the cap. 0 =
+    // UNCAPPED (the default since store-cap-behavior-plan.md); the 64-floor applies
+    // only to a nonzero opt-in cap — a tiny accidental cap would evict constantly.
+    // Ceiling raised 32 GB -> 1 TB 2026-08-02: this bounds the ADMIN'S OWN disk, opted
+    // into deliberately, and a Chunky-pregenerated world's store can exceed 32 GB —
+    // where an artificial ceiling silently turns an intentional cap into a treadmill.
+    public static final int MIN_LOD_STORE_MAX_MB = 64;
+    public static final int MAX_LOD_STORE_MAX_MB = 1_048_576;
+
+    public static final int MIN_LOD_STORE_RESWEEP_SECONDS = 0;
+    public static final int MAX_LOD_STORE_RESWEEP_SECONDS = 3600;
+
+    /** Backfill rate-cap clamp (docs/planning/store-backfill-tuning-plan.md §1): below
+     *  ~10 col/s the walk cannot finish a large world in useful time (worse than off —
+     *  it holds the thread and the hasRow probes for nothing); above ~1000 the
+     *  single-threaded synchronous read (~1-2 ms healthy) is the limiter anyway and the
+     *  value would only mislead. */
+    public static final int MIN_LOD_STORE_BACKFILL_CPS = 10;
+    public static final int MAX_LOD_STORE_BACKFILL_CPS = 1000;
+    /** Backfill tick-health ceiling (smoothed MSPT): the walk pauses above this. RETIRED
+     *  as config 2026-08-02 (config review section 6) — its clamp band was 20..50 and its own
+     *  comment conceded that >= 50 never pauses and <= 20 never runs on a busy server, so a
+     *  30-unit window with two degenerate ends is not a tuning range. Now a constant. */
+    public static final int LOD_STORE_BACKFILL_TICK_CEILING_MS = 45;
 
     /** X-ray mask height clamp (docs/planning/antixray-compat-design.md §3): comfortably
      *  outside any MC build height so any real world Y is expressible, while bounding
@@ -127,11 +198,13 @@ public final class LSSConstants {
      *  re-declaration arriving within this window of its column payload leaving the send
      *  queue (send success only) is silently skipped instead of honestly re-resolved —
      *  during cold backfill ~7-8% of asks cross their own payload's delivery in flight
-     *  (crossings &asymp; departure_rate &times; client&rarr;server latency per 1 Hz scan)
-     *  and each such re-resolve costs a redundant disk read + send. The skip keeps the
-     *  done-bit and answers NOTHING (never up_to_date — the client claims no data), so a
-     *  genuinely lost payload heals at most one scan later, when the grace has expired
-     *  and the clear-and-re-resolve ladder applies unchanged. Tuning is asymmetric:
+     *  (crossings &asymp; departure_rate &times; client&rarr;server latency per scan — a
+     *  RATE, so the client's adaptive cadence (up to 4 Hz) scales the absorbed skips
+     *  with it) and each such re-resolve costs a redundant disk read + send. The skip
+     *  keeps the done-bit and answers NOTHING (never up_to_date — the client claims no
+     *  data), so a genuinely lost payload heals at most one scan past grace expiry —
+     *  &le;750 ms at the client's 250 ms fast floor, &le;~1.5 s at the 1 Hz fallback —
+     *  when the clear-and-re-resolve ladder applies unchanged. Tuning is asymmetric:
      *  shorter than the RTT+tick window buys nothing; longer only stretches that bounded
      *  heal delay. 0 disables (no stamps are written). */
     public static final long SEND_DEPARTURE_GRACE_MILLIS = 500;
@@ -190,6 +263,25 @@ public final class LSSConstants {
 
     // Capabilities bitmask
     public static final int CAPABILITY_VOXEL_COLUMNS = 1;
+    /** Client can decode zstd-framed column payloads (declared only when its zstd native
+     *  probe succeeds — see the client-side StoreCodec.zstdOrNull holder). The bit carries
+     *  ABILITY only; the v19 layout (codec byte present) is version-agreed regardless. */
+    public static final int CAPABILITY_ZSTD_COLUMNS = 2;
+
+    // VoxelColumn codec tag values (one wire byte, protocol 19+, after the source tag).
+    // Unlike the source tag, unknown values are NOT passed through verbatim client-side:
+    // the codec byte changes how the section bytes must be read, so the decode drain
+    // treats anything outside {0,1} as a decode failure (ingest-failure re-serve).
+    public static final byte COLUMN_CODEC_RAW = 0;
+    public static final byte COLUMN_CODEC_ZSTD = 1;
+
+    /** Columns whose raw section bytes are below this never compress (codec 0): the frame
+     *  header wins nothing on tiny bodies and the 0-section clear must stay raw (the
+     *  client's clear detection reads the leading varint without a decompress). A safety
+     *  floor, not corpus-tuned — the Phase 0 corpus (compressed-columns-design.md §10)
+     *  contains no real column under 4 KiB; ColumnBytes' non-shrinking fallback covers
+     *  everything else. */
+    public static final int COLUMN_COMPRESS_MIN_BYTES = 512;
 
     // Dimension resource location strings (common/ has no MC deps, so plain strings)
     public static final String DIM_STR_OVERWORLD = "minecraft:overworld";

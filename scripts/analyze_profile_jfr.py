@@ -154,6 +154,66 @@ def shorten(frame, width=90):
     return frame if len(frame) <= width else "…" + frame[-(width - 1):]
 
 
+# ---- LOD-store band attribution (plan §5 Phase 0 (b)) ----------------------------------
+#
+# Stack-PREFIX buckets, scanned leaf-first: each exec sample is attributed to the first
+# frame (from the leaf upward) that matches a band. Thread-group bucketing cannot separate
+# store hits from NBT reads (same reader pool); frame bands can. Order matters — a store
+# hit's stack is org.sqlite -> common.store -> reader pool, and must land in `store`, not
+# `lss-other`. The `serialize`/`nbt` split is what §0's work-elimination gate reads
+# ("NBT-parse + serialization bands ≈ 0 samples on warm-join"); `zip` covers the codec
+# decompress cost of store hits AND the deflate cost of deposits.
+BANDS = [
+    ("store", ("org.sqlite.", "dev.vox.lss.common.store.")),
+    ("zip", ("java.util.zip.", "com.github.luben.zstd.", "net.jpountz.lz4.")),
+    ("nbt", ("net.minecraft.nbt.",)),
+    ("serialize", ("dev.vox.lss.networking.server.NbtSectionSerializer",
+                   "dev.vox.lss.networking.server.SectionSerializer",
+                   "dev.vox.lss.networking.server.MemoizedNbtCodec",
+                   "dev.vox.lss.paper.PaperNbtSectionSerializer",
+                   "dev.vox.lss.paper.PaperSectionSerializer",
+                   "dev.vox.lss.paper.PaperMemoizedNbtCodec")),
+    ("lss-other", ("dev.vox.lss",)),
+]
+# Stack markers of the DISK serve path — the work the LOD store can eliminate. The
+# nbt/serialize prefix match alone conflates it with STRUCTURAL serializer work that
+# runs store-or-not (probe-rung serves of loaded chunks + the save-hook's dirty-hash
+# re-serialization, both via SectionSerializer, and vanilla's own save-side
+# net.minecraft.nbt building). The Phase 2 methodology review showed that conflation
+# distorted the §0 work-elimination measurement in BOTH directions, so nbt/serialize
+# samples are sub-classified by whole-stack context:
+#   nbt / serialize            -> on the disk path (store-ADDRESSABLE)
+#   nbt-other / serialize-live -> structural (probe serves, save-hook hash, vanilla save)
+DISK_PATH_MARKERS = ("dev.vox.lss.networking.server.NbtSectionSerializer",
+                     "dev.vox.lss.networking.server.MemoizedNbtCodec",
+                     "dev.vox.lss.networking.server.ChunkDiskReader",
+                     "dev.vox.lss.paper.PaperNbtSectionSerializer",
+                     "dev.vox.lss.paper.PaperMemoizedNbtCodec",
+                     "dev.vox.lss.paper.PaperChunkDiskReader")
+DERIVED_BANDS = ("nbt-other", "serialize-live")
+# Bands summed into the "LSS-attributable" aggregate for §0 metric 2 (per-column CPU).
+# serialize-live IS LSS code (probe serves / save-hook) and stays attributed;
+# nbt-other is VANILLA save-pipeline work misattributed before the split — excluded.
+LSS_ATTRIBUTED_BANDS = ("store", "zip", "nbt", "serialize", "serialize-live", "lss-other")
+
+
+def band_for_stack(stack):
+    """Leaf-first first-match band for one exec-sample stack (frames un-shortened);
+    nbt/serialize sub-classified by disk-path stack context (see DISK_PATH_MARKERS)."""
+    for frame in stack:
+        for name, prefixes in BANDS:
+            for p in prefixes:
+                if frame.startswith(p):
+                    if name in ("nbt", "serialize"):
+                        on_disk_path = any(f.startswith(m) for f in stack
+                                           for m in DISK_PATH_MARKERS)
+                        if name == "nbt":
+                            return "nbt" if on_disk_path else "nbt-other"
+                        return "serialize" if on_disk_path else "serialize-live"
+                    return name
+    return "unattributed"
+
+
 def analyze_jfr(run_dir, jfr_tool):
     jfr_file = os.path.join(run_dir, "server-benchmark.jfr")
     t_first, t_last = active_window(run_dir)
@@ -166,6 +226,7 @@ def analyze_jfr(run_dir, jfr_tool):
     exec_by_thread = Counter()
     self_methods = Counter()
     self_methods_lss = Counter()
+    bands = Counter()
     hot_stacks = Counter()
     collapsed = Counter()
     alloc_by_class = Counter()
@@ -175,18 +236,32 @@ def analyze_jfr(run_dir, jfr_tool):
     thread_cpu = defaultdict(lambda: [0.0, 0])       # group -> [sum user+system, n]
     total_exec = 0
 
-    events = ["jdk.ExecutionSample", "jdk.ObjectAllocationSample", "jdk.GCPhasePause",
+    # jdk.NativeMethodSample (compressed-columns plan §5.2, review B2): time inside
+    # native methods — Deflater.deflateBytes, zstd-jni — is NOT in jdk.ExecutionSample,
+    # which made the `zip` band read 0.5% while deflate-6 provably cost ~15-20% of the
+    # serve path. Counted into the same band/self-method attribution as exec samples.
+    # Quantitative caveats (4-agent round, tooling F5): (a) profile.jfc samples Java
+    # @10ms but native @20ms, so 1:1 merged counts UNDER-weight native time ~2x —
+    # A/B CUTS are unaffected (both arms native-dominated in zip), absolute us/col
+    # understates; (b) NativeMethodSample also catches threads BLOCKED in native
+    # (epoll waits) — the large `unattributed` share dilutes every band share;
+    # (c) this change re-denominates the band metrics store_gate_check's floors were
+    # calibrated against pre-change (2026-07-31) — cut-based gates mostly cancel it,
+    # but never compare post-change absolutes to calibration-era numbers.
+    events = ["jdk.ExecutionSample", "jdk.NativeMethodSample",
+              "jdk.ObjectAllocationSample", "jdk.GCPhasePause",
               "jdk.FileRead", "jdk.ThreadCPULoad"]
     for name, fields, stack in stream_events(jfr_tool, jfr_file, events):
         if not in_window(fields):
             continue
-        if name == "jdk.ExecutionSample":
+        if name in ("jdk.ExecutionSample", "jdk.NativeMethodSample"):
             total_exec += 1
             th = thread_group(parse_thread(fields.get("sampledThread", "?")))
             exec_by_thread[th] += 1
             if stack:
                 leaf = shorten(stack[0])
                 self_methods[leaf] += 1
+                bands[band_for_stack(stack)] += 1
                 for fr in stack:
                     if fr.startswith("dev.vox.lss"):
                         self_methods_lss[shorten(fr)] += 1
@@ -224,10 +299,23 @@ def analyze_jfr(run_dir, jfr_tool):
         for stackline, n in collapsed.most_common():
             f.write(f"{stackline} {n}\n")
 
+    # Machine-readable band attribution for the store gates (§0 metric 2 reads
+    # lss_attributed_samples × idle-corrected CPU ÷ columns from this file).
+    band_summary = {
+        "window_s": round(t_last - t_first, 1),
+        "total_exec_samples": total_exec,
+        "bands": {name: bands.get(name, 0)
+                  for name in [b[0] for b in BANDS] + list(DERIVED_BANDS) + ["unattributed"]},
+        "lss_attributed_samples": sum(bands.get(b, 0) for b in LSS_ATTRIBUTED_BANDS),
+    }
+    with open(os.path.join(run_dir, "bands.json"), "w") as f:
+        json.dump(band_summary, f, indent=1)
+
     return {
         "run": os.path.basename(run_dir),
         "window_s": round(t_last - t_first, 1),
         "total_exec_samples": total_exec,
+        "bands": band_summary,
         "exec_by_thread": exec_by_thread.most_common(14),
         "self_methods": self_methods.most_common(22),
         "self_methods_lss": self_methods_lss.most_common(12),
@@ -253,6 +341,14 @@ def render_report(r):
     tot = r["total_exec_samples"] or 1
     for th, n in r["exec_by_thread"]:
         lines.append(f"- {th}: {n} ({100 * n / tot:.1f}%)")
+    lines.append("")
+
+    lines.append("### Band attribution (leaf-first stack-prefix buckets; store gates read these)")
+    for name, n in r["bands"]["bands"].items():
+        lines.append(f"- {name}: {n} ({100 * n / tot:.1f}%)")
+    lines.append(f"- lss_attributed (store+zip+nbt+serialize+serialize-live+lss-other): "
+                 f"{r['bands']['lss_attributed_samples']} "
+                 f"({100 * r['bands']['lss_attributed_samples'] / tot:.1f}%)")
     lines.append("")
 
     lines.append("### Top self methods (leaf frames)")

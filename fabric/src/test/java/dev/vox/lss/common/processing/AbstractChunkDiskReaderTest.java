@@ -153,10 +153,11 @@ class AbstractChunkDiskReaderTest {
     }
 
     @Test
-    void errorThrowingReadDeliversResultBeforeRethrowAndPoolSurvives() throws Exception {
-        // An Error skips the Exception triage and reaches the outer Throwable catch, which
-        // must still deliver a result before rethrowing. The barrier completing proves the
-        // worker pool survived the rethrown Error.
+    void errorThrowingReadDeliversExactlyOneResultAndPoolSurvives() throws Exception {
+        // An Error is contained by the op-region catch(Throwable) with full bookkeeping
+        // and NO re-throw (a re-throw would reach the submit lambda's last-resort catch
+        // and deliver a second result — the one-result-per-submit envelope forbids it).
+        // The barrier completing proves the worker pool survived.
         var r = runWithBarrier(2, 2, 13L, () -> {
             throw new NoClassDefFoundError("simulated serializer linkage failure");
         });

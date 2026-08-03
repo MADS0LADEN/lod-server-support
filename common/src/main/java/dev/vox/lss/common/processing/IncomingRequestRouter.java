@@ -246,8 +246,12 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
                 // re-ask almost certainly crossed its own delivery in flight. Same
                 // disposition as the enqueued rung: silent skip, done-bit KEPT, and
                 // never up_to_date — the client claims nothing. Termination is
-                // guaranteed: the stamp is written only at departure, so the next 1 Hz
-                // re-declaration outlives the grace and re-resolves honestly below.
+                // structural: the stamp is written ONCE at departure and never refreshed
+                // by a re-ask, so some later re-declaration always outlives the grace
+                // and re-resolves honestly below. (Under the client's adaptive cadence
+                // — as fast as 250 ms — one or two re-asks may land inside the window
+                // and be absorbed here before that happens; at the 1 Hz fallback it is
+                // the very next one.)
                 this.ctx.diagnostics().incrementGraceSkipped();
                 return Duplicate.IN_FLIGHT;
             }
@@ -279,9 +283,25 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
 
         long order = this.ctx.sequence().next();
         boolean allAir = probe.serializedSections() == null || probe.serializedSections().length == 0;
-        boolean sent = !allAir
-                && this.processor.enqueueLoadedColumn(state, probe, this.cycleNow, order, dimension,
-                        dev.vox.lss.common.LSSConstants.COLUMN_SOURCE_IN_MEMORY);
+        boolean sent;
+        try {
+            sent = !allAir
+                    && this.processor.enqueueLoadedColumn(state, probe, this.cycleNow, order, dimension,
+                            dev.vox.lss.common.LSSConstants.COLUMN_SOURCE_IN_MEMORY);
+        } catch (Throwable t) {
+            // Per-delivery containment for the probe path (4-agent round, pipeline F1):
+            // compression added a real throw source to this build (ColumnBytes.frame() ->
+            // native zstd), and before this catch a throw here failed the WHOLE processing
+            // cycle — this pass's polled entries lost uncounted (a latent law-A1 imbalance)
+            // and a deterministic throw tripped the cycle backoff for all players. Contain
+            // as the standard transient: counted superseded, no done-bit (the client
+            // re-declares within <=1 s), the rest of the pass continues.
+            dev.vox.lss.common.LSSLogger.error("Failed to serve probe column "
+                    + req.cx() + ", " + req.cz(), t);
+            this.ctx.diagnostics().addSuperseded(1);
+            this.ctx.diagnostics().incrementInMemory();
+            return true;
+        }
         if (!sent) {
             if (allAir) {
                 // Stamp the all-air resolution (the data path stamps inside enqueueLoadedColumn)

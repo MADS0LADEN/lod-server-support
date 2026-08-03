@@ -1,6 +1,7 @@
 package dev.vox.lss.networking.server;
 
 import dev.vox.lss.common.LSSConstants;
+import dev.vox.lss.common.processing.ColumnBytes;
 import dev.vox.lss.common.SharedBandwidthLimiter;
 import dev.vox.lss.common.processing.TickDiagnostics;
 import dev.vox.lss.networking.payloads.VoxelColumnS2CPayload;
@@ -60,7 +61,7 @@ class FabricOffThreadProcessorDropTest {
 
         boolean sent = h.processor().buildAndEnqueueColumnPayload(h.state(), 1, 2,
                 LSSConstants.DIM_STR_OVERWORLD,
-                5L, 1L, oversized, oversized.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                5L, 1L, ColumnBytes.ofRaw(null, oversized), oversized.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
                 LSSConstants.COLUMN_SOURCE_DISK);
         assertFalse(sent, "the caller answers up-to-date on false so the position resolves terminally");
 
@@ -80,7 +81,7 @@ class FabricOffThreadProcessorDropTest {
         String oversizedDim = "lss:" + "a".repeat(LSSConstants.MAX_DIMENSION_STRING_LENGTH - 3); // 257
 
         boolean sent = h.processor().buildAndEnqueueColumnPayload(h.state(), 1, 2, oversizedDim,
-                5L, 1L, sections, sections.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                5L, 1L, ColumnBytes.ofRaw(null, sections), sections.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
                 LSSConstants.COLUMN_SOURCE_DISK);
         assertFalse(sent, "an oversized dimension id drops the column (false), it must not throw");
         assertEquals(0, flush(h.state()).size(),
@@ -95,7 +96,7 @@ class FabricOffThreadProcessorDropTest {
 
         boolean enqueued = h.processor().buildAndEnqueueColumnPayload(h.state(), 3, -4,
                 LSSConstants.DIM_STR_THE_END,
-                77L, 1L, atCap, atCap.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                77L, 1L, ColumnBytes.ofRaw(null, atCap), atCap.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
                 LSSConstants.COLUMN_SOURCE_DISK);
         assertTrue(enqueued);
 
@@ -107,6 +108,6 @@ class FabricOffThreadProcessorDropTest {
         assertEquals(-4, column.chunkZ());
         assertEquals(77L, column.columnTimestamp());
         assertEquals(LSSConstants.DIM_STR_THE_END, column.dimension().identifier().toString());
-        assertEquals(LSSConstants.MAX_SEND_SECTIONS_SIZE, column.decompressedSections().length);
+        assertEquals(LSSConstants.MAX_SEND_SECTIONS_SIZE, column.shippedSections().length);
     }
 }

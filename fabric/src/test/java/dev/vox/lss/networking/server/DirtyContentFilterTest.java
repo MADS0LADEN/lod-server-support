@@ -6,8 +6,10 @@ import org.junit.jupiter.api.Test;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -18,6 +20,60 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * that keeps real hashes off the fastutil absent sentinel.
  */
 class DirtyContentFilterTest {
+
+    // ---- Phase 3 save-hook deposits: the observation contract ----
+
+    /** observeSave must agree with contentChanged AND hand out the exact serialized
+     *  bytes on a change — the save-hook deposit's payload. */
+    @Test
+    void observeSaveHandsOutBytesOnChangeAndSuppressesUnchanged() {
+        byte[] first = {1, 2, 3};
+        byte[][] next = {first};
+        var filter = new DirtyContentFilter((level, chunk, cx, cz) -> next[0]);
+        var obs1 = filter.observeSave(null, null, 4, 5, "minecraft:overworld");
+        assertTrue(obs1.changed(), "first observation is a change");
+        assertTrue(obs1.depositable());
+        assertArrayEquals(first, obs1.sectionBytes(), "the deposit payload is the hashed bytes");
+
+        var obs2 = filter.observeSave(null, null, 4, 5, "minecraft:overworld");
+        assertFalse(obs2.changed(), "identical re-save must be suppressed");
+        assertNull(obs2.sectionBytes(), "no bytes handed out for a suppressed save");
+
+        next[0] = new byte[]{9, 9};
+        var obs3 = filter.observeSave(null, null, 4, 5, "minecraft:overworld");
+        assertTrue(obs3.changed());
+        assertArrayEquals(new byte[]{9, 9}, obs3.sectionBytes());
+    }
+
+    /** All-air columns observe as changed+depositable with NULL bytes (the store maps
+     *  that to byte[0]); a serializer exception fails open as changed but NOT
+     *  depositable — the caller must delete, never deposit stale/unknown bytes. */
+    @Test
+    void observeSaveAllAirIsDepositableAndFailOpenIsNot() {
+        var allAir = new DirtyContentFilter((level, chunk, cx, cz) -> null);
+        var obs = allAir.observeSave(null, null, 1, 1, "minecraft:the_end");
+        assertTrue(obs.changed());
+        assertTrue(obs.depositable(), "all-air is valid content, depositable as byte[0]");
+        assertNull(obs.sectionBytes());
+
+        var throwing = new DirtyContentFilter((level, chunk, cx, cz) -> {
+            throw new IllegalStateException("boom");
+        });
+        var failOpen = throwing.observeSave(null, null, 1, 1, "minecraft:overworld");
+        assertTrue(failOpen.changed(), "fail-open must still mark dirty");
+        assertFalse(failOpen.depositable(), "unknown bytes must never be deposited");
+    }
+
+    /** The two observation APIs share one baseline: a save observed via observeSave
+     *  suppresses the same content via contentChanged and vice versa. */
+    @Test
+    void observeSaveAndContentChangedShareTheBaseline() {
+        byte[] bytes = {5, 5, 5};
+        var filter = new DirtyContentFilter((level, chunk, cx, cz) -> bytes);
+        assertTrue(filter.observeSave(null, null, 2, 2, "minecraft:overworld").changed());
+        assertFalse(filter.contentChanged(null, null, 2, 2, "minecraft:overworld"),
+                "contentChanged must see observeSave's baseline");
+    }
 
     @Test
     void seedToleratesAllAirNullBytes() {

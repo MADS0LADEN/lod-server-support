@@ -160,7 +160,7 @@ class TimestampSaveSchedulerTest {
         @Override
         protected boolean buildAndEnqueueColumnPayload(TestState state, int cx, int cz, String dimension,
                                                         long columnTimestamp, long submissionOrder,
-                                                        byte[] sectionBytes, int estimatedBytes, byte source) {
+                                                        ColumnBytes bytes, int estimatedBytes, byte source) {
             return true;
         }
     }

@@ -4,5 +4,7 @@
   "generationConcurrencyLimitGlobal": 64,
   "dirtyBroadcastIntervalSeconds": 5,
   "diskReaderThreads": 5,
-  "bytesPerSecondLimitGlobal": 524288
+  "bytesPerSecondLimitGlobal": 524288,
+  "lodStore": "off",
+  "lodStoreBackfill": false
 }

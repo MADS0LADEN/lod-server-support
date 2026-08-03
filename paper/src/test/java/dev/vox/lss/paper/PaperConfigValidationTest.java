@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -20,6 +21,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * clamps only via LSSServerConfig, so without this test the Paper override is unpinned.
  */
 class PaperConfigValidationTest {
+
+    /** Pins the Paper-only resweep default (4-agent round R3: nothing pinned it — the
+     *  instance initializer is Paper's ONLY bound on unfired-event staleness, and
+     *  deleting it would go green everywhere). GSON keeps the initialized value on a
+     *  missing key, so a fresh Paper config writes 300 while Fabric stays 0 (the
+     *  save-hook owns Fabric's within-session freshness). */
+    @Test
+    void paperDefaultsTheLodStoreResweepTo300() {
+        assertEquals(300, new PaperConfig().lodStoreResweepSeconds,
+                "Paper's periodic resweep default is its unfired-event staleness bound");
+    }
 
     @Test
     void validateClampsInheritedFieldsAndGuardsUpdateEvents() {
@@ -33,11 +45,62 @@ class PaperConfigValidationTest {
         assertEquals(List.of(), c.updateEvents);                 // Paper-only null guard
     }
 
-    /** Paper inherits the shared read-priority default: LOD reads yield to gameplay out of the box. */
+    /** Paper twin of the cap-behavior pins (store-cap-behavior-plan.md §1): the
+     *  inherited default is 0 = uncapped, and the 64 floor binds only nonzero caps. */
     @Test
-    void backgroundReadPriorityDefaultsOn() {
-        assertTrue(new PaperConfig().useBackgroundReadPriority,
-                "background read priority must default on (Paper)");
+    void lodStoreMaxMBInheritsUncappedZeroDefaultAndNonzeroFloor() {
+        assertEquals(0, new PaperConfig().lodStoreMaxMB,
+                "Paper must inherit the uncapped-by-default store");
+        PaperConfig c = new PaperConfig();
+        c.lodStoreMaxMB = 1;
+        c.validate();
+        assertEquals(LSSConstants.MIN_LOD_STORE_MAX_MB, c.lodStoreMaxMB,
+                "a nonzero opt-in cap must keep the 64 MB floor through the Paper subclass");
+        c.lodStoreMaxMB = 63; // the boundary just under the floor (plan §4: 1..63 -> 64)
+        c.validate();
+        assertEquals(LSSConstants.MIN_LOD_STORE_MAX_MB, c.lodStoreMaxMB);
+    }
+
+    /** Transport deference ships OFF (0) on both platforms — the elytra-wall investigation
+     *  measured the head-of-line mechanism ABSENT (flat ping, empty send queue), so the gate
+     *  exists to be armed from measurement, not by default. The 4096 KB floor binds only
+     *  nonzero opt-ins, and is deliberately well above one maximum-size column so a single
+     *  legal payload can never trip the gate on its own. */
+    @Test
+    void outboundBufferCeilingShipsOffAndKeepsItsNonzeroFloor() {
+        assertEquals(0, new PaperConfig().outboundBufferCeilingKB,
+                "transport deference must ship disabled");
+        PaperConfig c = new PaperConfig();
+        c.outboundBufferCeilingKB = 1;
+        c.validate();
+        assertEquals(LSSConstants.MIN_OUTBOUND_BUFFER_CEILING_KB, c.outboundBufferCeilingKB,
+                "a nonzero opt-in must clamp up to the floor through the Paper subclass");
+        assertTrue((long) LSSConstants.MIN_OUTBOUND_BUFFER_CEILING_KB * 1024L
+                        > LSSConstants.MAX_SECTIONS_SIZE,
+                "the floor must exceed one maximum-size column, or a single legal payload"
+                        + " could self-trip the gate");
+        c.outboundBufferCeilingKB = 0;
+        c.validate();
+        assertEquals(0, c.outboundBufferCeilingKB, "0 stays 0 — it is the off switch");
+    }
+
+    /** The store is OPT-IN on every platform (user decision, 2026-08-03): it briefly
+     *  defaulted to "full" during v0.9.0 development and was reverted before release,
+     *  because an upgrade must never silently double the size of an operator's world
+     *  folder. Paper inherits that default with no Folia-specific override any more — the
+     *  shared default already is the safe one, and the override was leaky besides (a Paper
+     *  run persisted lodStore=full into the file, so carrying that folder to Folia armed
+     *  the store anyway).
+     *
+     *  <p>lodStoreBackfill stays ON, and that pairing is the point: it is inert while the
+     *  store is off, so flipping the single lodStore key to "full" gets the background
+     *  warm-up too rather than leaving a second switch to discover. */
+    @Test
+    void lodStoreIsOptInWhileBackfillStaysArmedForWhenItIsEnabled() {
+        var c = new PaperConfig();
+        assertEquals("off", c.lodStore, "the store must be opt-in — never a silent 2x world folder");
+        assertTrue(c.lodStoreBackfill,
+                "backfill stays on so ONE key enables the whole feature; it is inert while off");
     }
 
     /** Paper inherits the shared transcode default: disk serves transcode NBT straight to
@@ -61,10 +124,6 @@ class PaperConfigValidationTest {
                     new Bounds(LSSConstants.MIN_LOD_DISTANCE, LSSConstants.MAX_LOD_DISTANCE)),
             Map.entry("bytesPerSecondLimitPerPlayer",
                     new Bounds(LSSConstants.MIN_BYTES_PER_SECOND, LSSConstants.MAX_BYTES_PER_SECOND_PER_PLAYER)),
-            Map.entry("diskReaderThreads",
-                    new Bounds(LSSConstants.MIN_DISK_READER_THREADS, LSSConstants.MAX_DISK_READER_THREADS)),
-            Map.entry("sendQueueLimitPerPlayer",
-                    new Bounds(LSSConstants.MIN_SEND_QUEUE_SIZE, LSSConstants.MAX_SEND_QUEUE_SIZE)),
             Map.entry("bytesPerSecondLimitGlobal",
                     new Bounds(LSSConstants.MIN_BYTES_PER_SECOND,
                             Math.toIntExact(LSSConstants.MAX_BYTES_PER_SECOND_GLOBAL_LIMIT))),
@@ -76,10 +135,26 @@ class PaperConfigValidationTest {
                     new Bounds(LSSConstants.MIN_MISS_MEMO_TTL_SECONDS, LSSConstants.MAX_MISS_MEMO_TTL_SECONDS)),
             Map.entry("dirtyBroadcastIntervalSeconds",
                     new Bounds(LSSConstants.MIN_DIRTY_BROADCAST_INTERVAL, LSSConstants.MAX_DIRTY_BROADCAST_INTERVAL)),
-            Map.entry("generationConcurrencyLimitPerPlayer",
-                    new Bounds(LSSConstants.MIN_CONCURRENCY_LIMIT, LSSConstants.MAX_CONCURRENCY_LIMIT)),
-            Map.entry("perDimensionTimestampCacheSizeMB",
-                    new Bounds(LSSConstants.MIN_TIMESTAMP_CACHE_SIZE_MB, LSSConstants.MAX_TIMESTAMP_CACHE_SIZE_MB)),
+            Map.entry("sendQueueLimitPerPlayer",
+                    new Bounds(LSSConstants.MIN_SEND_QUEUE_SIZE, LSSConstants.MAX_SEND_QUEUE_SIZE)),
+            // generationConcurrencyLimitPerPlayer and perDimensionTimestampCacheSizeMB left the
+            // table-driven sweep 2026-08-02: the first clamps to the CONFIGURED global (§9.1) and
+            // the second treats 0 as AUTO, so neither has fixed both-ends bounds. Named tests in
+            // the Fabric twin cover them.
+            // lodStoreMaxMB's legal floor is 0 (= uncapped, the default); the 64 floor
+            // applies only to nonzero opt-in caps, pinned by the named test below.
+            Map.entry("lodStoreMaxMB",
+                    new Bounds(0, LSSConstants.MAX_LOD_STORE_MAX_MB)),
+            // outboundBufferCeilingKB's legal floor is 0 (= transport deference off, the
+            // default); the 4096 floor applies only to nonzero opt-ins, pinned below.
+            Map.entry("outboundBufferCeilingKB",
+                    new Bounds(0, LSSConstants.MAX_OUTBOUND_BUFFER_CEILING_KB)),
+            Map.entry("lodStoreResweepSeconds",
+                    new Bounds(LSSConstants.MIN_LOD_STORE_RESWEEP_SECONDS,
+                            LSSConstants.MAX_LOD_STORE_RESWEEP_SECONDS)),
+            Map.entry("lodStoreBackfillColumnsPerSecond",
+                    new Bounds(LSSConstants.MIN_LOD_STORE_BACKFILL_CPS,
+                            LSSConstants.MAX_LOD_STORE_BACKFILL_CPS)),
             Map.entry("xrayMaxBlockHeight",
                     new Bounds(LSSConstants.MIN_XRAY_MAX_BLOCK_HEIGHT, LSSConstants.MAX_XRAY_MAX_BLOCK_HEIGHT)));
 
@@ -90,9 +165,16 @@ class PaperConfigValidationTest {
      */
     @Test
     void everyNumericFieldClampsToExactSharedBoundsAtBothEnds() throws Exception {
+        // Excluded 2026-08-02: diskReaderThreads and perDimensionTimestampCacheSizeMB treat 0 as
+        // AUTO, and generationConcurrencyLimitPerPlayer clamps to the CONFIGURED global (§9.1) —
+        // none has fixed both-ends bounds, so a table-driven sweep cannot express them. Named
+        // tests in the Fabric twin cover all three.
+        var derived = java.util.Set.of("diskReaderThreads", "perDimensionTimestampCacheSizeMB",
+                "generationConcurrencyLimitPerPlayer");
         List<Field> fields = Arrays.stream(PaperConfig.class.getFields())
                 .filter(f -> !Modifier.isStatic(f.getModifiers()))
                 .filter(f -> f.getType().isPrimitive() && f.getType() != boolean.class)
+                .filter(f -> !derived.contains(f.getName()))
                 .toList();
         // Anti-vacuity twin of the Fabric sweep guards: the sweep must keep seeing every field.
         assertEquals(SHARED_BOUNDS.keySet(),

@@ -80,7 +80,7 @@ class JsonConfigLoadTest {
         TestServerConfig c = TestServerConfig.load(configDir);
 
         assertEquals(256, c.lodDistanceChunks);
-        assertEquals(20_971_520, c.bytesPerSecondLimitPerPlayer);
+        assertEquals(26_214_400, c.bytesPerSecondLimitPerPlayer);
         assertTrue(Files.isRegularFile(configDir.resolve(FILE)));
 
         JsonObject saved = savedJson(configDir);
@@ -146,16 +146,16 @@ class JsonConfigLoadTest {
         // default (then validate() clamps the zeros to the minimums, e.g. 20 MB/s -> 1 KB/s).
         // These exact-value assertions are the only guard against that landmine.
         assertTrue(c.enabled);
-        assertEquals(20_971_520, c.bytesPerSecondLimitPerPlayer);
-        assertEquals(5, c.diskReaderThreads);
+        assertEquals(26_214_400, c.bytesPerSecondLimitPerPlayer);
+        assertEquals(0, c.diskReaderThreads);           // 0 = AUTO (derived per read path)
         assertEquals(1024, c.sendQueueLimitPerPlayer);
-        assertEquals(104_857_600, c.bytesPerSecondLimitGlobal);
+        assertEquals(268_435_456, c.bytesPerSecondLimitGlobal);
         assertTrue(c.enableChunkGeneration);
         assertEquals(32, c.generationConcurrencyLimitGlobal);
         assertEquals(60, c.generationTimeoutSeconds);
         assertEquals(10, c.dirtyBroadcastIntervalSeconds);
         assertEquals(16, c.generationConcurrencyLimitPerPlayer);
-        assertEquals(32, c.perDimensionTimestampCacheSizeMB);
+        assertEquals(0, c.perDimensionTimestampCacheSizeMB); // 0 = AUTO (from lodDistance)
     }
 
     @Test
@@ -169,7 +169,7 @@ class JsonConfigLoadTest {
         for (String key : serializedFieldNames()) {
             assertTrue(saved.has(key), "re-saved file missing migrated field " + key);
         }
-        assertEquals(20_971_520, saved.get("bytesPerSecondLimitPerPlayer").getAsInt());
+        assertEquals(26_214_400, saved.get("bytesPerSecondLimitPerPlayer").getAsInt());
     }
 
     @Test
@@ -207,7 +207,7 @@ class JsonConfigLoadTest {
         // write-back rewrites the file from the bound object — the typo line is erased without
         // any hint that the intended override never applied. Destructive, but today's contract.
         Files.writeString(configDir.resolve(FILE),
-                "{\"lodDistanceChunk\": 64, \"sendQueueLimitPerPlayer\": 123}");
+                "{\"lodDistanceChunk\": 64, \"diskReaderThreads\": 12}");
 
         TestServerConfig c = TestServerConfig.load(configDir);
 
@@ -215,19 +215,25 @@ class JsonConfigLoadTest {
         JsonObject saved = savedJson(configDir);
         assertFalse(saved.has("lodDistanceChunk"), "typo'd key must be dropped by the re-save");
         assertEquals(256, saved.get("lodDistanceChunks").getAsInt());
-        assertEquals(123, saved.get("sendQueueLimitPerPlayer").getAsInt()); // bound values survive the rewrite
+        assertEquals(12, saved.get("diskReaderThreads").getAsInt()); // bound values survive the rewrite
+        // Same mechanism retires a key: lodStoreBackfillTickCeilingMillis and lodStoreMemoryMB
+        // are gone as fields, so a file still carrying them loads fine and the re-save drops
+        // them (config review §6 — sendQueueLimitPerPlayer and useBackgroundReadPriority were
+        // proposed for the same treatment and kept, being live test-harness levers).
+        assertFalse(saved.has("lodStoreBackfillTickCeilingMillis"));
+        assertFalse(saved.has("lodStoreMemoryMB"));
     }
 
     @Test
     void singleBadFieldRevertsValidCustomizationsInTheSameFile(@TempDir Path configDir) throws Exception {
         // GSON binds the whole object or nothing: the valid sendQueueLimitPerPlayer=123 (read
         // before the failure) is discarded with the rest. One bad field costs every customization.
-        String broken = "{\"sendQueueLimitPerPlayer\": 123, \"lodDistanceChunks\": \"lots\"}";
+        String broken = "{\"diskReaderThreads\": 12, \"lodDistanceChunks\": \"lots\"}";
         Files.writeString(configDir.resolve(FILE), broken);
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(1024, c.sendQueueLimitPerPlayer); // the valid customization is reverted too
+        assertEquals(0, c.diskReaderThreads);          // the valid customization is reverted too
         assertEquals(256, c.lodDistanceChunks);
         assertEquals(broken, Files.readString(configDir.resolve(FILE)));
     }
@@ -259,15 +265,15 @@ class JsonConfigLoadTest {
         // stays, the parse succeeds — so sibling customizations survive and the re-save heals the
         // null into a real number. Contrast with the wrong-typed case, which reverts the whole file.
         Files.writeString(configDir.resolve(FILE),
-                "{\"lodDistanceChunks\": null, \"sendQueueLimitPerPlayer\": 123}");
+                "{\"lodDistanceChunks\": null, \"diskReaderThreads\": 12}");
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
         assertEquals(256, c.lodDistanceChunks);       // compiled default kept
-        assertEquals(123, c.sendQueueLimitPerPlayer); // parse succeeded: sibling customization kept
+        assertEquals(12, c.diskReaderThreads);        // parse succeeded: sibling customization kept
         JsonObject saved = savedJson(configDir);
         assertEquals(256, saved.get("lodDistanceChunks").getAsInt()); // healed to a number on disk
-        assertEquals(123, saved.get("sendQueueLimitPerPlayer").getAsInt());
+        assertEquals(12, saved.get("diskReaderThreads").getAsInt());
     }
 
     @Test

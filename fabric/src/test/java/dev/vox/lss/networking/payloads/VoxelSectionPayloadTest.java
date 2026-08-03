@@ -72,9 +72,9 @@ class VoxelSectionPayloadTest {
         VoxelColumnS2CPayload.CODEC.encode(b, original);
         var decoded = VoxelColumnS2CPayload.CODEC.decode(b);
 
-        assertNotNull(decoded.decompressedSections());
+        assertNotNull(decoded.shippedSections());
         // Verify we can read the VarInt sectionCount back
-        var readBuf = new FriendlyByteBuf(Unpooled.wrappedBuffer(decoded.decompressedSections()));
+        var readBuf = new FriendlyByteBuf(Unpooled.wrappedBuffer(decoded.shippedSections()));
         try {
             assertEquals(2, readBuf.readVarInt());
             assertEquals(3, readBuf.readByte());
@@ -95,8 +95,8 @@ class VoxelSectionPayloadTest {
         VoxelColumnS2CPayload.CODEC.encode(b, original);
         var decoded = VoxelColumnS2CPayload.CODEC.decode(b);
 
-        assertNotNull(decoded.decompressedSections());
-        var readBuf = new FriendlyByteBuf(Unpooled.wrappedBuffer(decoded.decompressedSections()));
+        assertNotNull(decoded.shippedSections());
+        var readBuf = new FriendlyByteBuf(Unpooled.wrappedBuffer(decoded.shippedSections()));
         try {
             assertEquals(0, readBuf.readVarInt());
         } finally {

@@ -3,6 +3,7 @@ package dev.vox.lss.paper;
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.LSSLogger;
 import dev.vox.lss.common.PositionUtil;
+import dev.vox.lss.common.processing.ColumnBytes;
 import dev.vox.lss.common.processing.OffThreadProcessor;
 import dev.vox.lss.common.processing.QueuedPayload;
 import net.minecraft.server.level.ServerLevel;
@@ -72,11 +73,13 @@ public class PaperOffThreadProcessor extends OffThreadProcessor<PaperPlayerReque
     protected boolean buildAndEnqueueColumnPayload(PaperPlayerRequestState state, int cx, int cz,
                                                     String dimension,
                                                     long columnTimestamp, long submissionOrder,
-                                                    byte[] sectionBytes, int estimatedBytes,
+                                                    ColumnBytes bytes, int estimatedBytes,
                                                     byte source) {
-        if (sectionBytes.length > LSSConstants.MAX_SEND_SECTIONS_SIZE) {
+        // RAW-size guard (twin of the Fabric build; load-bearing for store-frame hits
+        // whose rows can legally exceed the send cap — plan §3).
+        if (bytes.rawSize() > LSSConstants.MAX_SEND_SECTIONS_SIZE) {
             LSSLogger.warn("Dropping oversized column [" + cx + ", " + cz + "] in " + dimension
-                    + ": " + sectionBytes.length + " bytes exceeds send limit "
+                    + ": " + bytes.rawSize() + " bytes exceeds send limit "
                     + LSSConstants.MAX_SEND_SECTIONS_SIZE + " (netty frame cap would kill the connection)");
             return false;
         }
@@ -89,10 +92,24 @@ public class PaperOffThreadProcessor extends OffThreadProcessor<PaperPlayerReque
                     + dimension.length() + " chars > " + LSSConstants.MAX_DIMENSION_STRING_LENGTH + ")");
             return false;
         }
+        // Per-recipient codec choice off the shared holder — twin of the Fabric build:
+        // frame() only for capable sessions, memoized across the dedup fan-out; a v16
+        // session's flag is derived false at registration, so its frames encode raw and
+        // the egress splice stays two-byte-removable.
+        byte[] frame = state.wantsCompressedColumns() ? bytes.frame() : null;
+        byte codecTag = frame != null ? LSSConstants.COLUMN_CODEC_ZSTD
+                : LSSConstants.COLUMN_CODEC_RAW;
+        byte[] shipped = frame != null ? frame : bytes.raw();
         byte[] encoded = PaperPayloadHandler.encodeVoxelColumnPreEncoded(
-                cx, cz, dimension, columnTimestamp, source, sectionBytes);
-        state.addReadyPayload(new QueuedPayload<>(encoded, estimatedBytes, submissionOrder,
-                PositionUtil.packPosition(cx, cz)));
+                cx, cz, dimension, columnTimestamp, source, codecTag, shipped);
+        int wireBytes = shipped.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
+        state.addReadyPayload(new QueuedPayload<>(encoded, estimatedBytes, wireBytes,
+                submissionOrder, PositionUtil.packPosition(cx, cz)));
+        getDiagnostics().incrementColumnCodec(frame != null);
+        // Soak probe hashes (dev-only, no-op unless -Dlss.soak.probes): the RAW bytes —
+        // pinned (plan §0.6); the armed() gate keeps the unarmed production path from
+        // materializing raw for it. Twin of the Fabric hook.
+        if (PaperSoakProbeBridge.armed()) PaperSoakProbeBridge.recordServed(cx, cz, bytes.raw());
         return true;
     }
 

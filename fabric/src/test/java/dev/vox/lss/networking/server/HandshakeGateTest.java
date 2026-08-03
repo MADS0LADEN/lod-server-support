@@ -180,6 +180,25 @@ class HandshakeGateTest {
         }
         var current = HandshakeGate.evaluate(V, VOXEL_CAPS, true, true, true);
         assertEquals(Outcome.REGISTER, current.outcome());
-        assertEquals(HandshakeGate.WireDialect.V18, current.dialect());
+        assertEquals(HandshakeGate.WireDialect.CURRENT, current.dialect());
+    }
+
+    @Test
+    void zstdCapabilityBitNeverChangesTheLadder() {
+        // The gate is capability-agnostic beyond bit 0 (plan §2): 0x2 carries session
+        // ABILITY consumed at registration, never reply/registration policy. Identical
+        // Decision with and without it, on every rung that reads capabilities.
+        int with = LSSConstants.CAPABILITY_VOXEL_COLUMNS | LSSConstants.CAPABILITY_ZSTD_COLUMNS;
+        int without = LSSConstants.CAPABILITY_VOXEL_COLUMNS;
+        assertEquals(
+                HandshakeGate.evaluate(LSSConstants.PROTOCOL_VERSION, without, true, true),
+                HandshakeGate.evaluate(LSSConstants.PROTOCOL_VERSION, with, true, true));
+        assertEquals(
+                HandshakeGate.evaluate(LSSConstants.PROTOCOL_VERSION, without, false, true),
+                HandshakeGate.evaluate(LSSConstants.PROTOCOL_VERSION, with, false, true));
+        // A consumer-less client with ONLY the zstd bit stays NO_CONSUMER.
+        assertEquals(HandshakeGate.Outcome.NO_CONSUMER,
+                HandshakeGate.evaluate(LSSConstants.PROTOCOL_VERSION,
+                        LSSConstants.CAPABILITY_ZSTD_COLUMNS, true, true).outcome());
     }
 }

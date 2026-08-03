@@ -244,6 +244,7 @@ class WireParityTest {
                 b.writeUtf(c.dim());
                 b.writeLong(-1L);
                 b.writeByte(-1); // serve-source: unknown (source-less convenience path)
+                b.writeByte(LSSConstants.COLUMN_CODEC_RAW);
                 b.writeByteArray(sections);
             });
             assertArrayEquals(expected, encode(VoxelColumnS2CPayload.CODEC,
@@ -262,6 +263,7 @@ class WireParityTest {
             b.writeUtf("lsstest:custom");
             b.writeLong(42L);
             b.writeByte(-1); // serve-source: unknown (source-less convenience path)
+            b.writeByte(LSSConstants.COLUMN_CODEC_RAW);
             b.writeByteArray(sections);
         });
         assertArrayEquals(expected, encode(VoxelColumnS2CPayload.CODEC,
@@ -279,6 +281,7 @@ class WireParityTest {
             b.writeUtf("minecraft:overworld");
             b.writeLong(5L);
             b.writeByte(-1); // serve-source: unknown (source-less convenience path)
+            b.writeByte(LSSConstants.COLUMN_CODEC_RAW);
             b.writeByteArray(new byte[0]);
         });
         assertArrayEquals(expected, encode(VoxelColumnS2CPayload.CODEC,
@@ -286,7 +289,7 @@ class WireParityTest {
         assertEquals(0, expected[expected.length - 1],
                 "empty section bytes must encode as a single 0x00 length VarInt");
         var d = decode(VoxelColumnS2CPayload.CODEC, expected);
-        assertEquals(0, d.decompressedSections().length);
+        assertEquals(0, d.shippedSections().length);
     }
 
     // ---- v16 compat legacy shapes (docs/planning/v16-compat-design.md §2) ----
@@ -343,7 +346,7 @@ class WireParityTest {
             var p = new VoxelColumnS2CPayload(3, -4, dim, 1234L, source, sections);
             assertArrayEquals(expectedLegacy, encode(VoxelColumnS2CPayload.CODEC, p.asV16()),
                     "source tag " + source + " must vanish identically");
-            assertArrayEquals(sections, p.asV16().decompressedSections(),
+            assertArrayEquals(sections, p.asV16().shippedSections(),
                     "asV16 must not copy or alter the section bytes");
         }
     }

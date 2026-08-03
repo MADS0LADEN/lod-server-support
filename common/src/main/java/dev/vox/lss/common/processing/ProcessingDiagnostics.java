@@ -33,6 +33,10 @@ public class ProcessingDiagnostics {
     private volatile long totalGenOrderGated;
     private volatile long totalMemoHits;
     private volatile long totalGenCompletionInversions;
+    // Compressed-column shipping (protocol 19): per-payload codec outcome at build.
+    // cols_zstd + cols_raw == columns built; both zero pre-capability / config-off.
+    private volatile long totalColumnsCompressed;
+    private volatile long totalColumnsRaw;
 
     public void resetTickCounters() {
         procTickDiskQueued = 0;
@@ -130,6 +134,11 @@ public class ProcessingDiagnostics {
      *  Diagnostics only; the order-spread gate bounds how bad this can look on screen. */
     public void addGenCompletionInversion(long n) { if (n > 0) totalGenCompletionInversions += n; }
 
+    /** One column payload built with the given codec outcome (processing thread). */
+    public void incrementColumnCodec(boolean compressed) {
+        if (compressed) totalColumnsCompressed++; else totalColumnsRaw++;
+    }
+
     // Per-tick getters (read by main thread)
     public int getLastDiskQueued() { return procTickDiskQueued; }
     public int getLastDiskDrained() { return procTickDiskDrained; }
@@ -152,4 +161,6 @@ public class ProcessingDiagnostics {
     public long getTotalMemoHits() { return totalMemoHits; }
     public long getTotalGenOrderGated() { return totalGenOrderGated; }
     public long getTotalGenCompletionInversions() { return totalGenCompletionInversions; }
+    public long getTotalColumnsCompressed() { return totalColumnsCompressed; }
+    public long getTotalColumnsRaw() { return totalColumnsRaw; }
 }

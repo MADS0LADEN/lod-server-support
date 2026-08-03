@@ -170,6 +170,24 @@ public class LSSClientGameTests implements FabricClientGameTest {
                             + " (decode/dispatch pipeline broken)");
             assertDecodedFlatWorldContent(recorder.snapshot());
 
+            // C7b: the compressed session actually negotiated (plan §5.1 — this test must
+            // not silently pass raw): with useCompressedColumns default-on and the dev
+            // client's zstd native present, at least one codec-1 column arrived, which is
+            // provable without a codec counter: wire (shipped) strictly below the
+            // raw-denominated received volume — codec-0 columns count both identically.
+            // Read RAW first (4-agent round, wire F2): a column arriving between the two
+            // reads then only pushes WIRE up, so a regressed all-raw session stays
+            // deterministically red; the reverse order could false-PASS on one in-window
+            // arrival. wire < raw <=> >=1 genuinely-compressed codec-1 column (the holder
+            // ships only strictly-shrinking frames), which itself proves 0x2 negotiated.
+            long rawReceived = LSSClientNetworking.getBytesReceived();
+            long wireReceived = LSSClientNetworking.getWireBytesReceived();
+            if (wireReceived >= rawReceived) {
+                throw new AssertionError("no compressed column arrived (wire " + wireReceived
+                        + " >= raw " + rawReceived
+                        + ") — the compression capability failed to negotiate end-to-end");
+            }
+
             // C8: ingest-failure recovery loop. The rejector reported its first column as
             // not-ingested; that exact position must be re-served end-to-end.
             waitForOrFail(context, rejector::sawRejection, 100,

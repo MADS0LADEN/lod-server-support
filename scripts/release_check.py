@@ -168,18 +168,150 @@ def check_paper_jar(jar, problems):
         ymltext = _read(jar, "plugin.yml")
         if _looks_unexpanded(ymltext):
             problems.append(f"{base}: plugin.yml has an unexpanded ${{version}} placeholder")
-        # Inverted 2026-07-19 (was required-true): no Folia build exists for MC 26.2, so the
-        # flag must stay ABSENT — declaring it would auto-load release jars on a future Folia
-        # 26.2 with live-unvalidated Folia paths. Re-invert together with the Folia soak
-        # validation once Folia ships 26.2 (see docs/planning/v0.7.1-candidates.md).
-        if re.search(r"^folia-supported:\s*true\s*$", ymltext, re.MULTILINE):
-            problems.append(f"{base}: plugin.yml declares folia-supported: true — must stay "
-                            "absent until Folia 26.2 exists and the Folia soak passes")
+        # Re-inverted 2026-08-01: Folia shipped its first MC 26.2 build (26.2-1, BETA), so
+        # the flag is declared again and the single jar must keep serving Folia. A jar that
+        # LOSES the flag silently stops loading on Folia servers, which is the failure this
+        # now guards (the previous inversion guarded the opposite risk, when no 26.2 Folia
+        # existed to load onto).
+        if not re.search(r"^folia-supported:\s*true\s*$", ymltext, re.MULTILINE):
+            problems.append(f"{base}: plugin.yml lost folia-supported: true — Folia servers "
+                            "will refuse this jar")
     if not any(n.startswith("dev/vox/lss/common/") and n.endswith(".class") for n in names):
         problems.append(f"{base}: shaded jar missing the shared common/ classes")
     if "paperweight-mappings-namespace: mojang" not in _manifest(jar):
         problems.append(f"{base}: manifest lost 'paperweight-mappings-namespace: mojang' "
                         "(server will refuse to load remapped NMS)")
+
+
+# LOD-store engine natives (plan §3): every release jar must carry the FULL supported
+# matrix — a missing native silently degrades that platform's store to the containment
+# latch (store-off), which is fail-safe but must be a deliberate choice, not a packaging
+# regression. Keep in sync with fabric/build.gradle slimStoreDepJars + paper/build.gradle.
+SQLITE_NATIVES = (
+    "org/sqlite/native/Linux/x86_64/libsqlitejdbc.so",
+    "org/sqlite/native/Linux/aarch64/libsqlitejdbc.so",
+    "org/sqlite/native/Linux-Musl/x86_64/libsqlitejdbc.so",
+    "org/sqlite/native/Linux-Musl/aarch64/libsqlitejdbc.so",
+    "org/sqlite/native/Windows/x86_64/sqlitejdbc.dll",
+    "org/sqlite/native/Windows/aarch64/sqlitejdbc.dll",
+    "org/sqlite/native/Mac/x86_64/libsqlitejdbc.dylib",
+    "org/sqlite/native/Mac/aarch64/libsqlitejdbc.dylib",
+)
+# zstd natives embed the version in the file name — match by directory prefix.
+ZSTD_NATIVE_DIRS = (
+    "linux/amd64/", "linux/aarch64/", "win/amd64/", "win/aarch64/",
+    "darwin/x86_64/", "darwin/aarch64/",
+)
+
+
+def _check_sqlite_natives(base, where, names, problems):
+    for native in SQLITE_NATIVES:
+        if native not in names:
+            problems.append(f"{base}: {where} is missing sqlite native {native} — "
+                            "the store silently degrades to off on that platform")
+
+
+def _check_zstd_natives(base, where, names, problems):
+    for d in ZSTD_NATIVE_DIRS:
+        if not any(n.startswith(d) and (n.endswith(".so") or n.endswith(".dll")
+                                        or n.endswith(".dylib")) for n in names):
+            problems.append(f"{base}: {where} is missing a zstd native under {d} — "
+                            "the store silently degrades to off on that platform")
+
+
+# Native roots the strip lists prune (mirrors the gradle strip lists). Any native FILE
+# under these that is NOT in the kept matrix means the strip regressed and the full
+# multi-platform payload (+~10 MB) is shipping — presence checks alone stay green then.
+STORE_NATIVE_ROOTS = ("org/sqlite/native/", "linux/", "win/", "darwin/", "freebsd/", "aix/")
+
+
+def _check_native_strip(base, where, names, problems):
+    kept_dirs = tuple({n[:n.rfind("/") + 1] for n in SQLITE_NATIVES}) + ZSTD_NATIVE_DIRS
+    stray = [n for n in names
+             if any(n.startswith(r) for r in STORE_NATIVE_ROOTS)
+             and (n.endswith(".so") or n.endswith(".dll") or n.endswith(".dylib")
+                  or n.endswith(".jnilib"))
+             and not any(n.startswith(d) for d in kept_dirs)]
+    if stray:
+        problems.append(f"{base}: {where} carries {len(stray)} native(s) outside the "
+                        f"supported matrix (e.g. {stray[0]}) — the native strip regressed "
+                        "and the full multi-platform payload is shipping")
+
+
+def check_store_natives_fabric(jar, problems):
+    """The Fabric jar nests native-stripped sqlite-jdbc/zstd-jni as Jar-in-Jar; the
+    fabric.mod.json 'jars' entries and the matrix inside each nested jar are the ship gate."""
+    base = os.path.basename(jar)
+    nested = dict(_nested_jars(jar))
+    sq = nested.get("META-INF/jars/sqlite-jdbc-slim.jar")
+    zs = nested.get("META-INF/jars/zstd-jni-slim.jar")
+    if sq is None or zs is None:
+        problems.append(f"{base}: missing nested store dep jar(s) "
+                        f"(sqlite={'ok' if sq else 'MISSING'}, zstd={'ok' if zs else 'MISSING'})")
+        return
+    try:
+        declared = {j.get("file") for j in json.loads(_read(jar, "fabric.mod.json")).get("jars", [])}
+    except (KeyError, json.JSONDecodeError):
+        return  # check_fabric_jar already flags the descriptor
+    for f in ("META-INF/jars/sqlite-jdbc-slim.jar", "META-INF/jars/zstd-jni-slim.jar"):
+        if f not in declared:
+            problems.append(f"{base}: fabric.mod.json 'jars' does not declare {f} — "
+                            "the loader will never load it")
+    # The CONVERSE (4-agent round R4): every nested jar must be declared. The 'jars'
+    # array is hand-maintained while slimStoreDepJars emits one jar per RESOLVED
+    # artifact — a future transitive dep would ship undeclared (Fabric Loader ignores
+    # undeclared nested jars), fail only at class-load time on real servers, and every
+    # localRuntime-classpath gate would stay green.
+    actual = {n for n in _names(jar)
+              if n.startswith("META-INF/jars/") and n.endswith(".jar")}
+    undeclared = sorted(actual - declared)
+    if undeclared:
+        problems.append(f"{base}: nested jar(s) not declared in fabric.mod.json 'jars': "
+                        f"{', '.join(undeclared)} — the loader silently ignores them")
+    _check_sqlite_natives(base, "nested sqlite-jdbc-slim.jar", set(sq), problems)
+    _check_zstd_natives(base, "nested zstd-jni-slim.jar", set(zs), problems)
+    _check_native_strip(base, "nested sqlite-jdbc-slim.jar", set(sq), problems)
+    _check_native_strip(base, "nested zstd-jni-slim.jar", set(zs), problems)
+
+
+def check_store_natives_paper(jar, problems):
+    """Paper shades the store deps flat (org.sqlite deliberately NOT relocated — relocation
+    breaks its native loader); the matrix sits at the top level of the shadow jar."""
+    base = os.path.basename(jar)
+    names = set(_names(jar))
+    if not any(n == "org/sqlite/JDBC.class" for n in names):
+        problems.append(f"{base}: org/sqlite classes missing from the shadow jar")
+        return
+    if any(n.startswith("dev/vox/lss/") and "/sqlite/" in n for n in names):
+        problems.append(f"{base}: org.sqlite appears RELOCATED — relocation breaks the "
+                        "sqlite native loader; it must stay at org/sqlite")
+    _check_sqlite_natives(base, "shadow jar", names, problems)
+    _check_zstd_natives(base, "shadow jar", names, problems)
+    _check_native_strip(base, "shadow jar", names, problems)
+
+
+def check_third_party_notices(jar, is_fabric, problems):
+    """C6 (review-fixes round): the release jars redistribute two third-party native
+    binaries (sqlite-jdbc, zstd-jni); the notices file shipped only by grace of a
+    build.gradle resources line — a resources refactor dropped it with every gate
+    green. Presence + non-empty at the top level of every release jar, and the Fabric
+    nested sqlite-jdbc-slim.jar must retain its in-jar Apache-2.0 text (the slim
+    repack must not strip it — the notices file DELEGATES sqlite's license to it)."""
+    base = os.path.basename(jar)
+    names = set(_names(jar))
+    if "THIRD-PARTY-NOTICES" not in names:
+        problems.append(f"{base}: THIRD-PARTY-NOTICES missing — the jar redistributes "
+                        "sqlite-jdbc/zstd-jni binaries and must carry their notices")
+        return
+    if len(_read_raw(jar, "THIRD-PARTY-NOTICES")) < 100:
+        problems.append(f"{base}: THIRD-PARTY-NOTICES is (near-)empty")
+    if is_fabric:
+        nested = dict(_nested_jars(jar))
+        sq = nested.get("META-INF/jars/sqlite-jdbc-slim.jar")
+        if sq is not None and "META-INF/maven/org.xerial/sqlite-jdbc/LICENSE" not in set(sq):
+            problems.append(f"{base}: nested sqlite-jdbc-slim.jar lost its in-jar LICENSE "
+                            "— the slim task must not strip it (THIRD-PARTY-NOTICES "
+                            "delegates sqlite's license text to it)")
 
 
 def check_vss_fabric_identity(jar, problems):
@@ -469,8 +601,12 @@ def discover(problems, expected_version=None, root=ROOT):
         _flag_ambiguous(vpap, "voxy-server-side-paper", problems)
     for jar in fab:
         check_fabric_jar(jar, problems)
+        check_store_natives_fabric(jar, problems)
+        check_third_party_notices(jar, True, problems)
     for jar in pap:
         check_paper_jar(jar, problems)
+        check_store_natives_paper(jar, problems)
+        check_third_party_notices(jar, False, problems)
     # The vss jars ship to real users → identical safety gate, plus the identity guardrail
     # that pins them as branded byte-copies (mod id `lss` / plugin name LodServerSupport),
     # plus a descriptor pair-diff against the LSS jar they were repackaged from (only the
@@ -481,6 +617,8 @@ def discover(problems, expected_version=None, root=ROOT):
         check_brand_properties(jar, _BRAND_LSS, problems)
     for jar in vfab:
         check_fabric_jar(jar, problems)
+        check_store_natives_fabric(jar, problems)
+        check_third_party_notices(jar, True, problems)
         check_vss_fabric_identity(jar, problems)
         check_brand_properties(jar, _BRAND_VSS, problems)
         src = _vss_counterpart(jar, fab, "voxy-server-side-fabric", "lod-server-support-fabric")
@@ -492,6 +630,8 @@ def discover(problems, expected_version=None, root=ROOT):
             check_wire_identity_fabric(src, jar, problems)
     for jar in vpap:
         check_paper_jar(jar, problems)
+        check_store_natives_paper(jar, problems)
+        check_third_party_notices(jar, False, problems)
         check_vss_paper_identity(jar, problems)
         check_brand_properties(jar, _BRAND_VSS, problems)
         src = _vss_counterpart(jar, pap, "voxy-server-side-paper", "lod-server-support-paper")
@@ -586,6 +726,48 @@ def _selftest():
             z.writestr("dev/vox/lss/common/PositionUtil.class", "x")
         return buf.getvalue()
 
+    def _nested_sqlite(with_license=True):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("org/sqlite/JDBC.class", "x")
+            if with_license:  # C6: the notices check pins this entry's survival
+                z.writestr("META-INF/maven/org.xerial/sqlite-jdbc/LICENSE", "Apache-2.0 ...")
+            for native in SQLITE_NATIVES:
+                z.writestr(native, "elf")
+        return buf.getvalue()
+
+    def _nested_zstd(missing_dir=None):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("com/github/luben/zstd/Zstd.class", "x")
+            for d in ZSTD_NATIVE_DIRS:
+                if d == missing_dir:
+                    continue
+                ext = ".dll" if d.startswith("win") else (".dylib" if d.startswith("darwin") else ".so")
+                z.writestr(d + "libzstd-jni-1.5.7-3" + ext, "elf")
+        return buf.getvalue()
+
+    # Entries every schema-complete synthetic fabric release jar carries for the
+    # store-native matrix check (the real jars nest these via slimStoreDepJars).
+    STORE_FABRIC_ENTRIES = {
+        "META-INF/jars/sqlite-jdbc-slim.jar": _nested_sqlite(),
+        "META-INF/jars/zstd-jni-slim.jar": _nested_zstd(),
+    }
+    # Mirrors the REAL fabric.mod.json: all three nested jars declared (the converse
+    # check rejects any undeclared nested jar, so the fixture must declare common too).
+    STORE_FABRIC_JARS_FIELD = [{"file": "META-INF/jars/sqlite-jdbc-slim.jar"},
+                               {"file": "META-INF/jars/zstd-jni-slim.jar"},
+                               {"file": "META-INF/jars/common-0.7.0.jar"}]
+
+    def _store_paper_entries():
+        out = {"org/sqlite/JDBC.class": "x", "com/github/luben/zstd/Zstd.class": "x"}
+        for native in SQLITE_NATIVES:
+            out[native] = "elf"
+        for d in ZSTD_NATIVE_DIRS:
+            ext = ".dll" if d.startswith("win") else (".dylib" if d.startswith("darwin") else ".so")
+            out[d + "libzstd-jni-1.5.7-3" + ext] = "elf"
+        return out
+
     with tempfile.TemporaryDirectory() as td:
         fab_manifest = "Manifest-Version: 1.0\nFabric-Mapping-Namespace: official\n"
         good_fab = os.path.join(td, "lod-server-support-fabric.jar")
@@ -671,7 +853,7 @@ def _selftest():
 
         good_pap = os.path.join(td, "lod-server-support-paper.jar")
         _make_jar(good_pap, {
-            "plugin.yml": "name: LodServerSupport\nversion: 0.4.0\n",
+            "plugin.yml": "name: LodServerSupport\nversion: 0.4.0\nfolia-supported: true\n",
             "dev/vox/lss/paper/LSSPaperPlugin.class": "x",
             "dev/vox/lss/common/PositionUtil.class": "x",
         }, manifest="Manifest-Version: 1.0\npaperweight-mappings-namespace: mojang\n")
@@ -679,18 +861,19 @@ def _selftest():
         check_paper_jar(good_pap, p)
         check(p == [], f"clean paper jar flagged: {p}")
 
-        # a paper jar DECLARING folia-supported must be caught: no Folia build exists for MC
-        # 26.2, and the flag would auto-load release jars on a future Folia with
-        # live-unvalidated paths (inverted 2026-07-19; re-invert with the Folia validation)
+        # a paper jar LOSING folia-supported must be caught: Folia ships a 26.2 build since
+        # 2026-07-28, so a jar without the flag silently stops loading on Folia servers
+        # (re-inverted 2026-08-01 — the previous direction guarded the opposite risk, back
+        # when no Folia 26.2 existed to load onto)
         foliaflag_pap = os.path.join(td, "foliaflag-paper.jar")
         _make_jar(foliaflag_pap, {
-            "plugin.yml": "name: LodServerSupport\nversion: 0.4.0\nfolia-supported: true\n",
+            "plugin.yml": "name: LodServerSupport\nversion: 0.4.0\n",
             "dev/vox/lss/paper/LSSPaperPlugin.class": "x",
             "dev/vox/lss/common/PositionUtil.class": "x",
         }, manifest="Manifest-Version: 1.0\npaperweight-mappings-namespace: mojang\n")
         p = []
         check_paper_jar(foliaflag_pap, p)
-        check(any("folia-supported" in m for m in p), "declared folia-supported flag not caught")
+        check(any("folia-supported" in m for m in p), "missing folia-supported flag not caught")
 
         bad_pap = os.path.join(td, "bad-paper.jar")
         _make_jar(bad_pap, {
@@ -827,6 +1010,7 @@ def _selftest():
         good_vpap = os.path.join(td, "voxy-server-side-paper.jar")
         _make_jar(good_vpap, {
             "plugin.yml": ("name: LodServerSupport\nversion: 0.7.0\n"
+                           "folia-supported: true\n"
                            "description: Server-side backend for Voxy...\n"),
             "dev/vox/lss/paper/LSSPaperPlugin.class": "x",
             "dev/vox/lss/common/PositionUtil.class": "x",
@@ -1073,6 +1257,71 @@ def _selftest():
         check_glob_hygiene(p, [os.path.join(td, "voxy-server-side-paper-soaky.jar")])
         check(any("MATCHES release glob" in m for m in p), "mis-named vss soak jar not caught")
 
+        # ---- store-native matrix (plan §3) ----
+        sn_fab = os.path.join(td, "store-fab.jar")
+        _make_jar(sn_fab, {
+            "fabric.mod.json": json.dumps({"version": "1", "jars": STORE_FABRIC_JARS_FIELD}),
+            "META-INF/jars/sqlite-jdbc-slim.jar": _nested_sqlite(),
+            "META-INF/jars/zstd-jni-slim.jar": _nested_zstd(missing_dir="linux/aarch64/"),
+        })
+        p = []
+        check_store_natives_fabric(sn_fab, p)
+        check(any("linux/aarch64/" in m for m in p),
+              f"fabric jar missing a zstd native not caught: {p}")
+        sn_fab_undeclared = os.path.join(td, "store-fab-undeclared.jar")
+        _make_jar(sn_fab_undeclared, {
+            "fabric.mod.json": json.dumps({"version": "1"}),  # no "jars" field
+            "META-INF/jars/sqlite-jdbc-slim.jar": _nested_sqlite(),
+            "META-INF/jars/zstd-jni-slim.jar": _nested_zstd(),
+        })
+        p = []
+        check_store_natives_fabric(sn_fab_undeclared, p)
+        check(any("does not declare" in m for m in p),
+              f"undeclared nested store jar not caught: {p}")
+        sn_pap = os.path.join(td, "store-pap.jar")
+        pap_entries = _store_paper_entries()
+        del pap_entries["org/sqlite/native/Mac/aarch64/libsqlitejdbc.dylib"]
+        _make_jar(sn_pap, pap_entries)
+        p = []
+        check_store_natives_paper(sn_pap, p)
+        check(any("Mac/aarch64" in m for m in p),
+              f"paper jar missing a sqlite native not caught: {p}")
+        # a regressed strip (an out-of-matrix native shipping) must be caught (F3)
+        sn_pap_fat = os.path.join(td, "store-pap-fat.jar")
+        fat_entries = _store_paper_entries()
+        fat_entries["org/sqlite/native/Linux-Android/aarch64/libsqlitejdbc.so"] = "elf"
+        fat_entries["linux/ppc64le/libzstd-jni-1.5.7-3.so"] = "elf"
+        _make_jar(sn_pap_fat, fat_entries)
+        p = []
+        check_store_natives_paper(sn_pap_fat, p)
+        check(any("outside the supported matrix" in m for m in p),
+              f"regressed native strip not caught: {p}")
+
+        # ---- third-party notices (review-fixes C6) ----
+        tp_ok = os.path.join(td, "tp-ok.jar")
+        _make_jar(tp_ok, {
+            "THIRD-PARTY-NOTICES": "zstd-jni BSD-2 ... Zstandard BSD-3 ... " + "x" * 100,
+            "META-INF/jars/sqlite-jdbc-slim.jar": _nested_sqlite(),
+        })
+        p = []
+        check_third_party_notices(tp_ok, True, p)
+        check(p == [], f"clean notices jar flagged: {p}")
+        tp_missing = os.path.join(td, "tp-missing.jar")
+        _make_jar(tp_missing, {"some.class": "x"})
+        p = []
+        check_third_party_notices(tp_missing, False, p)
+        check(any("THIRD-PARTY-NOTICES missing" in m for m in p),
+              f"missing notices not caught: {p}")
+        tp_stripped = os.path.join(td, "tp-stripped-license.jar")
+        _make_jar(tp_stripped, {
+            "THIRD-PARTY-NOTICES": "x" * 200,
+            "META-INF/jars/sqlite-jdbc-slim.jar": _nested_sqlite(with_license=False),
+        })
+        p = []
+        check_third_party_notices(tp_stripped, True, p)
+        check(any("lost its in-jar LICENSE" in m for m in p),
+              f"stripped nested sqlite license not caught: {p}")
+
         # ---- discover(): end-to-end wiring over a synthetic build tree ----
         # The leaf checks above prove each check works; these prove discover() actually
         # CALLS them (presence, pair wiring, identity) — a refactor that drops a call
@@ -1084,6 +1333,7 @@ def _selftest():
         os.makedirs(dpap)
         PY_LSS = ("name: LodServerSupport\nversion: '0.7.0'\n"
                   "main: dev.vox.lss.paper.LSSPaperPlugin\napi-version: '26.2'\n"
+                  "folia-supported: true\n"
                   "description: LSS plugin.\n"
                   "website: https://modrinth.com/plugin/lod-server-support\n"
                   "commands:\n  lsslod:\n"
@@ -1105,23 +1355,30 @@ def _selftest():
         pap_manifest = "Manifest-Version: 1.0\npaperweight-mappings-namespace: mojang\n"
 
         def _write_tree_fabric(name, meta, brand, extra=None):
+            meta = dict(meta)
+            meta.setdefault("jars", STORE_FABRIC_JARS_FIELD)
             entries = {
                 "fabric.mod.json": json.dumps(meta),
                 "dev/vox/lss/LSSMod.class": "x",
                 "META-INF/jars/common-0.7.0.jar": _nested_common("0.7.0"),
                 "lss-brand.properties": brand,
                 "LICENSE_lod-server-support-fabric": "MIT",
+                "THIRD-PARTY-NOTICES": "sqlite-jdbc / zstd-jni notices " + "x" * 100,
             }
+            entries.update(STORE_FABRIC_ENTRIES)
             entries.update(extra or {})
             _make_jar(os.path.join(dfab, name), entries, manifest=fab_manifest)
 
         def _write_tree_paper(name, yml, brand):
-            _make_jar(os.path.join(dpap, name), {
+            entries = {
                 "plugin.yml": yml,
                 "lss-brand.properties": brand,
                 "dev/vox/lss/paper/LSSPaperPlugin.class": "x",
                 "dev/vox/lss/common/PositionUtil.class": "x",
-            }, manifest=pap_manifest)
+                "THIRD-PARTY-NOTICES": "sqlite-jdbc / zstd-jni notices " + "x" * 100,
+            }
+            entries.update(_store_paper_entries())
+            _make_jar(os.path.join(dpap, name), entries, manifest=pap_manifest)
 
         _write_tree_fabric("lod-server-support-fabric.jar",
                            {"id": "lss", "name": "LOD Server Support", "version": "0.7.0"},

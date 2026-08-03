@@ -108,9 +108,36 @@ public class LSSServerNetworking {
         if (service == null || !LSSServerConfig.CONFIG.enabled) return;
         String dimension = DIMENSION_STRINGS.computeIfAbsent(level.dimension(),
                 key -> key.identifier().toString());
-        if (service.getDirtyContentFilter().contentChanged(level, levelChunk, dimension)) {
+        var obs = service.getDirtyContentFilter().observeSave(level, levelChunk, dimension);
+        if (obs.changed()) {
             service.getDirtyTracker().markDirty(dimension, chunk.getPos().x(), chunk.getPos().z());
+            // Save-hook store bridge, DELETE-only (4-agent round R2-M2): the write-
+            // through deposit this branch used to make could never survive — the same
+            // mark it sets is drained by the broadcaster into the unconditional
+            // dirty->store fan-out, whose tombstone strictly postdates the deposit's
+            // enqueue, so every hook deposit died within one broadcast interval while
+            // costing a compress+insert+delete and real shed pressure on the bounded
+            // queue. The PROMPT delete is what carries the value: it closes the
+            // up-to-10 s window in which the PRE-edit store row would keep serving hits
+            // before the fan-out drain lands. Fresh bytes re-enter the store through
+            // the dirty-broadcast re-serve's delivery-path deposit (which is what
+            // actually re-warmed edited columns all along). Runs OUTSIDE the filter
+            // monitor; tombstone put + control-queue add, safe off-main.
+            applySaveObservationToStore(service.getLodStore(), dimension,
+                    chunk.getPos().x(), chunk.getPos().z(), obs);
         }
+    }
+
+    /** The save-hook -> store bridge, extracted for direct testing: a content-changing
+     *  save DELETES the position's store row (see onChunkSaveData — the old write-
+     *  through deposit was provably always dead on arrival; delete-only keeps the
+     *  stale-row-closure without the doomed work). Covers the serializer fail-open
+     *  case by construction: changed-but-undepositable also just deletes. */
+    static void applySaveObservationToStore(dev.vox.lss.common.store.LodStoreService store,
+                                            String dimension, int cx, int cz,
+                                            DirtyContentFilter.SaveObservation obs) {
+        if (store == null || !obs.changed()) return;
+        store.delete(dimension, dev.vox.lss.common.PositionUtil.packPosition(cx, cz));
     }
 
     /** Reply hook for {@link #handleHandshake}; production wires {@code ServerPlayNetworking.send}. */

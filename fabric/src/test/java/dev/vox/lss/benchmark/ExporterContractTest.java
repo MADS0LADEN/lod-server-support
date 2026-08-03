@@ -4,6 +4,7 @@ import dev.vox.lss.common.SharedBandwidthLimiter;
 import dev.vox.lss.common.processing.AbstractChunkDiskReader;
 import dev.vox.lss.common.processing.AbstractPlayerRequestState;
 import dev.vox.lss.common.processing.LoadedColumnData;
+import dev.vox.lss.common.processing.ColumnBytes;
 import dev.vox.lss.common.processing.OffThreadProcessor;
 import dev.vox.lss.common.processing.TickDiagnostics;
 import dev.vox.lss.common.tracking.DirtyColumnTracker;
@@ -60,7 +61,7 @@ class ExporterContractTest {
         @Override
         protected boolean buildAndEnqueueColumnPayload(TestState state, int cx, int cz, String dimension,
                                                        long columnTimestamp, long submissionOrder,
-                                                       byte[] sectionBytes, int estimatedBytes,
+                                                       ColumnBytes bytes, int estimatedBytes,
                                                        byte source) {
             return true;
         }
@@ -195,7 +196,7 @@ class ExporterContractTest {
     void clientSnapshotMatchesTheCheckedInContract() throws Exception {
         BenchmarkMetricsExporter.setProbesForTest("7:-3");
         var snapshot = BenchmarkMetricsExporter.buildClientSnapshot(
-                new LodRequestManager(), true, 10L, 1000L, 0L, 2, 4096L);
+                new LodRequestManager(), true, 10L, 1000L, 900L, 0L, 2, 4096L);
         assertEquals(contractLines("client-snapshot.contract"), flattenedLines(snapshot),
                 "client snapshot schema drifted from exporter-contract/client-snapshot.contract");
     }
@@ -283,8 +284,8 @@ class ExporterContractTest {
     void disabledClientSessionZeroFillsManagerFieldsWithTheSameKeySet() {
         BenchmarkMetricsExporter.setProbesForTest("7:-3");
         var enabled = BenchmarkMetricsExporter.buildClientSnapshot(
-                new LodRequestManager(), true, 10L, 1000L, 0L, 2, 4096L);
-        var disabled = BenchmarkMetricsExporter.buildClientSnapshot(null, false, 0L, 0L, 0L, 0, 0L);
+                new LodRequestManager(), true, 10L, 1000L, 900L, 0L, 2, 4096L);
+        var disabled = BenchmarkMetricsExporter.buildClientSnapshot(null, false, 0L, 0L, 0L, 0L, 0, 0L);
 
         var enabledFlat = new TreeMap<String, String>();
         var disabledFlat = new TreeMap<String, String>();
@@ -324,7 +325,7 @@ class ExporterContractTest {
     @Test
     void emptyProbeSpecEmitsNoProbesOrProbeHashesKey() {
         BenchmarkMetricsExporter.setProbesForTest("");
-        var client = BenchmarkMetricsExporter.buildClientSnapshot(null, false, 0L, 0L, 0L, 0, 0L);
+        var client = BenchmarkMetricsExporter.buildClientSnapshot(null, false, 0L, 0L, 0L, 0L, 0, 0L);
         assertFalse(client.containsKey("probes"), "no probes key when the property is blank");
         var server = BenchmarkMetricsExporter.buildServerMetrics(fullShapeSource());
         assertFalse(server.containsKey("probe_hashes"), "no probe_hashes key when the property is blank");

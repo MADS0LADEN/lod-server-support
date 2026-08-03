@@ -49,7 +49,9 @@ while [ "$ELAPSED" -lt "$MAX_SECONDS" ]; do
     NOW=$(date +%s)
 
     if [ -z "$SRV_PID" ] || [ ! -d "/proc/$SRV_PID" ]; then
-        SRV_PID=$(find_pid 'Dlss\.benchmark\.duration')
+        # Default: the benchmark server. Overridable so the soak harness can attach the
+        # same sampler to soak servers (-Dlss.soak.scenario) on any platform.
+        SRV_PID=$(find_pid "${PROC_SAMPLER_SRV_PATTERN:-Dlss\\.benchmark\\.duration}")
     fi
     if [ -z "$CLI_PID" ] || [ ! -d "/proc/$CLI_PID" ]; then
         CLI_PID=$(find_pid 'quickPlayMultiplayer')

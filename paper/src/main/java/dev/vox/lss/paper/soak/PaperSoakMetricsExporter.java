@@ -173,6 +173,10 @@ public final class PaperSoakMetricsExporter {
         serviceMap.put("requests_received", diag.getTotalRequestsRouted());
         serviceMap.put("columns_sent", service.getTickDiag().getTotalSectionsSent());
         serviceMap.put("bytes_sent", service.getTickDiag().getTotalBytesSent());
+        // Compressed columns (protocol 19) — twin of the Fabric exporter's fields.
+        serviceMap.put("wire_bytes", service.getTickDiag().getTotalWireBytesSent());
+        serviceMap.put("cols_zstd", diag.getTotalColumnsCompressed());
+        serviceMap.put("cols_raw", diag.getTotalColumnsRaw());
         serviceMap.put("duplicate_skips", diag.getTotalDuplicateSkips());
         serviceMap.put("queue_full", diag.getTotalQueueFull());
         serviceMap.put("up_to_date", diag.getTotalUpToDate());
@@ -272,6 +276,32 @@ public final class PaperSoakMetricsExporter {
         var dedupMap = new LinkedHashMap<String, Object>();
         dedupMap.put("groups", internals.dedupGroups());
         result.put("dedup", dedupMap);
+
+        // LOD store — verbatim twin of the Fabric exporter's group (same keys, same
+        // order; the shared server-snapshot.contract pins parity). All-zero while
+        // lodStore=off.
+        var storeDiag = service.getOffThreadProcessor().getStoreDiagnostics();
+        var storeMap = new LinkedHashMap<String, Object>();
+        storeMap.put("hits", storeDiag.getHits());
+        storeMap.put("misses", storeDiag.getMisses());
+        storeMap.put("deposits", storeDiag.getDeposits());
+        storeMap.put("deposit_drops", storeDiag.getDepositDrops());
+        storeMap.put("deposit_skips", storeDiag.getDepositSkips());
+        storeMap.put("errors", storeDiag.getErrors());
+        storeMap.put("mem_hits", storeDiag.getMemHits());
+        storeMap.put("mem_evictions", storeDiag.getMemEvictions());
+        storeMap.put("sweep_drops", storeDiag.getSweepDrops());
+        storeMap.put("backfill_reads", storeDiag.getBackfillReads());
+        storeMap.put("backfill_deposits", storeDiag.getBackfillDeposits());
+        storeMap.put("backfill_skips", storeDiag.getBackfillSkips());
+        storeMap.put("queue", storeDiag.getQueueDepth());
+        storeMap.put("mem_bytes", storeDiag.getMemBytes());
+        storeMap.put("db_bytes", storeDiag.getDbBytes());
+        storeMap.put("wal_bytes", storeDiag.getWalBytes());
+        storeMap.put("checkpoint_ms_max", storeDiag.getCheckpointMsMax());
+        storeMap.put("read_avg_us", storeDiag.getReadAvgMicros());
+        storeMap.put("read_p95_us", storeDiag.getReadP95Micros());
+        result.put("store", storeMap);
 
         // Wall-time per tick over the window since the last snapshot (a stalled server
         // reads >> 50). -1 when no sampler ticks were observed (sampler not wired).

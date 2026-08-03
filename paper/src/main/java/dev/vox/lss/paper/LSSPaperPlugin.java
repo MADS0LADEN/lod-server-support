@@ -298,10 +298,26 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                     }
                 },
                 (capabilities, dialect, replyAfterRegister) -> {
-                    if (dialect == HandshakeGate.WireDialect.V16) {
-                        service.getV16CompatManager().onHandshake(nmsPlayer.getUUID());
-                    }
-                    service.enqueueRegister(nmsPlayer, capabilities, replyAfterRegister);
+                    // The dialect flip runs on the PUMP, immediately before registerPlayer,
+                    // via the mailbox's pre-register hook. Both halves of that placement are
+                    // load-bearing:
+                    //   * BEFORE registerPlayer, because that is where
+                    //     wantsCompressedColumns is derived from isV16(). Doing it after —
+                    //     which is what the sender seam amounts to for a REGISTER outcome,
+                    //     since the drain runs replyAfterRegister last — left a v16 ->
+                    //     current re-handshake running its whole session uncompressed.
+                    //   * ON THE PUMP, because on Folia the handshake arrives on a REGION
+                    //     thread. A flip applied there takes effect instantly while the
+                    //     SessionConfig that re-arms the client's decoder waits for the next
+                    //     drain, so the remainder of that tick's flush could ship
+                    //     new-dialect columns to a decoder still armed for the old one — a
+                    //     malformed frame, and a disconnect. (Round-3 review; the first
+                    //     bullet's fix originally introduced the second bullet's race.)
+                    // Both directions go through the hook so neither can drift off-pump.
+                    Runnable dialectFlip = dialect == HandshakeGate.WireDialect.V16
+                            ? () -> service.getV16CompatManager().onHandshake(nmsPlayer.getUUID())
+                            : () -> service.getV16CompatManager().onNonV16Handshake(nmsPlayer.getUUID());
+                    service.enqueueRegister(nmsPlayer, capabilities, dialectFlip, replyAfterRegister);
                 });
     }
 

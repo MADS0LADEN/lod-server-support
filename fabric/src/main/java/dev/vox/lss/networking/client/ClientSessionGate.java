@@ -67,6 +67,7 @@ final class ClientSessionGate {
     private volatile int serverLodDistance = 0;
     private final AtomicLong columnsReceived = new AtomicLong();
     private final AtomicLong bytesReceived = new AtomicLong();
+    private final AtomicLong wireBytesReceived = new AtomicLong();
     private volatile long connectionStartMs = 0;
     private volatile LodRequestManager requestManager;
 
@@ -83,13 +84,23 @@ final class ClientSessionGate {
     int getServerLodDistance() { return this.serverLodDistance; }
     long getColumnsReceived() { return this.columnsReceived.get(); }
     long getBytesReceived() { return this.bytesReceived.get(); }
+    long getWireBytesReceived() { return this.wireBytesReceived.get(); }
     long getConnectionStartMs() { return this.connectionStartMs; }
     LodRequestManager getRequestManager() { return this.requestManager; }
 
-    /** Network-thread accounting for an arriving column frame (before the main-thread hop). */
-    void recordColumnFrame(long estimatedBytes) {
+    /** Network-thread accounting for an arriving column frame (before the main-thread hop).
+     *  {@code estimatedBytes} is RAW-denominated (decode-work accounting, law A2's client
+     *  half); {@code wireBytes} is the SHIPPED size (codec-1 frames — the observed-bandwidth
+     *  match). */
+    void recordColumnFrame(long estimatedBytes, long wireBytes) {
         this.columnsReceived.incrementAndGet();
         this.bytesReceived.addAndGet(estimatedBytes);
+        this.wireBytesReceived.addAndGet(wireBytes);
+    }
+
+    /** Pre-compression shape (wire == estimated) — existing tests/rigs. */
+    void recordColumnFrame(long estimatedBytes) {
+        recordColumnFrame(estimatedBytes, estimatedBytes);
     }
 
     /**
@@ -291,6 +302,7 @@ final class ClientSessionGate {
         this.serverLodDistance = 0;
         this.columnsReceived.set(0);
         this.bytesReceived.set(0);
+        this.wireBytesReceived.set(0);
         this.connectionStartMs = 0;
         this.requestManager = null;
         // Clear v16 discovery + decode state so nothing leaks into the next connection.
@@ -299,5 +311,10 @@ final class ClientSessionGate {
         this.v16FallbackSent = false;
         this.isV16Server = false;
         V16ClientWire.reset();
+        // A trace belongs to the session it was started in. It used to survive
+        // disconnect, server switches and world reloads with no size cap and no
+        // reminder — and its 1 Hz net event kept sending a ping packet to whatever
+        // server the player joined next. (v0.9.0 review.)
+        ClientTraceLog.stop();
     }
 }

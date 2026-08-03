@@ -40,7 +40,8 @@ ALL_SCENARIOS=(fresh-backfill warm-rejoin dimension-trip dirty-broadcast
                generation-capacity-stress bandwidth-throttle
                cold-restart-resync enabled-false teleport-prune
                dirty-range-filter dirty-during-backfill dirty-while-offline
-               clearcache-mid-session dimension-rejoin-warm)
+               clearcache-mid-session dimension-rejoin-warm store-second-join
+               store-save-storm)
 # Scenarios ported to Paper. The remaining ones are Fabric-specific for now: the dirty-*
 # family leans on the save-hook + DirtyContentFilter (Paper's dirty detection is
 # event-driven — paper-dirty-falling-block is the Paper-native dirty scenario),
@@ -51,6 +52,24 @@ PAPER_SCENARIOS=(fresh-backfill warm-rejoin dimension-trip paper-dirty-falling-b
 # save-all steps are mapped to acknowledged no-ops by the driver (Folia unregisters the
 # command); an aggressive bukkit.yml autosave keeps chunks flushing mid-run instead.
 FOLIA_SCENARIOS=("${PAPER_SCENARIOS[@]}")
+# Store scenarios that are portable to the Bukkit platforms but stay OUT of every 'all'
+# list. store-second-join is the only scenario that actually creates store DEMAND — it
+# clearcaches mid-session so the re-serve wave must come from the store — and its steps are
+# plain vanilla commands with a Paper twin for the probe recorder (PaperSoakProbeBridge), so
+# nothing in it was ever Fabric-specific; it simply was never added to the Bukkit lists.
+# That mattered once the Folia store question came up: warm-rejoin, the closest scenario in
+# the Folia set, keeps the client cache and so answers up_to_date instead of serving, which
+# means the Folia set could not exercise a store SERVE at all.
+STORE_STANDALONE_SCENARIOS=(store-second-join)
+# Phases of scripts/store_offline_edit.sh (populate -> offline mutate -> verify, chained
+# via SOAK_WORLD_FROM). Valid standalone invocations on fabric AND paper, but excluded
+# from every 'all' list: mutate/verify are meaningless without the carried world.
+PHASE_SCENARIOS=(store-offline-populate store-offline-mutate store-offline-verify)
+# Paper-only, AFTER the Folia copy above so Folia does not inherit it (the store is
+# unvalidated on Folia): console setblock fires no Bukkit event, so only the store's
+# periodic resweep (lodStoreResweepSeconds) can catch the edit — the unfired-event
+# staleness-bound gate (lod-store-implementation-plan.md Phase 2).
+PAPER_SCENARIOS+=(paper-store-unfired-event)
 # Scenarios that run on a fresh (deleted) world; everything else copies the base world.
 FRESH_WORLD_SCENARIOS="fresh-backfill rate-limit-storm generation-disabled generation-capacity-stress"
 LOG_PREFIX="soak"
@@ -131,7 +150,10 @@ case "$SCENARIO" in
     rate-limit-storm|disk-saturation|generation-disabled|generation-capacity-stress|bandwidth-throttle) ;;
     cold-restart-resync|enabled-false|teleport-prune|dirty-range-filter) ;;
     dirty-during-backfill|dirty-while-offline|clearcache-mid-session|dimension-rejoin-warm) ;;
-    paper-dirty-falling-block) ;;
+    store-second-join) ;;
+    store-offline-populate|store-offline-mutate|store-offline-verify) ;;
+    store-save-storm|store-save-storm-off) ;;
+    paper-dirty-falling-block|paper-store-unfired-event) ;;
     *)
         echo "[soak] ERROR: Unknown scenario '$SCENARIO'"
         usage
@@ -142,12 +164,12 @@ esac
 # Platform gating: the Paper port covers a validated subset; the falling-block scenario is
 # Paper-native (setblock fires no Bukkit event, and Fabric's save-hook detection would need
 # a save-all the timeline deliberately omits).
-if [[ "$SOAK_PLATFORM" == "paper" && " ${PAPER_SCENARIOS[*]} " != *" $SCENARIO "* ]]; then
+if [[ "$SOAK_PLATFORM" == "paper" && " ${PAPER_SCENARIOS[*]} ${PHASE_SCENARIOS[*]} ${STORE_STANDALONE_SCENARIOS[*]} " != *" $SCENARIO "* ]]; then
     echo "[soak] ERROR: Scenario '$SCENARIO' is not ported to SOAK_PLATFORM=paper"
     usage
     exit 1
 fi
-if [[ "$SOAK_PLATFORM" == "folia" && " ${FOLIA_SCENARIOS[*]} " != *" $SCENARIO "* ]]; then
+if [[ "$SOAK_PLATFORM" == "folia" && " ${FOLIA_SCENARIOS[*]} ${STORE_STANDALONE_SCENARIOS[*]} " != *" $SCENARIO "* ]]; then
     echo "[soak] ERROR: Scenario '$SCENARIO' is not ported to SOAK_PLATFORM=folia"
     usage
     exit 1
@@ -162,6 +184,7 @@ fi
 # gradle -P properties for the CLIENT JVM (per-position probes / scripted client action).
 # Kill switch budget = expected + 240s slack.
 CLIENT_EXTRA_ARGS=()
+SERVER_EXTRA_ARGS=()
 case "$SCENARIO" in
     fresh-backfill)             CLIENT_RUNS=1; EXPECTED_SECONDS=300 ;;
     warm-rejoin)                CLIENT_RUNS=2; EXPECTED_SECONDS=360 ;;
@@ -181,8 +204,39 @@ case "$SCENARIO" in
                                 CLIENT_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
     clearcache-mid-session)     CLIENT_RUNS=1; EXPECTED_SECONDS=280
                                 CLIENT_EXTRA_ARGS=("-Psoak.clientActionAt=60:clearcache") ;;
+    store-second-join)
+                                CLIENT_RUNS=1; EXPECTED_SECONDS=280
+                                # The Phase 1/2 LOD-store gate (lodStore=full): backfill
+                                # populates the store, the clearcache forces the full
+                                # ts<=0 re-declaration, the checker requires the re-serve
+                                # wave to be STORE HITS with byte-identical probe hashes.
+                                # Absorbed the old store-second-join-full twin when
+                                # lodStore=memory was retired (2026-08-02) — same
+                                # timeline, and this arm now IS the SQLite one.
+                                CLIENT_EXTRA_ARGS=("-Psoak.clientActionAt=60:clearcache")
+                                SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
     dimension-rejoin-warm)      CLIENT_RUNS=2; EXPECTED_SECONDS=650 ;;
+    store-offline-populate)     CLIENT_RUNS=1; EXPECTED_SECONDS=280
+                                SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
+    store-offline-mutate)       CLIENT_RUNS=1; EXPECTED_SECONDS=160 ;;
+    store-save-storm)           CLIENT_RUNS=1; EXPECTED_SECONDS=320
+                                # Phase 3: save-hook deposits under an autosave storm;
+                                # the clearcache re-serve must come from the store with
+                                # the edit's fresh bytes (see check_store_save_storm).
+                                CLIENT_EXTRA_ARGS=("-Psoak.clientActionAt=130:clearcache")
+                                SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
+    store-save-storm-off)       CLIENT_RUNS=1; EXPECTED_SECONDS=320
+                                # store_save_storm.sh's MSPT pairing arm (lodStore off).
+                                SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
+    store-offline-verify)       CLIENT_RUNS=1; EXPECTED_SECONDS=280
+                                SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
     paper-dirty-falling-block)  CLIENT_RUNS=1; EXPECTED_SECONDS=300 ;;
+    paper-store-unfired-event)  CLIENT_RUNS=1; EXPECTED_SECONDS=320
+                                # Backfill charges the store; the un-evented setblock +
+                                # save-all go stale-invisible; two 10 s resweep cycles
+                                # later the clearcache re-declare must get FRESH bytes.
+                                CLIENT_EXTRA_ARGS=("-Psoak.clientActionAt=120:clearcache")
+                                SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
 esac
 RUNTIME_BUDGET=$((EXPECTED_SECONDS + 240))
 DEADLINE_EPOCH=0
@@ -261,7 +315,16 @@ mkdir -p "$RUN_RESULTS_DIR"
 # world_nether/world_the_end dirs), so clearing/copying world/ covers the End too.
 echo "[soak] Staging world for scenario: $SCENARIO"
 rm -rf "$SERVER_RUN_DIR/world"
-if [[ " $FRESH_WORLD_SCENARIOS " != *" $SCENARIO "* ]]; then
+if [[ -n "${SOAK_WORLD_FROM:-}" ]]; then
+    # Multi-phase orchestrators (scripts/store_offline_edit.sh) carry a prior phase's
+    # world forward instead of restaging the base. The dir must contain world/.
+    if [[ ! -d "$SOAK_WORLD_FROM/world" ]]; then
+        echo "[soak] ERROR: SOAK_WORLD_FROM=$SOAK_WORLD_FROM has no world/ dir"
+        exit 1
+    fi
+    echo "[soak] Staging world from SOAK_WORLD_FROM=$SOAK_WORLD_FROM"
+    cp -r "$SOAK_WORLD_FROM/world" "$SERVER_RUN_DIR/world"
+elif [[ " $FRESH_WORLD_SCENARIOS " != *" $SCENARIO "* ]]; then
     cp -r "$BASE_WORLD_DIR/world" "$SERVER_RUN_DIR/world"
 fi
 
@@ -302,6 +365,31 @@ printf '%s' "$SOAK_PLATFORM" > "$CACHE_PLATFORM_MARKER"
 # Step 6a: Stage server config override (fabric: config/; paper: the plugin data folder)
 mkdir -p "$SERVER_CONFIG_DIR"
 cp "$SCENARIO_CONFIG" "$SERVER_CONFIG_DIR/lss-server-config.json"
+# Phase 5 burn-in lever: SOAK_LODSTORE_OVERRIDE=full merges the store into EVERY
+# scenario's staged config (the laws are store-aware; named checks are engine-blind).
+# SOAK_LODSTORE_BACKFILL_OVERRIDE independently forces the backfill, because every
+# scenario config now PINS lodStoreBackfill (the 19 pre-store ones to keep their
+# pre-store baselines, the store ones so their paired-CPU arms are not contaminated by
+# an unpaired region walk). Without this second lever the override could only ever
+# produce store-on/backfill-off — which is not the shipped default, so the suite could
+# not be run "against the shipped defaults" as intended. (v0.9.0 review.)
+if [[ -n "${SOAK_LODSTORE_OVERRIDE:-}" || -n "${SOAK_LODSTORE_BACKFILL_OVERRIDE:-}" ]]; then
+    python3 - "$SERVER_CONFIG_DIR/lss-server-config.json" \
+        "${SOAK_LODSTORE_OVERRIDE:-}" "${SOAK_LODSTORE_BACKFILL_OVERRIDE:-}" <<'PYEOF'
+import json, sys
+path, mode, backfill = sys.argv[1], sys.argv[2], sys.argv[3]
+cfg = json.load(open(path))
+applied = []
+if mode:
+    cfg["lodStore"] = mode
+    applied.append(f"lodStore={mode}")
+if backfill:
+    cfg["lodStoreBackfill"] = backfill.lower() in ("1", "true", "yes", "on")
+    applied.append(f"lodStoreBackfill={cfg['lodStoreBackfill']}")
+json.dump(cfg, open(path, "w"), indent=2)
+print("[soak] SOAK_LODSTORE override: " + ", ".join(applied) + " merged into the staged config")
+PYEOF
+fi
 
 # Step 6b: Write server.properties + eula.txt. Superflat: fresh noise terrain carries
 # minutes of unsettled fluid ticks (aquifers, gen-border flows) that mutate chunk content
@@ -357,9 +445,23 @@ if soak_port_in_use; then
 fi
 
 # Step 9: Start server and arm the kill switch once it is ready
-mc_start_server "$RUN_RESULTS_DIR/server.log" "$SERVER_GRADLE_TASK" -Psoak.scenario="$SCENARIO_JSON" ${SOAK_EXTRA_GRADLE_ARGS:-}
+mc_start_server "$RUN_RESULTS_DIR/server.log" "$SERVER_GRADLE_TASK" -Psoak.scenario="$SCENARIO_JSON" ${SERVER_EXTRA_ARGS[@]+"${SERVER_EXTRA_ARGS[@]}"} ${SOAK_EXTRA_GRADLE_ARGS:-}
 mc_wait_server_ready "$SERVER_RUN_DIR/logs/latest.log" "$RUN_RESULTS_DIR/server.log" "$SERVER_READY_TIMEOUT"
 DEADLINE_EPOCH=$(( $(date +%s) + RUNTIME_BUDGET ))
+
+# Step 9b: 1 Hz CPU/RSS/wire sampler (LOD-store plan §5 Phase 0 (c) — the store's CPU
+# gates need Paper/Folia samples, and benchmark.sh is Fabric-only). The soak server JVM
+# is discovered via -Dlss.soak.scenario (every platform's soak run task carries it). The
+# sampler self-terminates when the server JVM disappears; the explicit kill at collect is
+# belt-and-braces. Analysis lives with the profile tooling (cpu.jsonl schema unchanged).
+PROC_SAMPLER_SRV_PATTERN='Dlss\.soak\.scenario' \
+    "$PROJECT_ROOT/scripts/lib/proc_sampler.sh" "$RUN_RESULTS_DIR/cpu.jsonl" $((RUNTIME_BUDGET + 300)) &
+SAMPLER_PID=$!
+# Kill the sampler on ANY exit (review B14): a set -e exit between here and the
+# Step 12 kill left it alive for RUNTIME_BUDGET+300 s, and its pattern matches any
+# soak server — an orphan latched onto the NEXT scenario's JVM and appended to the
+# previous run's cpu.jsonl.
+trap 'kill "$SAMPLER_PID" 2>/dev/null || true; mc_cleanup' EXIT
 
 # Step 10: Client runs (the server kicks the client between runs / halts at scenario end)
 for (( run=1; run<=CLIENT_RUNS; run++ )); do
@@ -403,6 +505,8 @@ SERVER_PID=""
 echo "[soak] Server exited"
 
 # Step 12: Collect results (gradle logs were written there directly)
+kill "$SAMPLER_PID" 2>/dev/null || true
+wait "$SAMPLER_PID" 2>/dev/null || true
 echo "[soak] Collecting results into $RUN_RESULTS_DIR"
 if [[ -f "$SERVER_RUN_DIR/soak-results/server.jsonl" ]]; then
     cp "$SERVER_RUN_DIR/soak-results/server.jsonl" "$RUN_RESULTS_DIR/server.jsonl"

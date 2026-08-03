@@ -11,10 +11,14 @@ import java.util.List;
 
 public final class DiagnosticsFormatter {
 
+    /** {@code outboundPending}/{@code outboundHighWater} are netty outbound-buffer depths
+     *  in bytes, -1 = no signal (never "empty"); {@code sendDeferrals} counts ticks the
+     *  transport-deference gate skipped. See the elytra-wall investigation §8.3. */
     public record PlayerDiag(
             String name, int sendQueue, int maxSendQueue,
             int pendingSync, int pendingGen,
-            long sent, long bytes
+            long sent, long bytes,
+            long outboundPending, long outboundHighWater, long sendDeferrals
     ) {}
 
     public record DiagData(
@@ -31,8 +35,26 @@ public final class DiagnosticsFormatter {
             long bwWindowRate,
             List<PlayerDiag> players,
             String v16Line,
-            String xrayLine
+            String xrayLine,
+            long wireTotal, long colsZstd, long colsRaw
     ) {
+        /** Pre-compressed-columns full shape (wire counters zero) — keeps existing
+         *  constructions/tests intact. */
+        public DiagData(boolean enabled, int lodDist, long bwPerPlayer, long bwGlobal,
+                        long uptimeSec, long totalSent, long totalBytes,
+                        long cumInMem, long cumUtd, long cumGen, long cumReResolved,
+                        long cumGraceSkipped,
+                        long diskCompleted, String tickDiagnostics, String diskReaderDiagnostics,
+                        String generationDiagnostics, boolean generationEnabled,
+                        long genOrderGated, long genInversions,
+                        long bwTotal, long bwWindowRate, List<PlayerDiag> players,
+                        String v16Line, String xrayLine) {
+            this(enabled, lodDist, bwPerPlayer, bwGlobal, uptimeSec, totalSent, totalBytes,
+                    cumInMem, cumUtd, cumGen, cumReResolved, cumGraceSkipped, diskCompleted,
+                    tickDiagnostics, diskReaderDiagnostics, generationDiagnostics,
+                    generationEnabled, genOrderGated, genInversions, bwTotal, bwWindowRate,
+                    players, v16Line, xrayLine, 0L, 0L, 0L);
+        }
         /** Pre-v16-compat shape (no shim/xray lines) — keeps existing constructions/tests intact. */
         public DiagData(boolean enabled, int lodDist, long bwPerPlayer, long bwGlobal,
                         long uptimeSec, long totalSent, long totalBytes,
@@ -56,7 +78,7 @@ public final class DiagnosticsFormatter {
                     totalBytes, cumInMem, cumUtd, cumGen, cumReResolved, cumGraceSkipped,
                     diskCompleted, tickDiagnostics, diskReaderDiagnostics, generationDiagnostics,
                     generationEnabled, genOrderGated, genInversions, bwTotal, bwWindowRate,
-                    players, line, xrayLine);
+                    players, line, xrayLine, wireTotal, colsZstd, colsRaw);
         }
 
         /** Attach the x-ray masking one-line summary (always shown when non-null — the off
@@ -66,7 +88,8 @@ public final class DiagnosticsFormatter {
                     totalBytes, cumInMem, cumUtd, cumGen, cumReResolved, cumGraceSkipped,
                     diskCompleted, tickDiagnostics, diskReaderDiagnostics,
                     generationDiagnostics, generationEnabled, genOrderGated, genInversions,
-                    bwTotal, bwWindowRate, players, v16Line, line);
+                    bwTotal, bwWindowRate, players, v16Line, line,
+                    wireTotal, colsZstd, colsRaw);
         }
     }
 
@@ -131,20 +154,25 @@ public final class DiagnosticsFormatter {
             lines.add(d.xrayLine);
         }
 
-        // Bandwidth
-        lines.add(String.format("Bandwidth: %s/s / %s/s global (%s total)",
+        // Bandwidth. total = the RAW-denominated counted volume (the limiter's charge —
+        // client decode work scales with it); wire = SHIPPED payload bytes (codec-1
+        // frames), the number that matches observed network bandwidth (the elytra
+        // investigation's §1 confusion). cols = per-payload codec outcomes.
+        lines.add(String.format("Bandwidth: %s/s / %s/s global (%s total, %s wire, cols zstd=%d raw=%d)",
                 formatBytes(d.bwWindowRate), formatBytes(d.bwGlobal),
-                formatBytes(d.bwTotal)));
+                formatBytes(d.bwTotal), formatBytes(d.wireTotal), d.colsZstd, d.colsRaw));
 
         // Per-player
         for (var p : d.players) {
             double pRate = d.uptimeSec > 0 ? (double) p.sent / d.uptimeSec : 0;
             lines.add(String.format(
-                    "  %s: sq=%d/%d, psync=%d, pgen=%d, sent=%d (%s), rate=%s/s",
+                    "  %s: sq=%d/%d, psync=%d, pgen=%d, sent=%d (%s), rate=%s/s, obuf=%s/%s, deferred=%d",
                     p.name, p.sendQueue, p.maxSendQueue,
                     p.pendingSync, p.pendingGen,
                     p.sent, formatBytes(p.bytes),
-                    formatRate(pRate)
+                    formatRate(pRate),
+                    formatOutbound(p.outboundPending), formatOutbound(p.outboundHighWater),
+                    p.sendDeferrals
             ));
         }
 
@@ -169,14 +197,19 @@ public final class DiagnosticsFormatter {
     /** Collect the /lsslod diag data from common-typed sources, shared by both platforms.
      *  A null {@code diskReader} (reader not running) renders the DiskReader line as
      *  "disabled" and contributes zero completed reads — the command must answer in every
-     *  service state, never throw at the admin. */
+     *  service state, never throw at the admin. {@code storeMode}/{@code storeDiag} render
+     *  the LOD-store TOKEN on the DiskReader line (never a new line — the golden-order
+     *  tests pin the line list); a null {@code storeDiag} (bare test rigs) omits it. */
     public static DiagData collectDiagData(boolean enabled, int lodDistanceChunks,
                                            long bwPerPlayer, long bwGlobal, int sendQueueLimitPerPlayer,
                                            long uptimeSec, String tickDiagnostics, long windowBandwidthRate,
                                            long serviceTotalSent, long serviceTotalBytes,
+                                           long serviceWireBytes,
                                            ProcessingDiagnostics diag, AbstractChunkDiskReader diskReader,
                                            SharedBandwidthLimiter bwLimiter,
                                            String generationDiagnosticsOrNull,
+                                           dev.vox.lss.common.store.LodStoreMode storeMode,
+                                           dev.vox.lss.common.store.LodStoreDiagnostics storeDiag,
                                            Collection<? extends AbstractPlayerRequestState<?>> states) {
         // The Throughput totals are SERVICE-scoped (TickDiagnostics — they exist to survive
         // per-player state teardown): summing the live states' counters here (the pre-R2-9
@@ -190,7 +223,9 @@ public final class DiagnosticsFormatter {
                     state.getPlayerName(),
                     state.getSendQueueSize(), sendQueueLimitPerPlayer,
                     state.getHeldSyncSlots(), state.getHeldGenSlots(),
-                    state.getTotalSectionsSent(), state.getTotalBytesSent()
+                    state.getTotalSectionsSent(), state.getTotalBytesSent(),
+                    state.getOutboundPendingBytes(), state.getOutboundPendingHighWater(),
+                    state.getSendDeferrals()
             ));
         }
 
@@ -204,15 +239,19 @@ public final class DiagnosticsFormatter {
                 tickDiagnostics,
                 // memo_hits: miss-memo rung hits (fresh memoized absence skipped the redundant
                 // re-read and escalated straight to generation) — law A5's virtual not-founds.
+                // The LOD-store state rides the same line as a token (store=off / store=<mode>
+                // h=... m=...) — a new LINE would break the golden-order pins.
                 diskReader != null
                         ? diskReader.getDiagnostics()
                                 + String.format(", memo_hits=%d", diag.getTotalMemoHits())
+                                + (storeDiag != null ? ", " + storeDiag.formatToken(storeMode) : "")
                         : "disabled",
                 generationDiagnosticsOrNull, generationDiagnosticsOrNull != null,
                 diag.getTotalGenOrderGated(), diag.getTotalGenCompletionInversions(),
                 bwLimiter.getTotalBytesSent(),
                 windowBandwidthRate,
-                players
+                players, null, null,
+                serviceWireBytes, diag.getTotalColumnsCompressed(), diag.getTotalColumnsRaw()
         );
     }
 
@@ -241,6 +280,12 @@ public final class DiagnosticsFormatter {
         if (seconds < 60) return seconds + "s";
         if (seconds < 3600) return String.format("%dm %ds", seconds / 60, seconds % 60);
         return String.format("%dh %dm", seconds / 3600, (seconds % 3600) / 60);
+    }
+
+    /** Outbound-buffer depth for the diag line: {@code n/a} when the probe has no signal,
+     *  so an unresolvable channel never renders as a plausible-looking "0 B". */
+    private static String formatOutbound(long bytes) {
+        return bytes < 0 ? "n/a" : formatBytes(bytes);
     }
 
     public static String formatBytes(long bytes) {

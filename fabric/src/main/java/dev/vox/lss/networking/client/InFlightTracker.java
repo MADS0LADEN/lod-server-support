@@ -6,12 +6,17 @@ import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 /**
  * The awaiting-answer set: positions of the most recent want-set batch, minus answers
  * received since. This is NOT a send-suppression structure — the scanner re-declares
- * every unsatisfied position each scan regardless. It exists for exactly two consumers:
+ * every unsatisfied position each scan regardless. It exists for exactly three consumers:
  * status-response gating (BatchResponse carries no dimension, so up_to_date /
  * not_generated gate on membership here — cleared on dimension change, matching the
- * pre-v16 requestId gate) and dirty-crossing detection (a dirty broadcast landing while
+ * pre-v16 requestId gate), dirty-crossing detection (a dirty broadcast landing while
  * a position awaits an answer must survive that answer's mark-clear; see
- * ColumnStateMap.noteStaleIfInFlight).
+ * ColumnStateMap.noteStaleIfInFlight), and the adaptive scan cadence's completion
+ * trigger, which reads {@link #size} as a CADENCE input — when the set is ≥95% drained
+ * the scanner may fire early (docs/planning/adaptive-scan-cadence-design.md). The
+ * cadence consumer never filters what a walk declares: the deleted v16 in-flight
+ * send-suppression is not returning through this coupling (cf. the scanner chaos pin
+ * anyChaosInterleavingLeavesNoPositionPermanentlyOrphaned).
  *
  * <p>Replaced wholesale on every fired scan ({@link #replaceWith}), so a position that
  * left the scan window (superseded + excluded) cannot linger past the next scan.

@@ -9,9 +9,12 @@
     "AccessorServerChunkCache",
     "AccessorSimpleRegionStorage",
     "AccessorIOWorker",
+    "AccessorConnection",
+    "AccessorServerCommonPacketListener",
     "ChunkSaveDataHook"
   ],
   "client": [
-    "IntegratedServerLanHook"
+    "IntegratedServerLanHook",
+    "AccessorClientPacketListener"
   ]
 }

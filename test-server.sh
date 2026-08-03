@@ -72,6 +72,66 @@ case "$LSS_ADMISSION_TRACE" in
     *)              ADMISSION_TRACE_FLAG="-Dlss.admissionTrace=true" ;;
 esac
 
+# LOD store for manual play: LSS_LODSTORE=off|full (default full — the shipped default) is written into
+# the staged lss-server-config.json on EVERY run — the staging rewrites that file, so a
+# hand-edit does not survive a re-run; this variable is the supported way to flip it.
+# `run-fabric-store` / `run-paper-store` below force "full". The store DB lives at
+# <world>/lss-lod/store.db and persists across restarts (derived data — deleting the
+# lss-lod/ dir is always safe); eyeball it with '/lsslod store status' in-game.
+# Default follows the SHIPPED default, which is OFF again as of 2026-08-03 (the store is
+# opt-in so an upgrade never silently doubles a world folder). So a plain ./test-server.sh
+# exercises what players actually get, and run-fabric-store / run-paper-store are once more
+# the meaningful store arm rather than aliases of the plain entrypoints.
+LSS_LODSTORE="${LSS_LODSTORE:-off}"
+case "$LSS_LODSTORE" in
+    off|full) ;;
+    *) echo "LSS_LODSTORE must be off or full (got '$LSS_LODSTORE')" >&2; exit 1 ;;
+esac
+# Background store population (Fabric only — Paper has no backfill wiring yet, the key
+# is inert there): lodStoreBackfill=true auto-starts a low-priority region walk that
+# pre-warms the store, yielding to players and tick health (default 500 col/s cap —
+# LSS_LODSTORE_BACKFILL_CPS below overrides — pauses under load). run-fabric-store
+# forces it on; '/lsslod store backfill status|stop' to steer.
+# Stays TRUE like the shipped default: the key is inert while the store is off, so this
+# only decides what the store arms WITH once LSS_LODSTORE=full.
+LSS_LODSTORE_BACKFILL="${LSS_LODSTORE_BACKFILL:-true}"
+case "$LSS_LODSTORE_BACKFILL" in
+    true|false) ;;
+    *) echo "LSS_LODSTORE_BACKFILL must be true or false (got '$LSS_LODSTORE_BACKFILL')" >&2; exit 1 ;;
+esac
+# Optional backfill pace override (columns/second, server clamps 10..1000). UNSET means
+# the key is omitted from the staged config so the server default (500) rules —
+# run-fabric-store deliberately keeps the default.
+LSS_LODSTORE_BACKFILL_CPS="${LSS_LODSTORE_BACKFILL_CPS:-}"
+# Optional LOD-distance override (chunks, server clamps 32..2048). UNSET means the key is
+# omitted so the shipped default (256) rules. The rig used to hardcode 64; 256 is 16x the
+# area, so on a small box — or with all three test servers up at once — set this to 64 or
+# 96 to keep generation and IO manageable while still exercising the real defaults
+# elsewhere.
+LSS_LOD_DISTANCE="${LSS_LOD_DISTANCE:-}"
+if [ -n "$LSS_LOD_DISTANCE" ]; then
+    case "$LSS_LOD_DISTANCE" in
+        ''|*[!0-9]*) echo "LSS_LOD_DISTANCE must be a positive integer (got '$LSS_LOD_DISTANCE')" >&2; exit 1 ;;
+    esac
+    # Same overflow guard as the CPS knob: a value too large for an int makes GSON throw,
+    # and JsonConfig's whole-file fallback then silently resets the ENTIRE staged config
+    # to defaults rather than failing loudly.
+    if [ "${#LSS_LOD_DISTANCE}" -gt 4 ]; then
+        echo "LSS_LOD_DISTANCE too large — server clamps to 2048 (got '$LSS_LOD_DISTANCE')" >&2; exit 1
+    fi
+fi
+if [ -n "$LSS_LODSTORE_BACKFILL_CPS" ]; then
+    case "$LSS_LODSTORE_BACKFILL_CPS" in
+        ''|*[!0-9]*) echo "LSS_LODSTORE_BACKFILL_CPS must be a positive integer (got '$LSS_LODSTORE_BACKFILL_CPS')" >&2; exit 1 ;;
+    esac
+    # Bound the digits too: an int-overflowing value staged into the JSON makes GSON
+    # throw on load and JsonConfig's whole-file fallback silently resets EVERY key to
+    # its default — the store/backfill run asked for would quietly not happen.
+    if [ "${#LSS_LODSTORE_BACKFILL_CPS}" -gt 4 ]; then
+        echo "LSS_LODSTORE_BACKFILL_CPS too large — server clamps to 1000 (got '$LSS_LODSTORE_BACKFILL_CPS')" >&2; exit 1
+    fi
+fi
+
 # ============================================================
 # Helpers
 # ============================================================
@@ -187,23 +247,37 @@ EOF
     fi
 }
 
+# Stages the SHIPPED defaults, deliberately. This used to hand-write nine tuned values
+# — lodDistanceChunks 64, 8 MiB/player, 40 MiB global, diskReaderThreads 8,
+# sendQueueLimitPerPlayer 9600, generation caps 40/40 — dating from before those defaults
+# were reviewed, and every one of them has since been superseded:
+#   * diskReaderThreads 8 defeats the whole point of 0 = AUTO (which derives the pool from
+#     the resolved read path), and 8 is precisely the over-provisioned figure the v0.9.0
+#     review flagged on the unprioritized path;
+#   * sendQueueLimitPerPlayer 9600 predates issue #62, which LOWERED the default to 1024
+#     (= the wire batch cap) to stop unbounded snapshot backlog;
+#   * 8 MiB/player and 40 MiB global sit far under the reviewed 25 MiB / 256 MiB, so the
+#     rig throttled exactly the bandwidth behaviour it exists to eyeball.
+# A dev rig that contradicts the shipped defaults tests a configuration no player runs.
+# Only genuinely rig-specific keys belong here now; everything else falls through to the
+# mod's own defaults. NOTE this raises lodDistanceChunks 64 -> 256 (16x the area) — set
+# LSS_LOD_DISTANCE to dial it back on a small box.
 write_lss_config() {
     local dir="$1"
-    echo "  Writing lss-server-config.json"
+    echo "  Writing lss-server-config.json (shipped defaults; lodStore=${LSS_LODSTORE}, backfill=${LSS_LODSTORE_BACKFILL}${LSS_LOD_DISTANCE:+, lodDistance=${LSS_LOD_DISTANCE}})"
     mkdir -p "$dir"
-    cat > "$dir/lss-server-config.json" << 'EOF'
+    cat > "$dir/lss-server-config.json" << EOF
 {
   "enabled": true,
-  "lodDistanceChunks": 64,
-  "bytesPerSecondLimitPerPlayer": 8388608,
-  "diskReaderThreads": 8,
-  "sendQueueLimitPerPlayer": 9600,
-  "bytesPerSecondLimitGlobal": 41943040,
-  "syncOnLoadConcurrencyLimitPerPlayer": 400,
-  "generationConcurrencyLimitPerPlayer": 40,
   "enableChunkGeneration": true,
-  "generationConcurrencyLimitGlobal": 40,
-  "generationTimeoutSeconds": 60
+  "lodStore": "${LSS_LODSTORE}",
+  "lodStoreBackfill": ${LSS_LODSTORE_BACKFILL}$(
+    if [ -n "$LSS_LODSTORE_BACKFILL_CPS" ]; then
+        printf ',\n  "lodStoreBackfillColumnsPerSecond": %s' "$LSS_LODSTORE_BACKFILL_CPS"
+    fi)$(
+    if [ -n "$LSS_LOD_DISTANCE" ]; then
+        printf ',\n  "lodDistanceChunks": %s' "$LSS_LOD_DISTANCE"
+    fi)
 }
 EOF
 }
@@ -361,6 +435,9 @@ setup_folia() {
     # Folia lags Paper when a new Minecraft version lands — it may not have a build for
     # FOLIA_MC_VERSION yet. Skip the local Folia server gracefully (the Paper plugin jar already
     # carries Folia support) instead of aborting the whole script under `set -e`.
+    # 26.2 status: Folia published its first build (26.2-1) on 2026-07-28, channel BETA.
+    # download_papermc_jar falls back from STABLE to whatever exists, so this resolves the
+    # BETA build — deliberate, since BETA is the only channel Folia 26.2 has.
     if ! curl -fsSL -A "lod-server-support/test-server" -o /dev/null \
             "https://fill.papermc.io/v3/projects/folia/versions/${FOLIA_MC_VERSION}/builds" 2>/dev/null; then
         echo "  NOTE: Folia has no MC ${FOLIA_MC_VERSION} build published upstream yet — skipping the local Folia server."
@@ -379,7 +456,7 @@ setup_folia() {
     write_lss_config "$FOLIA_DIR/plugins/LodServerSupport"
 
     echo "=== Installing Folia plugins ==="
-    echo "  Installing LSS (same jar as Paper — folia-supported: true)..."
+    echo "  Installing LSS (same jar as Paper — folia-supported: true, EXPERIMENTAL on 26.2)..."
     local lss_jar
     lss_jar=$(build_paper_jar)
     rm -f "$plugins_dir"/lod-server-support-paper*.jar
@@ -560,12 +637,47 @@ case "${1:-run}" in
         echo ""
         run_fabric
         ;;
+    run-fabric-store)
+        LSS_LODSTORE=full
+        LSS_LODSTORE_BACKFILL=true
+        setup_fabric
+        set_mod_enabled c2me true       # same baseline as run-fabric, only the store differs
+        set_mod_enabled antixray false
+        echo ""
+        echo "=== Starting Fabric server (LOD store: full + background backfill) ==="
+        echo "  Connect to: localhost:25564"
+        echo "  Store DB: test-server/fabric/world/lss-lod/store.db — persists across runs"
+        echo "  (a REJOIN after backfill should serve warm: watch '/lsslod store status'"
+        echo "  and the client's /lss trace src:3 columns). Delete the lss-lod/ dir for a"
+        echo "  cold-store run; run-fabric (store off) leaves the DB in place but unused."
+        echo "  The backfill walk auto-starts after the startup sweep and pre-warms the"
+        echo "  store from existing region files, nearest-spawn first — low priority,"
+        echo "  yields to players/tick, resumes across restarts. Steer it with"
+        echo "  '/lsslod store backfill status|stop|start'."
+        echo ""
+        run_fabric
+        ;;
     run-paper)
         setup_paper
         echo ""
         echo "=== Starting Paper server ==="
         echo "  Connect to: localhost:25566"
         echo "  Paper native anti-xray is ENABLED (config/paper-world-defaults.yml)."
+        echo ""
+        run_paper
+        ;;
+    run-paper-store)
+        LSS_LODSTORE=full
+        setup_paper
+        echo ""
+        echo "=== Starting Paper server (LOD store: full) ==="
+        echo "  Connect to: localhost:25566"
+        echo "  Paper native anti-xray is ENABLED (config/paper-world-defaults.yml) — the"
+        echo "  store fingerprints the mask per dimension and rebuilds on any change."
+        echo "  Store DB: test-server/paper/world/lss-lod/store.db — persists across runs;"
+        echo "  '/lsslod store status' shows health, '/lsslod store invalidate all' resets."
+        echo "  NOTE: background backfill is Fabric-only for now — Paper's store warms"
+        echo "  from serves (first joins backfill it; rejoins serve warm)."
         echo ""
         run_paper
         ;;
@@ -603,7 +715,7 @@ case "${1:-run}" in
         echo "Done."
         ;;
     *)
-        echo "Usage: $0 {setup|run|run-fabric|run-fabric-no-c2me|run-fabric-antixray|run-paper|run-folia|run-legacy|update|clean}"
+        echo "Usage: $0 {setup|run|run-fabric|run-fabric-no-c2me|run-fabric-antixray|run-fabric-store|run-paper|run-paper-store|run-folia|run-legacy|update|clean}"
         echo ""
         echo "  setup      - Download and set up all servers"
         echo "  run        - Set up and start all servers (default)"
@@ -613,7 +725,15 @@ case "${1:-run}" in
         echo "  run-fabric-antixray - Same as run-fabric plus DrexHD AntiXray — the live gate"
         echo "               for the AntiXray compat shim + masking (current builds must"
         echo "               survive a client join and serve masked; only pre-shim builds crash)"
+        echo "  run-fabric-store - run-fabric with the store and backfill on (the store is"
+        echo "               opt-in, so this is the store arm; plain run-fabric has it off)."
+        echo "               Warm rejoins serve from world/lss-lod/store.db;"
+        echo "               '/lsslod store status' + client /lss trace src:3 are the"
+        echo "               eyeball instruments"
         echo "  run-paper  - Set up and start Paper server only (port 25566; native anti-xray on)"
+        echo "  run-paper-store - run-paper with the store on (opt-in, so plain run-paper"
+        echo "               has it off). No backfill on Paper (Fabric-only) — the store"
+        echo "               warms from serves"
         echo "  run-folia  - Set up and start Folia server only (port 25567)"
         echo "  run-legacy - Set up and start an OLD LSS v${LEGACY_LSS_VERSION} (protocol 16) server (port 25568),"
         echo "               for eyeballing the client-side v16 backward-compat path"
@@ -624,6 +744,25 @@ case "${1:-run}" in
         echo "  SERVER_RAM  - Server memory allocation per server (default: 2G)"
         echo "  LSS_ADMISSION_TRACE - Fabric [lss-adm] generation-admission trace (default: 1)."
         echo "                        Set to 0 to silence it — it is verbose during backfill."
+        echo "  LSS_LODSTORE - lodStore mode written into EVERY staged lss-server-config.json"
+        echo "                 (off|full, default: off — the shipped default; the store is"
+        echo "                 opt-in). Hand-edits to the config do NOT survive a re-run"
+        echo "                 — the staging rewrites it; this variable is the supported knob."
+        echo "  LSS_LODSTORE_BACKFILL - lodStoreBackfill written the same way (true|false,"
+        echo "                 default: true, matching the shipped default; inert unless"
+        echo "                 LSS_LODSTORE=full). Fabric-only — inert on Paper/Folia too."
+        echo "  LSS_LODSTORE_BACKFILL_CPS - optional backfill pace (columns/second, server"
+        echo "                 clamps 10..1000). Unset = key omitted, server default (500)"
+        echo "                 rules; run-fabric-store keeps the default."
+        echo "  LSS_LOD_DISTANCE - optional lodDistanceChunks override. Unset = the shipped"
+        echo "                 default (256). The rig used to hardcode 64; 256 is 16x the"
+        echo "                 area, so set 64 or 96 on a small box or when running all"
+        echo "                 three servers at once."
+        echo ""
+        echo "The staged config now carries the SHIPPED DEFAULTS. It used to hand-write nine"
+        echo "tuned values (distance 64, 8 MiB/player, diskReaderThreads 8, sendQueue 9600,"
+        echo "generation caps 40/40) that predated the config review and contradicted what"
+        echo "players actually run — the rig tested a configuration nobody had."
         exit 1
         ;;
 esac

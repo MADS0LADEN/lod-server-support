@@ -19,4 +19,10 @@ dependencies {
     // Provided at runtime by both platforms (Minecraft bundles GSON); compileOnly keeps it
     // out of the Paper shadow jar and the Fabric jar-in-jar, same pattern as fastutil.
     compileOnly 'com.google.code.gson:gson:2.13.2'
+    // LOD store engine + codec (docs/planning/lod-store-implementation-plan.md §3).
+    // compileOnly: each platform supplies the runtime — Fabric nests native-stripped
+    // jar-in-jar copies (fabric/build.gradle slimStoreDepJars), Paper shades them into
+    // the plugin jar WITHOUT relocating org.sqlite (relocation breaks its native loader).
+    compileOnly 'org.xerial:sqlite-jdbc:3.49.1.0'
+    compileOnly 'com.github.luben:zstd-jni:1.5.7-3'
 }

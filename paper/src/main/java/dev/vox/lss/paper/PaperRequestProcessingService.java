@@ -48,6 +48,8 @@ public class PaperRequestProcessingService {
     private final SharedBandwidthLimiter bandwidthLimiter;
     private final PaperConfig config;
     private final PaperOffThreadProcessor offThreadProcessor;
+    // Null while lodStore=off or when the codec native cannot load (degrade, never crash).
+    private final dev.vox.lss.common.store.LodStoreService lodStore;
     private final DirtyColumnTracker dirtyTracker;
     private final PaperDirtyColumnBroadcaster dirtyBroadcaster;
     // The v16 compat shim's per-player sessions (legacy protocol-16 clients). The pipeline
@@ -239,22 +241,53 @@ public class PaperRequestProcessingService {
                   PaperChunkGenerationService generationService,
                   PaperOffThreadProcessor offThreadProcessor,
                   DirtyColumnTracker dirtyTracker,
-                  PaperDirtyColumnBroadcaster dirtyBroadcaster) {}
+                  PaperDirtyColumnBroadcaster dirtyBroadcaster,
+                  dev.vox.lss.common.store.LodStoreService lodStore,
+                  PaperXrayMaskManager xrayMasks,
+                  boolean wireCompressionLive) {
+
+        /** Pre-compression full shape (no wire codec attached) — store-era test wirings. */
+        Wiring(Map<UUID, PaperPlayerRequestState> players,
+               PaperChunkDiskReader diskReader,
+               PaperChunkGenerationService generationService,
+               PaperOffThreadProcessor offThreadProcessor,
+               DirtyColumnTracker dirtyTracker,
+               PaperDirtyColumnBroadcaster dirtyBroadcaster,
+               dev.vox.lss.common.store.LodStoreService lodStore,
+               PaperXrayMaskManager xrayMasks) {
+            this(players, diskReader, generationService, offThreadProcessor,
+                    dirtyTracker, dirtyBroadcaster, lodStore, xrayMasks, false);
+        }
+
+        /** Pre-store test-wiring shape (no store attached, no mask manager published —
+         *  a test-wired service must retract nothing at shutdown). */
+        Wiring(Map<UUID, PaperPlayerRequestState> players,
+               PaperChunkDiskReader diskReader,
+               PaperChunkGenerationService generationService,
+               PaperOffThreadProcessor offThreadProcessor,
+               DirtyColumnTracker dirtyTracker,
+               PaperDirtyColumnBroadcaster dirtyBroadcaster) {
+            this(players, diskReader, generationService, offThreadProcessor,
+                    dirtyTracker, dirtyBroadcaster, null, null, false);
+        }
+    }
 
     // Null in test wiring — only the production-default regionTaskScheduler dereferences it,
     // and probe tests always inject a recording scheduler.
     private Plugin plugin;
     // Null in test wiring (the test ctor never publishes the static mask manager, so its
-    // shutdown must retract nothing) — set by the production ctor only.
+    // shutdown must retract nothing) — published by productionWiring BEFORE the store
+    // Environment snapshots mask fingerprints (R2-M1).
     private PaperXrayMaskManager xrayMasks;
+    // Compressed-column shipping is live: useCompressedColumns AND the server-side zstd
+    // native probe succeeded (latched in productionWiring — plan §0.11). A term of every
+    // session's wantsCompressedColumns derivation at registration; false in test wirings
+    // unless injected.
+    private final boolean wireCompressionLive;
 
     public PaperRequestProcessingService(MinecraftServer server, Plugin plugin, PaperConfig config) {
         this(server, config, productionWiring(server, plugin, config));
         this.plugin = plugin;
-        // Production only (the test-wiring ctor must not publish statics): the per-world
-        // x-ray mask decisions the serializer choke points consult. The reference makes
-        // shutdown's retract guarded — a test-wired service (null here) retracts nothing.
-        this.xrayMasks = PaperXrayMaskManager.activate(config);
     }
 
     /** Test seam: same field wiring as production, collaborators injected. */
@@ -268,11 +301,31 @@ public class PaperRequestProcessingService {
         this.offThreadProcessor = wiring.offThreadProcessor();
         this.dirtyTracker = wiring.dirtyTracker();
         this.dirtyBroadcaster = wiring.dirtyBroadcaster();
+        this.lodStore = wiring.lodStore();
+        // Null in test wiring: the guarded retract at shutdown must clear only a
+        // manager this service actually published.
+        this.xrayMasks = wiring.xrayMasks();
+        this.wireCompressionLive = wiring.wireCompressionLive();
     }
 
     private static Wiring productionWiring(MinecraftServer server, Plugin plugin, PaperConfig config) {
+        // The x-ray mask manager MUST be published before anything below consults it
+        // (4-agent round R2-M1): the store Environment snapshots each level's mask
+        // fingerprint via entryForActive, and Java evaluates this whole method BEFORE
+        // the delegating ctor body runs — the old ctor-body activate left the holder
+        // unset here, every dimension fingerprinted "off", and the mask-drift
+        // drop-and-rebuild permanently inert on Paper (an x-ray leak on any mask
+        // widening). The Fabric twin activates before its Environment for the same
+        // reason.
+        var xrayMasks = PaperXrayMaskManager.activate(config);
         Map<UUID, PaperPlayerRequestState> players = new ConcurrentHashMap<>();
-        var diskReader = new PaperChunkDiskReader(config.diskReaderThreads, config.useBackgroundReadPriority,
+        // Paper/Folia reads ALWAYS route through Moonrise at Priority.LOW, so the prioritized
+        // AUTO tier applies whenever background priority is on (unlike Fabric, which must
+        // also probe for Moonrise). With the flag off the reads run FOREGROUND, so the pool
+        // must be sized by the unprioritized tier — see the Fabric twin. (v0.9.0 review.)
+        var diskReader = new PaperChunkDiskReader(
+                config.effectiveDiskReaderThreads(config.useBackgroundReadPriority),
+                config.useBackgroundReadPriority,
                 config.useNbtTranscode);
         PaperChunkGenerationService generationService = config.enableChunkGeneration
                 ? new PaperChunkGenerationService(config, plugin) : null;
@@ -280,16 +333,128 @@ public class PaperRequestProcessingService {
         var dataDir = server.getWorldPath(LevelResource.ROOT).resolve("data");
         var offThreadProcessor = new PaperOffThreadProcessor(
                 players, diskReader, generationService != null, dataDir,
-                config.perDimensionTimestampCacheSizeMB, config.missMemoTtlSeconds,
+                config.effectiveTimestampCacheMB(), config.missMemoTtlSeconds,
                 config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
                         + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS);
+
+        // Compressed-column shipping (protocol 19, plan §0.11) — twin of the Fabric
+        // service's latch: one server-side native probe; failure degrades to raw
+        // sessions with one warning (zstd-jni publishes no musl natives, and musl
+        // servers are common). Independent of the store's own probe below.
+        boolean wireCompressionLive = false;
+        if (config.useCompressedColumns) {
+            var wireCodec = dev.vox.lss.common.store.StoreCodec.zstdOrNull();
+            if (wireCodec == null) {
+                LSSLogger.warn("useCompressedColumns is enabled but the "
+                        + dev.vox.lss.common.store.StoreCodec.NAME + " native cannot load"
+                        + " on this platform — LOD columns will ship uncompressed for"
+                        + " every session");
+            } else {
+                offThreadProcessor.attachWireCodec(wireCodec);
+                // Frame-form store serving (plan §3) — twin of the Fabric latch.
+                diskReader.setServeStoreFrames(true);
+                wireCompressionLive = true;
+            }
+        }
+
+        // LOD store: memory tier for "memory", memory + SQLite for "full" — attached to
+        // both consumers BEFORE the processor starts / any submit. Environment resolved
+        // eagerly on the construction thread (levels loaded at plugin enable); the
+        // periodic re-sweep (lodStoreResweepSeconds) is PAPER's stale bound for its
+        // unfired-event dirty gaps. A failed codec/native probe degrades to store-off
+        // with one warning (the Fabric twin is identical).
+        dev.vox.lss.common.store.LodStoreService lodStore = null;
+        // enabled=false must not open the store (Fabric twin: the same guard). Paper
+        // has no backfill so the cost is a DB file and a sweep thread rather than a
+        // full-world walk, but "LSS is off" should still mean nothing is created.
+        var storeMode = config.enabled
+                ? dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore)
+                : dev.vox.lss.common.store.LodStoreMode.OFF;
+        if (storeMode != dev.vox.lss.common.store.LodStoreMode.OFF) {
+            var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
+            var regionDirs = new java.util.HashMap<String, java.nio.file.Path>();
+            var maskFingerprints = new java.util.HashMap<String, String>();
+            for (ServerLevel level : server.getAllLevels()) {
+                String dim = level.dimension().identifier().toString();
+                // Paper 26.x uses the vanilla UNIFIED world layout (one world dir,
+                // dimensions/minecraft/<dim>/region — verified on disk against a live
+                // 26.2 Paper server), so the server worldRoot is the correct
+                // getStorageFolder root, same as Fabric. BACKPORT CAVEAT: the 1.21.x
+                // lines use Bukkit's legacy SPLIT world dirs (world_nether/DIM-1,
+                // world_the_end/DIM1) — a backport must re-root per level (e.g. via
+                // getWorld().getWorldFolder()) or the sweep fail-safe-drops every
+                // non-overworld dim's rows at each boot.
+                regionDirs.put(dim, net.minecraft.world.level.dimension.DimensionType
+                        .getStorageFolder(level.dimension(), worldRoot)
+                        .resolve("region").normalize());
+                var maskEntry = PaperXrayMaskManager.entryForActive(level);
+                maskFingerprints.put(dim, maskEntry == null ? "off"
+                        : maskEntry.sourceLabel() + ":"
+                                + Long.toHexString(maskEntry.mask().fingerprint()));
+            }
+            var env = new dev.vox.lss.common.store.SqliteLodStore.Environment(
+                    worldRoot.resolve("lss-lod"), server.getServerVersion(),
+                    LSSConstants.PROTOCOL_VERSION, regionDirs::get, maskFingerprints::get,
+                    config.lodStoreResweepSeconds, config.lodStoreMaxBytes(),
+                    storeRegistryFingerprint(server));
+            lodStore = dev.vox.lss.common.store.LodStores.createOrNull(env);
+            if (lodStore == null) {
+                LSSLogger.warn("lodStore=" + storeMode.configValue() + " requested but the "
+                        + dev.vox.lss.common.store.StoreCodec.NAME + " codec native cannot "
+                        + "load on this platform — running WITHOUT the LOD store");
+            } else {
+                diskReader.attachStore(lodStore);
+                offThreadProcessor.attachStore(lodStore);
+            }
+        }
         offThreadProcessor.start();
 
         var dirtyTracker = new DirtyColumnTracker();
         var dirtyBroadcaster = new PaperDirtyColumnBroadcaster(
                 server, players, dirtyTracker, offThreadProcessor);
         return new Wiring(players, diskReader, generationService, offThreadProcessor,
-                dirtyTracker, dirtyBroadcaster);
+                dirtyTracker, dirtyBroadcaster, lodStore, xrayMasks, wireCompressionLive);
+    }
+
+    /** Registry identity for the LOD store meta guard (4-agent round R2-M3) — textual
+     *  twin of {@code RequestProcessingService.storeRegistryFingerprint}: BOTH halves
+     *  are id-ordered identity hashes (review A3 — the old block half was a bare
+     *  COUNT, so an id-permuting registry change of identical total size served every
+     *  warm column as the wrong blocks with no self-heal); a mod/datapack change
+     *  shifts the global ids the stored wire bytes embed while no freshness rule can
+     *  fire. */
+    static String storeRegistryFingerprint(MinecraftServer server) {
+        var states = new java.util.ArrayList<String>();
+        for (var state : net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY) {
+            states.add(String.valueOf(state));
+        }
+        var biomeKeys = new java.util.ArrayList<String>();
+        var biomes = server.registryAccess()
+                .lookupOrThrow(net.minecraft.core.registries.Registries.BIOME);
+        for (var biome : biomes) {
+            var key = biomes.getKey(biome);
+            biomeKeys.add(key == null ? "?" : key.toString());
+        }
+        return dev.vox.lss.common.store.RegistryFingerprint.of(states, biomeKeys);
+    }
+
+    /** The live LOD store (null while lodStore=off OR after the codec-probe degrade). */
+    public dev.vox.lss.common.store.LodStoreService getLodStore() {
+        return this.lodStore;
+    }
+
+    /** Ops (/lsslod store invalidate all) — twin of the Fabric service's method: drop
+     *  every stored row + backfill progress (batcher-side, tombstoned). The tscache is
+     *  deliberately untouched: its stamps describe REGION truth, not store contents —
+     *  re-asks re-resolve via tscache/probe/NBT as normal and re-warm the store. Only
+     *  meaningful for the persistent store. Safe from any thread (Folia command
+     *  dispatch is region-threaded): tombstones + a control-queue offer. */
+    public boolean invalidateStoreAllDimensions() {
+        if (this.lodStore instanceof dev.vox.lss.common.store.SqliteLodStore sqlite) {
+            sqlite.requestDropAllRows();
+            return true;
+        }
+        return false;
     }
 
     public DirtyColumnTracker getDirtyTracker() {
@@ -301,7 +466,12 @@ public class PaperRequestProcessingService {
      *  service's non-concurrent maps), so region-thread callers enqueue here and tick() drains
      *  first — one queue preserves arrival order across a kick→rejoin of the same UUID. */
     private sealed interface LifecycleEvent {
-        record Register(ServerPlayer player, int capabilities, Runnable replyAfterRegister) implements LifecycleEvent {}
+        /** {@code beforeRegister} runs on the PUMP immediately before registerPlayer;
+         *  {@code replyAfterRegister} immediately after. See the enqueueRegister javadoc
+         *  for why the dialect flip must be the former and the reply the latter. */
+        record Register(ServerPlayer player, int capabilities,
+                        Runnable beforeRegister, Runnable replyAfterRegister)
+                implements LifecycleEvent {}
         record Remove(UUID uuid) implements LifecycleEvent {}
     }
 
@@ -309,7 +479,12 @@ public class PaperRequestProcessingService {
 
     /** Any thread. Applied at the top of the next tick(). */
     public void enqueueRegister(ServerPlayer player, int capabilities) {
-        enqueueRegister(player, capabilities, () -> { });
+        enqueueRegister(player, capabilities, () -> { }, () -> { });
+    }
+
+    /** Any thread; no pre-register hook. */
+    public void enqueueRegister(ServerPlayer player, int capabilities, Runnable replyAfterRegister) {
+        enqueueRegister(player, capabilities, () -> { }, replyAfterRegister);
     }
 
     /**
@@ -321,8 +496,10 @@ public class PaperRequestProcessingService {
      * dropped uncounted. Replying only after the drain makes that window unreachable for
      * clients that declare only after receiving SessionConfig (all of them).
      */
-    public void enqueueRegister(ServerPlayer player, int capabilities, Runnable replyAfterRegister) {
-        this.lifecycleMailbox.add(new LifecycleEvent.Register(player, capabilities, replyAfterRegister));
+    public void enqueueRegister(ServerPlayer player, int capabilities,
+                                Runnable beforeRegister, Runnable replyAfterRegister) {
+        this.lifecycleMailbox.add(new LifecycleEvent.Register(
+                player, capabilities, beforeRegister, replyAfterRegister));
     }
 
     /** Any thread. Applied at the top of the next tick(). */
@@ -341,6 +518,17 @@ public class PaperRequestProcessingService {
             try {
                 switch (ev) {
                     case LifecycleEvent.Register r -> {
+                        // On the PUMP, before registration: the wire-dialect flip. It must
+                        // be here rather than on the calling thread, because on Folia the
+                        // handshake arrives on a REGION thread and the flip takes effect
+                        // instantly, while the SessionConfig that re-arms the client's
+                        // decoder is deferred to this drain — so a flip made off-pump can
+                        // land mid-tick and let the rest of that tick's flush ship
+                        // NEW-dialect columns to a decoder still armed for the OLD one,
+                        // which the client reads as a malformed frame and disconnects on.
+                        // It must also be before registerPlayer, which derives
+                        // wantsCompressedColumns from the dialect. (Round-3 review.)
+                        r.beforeRegister().run();
                         try {
                             registerPlayer(r.player(), r.capabilities());
                         } finally {
@@ -368,10 +556,18 @@ public class PaperRequestProcessingService {
             // Session identity for the router's stale-snapshot guard (set before the map
             // publish so the processing thread never sees it null on a live state).
             s.setRegisteredDimension(player.level().dimension().identifier().toString());
+            // Transport-pressure gauge (elytra-wall §8.3), Fabric-parity.
+            s.setChannelPressureProbe(PaperChannelPressure.forPlayer(player));
             return s;
         });
         this.diskReader.registerPlayer(player.getUUID());
         state.setCapabilities(capabilities);
+        // The four-term AND (plan §2) — twin of the Fabric derivation. The v16 manager is
+        // marked before the register event is enqueued (handshake path), and the drain
+        // runs registerPlayer before the deferred reply, so no serve precedes the flag.
+        state.setWantsCompressedColumns(this.wireCompressionLive
+                && (capabilities & LSSConstants.CAPABILITY_ZSTD_COLUMNS) != 0
+                && !this.v16Compat.isV16(player.getUUID()));
         state.markHandshakeComplete();
         return state;
     }
@@ -716,7 +912,8 @@ public class PaperRequestProcessingService {
             if (!state.hasCompletedHandshake())
                 continue;
             long[] dropped = state.flushSendQueue(perPlayerCap, this.bandwidthLimiter, this.diag,
-                    data -> this.columnPayloadSender.send(state, data));
+                    data -> this.columnPayloadSender.send(state, data),
+                    (long) this.config.outboundBufferCeilingKB * 1024L);
             if (dropped.length > 0) {
                 // A send failure discarded resolved-but-undelivered columns: clear their
                 // done-bits so the client's re-requests re-resolve instead of being
@@ -747,7 +944,7 @@ public class PaperRequestProcessingService {
      * hold-release makes the same alignment deterministic; this is the sync path's
      * equivalent. The PUBLISHED want-set then covers the other ~19 ticks of each second
      * ({@code takeIncomingBatch()} nulls the mailbox within ~50 ms of arrival while batches
-     * arrive at only 1 Hz) and carries a want-set too large for the slot cap across the
+     * arrive at only 1-4 Hz — the client's adaptive cadence) and carries a want-set too large for the slot cap across the
      * cycles that work it off (published exactly while the backlog is non-empty).
      *
      * <p>Both sources may list already-routed positions; such a probe is simply unused by the
@@ -1021,6 +1218,15 @@ public class PaperRequestProcessingService {
             this.diskReader.shutdown();
         } catch (Exception e) {
             LSSLogger.error("Error shutting down disk reader", e);
+        }
+        try {
+            // After the reader (no more store rung callers) and after the processor (its
+            // sentinel take fanned the final invalidations into the store).
+            if (this.lodStore != null) {
+                this.lodStore.shutdown();
+            }
+        } catch (Exception e) {
+            LSSLogger.error("Error shutting down LOD store", e);
         }
         try {
             if (this.generationService != null) {

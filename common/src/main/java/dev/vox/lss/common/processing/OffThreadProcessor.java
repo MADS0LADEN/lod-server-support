@@ -78,6 +78,32 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
 
     // Cross-player disk read deduplication (processing-thread-owned)
     private final DedupTracker dedupTracker = new DedupTracker();
+    // LOD-store counters (docs/planning/lod-store-implementation-plan.md). The zero
+    // instance exists unconditionally — all-zero while lodStore=off — so the
+    // diagnostics/exporter schema is identical across the kill-switch A/B arms; with a
+    // store attached, the STORE's own instance (shared with the reader rung) is served.
+    private final dev.vox.lss.common.store.LodStoreDiagnostics storeDiagnostics =
+            new dev.vox.lss.common.store.LodStoreDiagnostics();
+    // The LOD store (null while lodStore=off). Attached once at service init, before
+    // start(). The processor owns the DELIVERY-PATH side of the store contract: deposits
+    // AFTER the stale guard, the invalidation fan-out, and the ghost-guard delete.
+    private volatile dev.vox.lss.common.store.LodStoreService store;
+    // The wire codec for compressed column shipping (protocol 19). Null = raw for
+    // everyone (useCompressedColumns off, or the server-side zstd native probe failed).
+    // Attached once at service init before start(); read by the processing thread.
+    private volatile dev.vox.lss.common.store.StoreCodec wireCodec;
+    // NOTE (Phase 3 review + 4-agent round R2-M2): the dirty->store invalidation
+    // fan-out stays ON on BOTH platforms, deliberately. A Fabric gating experiment
+    // (save-hook deposits looked like they made the drain invalidation redundant)
+    // opened two real holes — a stale in-flight disk read completing after the edit
+    // could overwrite the fresh row with a src_stamp the boot sweep can never catch,
+    // and a shed hook deposit stranded the stale row for the session — so the fan-out
+    // was restored. The final review round then proved the CONVERSE: with the fan-out
+    // unconditional, no hook deposit could ever survive it (the same save that
+    // deposits also marks; the drain tombstone postdates the deposit), so the hook is
+    // now DELETE-only (LSSServerNetworking.onChunkSaveData) and edited columns re-warm
+    // through THIS delivery path on the dirty re-serve. Cost: one NBT re-read per
+    // edited column per session.
     private final Path dataDir;
     private int evictionCounter;
     private int saveCounter;
@@ -337,6 +363,21 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                                           String dimension,
                                           boolean staleAgainstEdit,
                                           byte source) {
+        // One holder per call: the probe path has no dedup group, so two players wanting
+        // the same loaded chunk compress the same bytes twice — accepted (plan §0.4).
+        return enqueueLoadedColumn(state, column, columnTimestamp, submissionOrder,
+                dimension, staleAgainstEdit, source, null);
+    }
+
+    /** As above with a caller-supplied holder (the generation path shares one holder
+     *  between its build and its store deposit — plan §3 frame reuse); null builds one. */
+    protected boolean enqueueLoadedColumn(PlayerState state, LoadedColumnData column,
+                                          long columnTimestamp,
+                                          long submissionOrder,
+                                          String dimension,
+                                          boolean staleAgainstEdit,
+                                          byte source,
+                                          ColumnBytes sharedBytes) {
         if (column.serializedSections() == null || column.serializedSections().length == 0) {
             return false;
         }
@@ -351,20 +392,25 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
 
         return buildAndEnqueueColumnPayload(state, column.cx(), column.cz(), dimension,
                 columnTimestamp, submissionOrder,
-                column.serializedSections(), estimatedBytes, source);
+                sharedBytes != null ? sharedBytes
+                        : ColumnBytes.ofRaw(this.wireCodec, column.serializedSections()),
+                estimatedBytes, source);
     }
 
     /**
-     * Build platform-specific payload from serialized section bytes and enqueue to the
-     * player's ready queue. Returns false when the column cannot go on the wire (oversized
-     * payload) — every caller then answers up-to-date so the position resolves terminally
-     * instead of dropping silently (the old silent drop left diskReadDone set with no
-     * response, and the client retried an unserveable position forever).
+     * Build platform-specific payload from the column-bytes holder and enqueue to the
+     * player's ready queue. The holder decides raw-vs-frame per recipient (the platform
+     * build consults {@code state.wantsCompressedColumns()}); {@code estimatedBytes}
+     * stays RAW-denominated (bandwidth-limiter semantics — design §5). Returns false
+     * when the column cannot go on the wire (oversized payload) — every caller then
+     * answers up-to-date so the position resolves terminally instead of dropping
+     * silently (the old silent drop left diskReadDone set with no response, and the
+     * client retried an unserveable position forever).
      */
     protected abstract boolean buildAndEnqueueColumnPayload(PlayerState state, int cx, int cz,
                                                              String dimension,
                                                              long columnTimestamp, long submissionOrder,
-                                                             byte[] sectionBytes, int estimatedBytes,
+                                                             ColumnBytes bytes, int estimatedBytes,
                                                              byte source);
 
     // ---- Processing loop ----
@@ -403,8 +449,12 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                 // per-session events (removals, dirty-clears, generation outcomes) die with
                 // the session, but queued INVALIDATIONS must still hit the cache — shutdown's
                 // final save otherwise persists pre-edit stamps that answer false up_to_date
-                // across the restart.
+                // across the restart. The store fan-out rides along: moot for the memory
+                // tier, load-bearing once the Phase 2 disk store persists rows.
                 for (var inv : take.invalidations()) {
+                    if (this.store != null) {
+                        this.store.invalidate(inv.dimension(), inv.positions());
+                    }
                     this.timestampCache.invalidate(inv.dimension(), inv.positions());
                 }
                 return;
@@ -542,6 +592,11 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     /** Shared by the cycle-start apply and the late drain so the two paths cannot drift. */
     private void applyInvalidations(List<TimestampInvalidation> invalidations) {
         for (var inv : invalidations) {
+            // Store fan-out FIRST (plan §1 invalidation fan-out): the store's synchronous
+            // removal + tombstone must land before anything can re-read the position.
+            if (this.store != null) {
+                this.store.invalidate(inv.dimension(), inv.positions());
+            }
             int removed = this.timestampCache.invalidate(inv.dimension(), inv.positions());
             if (removed > 0 && !this.invalidationDirty) {
                 this.invalidationDirty = true;
@@ -639,6 +694,9 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     void flushPendingInvalidationsOnExit() {
         synchronized (this.mailboxLock) {
             for (var inv : this.pendingInvalidations) {
+                if (this.store != null) {
+                    this.store.invalidate(inv.dimension(), inv.positions());
+                }
                 this.timestampCache.invalidate(inv.dimension(), inv.positions());
             }
             this.pendingInvalidations = new ArrayList<>();
@@ -800,12 +858,41 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                 // re-request re-resolves from disk instead of drawing a false up_to_date.
                 boolean staleAgainstEdit = consumeInvalidatedInFlight(dimension, packed);
 
-                deliverDiskResult(playerUuid, state, result, result.submissionOrder(), dimension,
-                        staleAgainstEdit);
+                // ONE holder per drained result (plan §0.4): every dedup recipient's build
+                // and the store deposit share it, so a mixed-capability group costs one
+                // compress, never one per recipient. Null for non-data results (all-air /
+                // not-found / saturated). A store-FRAME hit (plan §3) wraps the validated
+                // frame — capable recipients ship it verbatim; raw-needing recipients
+                // (v16/no-capability) cost one lazy ~24 µs decompress here on the
+                // processing thread, bounded and rare.
+                ColumnBytes columnBytes;
+                if (result.frameBytes() != null) {
+                    columnBytes = ColumnBytes.ofFrame(this.wireCodec, result.frameBytes(),
+                            result.frameRawSize());
+                } else if (result.sectionBytes() != null) {
+                    columnBytes = ColumnBytes.ofRaw(this.wireCodec, result.sectionBytes());
+                } else {
+                    columnBytes = null;
+                }
+
+                deliverDiskResult(playerUuid, state, result, columnBytes,
+                        result.submissionOrder(), dimension, staleAgainstEdit);
 
                 if (!staleAgainstEdit && !result.saturated() && !result.notFound()) {
                     // Store timestamp so reconnecting clients get up-to-date responses
                     this.timestampCache.put(result.dimension(), packed, result.columnTimestamp(), this.cycleNow);
+                    // LOD-store deposit — the delivery-path choke point, ONCE per drained
+                    // result (not per dedup recipient), strictly AFTER the stale guard: an
+                    // edit-overtaken read must never populate the store (§1). Store hits
+                    // are not re-deposited. All-air (null section bytes here) normalizes
+                    // to byte[0] at the store boundary. Deliberately independent of the
+                    // per-recipient payload-build outcome (the gen flavor matches): a
+                    // send rejection loses the delivery, not the bytes.
+                    if (this.store != null && !result.fromStore()) {
+                        depositColumn(result.dimension(), packed, result.sectionBytes(),
+                                columnBytes, result.columnTimestamp(),
+                                result.srcStampSeconds());
+                    }
                 } else if (result.notFound()) {
                     // Disk says the chunk no longer exists (region trimmed/deleted outside
                     // MC). A stale cached stamp would answer up_to_date to data-claiming
@@ -818,6 +905,14 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                     if (removed > 0 && !this.invalidationDirty) {
                         this.invalidationDirty = true;
                         this.invalidationCountdown = INVALIDATE_SAVE_MAX_CYCLES;
+                    }
+                    // Ghost guard, store half (§1 fan-out): storage POSITIVELY answered
+                    // "no such chunk" — the store row must die or the store re-serves
+                    // deleted terrain forever. Gated on authoritativeMiss: an
+                    // error/timeout triage says nothing about existence, and deleting a
+                    // good row on a transient timeout would just cost a re-deposit.
+                    if (this.store != null && result.authoritativeMiss()) {
+                        this.store.delete(result.dimension(), packed);
                     }
                 }
 
@@ -833,7 +928,8 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                         if (attachedRegistered != null
                                 && !attachedRegistered.equals(result.dimension())) continue;
                         deliverDiskResult(attachment.playerUuid(), attachedState, result,
-                                attachment.submissionOrder(), dimension, staleAgainstEdit);
+                                columnBytes, attachment.submissionOrder(), dimension,
+                                staleAgainstEdit);
                     }
                 }
             }
@@ -847,6 +943,7 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
      * Shared by the primary requester and every dedup-attached player.
      */
     private void deliverDiskResult(UUID playerUuid, PlayerState state, ChunkReadResult result,
+                                    ColumnBytes columnBytes,
                                     long submissionOrder, String dimension,
                                     boolean staleAgainstEdit) {
         int cx = result.chunkX();
@@ -872,12 +969,16 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                 if (!staleAgainstEdit) {
                     state.markDiskReadDone(cx, cz);
                 }
-                boolean allAir = result.sectionBytes() == null;
+                // Serve-source attribution: a store hit reports COLUMN_SOURCE_STORE
+                // (client trace src:3), the NBT path stays COLUMN_SOURCE_DISK.
+                byte source = result.fromStore()
+                        ? LSSConstants.COLUMN_SOURCE_STORE : LSSConstants.COLUMN_SOURCE_DISK;
+                boolean allAir = columnBytes == null;
                 boolean sent = !allAir
                         && buildAndEnqueueColumnPayload(state, cx, cz, result.dimension(),
                                 result.columnTimestamp(), submissionOrder,
-                                result.sectionBytes(), result.estimatedBytes(),
-                                LSSConstants.COLUMN_SOURCE_DISK);
+                                columnBytes, result.estimatedBytes(),
+                                source);
                 if (!sent) {
                     // All-air chunk (no visible sections): a resync client (claimsData) may hold
                     // stale content here, so send an authoritative clearing 0-section column; a
@@ -888,7 +989,7 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                     // up_to_date so the client keeps what it has.
                     boolean claimsData = pending != null && pending.claimsData();
                     if (!(allAir && claimsData && sendEmptiedColumn(state, cx, cz, result.dimension(),
-                            result.columnTimestamp(), submissionOrder, LSSConstants.COLUMN_SOURCE_DISK))) {
+                            result.columnTimestamp(), submissionOrder, source))) {
                         this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state));
                     }
                 }
@@ -914,6 +1015,33 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     private static final byte[] ZERO_SECTION_COLUMN = new byte[]{0x00};
 
     /**
+     * Store deposit with opportunistic frame reuse (plan §3 "compress once, use twice"):
+     * when a capable recipient's build already materialized the wire frame on this very
+     * holder, hand the store the FRAME + processing-thread-computed hashes and skip the
+     * batcher's compress; otherwise (raw sessions, all-air, or the frame simply wasn't
+     * built yet — the deposit runs after the primary's build but before the dedup
+     * fan-out, so a later recipient's frame is missed, accepted) deposit raw as before.
+     * {@code raw} is always in hand at both call sites (never a store hit), so
+     * {@code holder.raw()} costs nothing here.
+     */
+    private void depositColumn(String dimension, long packed, byte[] raw,
+                               ColumnBytes holder, long columnTimestamp,
+                               long srcStampSeconds) {
+        if (holder != null && holder.frameMaterialized()) {
+            byte[] frame = holder.frame();
+            if (this.store.depositFrame(dimension, packed, frame, holder.rawSize(),
+                    dev.vox.lss.common.store.LodStoreService.contentHash(holder.raw()),
+                    dev.vox.lss.common.store.LodStoreService.contentHash(frame),
+                    columnTimestamp, srcStampSeconds)) {
+                return;
+            }
+            // false = unsupported/store-down, never "enqueued-with-shed" — the raw
+            // fallback cannot double-deposit (see the interface contract).
+        }
+        this.store.deposit(dimension, packed, raw, columnTimestamp, srcStampSeconds);
+    }
+
+    /**
      * Authoritative all-air serve: enqueue a 0-section {@code VoxelColumn} (carrying the server
      * columnTimestamp) so a data-claiming client clears the column. Returns false if the payload
      * could not be enqueued (caller falls back to up_to_date).
@@ -921,8 +1049,12 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     boolean sendEmptiedColumn(PlayerState state, int cx, int cz, String dimension,
                               long columnTimestamp, long submissionOrder, byte source) {
         int est = ZERO_SECTION_COLUMN.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
+        // Clears are ALWAYS codec 0 (the ONE common pin, plan §0.8): the 1-byte body is
+        // far below COLUMN_COMPRESS_MIN_BYTES, so the holder refuses a frame
+        // structurally and the client's clear detection keeps its decompress-free read.
         return buildAndEnqueueColumnPayload(state, cx, cz, dimension, columnTimestamp,
-                submissionOrder, ZERO_SECTION_COLUMN, est, source);
+                submissionOrder, ColumnBytes.ofRaw(this.wireCodec, ZERO_SECTION_COLUMN),
+                est, source);
     }
 
     /**
@@ -1189,9 +1321,31 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
             }
             byte[] genSections = entry.columnData().serializedSections();
             boolean allAir = genSections == null || genSections.length == 0;
+            // One holder shared by the build AND the deposit (plan §3): a compressed
+            // session's wire frame is reused by the store, compress-once-use-twice.
+            ColumnBytes genBytes = allAir ? null
+                    : ColumnBytes.ofRaw(this.wireCodec, genSections);
             boolean sent = !allAir && this.enqueueLoadedColumn(state, entry.columnData(),
                     entry.columnTimestamp(), entry.submissionOrder(), entry.dimension(), genStale,
-                    LSSConstants.COLUMN_SOURCE_GENERATION);
+                    LSSConstants.COLUMN_SOURCE_GENERATION, genBytes);
+            // LOD-store deposit, generation flavor — same delivery-path choke point,
+            // same stale-guard condition (a genStale outcome carries pre-edit bytes and
+            // must not populate the store). All-air deposits byte[0] so a warm all-air
+            // column never re-reads NBT (§1 all-air normalization). Deliberately NOT
+            // gated on `sent`: a send-queue rejection loses the delivery, not the bytes
+            // — depositing anyway makes the re-ask a warm hit instead of a re-generate.
+            if (this.store != null && !genStale) {
+                // The gen columnTimestamp IS the acquisition stamp: both platforms set
+                // it via epochSeconds() at completion-serialization, the moment the
+                // bytes exist (R1-M2 — closes the completion→delivery mailbox gap).
+                if (allAir) {
+                    this.store.deposit(entry.dimension(), packed, null,
+                            entry.columnTimestamp(), entry.columnTimestamp());
+                } else {
+                    depositColumn(entry.dimension(), packed, genSections, genBytes,
+                            entry.columnTimestamp(), entry.columnTimestamp());
+                }
+            }
             if (!sent) {
                 if (allAir && !genStale) {
                     // Stamp so future resyncs at this timestamp converge to a cheap
@@ -1223,6 +1377,34 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
 
     public ProcessingDiagnostics getDiagnostics() {
         return this.ctx.diagnostics();
+    }
+
+    /** The LOD-store counter family (all-zero while {@code lodStore=off}). */
+    public dev.vox.lss.common.store.LodStoreDiagnostics getStoreDiagnostics() {
+        var s = this.store;
+        return s != null ? s.diagnostics() : this.storeDiagnostics;
+    }
+
+    /**
+     * Attach the wire codec for compressed column shipping (protocol 19,
+     * useCompressedColumns). Null (never attached) means every session ships raw —
+     * the config-off AND natives-unavailable degrade path (plan §0.11: the service
+     * probes {@code StoreCodec.zstdOrNull()} once at start and warns when config
+     * wants compression but the native cannot serve it). Volatile: attached once at
+     * service init, read by the processing thread.
+     */
+    public final void attachWireCodec(dev.vox.lss.common.store.StoreCodec codec) {
+        this.wireCodec = codec;
+    }
+
+    /** The attached wire codec, or null while compression is off/unavailable. */
+    protected final dev.vox.lss.common.store.StoreCodec wireCodec() {
+        return this.wireCodec;
+    }
+
+    /** Attach the LOD store (lodStore != off). Must happen before {@link #start()}. */
+    public void attachStore(dev.vox.lss.common.store.LodStoreService store) {
+        this.store = store;
     }
 
     /**

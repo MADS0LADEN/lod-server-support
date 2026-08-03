@@ -109,38 +109,62 @@ public final class PaperPayloadHandler {
                 (byte) -1, sectionBytes);
     }
 
+    /** Raw-shipping overload (codec 0) — kept so pre-19 call sites and test rigs encode a
+     *  valid CURRENT-layout frame (the codec byte is version-carried, never optional). */
     public static byte[] encodeVoxelColumnPreEncoded(int chunkX, int chunkZ,
                                                       String dimensionStr, long columnTimestamp,
                                                       byte source, byte[] sectionBytes) {
+        return encodeVoxelColumnPreEncoded(chunkX, chunkZ, dimensionStr, columnTimestamp,
+                source, LSSConstants.COLUMN_CODEC_RAW, sectionBytes);
+    }
+
+    /** Full v19 layout: {@code sectionBytes} are the SHIPPED bytes for the given codec
+     *  (raw for {@code COLUMN_CODEC_RAW}, a zstd-1 frame for {@code COLUMN_CODEC_ZSTD}).
+     *  Byte-identical to Fabric's {@code VoxelColumnS2CPayload} encode (wire-parity
+     *  fixtures pin it). */
+    public static byte[] encodeVoxelColumnPreEncoded(int chunkX, int chunkZ,
+                                                      String dimensionStr, long columnTimestamp,
+                                                      byte source, byte codec, byte[] sectionBytes) {
         return encodeToBytes(sectionBytes.length + 64, buf -> {
             buf.writeInt(chunkX);
             buf.writeInt(chunkZ);
             buf.writeUtf(dimensionStr, LSSConstants.MAX_DIMENSION_STRING_LENGTH);
             buf.writeLong(columnTimestamp);
             buf.writeByte(source);
+            buf.writeByte(codec);
             buf.writeByteArray(sectionBytes);
         });
     }
 
     /**
-     * v16 compat: splice a v18 column frame (with the one-byte serve-source tag between
-     * columnTimestamp and sectionBytes) into the legacy pre-18 layout by removing exactly
-     * that byte. Parses only the fixed header to find the offset — the section bytes are
-     * copied, never re-encoded. A v18-shaped frame reaching a v16 client hard-kicks it (the
-     * old decode reads the source byte as the section-array length VarInt), so the per-player
-     * column egress converts UNCONDITIONALLY for v16 sessions.
+     * v16 compat: splice a CURRENT column frame (serve-source tag + codec tag between
+     * columnTimestamp and sectionBytes — one byte each) into the legacy pre-18 layout by
+     * removing exactly those two bytes. Parses only the fixed header to find the offset —
+     * the section bytes are copied, never re-encoded. A CURRENT-shaped frame reaching a
+     * v16 client hard-kicks it (the old decode reads the source byte as the section-array
+     * length VarInt), so the per-player column egress converts UNCONDITIONALLY for v16
+     * sessions. THROWS on a non-RAW codec (plan review A6): the legacy layout has nowhere
+     * to carry a codec and a spliced zstd body decodes as garbage on the old client.
+     * Reachable in the v19->v16 downgrade window (queued codec-1 payloads draining after
+     * the manager flips — 4-agent round, pipeline F2); the egress guard's warn-drop
+     * contains it and the ts<=0 re-declaration heals the dropped column.
      */
-    public static byte[] rewriteColumnToV16(byte[] v18Frame) {
-        return withReadBuffer(v18Frame, buf -> {
+    public static byte[] rewriteColumnToV16(byte[] frame) {
+        return withReadBuffer(frame, buf -> {
             buf.readInt();                                            // chunkX
             buf.readInt();                                            // chunkZ
             buf.readUtf(LSSConstants.MAX_DIMENSION_STRING_LENGTH);    // dimension
             buf.readLong();                                           // columnTimestamp
             int sourceIndex = buf.readerIndex();
-            byte[] out = new byte[v18Frame.length - 1];
-            System.arraycopy(v18Frame, 0, out, 0, sourceIndex);
-            System.arraycopy(v18Frame, sourceIndex + 1, out, sourceIndex,
-                    v18Frame.length - sourceIndex - 1);
+            byte codec = frame[sourceIndex + 1];
+            if (codec != LSSConstants.COLUMN_CODEC_RAW) {
+                throw new IllegalStateException("v16 splice on codec-" + codec
+                        + " column frame — the session flag should have forced raw");
+            }
+            byte[] out = new byte[frame.length - 2];
+            System.arraycopy(frame, 0, out, 0, sourceIndex);
+            System.arraycopy(frame, sourceIndex + 2, out, sourceIndex,
+                    frame.length - sourceIndex - 2);
             return out;
         });
     }

@@ -228,6 +228,12 @@ public final class BenchmarkMetricsExporter {
         serviceMap.put("requests_received", diag.getTotalRequestsRouted());
         serviceMap.put("columns_sent", src.tickDiag().getTotalSectionsSent());
         serviceMap.put("bytes_sent", src.tickDiag().getTotalBytesSent());
+        // Compressed columns (protocol 19): SHIPPED payload volume (codec-1 frames) next
+        // to the raw-denominated bytes_sent, plus the per-payload codec split. Law A2
+        // stays raw==raw on both ends; wire_bytes is the observed-bandwidth match.
+        serviceMap.put("wire_bytes", src.tickDiag().getTotalWireBytesSent());
+        serviceMap.put("cols_zstd", diag.getTotalColumnsCompressed());
+        serviceMap.put("cols_raw", diag.getTotalColumnsRaw());
         serviceMap.put("duplicate_skips", diag.getTotalDuplicateSkips());
         serviceMap.put("queue_full", diag.getTotalQueueFull());
         serviceMap.put("up_to_date", diag.getTotalUpToDate());
@@ -327,6 +333,33 @@ public final class BenchmarkMetricsExporter {
         dedupMap.put("groups", internals.dedupGroups());
         result.put("dedup", dedupMap);
 
+        // LOD store (docs/planning/lod-store-implementation-plan.md): counters live on the
+        // processor unconditionally (all-zero while lodStore=off) so this group's shape is
+        // identical across the kill-switch A/B arms. `queue` (batcher depth) is a DRAIN
+        // gauge (must be 0 at quiescence endpoints); the byte fields are plain gauges.
+        var storeDiag = src.processor().getStoreDiagnostics();
+        var storeMap = new LinkedHashMap<String, Object>();
+        storeMap.put("hits", storeDiag.getHits());
+        storeMap.put("misses", storeDiag.getMisses());
+        storeMap.put("deposits", storeDiag.getDeposits());
+        storeMap.put("deposit_drops", storeDiag.getDepositDrops());
+        storeMap.put("deposit_skips", storeDiag.getDepositSkips());
+        storeMap.put("errors", storeDiag.getErrors());
+        storeMap.put("mem_hits", storeDiag.getMemHits());
+        storeMap.put("mem_evictions", storeDiag.getMemEvictions());
+        storeMap.put("sweep_drops", storeDiag.getSweepDrops());
+        storeMap.put("backfill_reads", storeDiag.getBackfillReads());
+        storeMap.put("backfill_deposits", storeDiag.getBackfillDeposits());
+        storeMap.put("backfill_skips", storeDiag.getBackfillSkips());
+        storeMap.put("queue", storeDiag.getQueueDepth());
+        storeMap.put("mem_bytes", storeDiag.getMemBytes());
+        storeMap.put("db_bytes", storeDiag.getDbBytes());
+        storeMap.put("wal_bytes", storeDiag.getWalBytes());
+        storeMap.put("checkpoint_ms_max", storeDiag.getCheckpointMsMax());
+        storeMap.put("read_avg_us", storeDiag.getReadAvgMicros());
+        storeMap.put("read_p95_us", storeDiag.getReadP95Micros());
+        result.put("store", storeMap);
+
         // Wall-time per tick over the window since the last snapshot (a stalled server
         // reads >> 50). -1 when no sampler ticks were observed (sampler not wired).
         long nowNanos = System.nanoTime();
@@ -385,6 +418,7 @@ public final class BenchmarkMetricsExporter {
                 LSSClientNetworking.isServerEnabled(),
                 LSSClientNetworking.getColumnsReceived(),
                 LSSClientNetworking.getBytesReceived(),
+                LSSClientNetworking.getWireBytesReceived(),
                 LSSClientNetworking.getColumnsDropped(),
                 LSSClientNetworking.getQueuedColumnCount(),
                 LSSClientNetworking.getQueuedColumnBytes());
@@ -393,11 +427,15 @@ public final class BenchmarkMetricsExporter {
     /** Schema-owning overload (test seam — the public method binds the live static reads). */
     static Map<String, Object> buildClientSnapshot(LodRequestManager manager, boolean serverEnabled,
                                                    long receivedColumns, long receivedBytes,
+                                                   long wireReceivedBytes,
                                                    long dropped, int queued, long queuedBytes) {
         var result = new LinkedHashMap<String, Object>();
         result.put("server_enabled", serverEnabled);
         result.put("received_columns", receivedColumns);
         result.put("received_bytes", receivedBytes);
+        // Shipped (codec-1 frame) volume next to the raw-denominated received_bytes —
+        // the client half of the wire_bytes observability (compressed columns, v19).
+        result.put("wire_received_bytes", wireReceivedBytes);
         result.put("dropped", dropped);
         // The decode/ingest queue (ClientColumnProcessor) — unrelated to the request loop, which
         // no longer queues anything (the want-set is scanned and sent in the same tick).
@@ -438,6 +476,11 @@ public final class BenchmarkMetricsExporter {
         scan.put("missing_vanilla", manager != null ? manager.getMissingVanillaChunks() : 0);
         scan.put("budget", manager != null ? manager.getLastBudget() : 0);
         scan.put("queued", manager != null ? manager.getLastQueued() : 0);
+        // Adaptive-cadence liveness (docs/planning/adaptive-scan-cadence-design.md §8's
+        // acceptance criterion): fast-fire count — ~0 across a warm backfill means a gate
+        // is suppressing the feature. Additive key; check_soak.py validates top-level
+        // client keys only.
+        scan.put("fast", manager != null ? manager.getFastScans() : 0L);
         result.put("scan", scan);
 
         // Declared-and-unanswered (the awaiting-answer set), replaced per scan.
@@ -554,7 +597,33 @@ public final class BenchmarkMetricsExporter {
         // Bandwidth
         var bandwidth = new LinkedHashMap<String, Object>();
         bandwidth.put("total_bytes_sent", service.getBandwidthLimiter().getTotalBytesSent());
+        bandwidth.put("total_wire_bytes_sent", service.getTickDiag().getTotalWireBytesSent());
         result.put("bandwidth", bandwidth);
+
+        // LOD store (second exporter site — the benchmark server.json; the warm-join gate
+        // reads hits/misses + disk.submitted from here). All-zero while lodStore=off.
+        var storeDiag = service.getOffThreadProcessor().getStoreDiagnostics();
+        var store = new LinkedHashMap<String, Object>();
+        store.put("hits", storeDiag.getHits());
+        store.put("misses", storeDiag.getMisses());
+        store.put("deposits", storeDiag.getDeposits());
+        store.put("deposit_drops", storeDiag.getDepositDrops());
+        store.put("deposit_skips", storeDiag.getDepositSkips());
+        store.put("errors", storeDiag.getErrors());
+        store.put("mem_hits", storeDiag.getMemHits());
+        store.put("mem_evictions", storeDiag.getMemEvictions());
+        store.put("sweep_drops", storeDiag.getSweepDrops());
+        store.put("backfill_reads", storeDiag.getBackfillReads());
+        store.put("backfill_deposits", storeDiag.getBackfillDeposits());
+        store.put("backfill_skips", storeDiag.getBackfillSkips());
+        store.put("queue", storeDiag.getQueueDepth());
+        store.put("mem_bytes", storeDiag.getMemBytes());
+        store.put("db_bytes", storeDiag.getDbBytes());
+        store.put("wal_bytes", storeDiag.getWalBytes());
+        store.put("checkpoint_ms_max", storeDiag.getCheckpointMsMax());
+        store.put("read_avg_us", storeDiag.getReadAvgMicros());
+        store.put("read_p95_us", storeDiag.getReadP95Micros());
+        result.put("store", store);
 
         // JVM
         var jvm = new LinkedHashMap<String, Object>();
@@ -584,6 +653,7 @@ public final class BenchmarkMetricsExporter {
 
         result.put("columns_received", LSSClientNetworking.getColumnsReceived());
         result.put("bytes_received", LSSClientNetworking.getBytesReceived());
+        result.put("wire_received_bytes", LSSClientNetworking.getWireBytesReceived());
 
         LodRequestManager manager = LSSClientNetworking.getRequestManager();
         if (manager != null) {

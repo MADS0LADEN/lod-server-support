@@ -174,7 +174,7 @@ class LSSPaperPluginGlueTest {
         assertEquals(1, sender.replies.size(), "the deferred reply fires after registration");
         assertEquals(List.of(caps), registrar.caps,
                 "registration receives the client's full capabilities bitmask, not a normalized one");
-        assertEquals(List.of(HandshakeGate.WireDialect.V18), registrar.dialects);
+        assertEquals(List.of(HandshakeGate.WireDialect.CURRENT), registrar.dialects);
     }
 
     @Test
@@ -190,7 +190,7 @@ class LSSPaperPluginGlueTest {
         LSSPaperPlugin.handleHandshake(handshakeFrame(V, VOXEL_CAPS),
                 "Steve", config, true, sender, (caps, dialect, reply) -> reply.run());
 
-        assertEquals(List.of(new Reply(HandshakeGate.WireDialect.V18, true, 101,
+        assertEquals(List.of(new Reply(HandshakeGate.WireDialect.CURRENT, true, 101,
                         LSSConstants.SYNC_ON_LOAD_SLOT_CAP, 7, false)), sender.replies,
                 "each PaperConfig field must land in its own session-config slot");
     }

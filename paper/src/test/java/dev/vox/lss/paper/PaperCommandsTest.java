@@ -28,7 +28,8 @@ import static org.mockito.Mockito.when;
  */
 class PaperCommandsTest {
 
-    private static final String USAGE = "Usage: /lsslod <stats|diag>";
+    private static final String USAGE = "Usage: /lsslod <stats|diag|store>";
+    private static final String STORE_USAGE = "Usage: /lsslod store <status|invalidate all>";
 
     private final List<String> messages = new ArrayList<>();
     private CommandSender sender;
@@ -87,6 +88,45 @@ class PaperCommandsTest {
         // above while flipping this answer.
         assertTrue(run(commands(null, null), "bogus"));
         assertEquals(List.of("LSS LOD request processing is not active"), messages);
+    }
+
+    // ---- store verbs (4-agent round R3: Paper parity for the ops surface) ----
+
+    @Test
+    void storeStatusWithNoStoreReportsOffUnavailable() {
+        var service = mock(PaperRequestProcessingService.class);
+        when(service.getLodStore()).thenReturn(null);
+        assertTrue(run(commands(service, null), "store", "status"));
+        assertEquals(List.of("LOD store: off/unavailable"), messages);
+    }
+
+    @Test
+    void storeInvalidateAllOnNonPersistentStoreReportsRequiresFull() {
+        var service = mock(PaperRequestProcessingService.class);
+        when(service.getLodStore())
+                .thenReturn(mock(dev.vox.lss.common.store.LodStoreService.class));
+        when(service.invalidateStoreAllDimensions()).thenReturn(false);
+        assertTrue(run(commands(service, null), "store", "invalidate", "all"));
+        assertEquals(List.of("Invalidate-all requires the persistent store — this session degraded to the in-memory tier at boot (SQLite could not open; see the startup warning)"),
+                messages);
+    }
+
+    @Test
+    void storeInvalidateAllOnPersistentStoreAcknowledges() {
+        var service = mock(PaperRequestProcessingService.class);
+        when(service.getLodStore())
+                .thenReturn(mock(dev.vox.lss.common.store.LodStoreService.class));
+        when(service.invalidateStoreAllDimensions()).thenReturn(true);
+        assertTrue(run(commands(service, null), "store", "invalidate", "all"));
+        assertEquals(List.of("LOD store: dropping all rows (background) — re-warms from serves"),
+                messages);
+    }
+
+    @Test
+    void bareStoreVerbShowsStoreUsage() {
+        var service = mock(PaperRequestProcessingService.class);
+        assertTrue(run(commands(service, null), "store"));
+        assertEquals(List.of(STORE_USAGE), messages);
     }
 
     @Test
@@ -165,10 +205,14 @@ class PaperCommandsTest {
     @Test
     void tabCompleteFiltersByPrefix() {
         var cmd = commands(null, null);
-        assertEquals(List.of("stats", "diag"), cmd.onTabComplete(sender, null, "lsslod", new String[]{""}));
-        assertEquals(List.of("stats"), cmd.onTabComplete(sender, null, "lsslod", new String[]{"st"}));
+        assertEquals(List.of("stats", "diag", "store"), cmd.onTabComplete(sender, null, "lsslod", new String[]{""}));
+        assertEquals(List.of("stats", "store"), cmd.onTabComplete(sender, null, "lsslod", new String[]{"st"}));
         assertEquals(List.of("diag"), cmd.onTabComplete(sender, null, "lsslod", new String[]{"D"}));
         assertEquals(List.of(), cmd.onTabComplete(sender, null, "lsslod", new String[]{"zz"}));
         assertEquals(List.of(), cmd.onTabComplete(sender, null, "lsslod", new String[]{"stats", "x"}));
+        assertEquals(List.of("status", "invalidate"),
+                cmd.onTabComplete(sender, null, "lsslod", new String[]{"store", ""}));
+        assertEquals(List.of("all"),
+                cmd.onTabComplete(sender, null, "lsslod", new String[]{"store", "invalidate", ""}));
     }
 }

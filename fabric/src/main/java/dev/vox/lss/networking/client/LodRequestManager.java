@@ -90,6 +90,13 @@ public class LodRequestManager {
     // Last polled backlog — trace + /lss diag observability.
     private int lastIngestBacklog = -1;
 
+    public LodRequestManager() {
+        // Adaptive cadence: the scanner's fast trigger reads the awaiting-set size each
+        // tick. Same main-client-thread contract as every other tracker consumer — every
+        // mutation arrives via client.execute tasks on the thread that ticks maybeScan.
+        this.scanner.setOutstandingSupplier(this.tracker::size);
+    }
+
     public void onSessionConfig(SessionConfigS2CPayload config, String serverAddress) {
         this.sessionConfig = config;
         this.serverAddress = serverAddress;
@@ -158,6 +165,16 @@ public class LodRequestManager {
                 LSSClientNetworking.getQueuedColumnBytes(),
                 this.ingestBacklogSupplier.getAsInt(),
                 () -> countMissingVanillaChunks(level, playerCx, playerCz, viewDistance));
+        // Transport instrument (1 Hz, self-throttled): vanilla's ping/chunk-rate view of the
+        // shared connection next to LSS's byte rates — see ClientNetTrace and
+        // docs/planning/elytra-chunk-wall-investigation-2026-08-01.md §8.2. After the tick
+        // body so the queue/backlog numbers it reports are this tick's.
+        if (ClientTraceLog.enabled()) {
+            ClientNetTrace.maybeEmit(mc, player, level, viewDistance,
+                    LSSClientNetworking.getQueuedColumnCount(),
+                    LSSClientNetworking.getQueuedColumnBytes(),
+                    this.lastIngestBacklog, this.tracker.size());
+        }
     }
 
     /**
@@ -188,8 +205,8 @@ public class LodRequestManager {
         }
         this.backpressureClearSent = false;
         if (!tickCacheGatePhase()) return;
-        tickScanPhase(playerCx, playerCz, viewDistance, columnQueueSize, ingestBacklogSections,
-                missingVanilla);
+        tickScanPhase(playerCx, playerCz, viewDistance, columnQueueSize, columnQueueBytes,
+                ingestBacklogSections, missingVanilla);
     }
 
     /** The explicit backpressure clear: an empty want-set replaces the server backlog with nothing. */
@@ -197,6 +214,12 @@ public class LodRequestManager {
         if (ClientTraceLog.enabled()) ClientTraceLog.event("clear_batch", "");
         try {
             this.batchSender.send(new BatchChunkRequestC2SPayload(new long[0], new long[0], 0));
+            // A real (empty) declaration went out — disarm the fast cadence with it. The
+            // tracker is deliberately NOT replaced (late-status gating still wants the
+            // pre-halt awaiting set), so without this the one declaration path that
+            // bypasses tickScanPhase would leave "lastSentCount == what was declared"
+            // false and invite a fast re-declare storm right out of the halt.
+            this.scanner.noteDeclared(0);
         } catch (Exception e) {
             LSSLogger.error("Failed to send backpressure clear batch", e);
             this.backpressureClearSent = false; // retry on the next halted tick
@@ -299,17 +322,19 @@ public class LodRequestManager {
     }
 
     /**
-     * Periodic scan (every 20 ticks): build the complete want-set and send it as ONE batch in
-     * the same tick. A walked-but-empty scan (0) sends NOTHING — the convergence invariant that
+     * Scan phase (adaptive cadence: 20-tick fallback + completion-triggered fast re-scans):
+     * build the complete want-set and send it as ONE batch in the same tick. A
+     * walked-but-empty scan (0) sends NOTHING — the convergence invariant that
      * keeps the soak quiescence predicate alive (a heartbeat would keep requests_received moving
      * forever and silently disable every law) — but still replaces the awaiting set so phantom
      * entries cannot linger.
      * @return the {@link SpiralScanner#maybeScan} result (-1 when no walk happened)
      */
     int tickScanPhase(int playerCx, int playerCz, int viewDistance, int columnQueueSize,
-                      int ingestBacklogSections, IntSupplier missingVanilla) {
+                      long columnQueueBytes, int ingestBacklogSections, IntSupplier missingVanilla) {
         int scanned = this.scanner.maybeScan(playerCx, playerCz, viewDistance,
                 columnQueueSize, haltThreshold(),
+                columnQueueBytes, byteHaltThreshold(),
                 ingestBacklogSections, INGEST_BACKLOG_HALT_SECTIONS, missingVanilla,
                 this.columns, this.sendPositionBuffer, this.sendTimestampBuffer);
         if (scanned >= 0 && ClientTraceLog.enabled()) {
@@ -323,6 +348,7 @@ public class LodRequestManager {
             }
             ClientTraceLog.event("scan", "\"center\":[" + playerCx + "," + playerCz
                     + "],\"confirmed\":" + this.scanner.getConfirmedRing()
+                    + ",\"fast\":" + this.scanner.wasLastScanFast()
                     + ",\"declared\":" + scanned
                     + ",\"budget\":" + this.scanner.getLastBudget()
                     + ",\"ingest_backlog\":" + ingestBacklogSections
@@ -332,6 +358,11 @@ public class LodRequestManager {
         }
         if (scanned >= 0) {
             this.tracker.replaceWith(this.sendPositionBuffer, scanned);
+            // Arm/disarm the adaptive fast cadence beside the tracker replace, so
+            // "lastSentCount == what the awaiting set holds" is true by construction
+            // (a 0-count converged walk disarms; sendRequests' catch re-disarms a
+            // failed send before the next tick's predicate can read it).
+            this.scanner.noteDeclared(scanned);
             if (scanned > 0) {
                 sendRequests(this.sendPositionBuffer, this.sendTimestampBuffer, scanned);
             }
@@ -377,8 +408,11 @@ public class LodRequestManager {
             // Nothing is consumed at send any more (marks are answer-consumed), and the next
             // scan re-declares the identical set, so no mark restoration is needed. Just drop
             // the awaiting entries so late-status gating doesn't credit a batch that never
-            // reached the wire.
+            // reached the wire — and disarm the fast cadence, or the emptied awaiting set
+            // would read as "all answered" and turn a dying connection into a 4 Hz retry
+            // hammer (it must retry at the 1 Hz fallback, exactly as before).
             this.tracker.replaceWith(positions, 0);
+            this.scanner.noteDeclared(0);
         }
         this.metrics.recordSendCycle(count); // counts attempts — a failed batch still counts
     }
@@ -617,6 +651,10 @@ public class LodRequestManager {
 
     public void disconnect() {
         this.tracker.clear();
+        // Defensive disarm: the manager is normally dropped right after, but the session
+        // gate's teardown is deliberately self-sufficient — an armed scanner over a
+        // cleared tracker would satisfy the fast trigger trivially.
+        this.scanner.noteDeclared(0);
     }
 
     public void saveCache() {
@@ -715,6 +753,8 @@ public class LodRequestManager {
     public int getConfirmedRing() { return this.scanner.getConfirmedRing(); }
     public int getScanRing() { return this.scanner.getScanRing(); }
     public int getMissingVanillaChunks() { return this.scanner.getMissingVanillaChunks(); }
+    /** Fast (completion-triggered) scan fires this session — the adaptive-cadence liveness signal. */
+    public long getFastScans() { return this.scanner.getFastScans(); }
 
     // Response counters
     public long getTotalColumnsReceived() { return this.metrics.getTotalColumnsReceived(); }

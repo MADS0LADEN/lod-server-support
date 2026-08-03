@@ -2,6 +2,7 @@ package dev.vox.lss.paper;
 
 import dev.vox.lss.common.HandshakeGate;
 import dev.vox.lss.common.LSSConstants;
+import dev.vox.lss.common.processing.ColumnBytes;
 import dev.vox.lss.common.PositionUtil;
 import dev.vox.lss.common.processing.QueuedPayload;
 import io.netty.buffer.Unpooled;
@@ -228,7 +229,7 @@ class PaperPayloadEdgeTest {
 
     /** Decode a voxel-column frame with the exact grammar + guards of the Fabric client decoder. */
     private record ClientDecoded(int cx, int cz, String dimension, long timestamp, byte source,
-                                 byte[] sections) {}
+                                 byte codec, byte[] sections) {}
 
     private static ClientDecoded clientDecode(byte[] data) {
         var buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(data));
@@ -237,7 +238,8 @@ class PaperPayloadEdgeTest {
                     buf.readInt(), buf.readInt(),
                     buf.readUtf(LSSConstants.MAX_DIMENSION_STRING_LENGTH),
                     buf.readLong(),
-                    buf.readByte(), // serve-source tag (v18)
+                    buf.readByte(), // serve-source tag (v18+)
+                    buf.readByte(), // codec tag (v19+)
                     buf.readByteArray(LSSConstants.MAX_SECTIONS_SIZE));
             assertEquals(0, buf.readableBytes(), "frame fully drained");
             return decoded;
@@ -309,7 +311,7 @@ class PaperPayloadEdgeTest {
         var proc = newProcessor();
         var state = mock(PaperPlayerRequestState.class);
         proc.buildAndEnqueueColumnPayload(state, 1, 2, "minecraft:overworld", 42L, 7L,
-                new byte[LSSConstants.MAX_SEND_SECTIONS_SIZE + 1], 99, (byte) 1);
+                ColumnBytes.ofRaw(null, new byte[LSSConstants.MAX_SEND_SECTIONS_SIZE + 1]), 99, (byte) 1);
         verify(state, never()).addReadyPayload(any());
     }
 
@@ -320,7 +322,7 @@ class PaperPayloadEdgeTest {
         var state = mock(PaperPlayerRequestState.class);
         byte[] sections = new byte[LSSConstants.MAX_SEND_SECTIONS_SIZE];
         sections[123] = 0x5A;
-        proc.buildAndEnqueueColumnPayload(state, 1, 2, "minecraft:overworld", 42L, 7L, sections, 99, (byte) -1);
+        proc.buildAndEnqueueColumnPayload(state, 1, 2, "minecraft:overworld", 42L, 7L, ColumnBytes.ofRaw(null, sections), 99, (byte) -1);
 
         var captor = ArgumentCaptor.forClass((Class<QueuedPayload<byte[]>>) (Class<?>) QueuedPayload.class);
         verify(state).addReadyPayload(captor.capture());
@@ -340,11 +342,11 @@ class PaperPayloadEdgeTest {
         var proc = newProcessor();
         var state = mock(PaperPlayerRequestState.class);
         assertFalse(proc.buildAndEnqueueColumnPayload(state, 1, 2, "minecraft:overworld", 42L, 7L,
-                new byte[LSSConstants.MAX_SEND_SECTIONS_SIZE + 1], 99, (byte) 1),
+                ColumnBytes.ofRaw(null, new byte[LSSConstants.MAX_SEND_SECTIONS_SIZE + 1]), 99, (byte) 1),
                 "an oversized drop must report false so the caller answers up-to-date");
         verify(state, never()).addReadyPayload(any());
         assertTrue(proc.buildAndEnqueueColumnPayload(state, 1, 2, "minecraft:overworld", 42L, 7L,
-                new byte[]{0}, 9, (byte) 1),
+                ColumnBytes.ofRaw(null, new byte[]{0}), 9, (byte) 1),
                 "a successful enqueue must report true (false would answer up-to-date AND send)");
     }
 

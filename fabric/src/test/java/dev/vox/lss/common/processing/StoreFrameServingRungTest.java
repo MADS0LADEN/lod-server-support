@@ -1,0 +1,170 @@
+package dev.vox.lss.common.processing;
+
+import dev.vox.lss.common.store.LodStoreDiagnostics;
+import dev.vox.lss.common.store.LodStoreMode;
+import dev.vox.lss.common.store.LodStoreService;
+import dev.vox.lss.common.store.StoreCodec;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+
+import java.util.UUID;
+import java.util.concurrent.ConcurrentLinkedQueue;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+/**
+ * The frame-form store rung (compressed-columns plan §3): with {@code serveStoreFrames}
+ * the reader consults {@code getFrame} EXCLUSIVELY — a frame hit delivers the frame
+ * verbatim in the result (zero decompress on the reader pool), all-air keeps the raw
+ * rung's shape, a getFrame miss falls to region IO (never a second get() of the same
+ * row), and the flag OFF keeps the raw rung bit-identical. Rung contract (hits excluded
+ * from disk.* and the throttle EWMA) unchanged in both forms.
+ */
+class StoreFrameServingRungTest {
+
+    private static final UUID PLAYER = UUID.randomUUID();
+    private static final String DIM = "minecraft:overworld";
+    private static StoreCodec codec;
+
+    @BeforeAll
+    static void probe() {
+        codec = StoreCodec.zstdOrNull();
+        assumeTrue(codec != null, "zstd native unavailable");
+    }
+
+    private static class StubStore implements LodStoreService {
+        final LodStoreDiagnostics diag = new LodStoreDiagnostics();
+        FrameHit frameAnswer;
+        StoreHit rawAnswer;
+        int getFrameCalls;
+        int getCalls;
+
+        @Override public LodStoreMode mode() { return LodStoreMode.MEMORY; }
+        @Override public StoreHit get(String dimension, long packed) {
+            this.getCalls++;
+            return this.rawAnswer;
+        }
+        @Override public FrameHit getFrame(String dimension, long packed) {
+            this.getFrameCalls++;
+            return this.frameAnswer;
+        }
+        @Override public boolean deposit(String d, long p, byte[] b, long ts, long acq) { return true; }
+        @Override public void invalidate(String d, long[] p) {}
+        @Override public void delete(String d, long p) {}
+        @Override public LodStoreDiagnostics diagnostics() { return this.diag; }
+        @Override public void shutdown() {}
+    }
+
+    private static AbstractChunkDiskReader reader(boolean frames) {
+        var r = new AbstractChunkDiskReader(1) {};
+        r.registerPlayer(PLAYER);
+        r.setServeStoreFrames(frames);
+        return r;
+    }
+
+    private static ChunkReadResult awaitResult(AbstractChunkDiskReader r) {
+        ConcurrentLinkedQueue<ChunkReadResult> q = r.getPlayerQueue(PLAYER);
+        long deadline = System.currentTimeMillis() + 2000;
+        while (System.currentTimeMillis() < deadline) {
+            var result = q.poll();
+            if (result != null) return result;
+            Thread.onSpinWait();
+        }
+        throw new AssertionError("no result within 2s");
+    }
+
+    @Test
+    void frameHitDeliversTheFrameVerbatimWithZeroDiskCounters() {
+        var r = reader(true);
+        var store = new StubStore();
+        byte[] raw = new byte[4096];
+        byte[] frame = codec.compress(raw);
+        store.frameAnswer = new LodStoreService.FrameHit(frame, raw.length, 777L);
+        r.attachStore(store);
+
+        r.submitRead(PLAYER, 3, -4, DIM, 1L, () -> {
+            throw new AssertionError("the NBT operation must not run on a frame hit");
+        });
+        var result = awaitResult(r);
+
+        assertTrue(result.fromStore());
+        assertNull(result.sectionBytes(), "frame hits carry NO raw bytes");
+        assertSame(frame, result.frameBytes(), "the stored frame, verbatim — no copy");
+        assertEquals(raw.length, result.frameRawSize());
+        assertEquals(777L, result.columnTimestamp());
+        assertEquals(raw.length + dev.vox.lss.common.LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                result.estimatedBytes(), "estimate stays RAW-denominated");
+        assertEquals(0, store.getCalls, "exactly one read form per submit — never get() too");
+        assertEquals(1, store.diag.getHits());
+        assertEquals(0, r.getDiag().getSubmittedCount(), "rung contract unchanged");
+        r.shutdown();
+    }
+
+    @Test
+    void frameAllAirKeepsTheRawRungShape() {
+        var r = reader(true);
+        var store = new StubStore();
+        store.frameAnswer = new LodStoreService.FrameHit(new byte[0], 0, 55L);
+        r.attachStore(store);
+        r.submitRead(PLAYER, 0, 0, DIM, 1L, () -> {
+            throw new AssertionError("no NBT read on an all-air frame hit");
+        });
+        var result = awaitResult(r);
+        assertTrue(result.fromStore());
+        assertNull(result.sectionBytes());
+        assertNull(result.frameBytes(), "all-air is the null-bytes shape, never a frame");
+        assertFalse(result.notFound(), "all-air must never read as an authoritative miss");
+        r.shutdown();
+    }
+
+    @Test
+    void frameMissFallsToRegionIoWithoutASecondStoreRead() {
+        var r = reader(true);
+        var store = new StubStore(); // frameAnswer null = miss
+        store.rawAnswer = new LodStoreService.StoreHit(new byte[]{1}, 9L); // must NOT be consulted
+        r.attachStore(store);
+        r.submitRead(PLAYER, 1, 2, DIM, 1L, () -> new byte[]{4, 2});
+        var result = awaitResult(r);
+        assertFalse(result.fromStore());
+        assertArrayEquals(new byte[]{4, 2}, result.sectionBytes());
+        assertEquals(1, store.getFrameCalls);
+        assertEquals(0, store.getCalls, "a frame miss never retries via get()");
+        assertEquals(1, store.diag.getMisses());
+        r.shutdown();
+    }
+
+    @Test
+    void flagOffKeepsTheRawRungAndNeverCallsGetFrame() {
+        var r = reader(false);
+        var store = new StubStore();
+        store.rawAnswer = new LodStoreService.StoreHit(new byte[]{5, 6}, 88L);
+        r.attachStore(store);
+        r.submitRead(PLAYER, 1, 2, DIM, 1L, () -> {
+            throw new AssertionError("store hit expected");
+        });
+        var result = awaitResult(r);
+        assertTrue(result.fromStore());
+        assertArrayEquals(new byte[]{5, 6}, result.sectionBytes());
+        assertNull(result.frameBytes());
+        assertEquals(0, store.getFrameCalls, "compression off = the pre-19 rung, bit-identical");
+        r.shutdown();
+    }
+
+    @Test
+    void throwingGetFrameIsContainedAsMiss() {
+        var r = reader(true);
+        var store = new StubStore() {
+            @Override public FrameHit getFrame(String dimension, long packed) {
+                throw new RuntimeException("boom");
+            }
+        };
+        r.attachStore(store);
+        r.submitRead(PLAYER, 1, 2, DIM, 1L, () -> new byte[]{7});
+        var result = awaitResult(r);
+        assertFalse(result.fromStore(), "an escaped store throw reads as a miss (belt)");
+        assertArrayEquals(new byte[]{7}, result.sectionBytes());
+        assertEquals(1, store.diag.getErrors());
+        r.shutdown();
+    }
+}

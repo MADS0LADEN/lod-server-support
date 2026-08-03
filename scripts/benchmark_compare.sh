@@ -59,7 +59,7 @@ cmd_baseworld() {
     rm -f "$MAIN_ROOT/fabric/build/run/benchmark-client/config/lss-client-config.json"
     rm -rf "$MAIN_ROOT/fabric/build/run/benchmark-client/config/lss/cache"
     log "Building base world: fresh run for ${seconds}s (generation enabled, defaults)"
-    (cd "$MAIN_ROOT" && ./scripts/benchmark.sh fresh "$seconds")
+    (export BENCHMARK_CONFIG_STAGED=1; cd "$MAIN_ROOT" && ./scripts/benchmark.sh fresh "$seconds")
     log "Base world saved to benchmark-worlds/base/world"
 }
 
@@ -81,12 +81,13 @@ stage_server_config() { # <path> <use_bg_read>
   "generationConcurrencyLimitGlobal": 32,
   "generationTimeoutSeconds": 60,
   "dirtyBroadcastIntervalSeconds": 10,
-  "syncOnLoadConcurrencyLimitPerPlayer": 200,
   "generationConcurrencyLimitPerPlayer": 16,
   "perDimensionTimestampCacheSizeMB": 32,
   "missMemoTtlSeconds": 30,
   "useBackgroundReadPriority": $2,
-  "enableV16Compat": true
+  "enableV16Compat": true,
+  "lodStore": "off",
+  "lodStoreBackfill": false
 }
 EOF
 }
@@ -146,7 +147,7 @@ cmd_run() {
     local sampler_pid=$!
 
     local rc=0
-    (cd "$root" && ./scripts/benchmark.sh no-cache "$duration") \
+    (export BENCHMARK_CONFIG_STAGED=1; cd "$root" && ./scripts/benchmark.sh no-cache "$duration") \
         > "$RUN_OUT/orchestrator.log" 2>&1 || rc=$?
 
     kill "$sampler_pid" 2>/dev/null || true

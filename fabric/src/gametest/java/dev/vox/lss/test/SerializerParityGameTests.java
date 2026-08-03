@@ -802,4 +802,113 @@ public class SerializerParityGameTests {
         }
         return sb.toString();
     }
+
+    private static final int STORE_PARITY_CHUNK_OFFSET = 220;
+
+    /**
+     * LOD-store parity (docs/planning/lod-store-implementation-plan.md Phase 2 gate): a
+     * store hit through the REAL reader path must serve section bytes byte-identical to
+     * the NBT-served bytes it was deposited from, carry the STORED timestamp (delivery
+     * honesty — never freshly stamped), and be marked {@code fromStore}. Runs the real
+     * SQLite engine inside the real Fabric server JVM (Knot classloader + native load —
+     * the environment fabric-loader-junit only approximates), with the store rooted in
+     * the gametest world and swept against the world's real region directory.
+     */
+    @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 1200)
+    public void storeHitBytesMatchNbtServedBytesThroughTheReaderPath(GameTestHelper helper) {
+        ServerLevel level = helper.getLevel();
+        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        int cx = origin.x() + STORE_PARITY_CHUNK_OFFSET;
+        int cz = origin.z() + 7;
+        var chunkPos = new ChunkPos(cx, cz);
+        var chunkSource = level.getChunkSource();
+        var torchPos = new BlockPos(cx * 16 + 8, -60, cz * 16 + 8);
+        long packed = PositionUtil.packPosition(cx, cz);
+        final long storedTs = 424_242L;
+
+        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+        level.getChunk(cx, cz);
+        level.setBlock(torchPos, Blocks.TORCH.defaultBlockState(), 3);
+        helper.runAfterDelay(4, () -> level.setBlock(torchPos, Blocks.AIR.defaultBlockState(), 3));
+        helper.runAfterDelay(8, () -> chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0));
+
+        var server = level.getServer();
+        var worldRoot = server.getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT)
+                .normalize();
+        String dim = level.dimension().identifier().toString();
+        var regionDir = net.minecraft.world.level.dimension.DimensionType
+                .getStorageFolder(level.dimension(), worldRoot).resolve("region").normalize();
+        var env = new dev.vox.lss.common.store.SqliteLodStore.Environment(
+                worldRoot.resolve("lss-lod-gametest-" + UUID.randomUUID()),
+                server.getServerVersion(), LSSConstants.PROTOCOL_VERSION,
+                d -> regionDir, d -> "off", 0);
+        var store = dev.vox.lss.common.store.SqliteLodStore.createOrNull(
+                dev.vox.lss.common.store.LodStoreMode.FULL, env,
+                new dev.vox.lss.common.store.LodStoreDiagnostics());
+        helper.assertTrue(store != null, "SQLite store engine must be available in-game");
+
+        var reader = new ChunkDiskReader(1, false, true);
+        reader.attachStore(store);
+        var readerId = UUID.randomUUID();
+        reader.registerPlayer(readerId);
+        var step = new AtomicInteger();
+        var nbtBytes = new AtomicReference<byte[]>();
+
+        helper.succeedWhen(() -> {
+            helper.assertTrue(helper.getTick() >= 10, "waiting for the torch dance to finish");
+            switch (step.get()) {
+                case 0 -> {
+                    helper.assertTrue(chunkSource.getChunkNow(cx, cz) == null,
+                            "waiting for the chunk to unload");
+                    level.save(null, true, false);
+                    try {
+                        helper.assertTrue(store.awaitSweep(1),
+                                "waiting for the store's startup sweep");
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        helper.fail("interrupted awaiting the store sweep");
+                    }
+                    // First read: the store is empty, so this is the NBT path (the
+                    // deposit source in production rides the delivery path; here the
+                    // test deposits the same bytes directly).
+                    reader.submitReadDirect(readerId, dim, level, cx, cz, 0);
+                    step.set(1);
+                    helper.assertTrue(false, "NBT read submitted, awaiting result");
+                }
+                case 1 -> {
+                    var result = reader.getPlayerQueue(readerId).poll();
+                    helper.assertTrue(result != null, "waiting for the NBT read result");
+                    helper.assertTrue(!result.notFound() && result.sectionBytes() != null,
+                            "superflat chunk must resolve with content from disk");
+                    helper.assertTrue(!result.fromStore(),
+                            "an empty store must not answer the first read");
+                    nbtBytes.set(result.sectionBytes());
+                    store.deposit(dim, packed, result.sectionBytes(), storedTs);
+                    step.set(2);
+                    helper.assertTrue(false, "deposited, awaiting batcher visibility");
+                }
+                case 2 -> {
+                    helper.assertTrue(store.get(dim, packed) != null,
+                            "waiting for the deposit to commit (batcher)");
+                    reader.submitReadDirect(readerId, dim, level, cx, cz, 1);
+                    step.set(3);
+                    helper.assertTrue(false, "store-rung read submitted, awaiting result");
+                }
+                case 3 -> {
+                    var result = reader.getPlayerQueue(readerId).poll();
+                    helper.assertTrue(result != null, "waiting for the store-rung read result");
+                    reader.shutdown();
+                    store.shutdown();
+                    helper.assertTrue(result.fromStore(),
+                            "second read must be answered by the store rung");
+                    helper.assertTrue(result.columnTimestamp() == storedTs,
+                            "a store hit must serve the STORED timestamp (got "
+                                    + result.columnTimestamp() + ")");
+                    helper.assertTrue(Arrays.equals(nbtBytes.get(), result.sectionBytes()),
+                            describeMismatch(nbtBytes.get(), result.sectionBytes()));
+                }
+                default -> helper.fail("unexpected store parity step " + step.get());
+            }
+        });
+    }
 }

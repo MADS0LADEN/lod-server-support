@@ -83,6 +83,7 @@ class SpiralScannerTest {
                                 ColumnStateMap columns, Sink queue) {
         for (int i = 0; i < LSSConstants.TICKS_PER_SECOND + 1; i++) {
             int n = s.maybeScan(CX, CZ, viewDistance, columnQueueSize, columnQueueHaltThreshold,
+                    0L, Long.MAX_VALUE,
                     ingestBacklog, ingestBacklogHalt,
                     () -> missingVanilla, columns, queue.pos, queue.ts);
             if (n >= 0) { queue.count = Math.max(n, 0); return n; }
@@ -99,7 +100,7 @@ class SpiralScannerTest {
                                     ColumnStateMap columns, Sink queue) {
         for (int i = 0; i < LSSConstants.TICKS_PER_SECOND + 1; i++) {
             int n = s.maybeScan(cx, cz, viewDistance, columnQueueSize, columnQueueHaltThreshold,
-                    -1, 1000,
+                    0L, Long.MAX_VALUE, -1, 1000,
                     () -> missingVanilla, columns, queue.pos, queue.ts);
             if (n >= 0) { queue.count = Math.max(n, 0); return n; }
         }
@@ -551,12 +552,12 @@ class SpiralScannerTest {
 
         // A fresh scanner is primed: the very FIRST cadence call must fire (join burst),
         // not the 20th — the fireScan helper used elsewhere cannot tell those apart.
-        int first = s.maybeScan(CX, CZ, 2, 0, 1000, -1, 1000, () -> 0, new ColumnStateMap(), queue.pos, queue.ts);
+        int first = s.maybeScan(CX, CZ, 2, 0, 1000, 0L, Long.MAX_VALUE, -1, 1000, () -> 0, new ColumnStateMap(), queue.pos, queue.ts);
         assertEquals(8 * 3 + 8 * 4, first, "first maybeScan on a fresh scanner must fire and queue the annulus");
 
         // reset() (new session / flushCache) re-primes: again a single call fires.
         s.reset();
-        int afterReset = s.maybeScan(CX, CZ, 2, 0, 1000, -1, 1000, () -> 0, new ColumnStateMap(), queue.pos, queue.ts);
+        int afterReset = s.maybeScan(CX, CZ, 2, 0, 1000, 0L, Long.MAX_VALUE, -1, 1000, () -> 0, new ColumnStateMap(), queue.pos, queue.ts);
         assertEquals(8 * 3 + 8 * 4, afterReset, "first maybeScan after reset() must fire immediately");
     }
 
@@ -610,7 +611,7 @@ class SpiralScannerTest {
         // cadence alone — the old debounce restarted it here, which starved scanning (and
         // re-declaration with it) for as long as crossings outpaced the window.
         for (int i = 0; i < LSSConstants.TICKS_PER_SECOND - 1; i++) {
-            assertEquals(-1, s.maybeScan(CX, CZ, 2, 0, 1000, -1, 1000, () -> 0, columns, queue.pos, queue.ts));
+            assertEquals(-1, s.maybeScan(CX, CZ, 2, 0, 1000, 0L, Long.MAX_VALUE, -1, 1000, () -> 0, columns, queue.pos, queue.ts));
         }
         s.recenter();
 
@@ -618,7 +619,7 @@ class SpiralScannerTest {
                 "movement must zero ring confirmation (the confirmed prefix belonged to the old center)");
         assertTrue(columns.hasRetries(), "movement preserves in-range retry marks");
         queue.clear();
-        int n = s.maybeScan(CX, CZ, 2, 0, 1000, -1, 1000, () -> 0, columns, queue.pos, queue.ts);
+        int n = s.maybeScan(CX, CZ, 2, 0, 1000, 0L, Long.MAX_VALUE, -1, 1000, () -> 0, columns, queue.pos, queue.ts);
         assertEquals(1, n, "the in-progress cadence window completes ON SCHEDULE through a"
                 + " recenter and the scan re-walks the disc, declaring the retry");
         assertEquals(List.of(retried), queue.positions(n));
@@ -672,7 +673,7 @@ class SpiralScannerTest {
 
         assertEquals(0, s.getConfirmedRing(), "reset() zeroes ring confirmation");
         assertFalse(columns.hasRetries(), "session state cleared with the map");
-        int first = s.maybeScan(CX, CZ, 2, 0, 1000, -1, 1000, () -> 0, columns, queue.pos, queue.ts);
+        int first = s.maybeScan(CX, CZ, 2, 0, 1000, 0L, Long.MAX_VALUE, -1, 1000, () -> 0, columns, queue.pos, queue.ts);
         assertEquals(8 * 3 + 8 * 4, first,
                 "reset() primes the cadence: the rejoin scan fires on the FIRST call");
     }
@@ -1015,5 +1016,506 @@ class SpiralScannerTest {
         assertEquals(0, fireScanFull(s, CX, CZ, 0, 0, 1000, 0, columns, queue),
                 "answered: the position leaves the want-set");
         assertEquals(2, s.getConfirmedRing(), "answered: the ring confirms past it (lodDistance+1)");
+    }
+
+    // ---- adaptive cadence: the completion-triggered fast re-scan (fastRescanDue) ----
+    // docs/planning/adaptive-scan-cadence-design.md. Every rig above stays bit-identical:
+    // bare scanners have no outstanding supplier, so the fast path is structurally off there.
+
+    /**
+     * Adaptive rig: the supplier + kill-switch seams wired, arming performed manually (in
+     * production it is {@code tickScanPhase}'s job, beside the tracker replace — a scanner
+     * driven without it, like this file's other rigs, never arms).
+     */
+    private static final class AdaptiveRig {
+        final SpiralScanner s;
+        final Sink q = new Sink();
+        final ColumnStateMap columns = new ColumnStateMap();
+        int outstanding;
+        int missingVanillaCalls;
+
+        AdaptiveRig() { this(scanner(4)); }
+
+        AdaptiveRig(SpiralScanner scanner) {
+            this.s = scanner;
+            this.s.adaptiveCadenceEnabled = () -> true;
+            this.s.setOutstandingSupplier(() -> this.outstanding);
+        }
+
+        /** First periodic fire (declares the lod-4/vd-2 annulus, 56) + arm with its count. */
+        int primeAndArm() {
+            int declared = fireScan(this.s, 2, this.columns, this.q);
+            this.s.noteDeclared(declared);
+            return declared;
+        }
+
+        int tickOnce() { return tickOnce(0, 1000, 0L, 1L << 30, -1, 1000); }
+
+        int tickOnce(int queueSize, int queueHalt, long queueBytes, long queueByteHalt,
+                     int ingest, int ingestHalt) {
+            int n = this.s.maybeScan(CX, CZ, 2, queueSize, queueHalt, queueBytes, queueByteHalt,
+                    ingest, ingestHalt,
+                    () -> { this.missingVanillaCalls++; return 0; },
+                    this.columns, this.q.pos, this.q.ts);
+            if (n >= 0) this.q.count = Math.max(n, 0);
+            return n;
+        }
+
+        /** Drives until the next fire; returns the 1-based tick it fired on (fails past 20). */
+        int ticksToFire() { return ticksToFire(0, 1000, 0L, 1L << 30, -1, 1000); }
+
+        int ticksToFire(int queueSize, int queueHalt, long queueBytes, long queueByteHalt,
+                        int ingest, int ingestHalt) {
+            for (int t = 1; t <= LSSConstants.TICKS_PER_SECOND; t++) {
+                if (tickOnce(queueSize, queueHalt, queueBytes, queueByteHalt, ingest, ingestHalt) >= 0) return t;
+            }
+            throw new AssertionError("cadence never fired within a fallback window");
+        }
+    }
+
+    @Test
+    void fastRescanFiresAtTheFloorOnceTheBatchIsNearlyAnswered() {
+        var rig = new AdaptiveRig();
+        assertTrue(rig.primeAndArm() > 0);
+        assertFalse(rig.s.wasLastScanFast(), "the primed first fire is periodic");
+        rig.outstanding = 0; // everything answered
+
+        for (int t = 1; t < SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS; t++) {
+            assertEquals(-1, rig.tickOnce(), "no fire below the floor (tick " + t + ")");
+        }
+        assertTrue(rig.tickOnce() >= 0, "fast fire exactly at the floor");
+        assertTrue(rig.s.wasLastScanFast(), "...and it reports as fast");
+        assertEquals(1, rig.s.getFastScans());
+    }
+
+    @Test
+    void outstandingAboveThresholdKeepsThePeriodicCadence() {
+        var rig = new AdaptiveRig();
+        rig.outstanding = rig.primeAndArm(); // nothing answered
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "an unanswered batch never fast-fires — the fallback owns the cadence"
+                        + " (this is also why churny soak phases see today's exact 1 Hz:"
+                        + " silent server drops never remove positions from the awaiting set)");
+        assertFalse(rig.s.wasLastScanFast());
+        assertEquals(0, rig.s.getFastScans());
+    }
+
+    @Test
+    void thresholdIsFivePercentOfTheDeclaredCount() {
+        var rig = new AdaptiveRig();
+        rig.primeAndArm();
+        rig.s.noteDeclared(800);
+        rig.outstanding = 41;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "41 of 800 outstanding is above 5% — periodic");
+        rig.s.noteDeclared(800);
+        rig.outstanding = 40;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(),
+                "40 of 800 is exactly 5% — fast");
+    }
+
+    @Test
+    void tinyDeclaresDegenerateToStrictZeroOutstanding() {
+        var rig = new AdaptiveRig();
+        rig.primeAndArm();
+        rig.s.noteDeclared(SpiralScanner.FAST_RESCAN_OUTSTANDING_DIVISOR - 1); // threshold 0
+        rig.outstanding = 1;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "integer threshold: a sub-20 declare requires FULL drain");
+        rig.s.noteDeclared(SpiralScanner.FAST_RESCAN_OUTSTANDING_DIVISOR - 1);
+        rig.outstanding = 0;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire());
+    }
+
+    @Test
+    void geometricTighteningShrinksTheThresholdWithTheDeclare() {
+        // The anti-chatter property: a fast walk that re-declares only ~30 stragglers
+        // shrinks the next threshold to 1 — sustained 4 Hz needs a genuinely refilling
+        // frontier, never a parked straggler set.
+        var rig = new AdaptiveRig();
+        rig.primeAndArm();
+        rig.s.noteDeclared(30);
+        rig.outstanding = 2;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(), "2 > 30/20 — periodic");
+        rig.s.noteDeclared(30);
+        rig.outstanding = 1;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(), "1 <= 30/20 — fast");
+    }
+
+    @Test
+    void decodeQueueGateBlocksAtAQuarterOfItsHaltThreshold() {
+        // Proportional, deliberately NOT strict zero: received columns enter the decode
+        // queue in the same handler that empties the awaiting set, so a zero gate would
+        // suppress the fast path in exactly the data-bearing warm backfill it exists for.
+        var rig = new AdaptiveRig();
+        rig.primeAndArm();
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(250, 1000, 0L, 1L << 30, -1, 1000),
+                "queue at exactly 1/4 of its halt threshold blocks the fast fire");
+        rig.s.noteDeclared(rig.q.count);
+        rig.outstanding = 0;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS,
+                rig.ticksToFire(249, 1000, 0L, 1L << 30, -1, 1000),
+                "just below the 1/4 line the fast fire proceeds");
+    }
+
+    @Test
+    void byteQueueGateBlocksAtAQuarterOfItsHaltThreshold() {
+        // The byte pipe is the halt term that actually BINDS for real terrain columns
+        // (columns > ~32 KiB hit the byte halt before the count halt), so the fast gate
+        // must cover it too — a count-only gate left the fast path open at 74% of the
+        // binding halt (implementation-review finding).
+        var rig = new AdaptiveRig();
+        rig.primeAndArm();
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(0, 1000, 250L, 1000L, -1, 1000),
+                "queued bytes at exactly 1/4 of the byte-halt threshold block the fast fire");
+        rig.s.noteDeclared(rig.q.count);
+        rig.outstanding = 0;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS,
+                rig.ticksToFire(0, 1000, 249L, 1000L, -1, 1000),
+                "just below the 1/4 line the fast fire proceeds");
+    }
+
+    @Test
+    void ingestBacklogGateBlocksAtAQuarterOfItsHaltThreshold() {
+        var rig = new AdaptiveRig();
+        rig.primeAndArm();
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(0, 1000, 0L, 1L << 30, 250, 1000),
+                "consumer ingest backlog at 1/4 of its halt threshold blocks the fast fire");
+        rig.s.noteDeclared(rig.q.count);
+        rig.outstanding = 0;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS,
+                rig.ticksToFire(0, 1000, 0L, 1L << 30, 249, 1000),
+                "below the line it proceeds (and -1 no-signal always passes — every other test here)");
+    }
+
+    @Test
+    void convergedWalkDisarmsTheFastCadence() {
+        // THE safety property: without the disarm a converged client would re-walk the
+        // full spiral every 250 ms forever (and the walk-fires would still send nothing,
+        // but burn the render thread). The manager notes the 0-count declare; after it,
+        // only the 1 Hz fallback walks.
+        var rig = new AdaptiveRig();
+        rig.primeAndArm();
+        seedSatisfied(rig.columns, 3, 4); // the whole declarable annulus answered
+        rig.outstanding = 0;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(),
+                "the fast fire itself still happens...");
+        assertEquals(0, rig.q.count, "...but the converged walk declares nothing");
+        rig.s.noteDeclared(0); // the manager's converged disarm (tickScanPhase)
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "disarmed: a converged client re-walks at the fallback cadence only");
+    }
+
+    @Test
+    void anUnarmedScannerNeverFastFires() {
+        var rig = new AdaptiveRig();
+        fireScan(rig.s, 2, rig.columns, rig.q); // a walk ran, but nothing was ever declared to us
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "no noted declare = nothing to complete = periodic only");
+    }
+
+    @Test
+    void killSwitchRestoresThePeriodicCadence() {
+        var rig = new AdaptiveRig();
+        rig.primeAndArm();
+        rig.s.adaptiveCadenceEnabled = () -> false;
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "enableAdaptiveScanCadence=false is bit-identical pre-change behavior");
+    }
+
+    @Test
+    void v16SessionsNeverFastFire() {
+        // Non-optional: besides the legacy server's real rate limiter, Tier B's
+        // NOT_GENERATED handling removes gen-slot-bounced positions from the awaiting set,
+        // so a v16 session would fast-fire on exactly that churn loop and hammer the old
+        // server's generation slots at 4 Hz.
+        var legacy = new SpiralScanner();
+        legacy.setConfig(new SessionConfigS2CPayload(
+                LSSConstants.V16_COMPAT_PROTOCOL_VERSION, true, 4, true));
+        var rig = new AdaptiveRig(legacy);
+        rig.primeAndArm();
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "a legacy (protocol-16) session keeps the 1 Hz cadence bit-identically");
+    }
+
+    @Test
+    void nullSessionConfigTicksAreSafeWithTheFastPredicateArmed() {
+        // The fast predicate runs on ticks 5..19, which never touched sessionConfig before;
+        // production sets the config before any scan, but the guard must hold regardless.
+        var rig = new AdaptiveRig(new SpiralScanner()); // setConfig never called
+        rig.s.resetScanCounter(); // un-prime: a fresh scanner's first tick would fire a WALK (NPE pre-config)
+        rig.s.noteDeclared(56);   // (re-)arm after the reset's disarm
+        rig.outstanding = 0;
+        for (int t = 1; t < LSSConstants.TICKS_PER_SECOND; t++) {
+            assertEquals(-1, rig.tickOnce(), "pre-config ticks must neither NPE nor fast-fire");
+        }
+    }
+
+    @Test
+    void cheapPrefixInvalidationNoLongerHoldsTheFastPath() {
+        // THE regression the walk-cost gate rewrite exists to fix (elytra-chunk-wall
+        // investigation §8.6.3). recenter() zeroes the confirmed prefix on EVERY chunk
+        // crossing, and the old `confirmedRing > 0` term read that as "expensive walk".
+        // At 33 blocks/s crossings run ~2.76 Hz against 1 Hz scans, so a moving client
+        // never fast-fired at all — measured as exactly 1.000 s gaps for 23 consecutive
+        // seconds of flight. A small disc's re-walk costs ~80 iterations; cost decides now,
+        // so it fires at the floor.
+        var rig = new AdaptiveRig();
+        rig.primeAndArm();
+        rig.outstanding = 0;
+        rig.s.recenter(); // movement
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(),
+                "post-movement: a CHEAP re-walk fast-fires (was pinned to 1 Hz — the bug)");
+
+        rig.s.resetConfirmedRing(); // dirty re-open, same shape
+        rig.outstanding = 0;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(),
+                "post-dirty-reopen: same — the COST decides, not the fact of invalidation");
+    }
+
+    @Test
+    void expensivePrefixInvalidationStillRidesTheFallback() {
+        // The half of the old gate worth keeping: a from-ring-0 re-walk across a disc that
+        // is satisfied far out is the render-thread-hitch shape, and must stay at 1 Hz.
+        // Deliberate policy — such a disc is both expensive to walk AND has little left to
+        // fetch, so the fallback is the right cadence there.
+        var rig = new AdaptiveRig(scanner(200));
+        // Ring 141 alone (1128 positions) overruns the budget, so the walk TRUNCATES there:
+        // scanRing = confirmedRing = 141, and the post-recenter prediction is 4*141*142.
+        seedSatisfiedDisc(rig.columns, 140);
+        rig.primeAndArm();
+        rig.outstanding = 0;
+        assertTrue(rig.s.predictedWalkCost() <= SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "premise: with the prefix intact the frontier-only walk is cheap");
+
+        rig.s.recenter();
+        assertTrue(rig.s.predictedWalkCost() > SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "premise: zeroing the prefix makes the NEXT walk the expensive full re-walk");
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "an expensive from-ring-0 re-walk still rides the 1 Hz fallback");
+    }
+
+    @Test
+    void walkCostIsPredictedForTheNextWalkNotRememberedFromTheLast() {
+        // Plan review round 1: a REMEMBERED cost gates the next walk with the last walk's
+        // price, and those differ exactly here — after recenter() the next walk restarts at
+        // ring 0 while the last one started at the frontier. A remembered gate would admit
+        // one full-price walk after every prefix collapse. The prediction must jump the
+        // moment the prefix is zeroed, before any walk has run.
+        var rig = new AdaptiveRig(scanner(200));
+        seedSatisfiedDisc(rig.columns, 140);
+        rig.primeAndArm();
+        int frontierWalk = rig.s.predictedWalkCost();
+
+        rig.s.recenter(); // no walk has happened yet
+        assertTrue(rig.s.predictedWalkCost() > frontierWalk,
+                "the prediction reflects the re-walk immediately, with no walk in between");
+    }
+
+    @Test
+    void untruncatedWalkPredictsToTheLodDistanceNotTheLastQueuedRing() {
+        // Implementation-review MAJOR A-1. scan()'s ONLY early exit is the budget break;
+        // otherwise it iterates every ring out to lodDistance, while scanRing records merely
+        // the outermost ring that QUEUED something. On a warm disc — the shipped server's
+        // regime — a moving client finds work only in the trailing view-edge crescents near
+        // ring ~viewDistance, so scanRing stays tiny while the walk still examines the whole
+        // disc. Predicting off scanRing there under-reports by orders of magnitude and admits
+        // exactly the expensive walk this gate exists to refuse.
+        var rig = new AdaptiveRig(scanner(150));
+        seedSatisfiedDiscExceptRing(rig.columns, 150, 12); // full disc warm, one crescent ring open
+        rig.primeAndArm();
+        rig.outstanding = 0;
+
+        assertTrue(rig.s.getConfirmedRing() <= 12,
+                "premise: the prefix stops at the open crescent ring");
+        // The walk queued only ~96 positions — far under budget — so it ran to ring 150.
+        // Predicting off scanRing (~12) would give ~96 and open the gate.
+        assertTrue(rig.s.predictedWalkCost() > SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "an UNtruncated walk must be predicted against the LOD distance it actually"
+                        + " iterates (4*150*151 = 90,600), not the last queued ring");
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "...so a full warm-disc sweep still rides the 1 Hz fallback");
+    }
+
+    @Test
+    void walkCostCalibrationAdmitsTheMeasuredFlightWalkAndRefusesTheWarmFullDisc() {
+        // The constant's entire rationale, pinned. Its javadoc cites both numbers; nothing
+        // evaluated either, and at the rings the rest of the suite exercises the correct
+        // 4R(R+1) and the WRONG 4R^2 agree on the verdict — so the arithmetic error that
+        // inverted the first draft's threshold (262,144 refusing the live server's own
+        // lod-256 walk at 263,168) was invisible to tests.
+        var flight = new AdaptiveRig(scanner(200));
+        // Rings 0..73 satisfied; ring 74 (592 positions) fits inside the 800 budget and
+        // ring 75 overruns it, so the walk truncates IN ring 75 => scanRing = 75, the
+        // frontier the elytra trace measured.
+        seedSatisfiedDisc(flight.columns, 73);
+        flight.primeAndArm();
+        flight.s.recenter();
+        assertEquals(4 * 75 * 76, flight.s.predictedWalkCost(),
+                "the measured elytra flight walk is exactly 4R(R+1) at frontier ring 75");
+        assertTrue(flight.s.predictedWalkCost() <= SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "...and it MUST be admitted — unlocking it is the whole point of the change");
+
+        var warm = new AdaptiveRig(scanner(256));
+        assertTrue(4 * 256 * 257 > SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "a full walk at the default 256 LOD distance (263,168) must be refused;"
+                        + " 4R^2 would give 262,144 and sit on the wrong side of the constant");
+        seedSatisfiedDiscExceptRing(warm.columns, 256, 12);
+        warm.primeAndArm();
+        warm.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, warm.ticksToFire(),
+                "a warm full-disc sweep rides the 1 Hz fallback");
+    }
+
+    /** Seeds a satisfied square of {@code radius} but leaves one Chebyshev ring open — the
+     *  trailing view-edge crescent shape a moving client sees on warm terrain. */
+    private static void seedSatisfiedDiscExceptRing(ColumnStateMap columns, int radius, int openRing) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                if (Math.max(Math.abs(dx), Math.abs(dz)) == openRing) continue;
+                columns.onReceived(PositionUtil.packPosition(CX + dx, CZ + dz), 5000L);
+            }
+        }
+    }
+
+    /** Marks every column in a square of {@code radius} around the rig centre as received
+     *  (SATISFIED), so a walk must traverse them before it finds work. */
+    private static void seedSatisfiedDisc(ColumnStateMap columns, int radius) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                columns.onReceived(PositionUtil.packPosition(CX + dx, CZ + dz), 5000L);
+            }
+        }
+    }
+
+    @Test
+    void resetScanCounterDisarmsAndKeepsTheDimensionChangeWait() {
+        var rig = new AdaptiveRig();
+        rig.primeAndArm();
+        rig.s.resetScanCounter(); // dimension change
+        rig.outstanding = 0; // the fresh dimension's awaiting set is empty — trivially "drained"
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "the deliberate post-dimension-change 20-tick wait cannot be bypassed by a"
+                        + " stale armed count over the new dimension's empty awaiting set");
+        // The fire above re-derived the prefix (ring 0 confirms trivially), so the
+        // walk-cost gate is now OPEN — only the disarm can be holding the fast path.
+        // Without re-arming, the next window must still be periodic: this half is what
+        // makes the DISARM assertion non-vacuous (the first window was held by both).
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "resetScanCounter() disarmed: no fast fire until the manager arms a fresh declare");
+    }
+
+    @Test
+    void actionableRetryMarksHoldFastFiresLikeAnyPrefixInvalidation() {
+        // The IN-WALK prefix reset: an actionable retry mark zeroes the prefix inside
+        // scan() — after the gate's confirmedRing read — and every walk re-derives
+        // confirmedRing >= 1, so the field alone can never see it (all three
+        // implementation reviewers' shared MAJOR). The gate consults hasActionableRetries
+        // directly: retry-forced from-ring-0 re-walks ride the 1 Hz fallback, exactly
+        // like movement and dirty re-opens.
+        var rig = new AdaptiveRig();
+        rig.primeAndArm();
+        rig.outstanding = 0;
+        long target = PositionUtil.packPosition(3, 0); // in the declared annulus (outside vd 2)
+        rig.columns.onReceived(target, 5000L);
+        rig.columns.onIngestFailed(target); // consumer rejection: unstamp + retry mark
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "an actionable retry mark holds the fast cadence (its walk re-walks from ring 0)");
+        // The mark is answer-consumed, so it survives the walk — the hold persists...
+        rig.s.noteDeclared(rig.q.count);
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "still held while the mark is unconsumed");
+        // ...until the re-serve lands and consumes it.
+        rig.columns.onReceived(target, 6000L);
+        rig.s.noteDeclared(rig.q.count);
+        rig.outstanding = 0;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(),
+                "mark consumed: the fast cadence resumes");
+    }
+
+    @Test
+    void adaptiveCadenceConstantsArePinned() {
+        // Numeric pins (implementation-review M4): every behavioral test references these
+        // symbolically, so a constant drift (e.g. floor 5 -> 1 = a 20 Hz / 5x-upstream
+        // ceiling) would pass the whole suite green without this.
+        assertEquals(5, SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS,
+                "250 ms floor — the 4 Hz ceiling every cost bound (C2S upstream, walk rate) assumes");
+        assertEquals(20, SpiralScanner.FAST_RESCAN_OUTSTANDING_DIVISOR, "the 5% completion threshold");
+        assertEquals(4, SpiralScanner.FAST_RESCAN_PRESSURE_DIVISOR,
+                "fast fires only below 1/4 of each halt threshold (count, bytes, ingest)");
+        assertEquals(65_536, SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "walk-cost ceiling — calibrated from the measured 22,800-iteration flight walk"
+                        + " (4R(R+1) at frontier ring 75); a drift upward re-admits the"
+                        + " full-256-disc walk (263,168) at 4 Hz on the render thread");
+    }
+
+    @Test
+    void resetRestoresTheWalkCostPredictionWithTheRestOfTheSessionState() {
+        // reset() zeroes confirmedRing AND scanRing, so the prediction must come back as a
+        // fresh-session zero rather than carrying the old dimension's frontier.
+        var rig = new AdaptiveRig(scanner(200));
+        seedSatisfiedDisc(rig.columns, 140);
+        rig.primeAndArm();
+        rig.s.recenter();
+        assertTrue(rig.s.predictedWalkCost() > SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "premise: an expensive prediction is standing");
+        rig.s.reset();
+        assertTrue(rig.s.predictedWalkCost() > SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "a fresh session has never walked, so it must predict the FULL disc and fail"
+                        + " closed — never inherit a cheap stale frontier");
+    }
+
+    @Test
+    void resetDisarmsAndZeroesTheSessionCounters() {
+        var rig = new AdaptiveRig();
+        rig.primeAndArm();
+        rig.outstanding = 0;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(), "armed: fast");
+        assertEquals(1, rig.s.getFastScans());
+
+        rig.s.reset(); // new session
+        assertEquals(0, rig.s.getFastScans(), "session counter zeroed");
+        assertFalse(rig.s.wasLastScanFast());
+        rig.outstanding = 0;
+        assertEquals(1, rig.ticksToFire(), "reset() keeps the primed immediate first scan...");
+        assertFalse(rig.s.wasLastScanFast(), "...which is periodic");
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "reset() disarmed: no fast fire until the manager arms a fresh declare");
+    }
+
+    @Test
+    void aFastFireRestartsTheFallbackWindow() {
+        var rig = new AdaptiveRig();
+        rig.primeAndArm();
+        rig.outstanding = 0;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(), "fast fire");
+        rig.s.noteDeclared(rig.q.count); // the fast walk re-declared the unsatisfied annulus
+        rig.outstanding = rig.q.count;   // and this time nothing gets answered
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "the fallback measures from the LAST fire: 20 ticks after the fast one, not 15"
+                        + " — 'more than 1 s since the last batch' is the fallback's contract");
+    }
+
+    @Test
+    void fastFiresSkipTheMissingVanillaProbe() {
+        // The probe is an O((2*vd+1)^2) hasChunk sweep feeding a diagnostic-only field —
+        // fast fires keep the last periodic value instead of 4x-ing it.
+        var rig = new AdaptiveRig();
+        assertEquals(1, rig.ticksToFire(), "the primed first fire lands on tick 1 (periodic)");
+        assertEquals(1, rig.missingVanillaCalls, "the periodic fire evaluates the probe");
+        rig.s.noteDeclared(rig.q.count);
+        rig.outstanding = 0;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire());
+        assertEquals(1, rig.missingVanillaCalls, "the fast fire kept the last value");
     }
 }

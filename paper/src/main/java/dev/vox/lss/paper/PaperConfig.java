@@ -1,5 +1,6 @@
 package dev.vox.lss.paper;
 
+import dev.vox.lss.common.LSSLogger;
 import dev.vox.lss.common.config.ServerConfigBase;
 
 import java.nio.file.Path;
@@ -11,6 +12,23 @@ import java.util.List;
  * Stored in plugins/LodServerSupport/lss-server-config.json.
  */
 public class PaperConfig extends ServerConfigBase {
+
+    {
+        // PAPER default override: the periodic resweep is Paper's stale bound for its
+        // documented unfired-event dirty gaps (console setblock, walk-in generation
+        // without ChunkPopulateEvent, plugin edits) — with 0 the "≈ save + one sweep"
+        // staleness guarantee simply doesn't run. 300 s ≈ the autosave cadence. Fabric
+        // keeps the shared 0: its content-hash save hook invalidates at runtime, and a
+        // periodic resweep there would only churn-drop rows on metadata re-saves.
+        lodStoreResweepSeconds = 300;
+        // The FOLIA override that used to live here is gone (2026-08-03): the shared default
+        // is now "off" on every platform, so forcing it off again for Folia was redundant —
+        // and the config save-back made it leaky anyway, since a Paper run persisted
+        // lodStore=full into the file and carrying that folder to Folia armed the store with
+        // no opt-in. With the shared default off, a carried-over file carries "off" too.
+        // validate() still WARNS when an explicit "full" arms the store on Folia, which is
+        // the case that actually deserves an operator's attention.
+    }
 
     // Bukkit events that mark a chunk dirty for LOD re-send. Broadened to better match the
     // Fabric chunk-save hook's coverage (decay, growth, ice/snow, fire, falling blocks).
@@ -46,6 +64,21 @@ public class PaperConfig extends ServerConfigBase {
     public void validate() {
         super.validate();
         if (updateEvents == null) updateEvents = List.of();
+        // The Folia default above is a DEFAULT, and JsonConfig saves every live field back
+        // on load — so any Paper run writes "lodStore": "full" into the file, and carrying
+        // that plugins folder to Folia arms the store there with no opt-in the admin would
+        // recognise as one. That is the population the guard exists to protect. It stays a
+        // default rather than becoming a gate (an admin who deliberately sets full on Folia
+        // should get it), but it must not be silent. (Round-3 review.)
+        if (FoliaSupport.IS_FOLIA
+                && dev.vox.lss.common.store.LodStoreMode.normalize(lodStore)
+                        != dev.vox.lss.common.store.LodStoreMode.OFF) {
+            LSSLogger.warn("lodStore=" + lodStore + " is set on FOLIA, where the LOD store is"
+                    + " NOT validated (single-player soaks only; concurrent multi-region"
+                    + " ingress is untested). This is usually a Paper config carried over —"
+                    + " Paper writes lodStore=full into the file on every run. Set"
+                    + " lodStore=off unless you intend to test it.");
+        }
     }
 
     public static PaperConfig load(Path dataFolder) {

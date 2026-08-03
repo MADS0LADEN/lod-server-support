@@ -109,17 +109,20 @@ class PluginYmlContractTest {
     }
 
     @Test
-    void foliaSupportedIsAbsentOnThe262Line() {
-        // Flipped again 2026-07-19 (was declared-true since 2026-07-02): no Folia build
-        // exists for MC 26.2, so the Folia code paths (regionized probing, hold-release,
-        // lifecycle mailbox — FoliaWiringContractTest still pins their wiring) have never
-        // run against a real 26.2 Folia. Declaring the flag would auto-load v0.7.0 jars the
-        // day Folia ships 26.2, with a known deferred Folia-only race outstanding
-        // (docs/planning/v0.7.1-candidates.md #1). Re-add `folia-supported: true` together
-        // with the SOAK_PLATFORM=folia validation once Folia publishes a 26.2 build.
-        assertFalse(yml.contains("folia-supported"),
-                "folia-supported must stay absent until Folia 26.2 exists and the Folia soak"
-                        + " passes — declaring it ships live-unvalidated Folia paths");
+    void foliaSupportedIsDeclaredNowThatFolia262Exists() {
+        // Third flip. Absent 2026-07-19..2026-08-01 because Folia had no MC 26.2 build at
+        // all, so declaring it would have auto-loaded release jars onto a platform that did
+        // not exist yet. Folia published 26.2-1 (channel BETA) on 2026-07-28, so the flag is
+        // back — putting this line on the same experimental footing as 1.21.8/1.21.11/26.1.x
+        // rather than ahead of them. FoliaWiringContractTest still pins the wiring
+        // (no legacy scheduler, lifecycle through the mailbox).
+        assertTrue(yml.contains("folia-supported"),
+                "folia-supported must be declared now that Folia ships a 26.2 build — the"
+                        + " single jar serves Paper and Folia");
+        assertTrue(yml.getBoolean("folia-supported"),
+                "...and it must be true; a false/absent flag makes Folia refuse the jar");
+        assertTrue(rawText.contains("folia-supported: true"),
+                "release_check.py greps the RAW line, so the source must carry that exact form");
     }
 
     @Test

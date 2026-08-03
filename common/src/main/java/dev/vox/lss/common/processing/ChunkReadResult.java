@@ -26,7 +26,48 @@ public record ChunkReadResult(UUID playerUuid, int chunkX, int chunkZ,
                               long columnTimestamp,
                               boolean notFound, boolean saturated,
                               boolean authoritativeMiss,
-                              long submissionOrder) {
+                              boolean fromStore,
+                              long submissionOrder,
+                              long srcStampSeconds,
+                              byte[] frameBytes, int frameRawSize) {
+
+    /**
+     * Pre-store signature (fromStore = false, srcStampSeconds = 0) — the shape every
+     * test rig and non-data outcome uses. {@code fromStore = true} marks a LOD-store
+     * hit: its {@code columnTimestamp} is the STORED stamp (delivery honesty — never
+     * freshly fabricated), delivery attributes it {@code COLUMN_SOURCE_STORE}, and the
+     * delivery path must NOT re-deposit it. {@code srcStampSeconds} is the epoch second
+     * captured at READ START — the store deposit's freshness stamp (4-agent round
+     * R1-M2: the sweep's {@code header >= src_stamp} argument needs a stamp no later
+     * than byte acquisition; a save landing mid-read or in the read→deposit gap must
+     * land at-or-after it). 0 = unknown (the store stamps at deposit-call, the
+     * pre-review behavior).
+     *
+     * <p>{@code frameBytes}/{@code frameRawSize} (protocol-19 frame serving, plan §3):
+     * a store-frame hit carries the validated zstd frame INSTEAD of raw bytes —
+     * exactly one of {@code sectionBytes}/{@code frameBytes} is set on a data result;
+     * {@code frameRawSize} is the store row's validated usize.
+     */
+    public ChunkReadResult(UUID playerUuid, int chunkX, int chunkZ,
+                           byte[] sectionBytes, String dimension, int estimatedBytes,
+                           long columnTimestamp, boolean notFound, boolean saturated,
+                           boolean authoritativeMiss, long submissionOrder) {
+        this(playerUuid, chunkX, chunkZ, sectionBytes, dimension, estimatedBytes,
+                columnTimestamp, notFound, saturated, authoritativeMiss, false,
+                submissionOrder, 0L, null, 0);
+    }
+
+    /** Pre-frame full signature (frameBytes = null) — the store-era rigs and every
+     *  raw-bytes production path. */
+    public ChunkReadResult(UUID playerUuid, int chunkX, int chunkZ,
+                           byte[] sectionBytes, String dimension, int estimatedBytes,
+                           long columnTimestamp, boolean notFound, boolean saturated,
+                           boolean authoritativeMiss, boolean fromStore,
+                           long submissionOrder, long srcStampSeconds) {
+        this(playerUuid, chunkX, chunkZ, sectionBytes, dimension, estimatedBytes,
+                columnTimestamp, notFound, saturated, authoritativeMiss, fromStore,
+                submissionOrder, srcStampSeconds, null, 0);
+    }
 
     /** An authoritative miss: storage positively answered "no such chunk". */
     public static ChunkReadResult notFoundAuthoritative(UUID playerUuid, int chunkX, int chunkZ,

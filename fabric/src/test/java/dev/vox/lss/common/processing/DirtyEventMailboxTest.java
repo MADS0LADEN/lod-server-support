@@ -70,7 +70,7 @@ class DirtyEventMailboxTest {
         @Override
         protected boolean buildAndEnqueueColumnPayload(TestState state, int cx, int cz, String dimension,
                                                      long columnTimestamp, long submissionOrder,
-                                                     byte[] sectionBytes, int estimatedBytes, byte source) {
+                                                     ColumnBytes bytes, int estimatedBytes, byte source) {
             this.deliveredPositions.add(PositionUtil.packPosition(cx, cz));
             this.deliveryStarted.countDown();
             try {
