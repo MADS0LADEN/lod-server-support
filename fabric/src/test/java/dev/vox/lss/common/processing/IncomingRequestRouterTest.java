@@ -167,11 +167,21 @@ class IncomingRequestRouterTest {
         return list.stream().filter(d -> d.type() == type && d.packed() == packedPos).count();
     }
 
+    /** Deadline for the two polling helpers below. Raised 5 s -> 30 s after
+     *  loadedProbeBeatsAFreshMissMemo timed out once on a GitHub runner (2026-08-03) on code
+     *  that passed the same commit's PR run, the release run, and 5/5 locally — the work
+     *  these wait on takes milliseconds, so the old value was measuring runner contention,
+     *  not the pipeline. A generous deadline costs nothing on the passing path: every wait
+     *  exits as soon as its condition holds, and only a genuinely stuck pipeline pays it.
+     *  Note build.yml retries the GAMETEST tiers once but not Tier 1, so a timing flake here
+     *  fails the whole run with no second attempt. */
+    private static final long POLL_DEADLINE_NANOS = 30_000_000_000L;
+
     /** Accumulate drained batch responses until {@code done} or a deadline passes. */
     private static List<Delivered> drainUntil(TestProcessor proc, Predicate<List<Delivered>> done)
             throws InterruptedException {
         var delivered = new ArrayList<Delivered>();
-        long deadline = System.nanoTime() + 5_000_000_000L;
+        long deadline = System.nanoTime() + POLL_DEADLINE_NANOS;
         while (!done.test(delivered) && System.nanoTime() < deadline) {
             proc.drainSendActions((state, types, positions, count) -> {
                 for (int i = 0; i < count; i++) delivered.add(new Delivered(state, types[i], positions[i]));
@@ -183,7 +193,7 @@ class IncomingRequestRouterTest {
 
     private static void waitFor(java.util.function.BooleanSupplier condition, String what)
             throws InterruptedException {
-        long deadline = System.nanoTime() + 5_000_000_000L;
+        long deadline = System.nanoTime() + POLL_DEADLINE_NANOS;
         while (!condition.getAsBoolean()) {
             if (System.nanoTime() > deadline) fail("timed out waiting for: " + what);
             Thread.sleep(10);
