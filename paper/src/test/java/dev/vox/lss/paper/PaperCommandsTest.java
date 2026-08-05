@@ -162,6 +162,35 @@ class PaperCommandsTest {
                 "null generation service renders as 'disabled': " + messages);
         assertFalse(messages.contains("Generation: null"),
                 "disabled generation must not format the null diagnostics string");
+        assertTrue(messages.stream().noneMatch(m -> m.startsWith("V18Compat")),
+                "an untouched v18 rung must render no line: " + messages);
+    }
+
+    @Test
+    void diagRendersTheV18CompatLineThroughTheCommandCallSite() {
+        // The tracker -> withV18Line -> output plumbing at the COMMAND call site
+        // (v18-compat design §2.7): the formatter-level slot test cannot catch a deleted
+        // .withV18Line(...) chain link in PaperCommands, this can.
+        var service = mock(PaperRequestProcessingService.class);
+        var offThread = mock(PaperOffThreadProcessor.class);
+        when(offThread.getDiagnostics()).thenReturn(new ProcessingDiagnostics());
+        doReturn(offThread).when(service).getOffThreadProcessor();
+        var diskReader = mock(PaperChunkDiskReader.class);
+        when(diskReader.getDiag()).thenReturn(new DiskReaderDiagnostics());
+        when(diskReader.getDiagnostics()).thenReturn("idle");
+        when(service.getDiskReader()).thenReturn(diskReader);
+        when(service.getBandwidthLimiter()).thenReturn(new SharedBandwidthLimiter(1024));
+        when(service.getV16CompatManager()).thenReturn(new V16CompatManager());
+        var tracker = new dev.vox.lss.common.compat.V18CompatTracker();
+        tracker.onHandshake(java.util.UUID.randomUUID());
+        when(service.getV18CompatTracker()).thenReturn(tracker);
+        when(service.getTickDiagnostics()).thenReturn("tick");
+        when(service.getTickDiag()).thenReturn(new dev.vox.lss.common.processing.TickDiagnostics());
+        when(service.getPlayers()).thenReturn(Map.of());
+
+        assertTrue(run(commands(service, new PaperConfig()), "diag"));
+        assertTrue(messages.contains("V18Compat: clients=1, started=1"),
+                "a live v18 session must render its diag line through the command: " + messages);
     }
 
     @Test

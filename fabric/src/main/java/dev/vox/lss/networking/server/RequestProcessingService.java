@@ -632,10 +632,14 @@ public class RequestProcessingService {
                     || !isLegacyConvertible(col)) {
                 if (!this.v18UnconvertibleWarned) {
                     this.v18UnconvertibleWarned = true;
+                    // Name the actual failure shape (execution-review finding 5): a
+                    // foreign payload class and a codec-1 column are different bugs.
+                    String why = payload instanceof
+                            dev.vox.lss.networking.payloads.VoxelColumnS2CPayload c
+                            ? "codec-" + c.codec() + " column — a v18 frame has nowhere to carry a codec"
+                            : "non-column payload " + payload.getClass().getName();
                     LSSLogger.warn("v18-compat: dropping unconvertible column-queue payload for "
-                            + state.getPlayerName()
-                            + " — a v18 frame has nowhere to carry a codec"
-                            + " (further drops are silent)");
+                            + state.getPlayerName() + " (" + why + "; further drops are silent)");
                 }
                 return;
             }

@@ -157,7 +157,11 @@ SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBac
                                      # since it was introduced, so no scenario could
                                      # ever pin it — the same R4 hole as lodStoreBackfill
                                      # (v0.9.0 review).
-                                     "enableV16Compat"})
+                                     "enableV16Compat",
+                                     # v18 compat rung kill switch (v0.9.1) — listed at
+                                     # introduction so an A/B scenario CAN pin it, unlike
+                                     # the two R4 holes above.
+                                     "enableV18Compat"})
 SERVER_CONFIG_INT_KEYS = frozenset({
     "lodDistanceChunks", "bytesPerSecondLimitPerPlayer", "diskReaderThreads",
     "sendQueueLimitPerPlayer", "bytesPerSecondLimitGlobal",

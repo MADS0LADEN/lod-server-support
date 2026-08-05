@@ -777,9 +777,13 @@ public class ServiceLifecycleGameTests {
         var service = new RequestProcessingService(server);
         var replies = new ArrayList<SessionConfigS2CPayload>();
         try {
+            // caps=3 (the HOSTILE shape — a real v0.8.x client hardcodes caps=1): with the
+            // zstd bit set, the forced-RAW assertion below actually exercises the v18 term
+            // of the derivation instead of passing vacuously off the missing bit.
             LSSServerNetworking.handleHandshake(
                     new HandshakeC2SPayload(LSSConstants.V18_COMPAT_PROTOCOL_VERSION,
-                            LSSConstants.CAPABILITY_VOXEL_COLUMNS),
+                            LSSConstants.CAPABILITY_VOXEL_COLUMNS
+                                    | LSSConstants.CAPABILITY_ZSTD_COLUMNS),
                     mock, service, replies::add);
             helper.assertTrue(replies.size() == 1,
                     "a v18 handshake on default config must be answered, got " + replies.size());
@@ -795,7 +799,8 @@ public class ServiceLifecycleGameTests {
             helper.assertTrue(!service.getV16CompatManager().isV16(uuid),
                     "a v18 session is NOT a v16 compat session");
             helper.assertTrue(!state.wantsCompressedColumns(),
-                    "a v18 session must be forced codec-RAW");
+                    "a v18 session must be forced codec-RAW even when the handshake "
+                            + "(hostilely) declares the zstd capability bit");
         } finally {
             service.shutdown();
             playerList.remove(mock);

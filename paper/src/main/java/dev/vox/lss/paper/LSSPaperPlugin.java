@@ -301,11 +301,7 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                                 lodDistanceChunks, syncCap, genCap, generationEnabled);
                     } else {
                         PaperPayloadHandler.sendSessionConfig(bukkitPlayer,
-                                // v18 compat: the CURRENT 4-field layout, echoing 18
-                                // (v18-compat design §2.4).
-                                dialect == HandshakeGate.WireDialect.V18
-                                        ? LSSConstants.V18_COMPAT_PROTOCOL_VERSION
-                                        : LSSConstants.PROTOCOL_VERSION,
+                                sessionConfigVersionFor(dialect),
                                 enabled, lodDistanceChunks, generationEnabled);
                     }
                 },
@@ -329,22 +325,48 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                     // dialect marks its own identity and sheds the other's (the v18
                     // membership especially must NEVER be marked on the region thread —
                     // v18-compat design §2.3, review F1).
-                    Runnable dialectFlip = switch (dialect) {
-                        case V16 -> () -> {
-                            service.getV16CompatManager().onHandshake(nmsPlayer.getUUID());
-                            service.getV18CompatTracker().onNonV18Handshake(nmsPlayer.getUUID());
-                        };
-                        case V18 -> () -> {
-                            service.getV18CompatTracker().onHandshake(nmsPlayer.getUUID());
-                            service.getV16CompatManager().onNonV16Handshake(nmsPlayer.getUUID());
-                        };
-                        case CURRENT -> () -> {
-                            service.getV16CompatManager().onNonV16Handshake(nmsPlayer.getUUID());
-                            service.getV18CompatTracker().onNonV18Handshake(nmsPlayer.getUUID());
-                        };
-                    };
-                    service.enqueueRegister(nmsPlayer, capabilities, dialectFlip, replyAfterRegister);
+                    service.enqueueRegister(nmsPlayer, capabilities,
+                            dialectFlipFor(dialect, service.getV16CompatManager(),
+                                    service.getV18CompatTracker(), nmsPlayer.getUUID()),
+                            replyAfterRegister);
                 });
+    }
+
+    /** The SessionConfig version echo per dialect (v18-compat design §2.4): the V18
+     *  dialect echoes 18 on the CURRENT 4-field layout — the v0.8.x client's gate
+     *  hard-requires its own version and self-disables on 19. Extracted static so the
+     *  literal is pinnable (execution-review finding 1: the production lambda sat one
+     *  seam above every test, and a silent V18->PROTOCOL_VERSION regression compiled
+     *  clean). V16 never reaches this — it takes the 6-field legacy sender. */
+    static int sessionConfigVersionFor(HandshakeGate.WireDialect dialect) {
+        return dialect == HandshakeGate.WireDialect.V18
+                ? LSSConstants.V18_COMPAT_PROTOCOL_VERSION
+                : LSSConstants.PROTOCOL_VERSION;
+    }
+
+    /** The pump-deferred dialect flip per dialect: mark own identity, shed the other's
+     *  (CURRENT sheds both). Extracted static so the switch BODY is pinnable against
+     *  real manager/tracker instances (execution-review finding 1: dropping the V18
+     *  case's mark — which mis-derives wantsCompressedColumns and leaks the codec byte
+     *  to every v0.8.x client — passed the whole suite). */
+    static Runnable dialectFlipFor(HandshakeGate.WireDialect dialect,
+                                   dev.vox.lss.common.compat.V16CompatManager v16,
+                                   dev.vox.lss.common.compat.V18CompatTracker v18,
+                                   java.util.UUID uuid) {
+        return switch (dialect) {
+            case V16 -> () -> {
+                v16.onHandshake(uuid);
+                v18.onNonV18Handshake(uuid);
+            };
+            case V18 -> () -> {
+                v18.onHandshake(uuid);
+                v16.onNonV16Handshake(uuid);
+            };
+            case CURRENT -> () -> {
+                v16.onNonV16Handshake(uuid);
+                v18.onNonV18Handshake(uuid);
+            };
+        };
     }
 
     /**

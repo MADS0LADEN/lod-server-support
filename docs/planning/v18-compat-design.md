@@ -91,10 +91,12 @@ for diagnostics; no per-session state:
   Register's mark has applied, which would leak membership forever (an unbounded set
   under a forged-UUID join/quit flood — review F2; the v16 manager has the same
   inherited hole with heavier state, out of scope here). The mailbox Remove is
-  quit-originated only — the dimension-change cycle calls `removePlayer` directly on
-  the pump — so this cannot break identity-survives-dim-change. (Verify the
-  enqueueRemove caller set during implementation; if anything else enqueues removes,
-  fall back to document-only.)
+  quit-originated only (enqueueRemove's single caller is the PlayerQuit handler —
+  verified) — the dimension-change cycle calls `removePlayer` directly on the pump — so
+  this cannot break identity-survives-dim-change. **Execution review added the third
+  drop site: the departed-player sweep** (`processPlayerLifecycle`'s toRemove — an
+  entity removed with no PlayerList entry, i.e. a player whose quit event never fired)
+  also drops membership; it is semantically a disconnect.
 - Identity SURVIVES `service.removePlayer` (the dimension-change remove+register
   cycle), mirroring capabilities and the v16 identity. Pinned by driving the production
   remove+register cycle through the Paper service twin and asserting the re-derived
@@ -261,10 +263,13 @@ Tier 1 (both platforms where twins exist):
    dimension-change cycle re-derives false through the surviving membership (Paper
    service twin via the injection seams; the Fabric derivation is textually identical
    per the established twin convention).
-6. Paper glue (`LSSPaperPluginGlueTest`) — V18 dialect: reply is the 4-field encode with
-   version 18, deferred through `enqueueRegister`; dialect flip (mark+shed) ordering
-   before registerPlayer; the production `handleHandshake` path drives the 6-arg
-   evaluate (review F5).
+6. Paper glue (`LSSPaperPluginGlueTest`) — V18 dialect: deferred reply, dialect
+   recorded, kill switch; the production `handleHandshake` path drives the 6-arg
+   evaluate (review F5). The execution review found the two production LAMBDA bodies
+   sat one seam above these tests (a dropped V18 mark or a version-19 echo compiled
+   clean), so both were extracted static and pinned directly:
+   `sessionConfigVersionFor` (echoes 18 for V18 only) and `dialectFlipFor` (the
+   mark-own/shed-other switch, driven against real manager+tracker instances).
 7. Egress guards — Paper: v18 branch splices codec-RAW and drops codec-1 with warn-once
    (mirror the v16 pins); the quit-race mailbox-Remove membership drop (review F2).
    Fabric: `isLegacyConvertible` predicate pin moves with the rename.

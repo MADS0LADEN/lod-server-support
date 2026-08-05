@@ -271,6 +271,48 @@ class LSSPaperPluginGlueTest {
         assertEquals(List.of(), registrar.caps);
     }
 
+    // ---- the production sender/flip bodies (execution-review finding 1: these sat one
+    // seam ABOVE the recording seams, so a silent regression in either compiled clean) ----
+
+    @Test
+    void sessionConfigVersionEchoes18ForTheV18DialectOnly() {
+        // A V18 session answered with version 19 self-disables the v0.8.x client
+        // ("incompatible protocol version"); CURRENT must keep echoing PROTOCOL_VERSION.
+        assertEquals(LSSConstants.V18_COMPAT_PROTOCOL_VERSION,
+                LSSPaperPlugin.sessionConfigVersionFor(HandshakeGate.WireDialect.V18));
+        assertEquals(LSSConstants.PROTOCOL_VERSION,
+                LSSPaperPlugin.sessionConfigVersionFor(HandshakeGate.WireDialect.CURRENT));
+        assertEquals(LSSConstants.PROTOCOL_VERSION,
+                LSSPaperPlugin.sessionConfigVersionFor(HandshakeGate.WireDialect.V16),
+                "V16 never reaches the 4-field sender, but a defined answer keeps the "
+                        + "helper total");
+    }
+
+    @Test
+    void dialectFlipMarksOwnIdentityAndShedsTheOther() {
+        // The switch body the pump runs before registerPlayer: V18 must MARK v18
+        // membership (dropping that mark mis-derives wantsCompressedColumns and leaks
+        // the codec byte to every v0.8.x client) and shed v16; V16 the mirror; CURRENT
+        // sheds both. Driven against real manager/tracker instances.
+        var uuid = java.util.UUID.randomUUID();
+
+        var v16 = new dev.vox.lss.common.compat.V16CompatManager();
+        var v18 = new dev.vox.lss.common.compat.V18CompatTracker();
+        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.V18, v16, v18, uuid).run();
+        assertTrue(v18.isV18(uuid), "the V18 flip must mark v18 membership");
+        assertFalse(v16.isV16(uuid));
+
+        // V16 flip on the same player (a cross-dialect re-handshake): marks v16, sheds v18.
+        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.V16, v16, v18, uuid).run();
+        assertTrue(v16.isV16(uuid), "the V16 flip must mark the v16 session");
+        assertFalse(v18.isV18(uuid), "the V16 flip must shed stale v18 membership");
+
+        // CURRENT flip sheds both.
+        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.CURRENT, v16, v18, uuid).run();
+        assertFalse(v16.isV16(uuid), "the CURRENT flip must shed the v16 session");
+        assertFalse(v18.isV18(uuid), "the CURRENT flip must shed v18 membership");
+    }
+
     @Test
     void disabledConfigOrAbsentServiceAdvertisesDisabledWithoutRegistering() {
         var sender = new RecordingSender();

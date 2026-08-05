@@ -682,14 +682,18 @@ public class PaperRequestProcessingService {
      * client keeps declaring its want-set at 1 Hz forever — silently dropped here until
      * the player manually rejoined.
      *
-     * <p>The prompt is the V16-DIALECT 6-field SessionConfig, deliberately: a modern
-     * client's downgrade guard treats an unexpected v16 config on an established v18
-     * session as a raced discovery and RE-ANNOUNCES a v18 handshake — which re-registers
-     * it through the normal deferred path. That is the heal, and it ships with zero
-     * client-side changes. A genuine v16 client (whose post-reload batches also land here
-     * — the fresh compat manager has no session for it) parses the 6-field shape
-     * harmlessly and stays broken-until-rejoin, exactly today's behavior; the v18 4-field
-     * shape would buffer-underflow its decoder and hard-kick it.
+     * <p>The prompt is the V16-DIALECT 6-field SessionConfig, deliberately: a
+     * current-protocol client's downgrade guard treats an unexpected v16 config on an
+     * established session as a raced discovery and RE-ANNOUNCES its own version — which
+     * re-registers it through the normal deferred path. That is the heal, and it ships
+     * with zero client-side changes. It covers v18-compat sessions too: the v0.7.x–v0.8.x
+     * client carries the same downgrade guard, its re-announce (protocol 18) lands on the
+     * v18 rung, and the in-order echo-18 config disarms its sourceless-decode flag before
+     * any post-re-registration column (v18-compat design §4). A genuine v16 client (whose
+     * post-reload batches also land here — the fresh compat manager has no session for
+     * it) parses the 6-field shape harmlessly and stays broken-until-rejoin, exactly
+     * today's behavior; the current 4-field shape would buffer-underflow its decoder and
+     * hard-kick it.
      *
      * <p>Rate-limited per UUID (60 s), and removePlayer STAMPS the same map, so the Folia
      * dimension-change remove→register window sits inside a post-removal grace and cannot
@@ -801,8 +805,15 @@ public class PaperRequestProcessingService {
         var lifecycle = processPlayerLifecycle(generationReady);
 
         if (lifecycle.toRemove != null) {
-            for (UUID uuid : lifecycle.toRemove)
+            for (UUID uuid : lifecycle.toRemove) {
                 this.removePlayer(uuid);
+                // The sweep IS a disconnect (entity removed, no PlayerList entry — the
+                // quit event never fired for this player), so drop v18 membership like
+                // the quit hook would; without this the entry and the diag clients=
+                // count leak until a same-UUID rejoin (execution-review finding 2 — the
+                // v16 manager's identical inherited shape stays as-is, out of scope).
+                this.v18Compat.onDisconnect(uuid);
+            }
         }
 
         if (this.regionizedProbing && !this.regionProbeResults.isEmpty()) {
