@@ -202,6 +202,14 @@ public class RequestProcessingService {
             LSSLogger.info("LSS is disabled (enabled=false) — the LOD store and its "
                     + "backfill stay off; no store is created and no regions are walked");
         }
+        if (storeMode == dev.vox.lss.common.store.LodStoreMode.OFF) {
+            // Never on Folia — this is the Fabric service. Null when enabled=false.
+            var advice = dev.vox.lss.common.store.LodStores
+                    .offRecommendationOrNull(config.enabled, false);
+            if (advice != null) {
+                LSSLogger.info(advice);
+            }
+        }
         if (storeMode != dev.vox.lss.common.store.LodStoreMode.OFF) {
             var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
             var regionDirs = new HashMap<String, java.nio.file.Path>();

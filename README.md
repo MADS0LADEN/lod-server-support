@@ -40,7 +40,7 @@ Voxy on its own can only build LOD data from chunks the client has already loade
 
 ## Commands
 
-**Server** — `/lsslod stats` for per-player transfer statistics, `/lsslod diag` for detailed diagnostics. Requires operator status (Fabric: gamemaster level; Paper: the `lss.admin` permission, default op).
+**Server** — `/lsslod stats` for per-player transfer statistics, `/lsslod diag` for detailed diagnostics. With the LOD store: `/lsslod store status` (state, hit/miss counters, size), `/lsslod store invalidate all` (drop every stored column — they re-warm from normal serves), and on Fabric `/lsslod store backfill start|stop|status` to control the background pre-warm walk. Requires operator status (Fabric: gamemaster level; Paper: the `lss.admin` permission, default op).
 
 **Client** (Fabric only) — `/lss clearcache` re-requests every chunk, `/lss diag` shows connection and throughput, `/lss trace` toggles a debug log under `logs/`.
 
@@ -52,8 +52,8 @@ Config is generated on first run at the paths in the install table above. The ge
 |---------|---------|-------------|
 | `enabled` | `true` | Enable LOD distribution |
 | `lodDistanceChunks` | `256` | Max LOD distance in chunks |
-| `bytesPerSecondLimitPerPlayer` | `26214400` | Per-player bandwidth cap (25 MiB/s), counted **before** compression |
-| `bytesPerSecondLimitGlobal` | `268435456` | Total bandwidth cap across all players (256 MiB/s), counted **before** compression |
+| `bytesPerSecondLimitPerPlayer` | `15728640` | Per-player bandwidth cap (15 MiB/s), counted **before** compression |
+| `bytesPerSecondLimitGlobal` | `62914560` | Total bandwidth cap across all players (60 MiB/s), counted **before** compression |
 | `enableChunkGeneration` | `true` | Generate missing chunks on demand, so players see terrain nobody has visited |
 | `generationConcurrencyLimitGlobal` | `32` | Max chunks generating server-wide at once |
 | `generationConcurrencyLimitPerPlayer` | `16` | Max concurrently generating chunks per player |
@@ -63,6 +63,7 @@ Config is generated on first run at the paths in the install table above. The ge
 | `useCompressedColumns` | `true` | Send LOD columns pre-compressed, which cuts CPU on both server and client. Clients that do not support it are served the old format automatically; `false` disables it entirely as a rollback |
 | `useBackgroundReadPriority` | `true` | LOD disk reads yield to normal chunk loading, so streaming distant terrain doesn't delay the chunks players are actively walking into |
 | `enableV16Compat` | `true` | Serve legacy v0.4.x–v0.6.x clients through a built-in translation layer. `false` requires every client to match the server's protocol |
+| `enableV18Compat` | `true` | Serve v0.7.x–v0.8.x clients natively — a full session, minus only the column compression their client predates. `false` drops them to the `enableV16Compat` fallback |
 | `xrayObfuscation` | `"auto"` | Anti-xray masking for LOD data. `"auto"` mirrors your anti-xray engine's own hidden-block list and height cutoff whenever one is detected (Paper's built-in, per world; the DrexHD AntiXray mod on Fabric). `"on"` forces masking, `"off"` disables it — LOD data then carries real ore locations even on anti-xray servers |
 | `xrayHiddenBlocks` / `xrayMaxBlockHeight` | ore list / `64` | Fallback list and Y cutoff, used only when no engine settings can be adopted |
 

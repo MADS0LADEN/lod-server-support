@@ -105,10 +105,10 @@ class PaperConfigLoadTest {
         // Exact values double as Fabric/Paper default-parity pins (see ServerConfigBase).
         assertEquals(DEFAULT_EVENTS, c.updateEvents);
         assertTrue(c.enabled);
-        assertEquals(26_214_400, c.bytesPerSecondLimitPerPlayer);
+        assertEquals(15_728_640, c.bytesPerSecondLimitPerPlayer);
         assertEquals(0, c.diskReaderThreads);           // 0 = AUTO (derived per read path)
         assertEquals(1024, c.sendQueueLimitPerPlayer);
-        assertEquals(268_435_456, c.bytesPerSecondLimitGlobal);
+        assertEquals(62_914_560, c.bytesPerSecondLimitGlobal);
         assertTrue(c.enableChunkGeneration);
         assertEquals(32, c.generationConcurrencyLimitGlobal);
         assertEquals(60, c.generationTimeoutSeconds);
