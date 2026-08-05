@@ -399,6 +399,15 @@ public class PaperRequestProcessingService {
         var storeMode = config.enabled
                 ? dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore)
                 : dev.vox.lss.common.store.LodStoreMode.OFF;
+        if (storeMode == dev.vox.lss.common.store.LodStoreMode.OFF) {
+            // Suppressed on Folia: the store is unvalidated there (validate() WARNS on
+            // an explicit full) — recommending what we warn about is incoherent.
+            var advice = dev.vox.lss.common.store.LodStores
+                    .offRecommendationOrNull(config.enabled, FoliaSupport.IS_FOLIA);
+            if (advice != null) {
+                LSSLogger.info(advice);
+            }
+        }
         if (storeMode != dev.vox.lss.common.store.LodStoreMode.OFF) {
             var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
             var regionDirs = new java.util.HashMap<String, java.nio.file.Path>();

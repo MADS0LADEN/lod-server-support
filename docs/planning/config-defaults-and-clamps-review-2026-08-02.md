@@ -539,3 +539,12 @@ that run.
   elytra wall reproduced at, rather than above it**: traffic can reach the rate that once
   hurt but cannot exceed it, and the mechanism that actually caused the wall (the scan-cadence
   gate) is fixed. The §11.7 cap sweep remains the falsifiable check.
+- **2026-08-05 amendment (v0.9.1, user decisions): per-player 25 -> 15 MiB, global
+  256 -> 60 MiB.** The per-player ceiling now sits comfortably BELOW the elytra-wall
+  incident rate instead of AT it (below even §8.1's conservative 20); the global ceiling
+  reverses most of §3.2's raise and binds at FOUR concurrent full-rate LOD players — a
+  deliberate total-egress bound for typical hosts, with "raise the global first" as the
+  operator guidance on bigger fleets. Every soak scenario except bandwidth-throttle and
+  dirty-during-backfill rides these defaults: if a scenario reds on convergence timing
+  after this change, the cut is the first suspect (re-baseline, don't chase phantoms).
+  The §11.7 cap sweep remains the falsifiable check for both.

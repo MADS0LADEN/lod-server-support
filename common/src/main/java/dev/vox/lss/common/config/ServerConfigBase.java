@@ -21,24 +21,25 @@ public abstract class ServerConfigBase extends JsonConfig {
      *  footprint. Admins who want the larger disc raise this one key and the cache follows. */
     public int lodDistanceChunks = 256;
     /**
-     * Per-player bandwidth cap. Went 20 -> 50 -> 25 MiB on 2026-08-02 (user decisions).
+     * Per-player bandwidth cap. Went 20 -> 50 -> 25 MiB on 2026-08-02, then 25 -> 15 MiB
+     * on 2026-08-05 (all user decisions; the last for v0.9.1).
      *
      * <p><b>This charges RAW bytes, not wire bytes</b> ({@code estimatedBytes} = raw sections +
      * envelope; wire compression is deliberately invisible to it), because what it really
      * bounds is CLIENT DECODE AND INGEST WORK — and the elytra chunk-wall investigation
      * confirmed the client, not the link, is the binding constraint. So the ~6.25:1 the
      * compressed-columns work bought did NOT loosen the thing this cap exists to limit: at
-     * 25 MiB counted the wire cost is roughly 4 MB/s, but the client still decodes 25 MiB/s.
+     * 15 MiB counted the wire cost is roughly 2.4 MB/s, but the client still decodes 15 MiB/s.
      *
      * <p>Context for anyone retuning it: the elytra chunk wall reproduced at ~25 MB/s
-     * counted, so 25 MiB places the CEILING at the historic incident rate rather than above
-     * it — traffic can reach the rate that once hurt but cannot exceed it, and the thing that
-     * actually caused the wall (the client's scan-cadence gate) is fixed. The #71 ingest taper
-     * and the decode-queue halt sit underneath as client-side guards. The falsifiable check is
+     * counted; 15 MiB places the CEILING comfortably BELOW the historic incident rate (the
+     * 2026-08-02 setting placed it AT that rate). The thing that actually caused the wall
+     * (the client's scan-cadence gate) is fixed, and the #71 ingest taper and the
+     * decode-queue halt sit underneath as client-side guards. The falsifiable check is
      * the cap sweep in the investigation's section 11.7 — sweep upward until {@code runway}
      * collapses in the client trace.
      */
-    public int bytesPerSecondLimitPerPlayer = 26_214_400;
+    public int bytesPerSecondLimitPerPlayer = 15_728_640;
     /**
      * LSS disk-read pool size. <b>0 = AUTO (the default)</b>, derived from the resolved read
      * path — see {@link #effectiveDiskReaderThreads(boolean)}.
@@ -89,11 +90,13 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public int outboundBufferCeilingKB = 0;
     /** Fleet-wide bandwidth ceiling. Raised 100 -> 256 MiB 2026-08-02 (config review
-     *  section 3.2): at the 20 MiB per-player default the old value started binding at FIVE
-     *  concurrent LOD players, where it manifests as everyone slowing together with no local
-     *  explanation. 256 MiB moves that crossover to ~13. It is a safety valve, not a
-     *  throughput setting. */
-    public int bytesPerSecondLimitGlobal = 268_435_456;
+     *  section 3.2 — at 20 MiB/player the old value bound at FIVE concurrent LOD players),
+     *  then lowered 256 -> 60 MiB on 2026-08-05 (user decision, v0.9.1, alongside the
+     *  15 MiB per-player cut): a deliberate total-egress bound sized for typical hosts. At
+     *  the 15 MiB per-player default it binds at FOUR concurrent full-rate LOD players and
+     *  manifests as everyone slowing together — operators with more simultaneous LOD
+     *  traffic should raise this first. */
+    public int bytesPerSecondLimitGlobal = 62_914_560;
     public boolean enableChunkGeneration = true;
     public int generationConcurrencyLimitGlobal = 32;
     public int generationTimeoutSeconds = 60;

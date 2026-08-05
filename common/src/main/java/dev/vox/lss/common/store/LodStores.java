@@ -62,4 +62,20 @@ public final class LodStores {
                 + " always safe. Set lodStore=off to disable, lodStoreMaxMB to bound it.");
         return sqlite;
     }
+
+    /**
+     * One-line startup recommendation, emitted by both platforms when the store is OFF and
+     * LSS itself is enabled. The store went opt-in on 2026-08-03 (an upgrade must never
+     * silently double a world folder), which makes this line — not the default — how the
+     * feature reaches admins. Returns the message rather than logging so the decision is
+     * pinnable; callers log INFO. Null when LSS is disabled (nothing to recommend into)
+     * and on Folia — the store is unvalidated there and {@code PaperConfig.validate()}
+     * WARNS on an explicit {@code full}; recommending what we warn about is incoherent.
+     */
+    public static String offRecommendationOrNull(boolean lssEnabled, boolean isFolia) {
+        if (!lssEnabled || isFolia) return null;
+        return "LOD store is off. Recommended: set \"lodStore\": \"full\" in"
+                + " lss-server-config.json for much faster LOD serving; the tradeoff is it"
+                + " roughly doubles the size of your world directory.";
+    }
 }
