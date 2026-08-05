@@ -313,7 +313,8 @@ class WireParityTest {
     }
 
     @Test
-    void v18SessionConfigEncodeIsByteIdenticalWithTheLegacyFieldsDormant() {
+    void currentSessionConfigEncodeIsByteIdenticalWithTheLegacyFieldsDormant() {
+        // (Renamed from v18SessionConfig... — "v18" was the CURRENT dialect's old name.)
         // Regression pin: the compat fields must not perturb the current 4-field frame.
         byte[] expected = ref(b -> {
             b.writeVarInt(LSSConstants.PROTOCOL_VERSION);
@@ -368,6 +369,95 @@ class WireParityTest {
         var p = new VoxelColumnS2CPayload(0, 0, dim, 42L,
                 LSSConstants.COLUMN_SOURCE_IN_MEMORY, new byte[0]);
         assertArrayEquals(expected, encode(VoxelColumnS2CPayload.CODEC, p.asV16()));
+    }
+
+    // ---- v18 compat legacy shapes (docs/planning/v18-compat-design.md §2.6) ----
+    // Reference ops mirror the v0.8.2 decoder VERBATIM (verified against the tag): the
+    // protocol-18 column frame is the CURRENT layout minus the codec byte — readInt,
+    // readInt, readUtf, readLong, readByte(source), readByteArray. The Paper twin
+    // asserts rewriteColumnToV18 against these IDENTICAL ops.
+
+    @Test
+    void sessionConfigEchoing18IsTheCurrentFourFieldLayout() {
+        // The v18 reply is NOT a new shape — the same 4-field encode with the version
+        // value 18 (the v0.8.x gate hard-requires its own version; the encoder must not
+        // branch on the value).
+        byte[] expected = ref(b -> {
+            b.writeVarInt(LSSConstants.V18_COMPAT_PROTOCOL_VERSION);
+            b.writeBoolean(true);
+            b.writeVarInt(256);
+            b.writeBoolean(true);
+        });
+        assertArrayEquals(expected, encode(SessionConfigS2CPayload.CODEC,
+                new SessionConfigS2CPayload(LSSConstants.V18_COMPAT_PROTOCOL_VERSION,
+                        true, 256, true)));
+    }
+
+    @Test
+    void voxelColumnAsV18DropsExactlyTheCodecByteForEveryProducerTag() {
+        // Dialect totality at the wire: whichever producer served the column — INCLUDING
+        // the store (source 3, a value no v0.8.x client ever saw; it passes through
+        // verbatim under the forward-safety rule) — asV18() must keep the source byte and
+        // drop only the codec byte. A leaked codec byte is parsed by the v18 client as
+        // the section-array length VarInt and hard-kicks it.
+        byte[] sections = {9, 8, 7};
+        var dim = ResourceKey.create(Registries.DIMENSION, Identifier.parse("minecraft:overworld"));
+        byte[] sources = {LSSConstants.COLUMN_SOURCE_IN_MEMORY, LSSConstants.COLUMN_SOURCE_DISK,
+                LSSConstants.COLUMN_SOURCE_GENERATION, LSSConstants.COLUMN_SOURCE_STORE, (byte) -1};
+        for (byte source : sources) {
+            byte[] expectedV18 = ref(b -> {
+                b.writeInt(3);
+                b.writeInt(-4);
+                b.writeUtf("minecraft:overworld");
+                b.writeLong(1234L);
+                b.writeByte(source); // kept verbatim — the v18 layout HAS the source byte
+                b.writeByteArray(sections);
+            });
+            var p = new VoxelColumnS2CPayload(3, -4, dim, 1234L, source, sections);
+            assertArrayEquals(expectedV18, encode(VoxelColumnS2CPayload.CODEC, p.asV18()),
+                    "source tag " + source + " must survive with only the codec byte gone");
+            assertArrayEquals(sections, p.asV18().shippedSections(),
+                    "asV18 must not copy or alter the section bytes");
+        }
+    }
+
+    @Test
+    void voxelColumnAsV18DiffersFromCurrentByExactlyTheCodecByte() {
+        // The splice-position pin (mirrors Paper's rewriteColumnToV18): removing the ONE
+        // byte after the source byte from the CURRENT frame yields the v18 frame.
+        byte[] sections = {5, 4, 3, 2};
+        var dim = ResourceKey.create(Registries.DIMENSION, Identifier.parse("minecraft:the_end"));
+        var p = new VoxelColumnS2CPayload(7, -9, dim, 99L,
+                LSSConstants.COLUMN_SOURCE_DISK, sections);
+        byte[] current = encode(VoxelColumnS2CPayload.CODEC, p);
+        byte[] v18 = encode(VoxelColumnS2CPayload.CODEC, p.asV18());
+        assertEquals(current.length - 1, v18.length);
+        int codecIndex = 4 + 4 + 1 + "minecraft:the_end".length() + 8 + 1; // header + utf(1-byte len) + ts + source
+        byte[] spliced = new byte[current.length - 1];
+        System.arraycopy(current, 0, spliced, 0, codecIndex);
+        System.arraycopy(current, codecIndex + 1, spliced, codecIndex,
+                current.length - codecIndex - 1);
+        assertArrayEquals(spliced, v18);
+    }
+
+    @Test
+    void voxelColumnAsV18KeepsTheGhostClearAndLongDimensions() {
+        // The 0-section authoritative clear must survive the v18 rewrite (the v0.8.x
+        // client handles it: isClearColumn + air-fill), and a >127-char dimension string
+        // (2-byte VarInt UTF prefix) must not shift the layout.
+        String longDim = "lsstest:" + "d".repeat(120);
+        byte[] expected = ref(b -> {
+            b.writeInt(0);
+            b.writeInt(0);
+            b.writeUtf(longDim);
+            b.writeLong(42L);
+            b.writeByte(LSSConstants.COLUMN_SOURCE_IN_MEMORY);
+            b.writeByteArray(new byte[0]);
+        });
+        var dim = ResourceKey.create(Registries.DIMENSION, Identifier.parse(longDim));
+        var p = new VoxelColumnS2CPayload(0, 0, dim, 42L,
+                LSSConstants.COLUMN_SOURCE_IN_MEMORY, new byte[0]);
+        assertArrayEquals(expected, encode(VoxelColumnS2CPayload.CODEC, p.asV18()));
     }
 
     // ---- Meta: the parity corpus must cover the whole v17 payload surface ----

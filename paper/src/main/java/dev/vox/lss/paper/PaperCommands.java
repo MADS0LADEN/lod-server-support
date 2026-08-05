@@ -148,6 +148,7 @@ public class PaperCommands implements CommandExecutor, TabCompleter {
                 service.getOffThreadProcessor().getStoreDiagnostics(),
                 service.getPlayers().values()
         ).withV16Line(service.getV16CompatManager().diagLineOrNull())
+                .withV18Line(service.getV18CompatTracker().diagLineOrNull())
                 .withXrayLine(xrayDiagLine());
 
         for (var line : DiagnosticsFormatter.formatDiagnostics(data)) {

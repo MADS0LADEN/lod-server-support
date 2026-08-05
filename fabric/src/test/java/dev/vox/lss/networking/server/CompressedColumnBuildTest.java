@@ -182,17 +182,18 @@ class CompressedColumnBuildTest {
         assertEquals(1, capable.processor().getDiagnostics().getTotalColumnsCompressed());
         assertEquals(1, capable.processor().getDiagnostics().getTotalColumnsRaw());
 
-        // The v16 egress guard, pinned on the SAME two payloads the build just
-        // produced. This decision is the only thing between a codec-1 payload and a
-        // hard-kicked v16 client — the legacy layout has nowhere to carry a codec byte,
+        // The legacy egress guard (shared by the v16 AND v18 branches — renamed from
+        // isV16Convertible with the v18 rung), pinned on the SAME two payloads the build
+        // just produced. This decision is the only thing between a codec-1 payload and a
+        // hard-kicked legacy client — neither legacy layout has a place for a codec byte,
         // so a converted zstd body decodes as garbage — and it had no Fabric-side test
         // at all, while Paper pins its equivalent twice. Reachable in one narrow but
-        // real window: an established compressed session downgrading to v16 via the
-        // discovery re-handshake can drain already-queued codec-1 payloads into it.
-        assertFalse(RequestProcessingService.isV16Convertible(capCol),
-                "a compressed column must NEVER be converted to the legacy shape");
-        assertTrue(RequestProcessingService.isV16Convertible(rawCol),
-                "a raw column is what the legacy shape can carry");
+        // real window: an established compressed session downgrading via a cross-dialect
+        // re-handshake can drain already-queued codec-1 payloads into it.
+        assertFalse(RequestProcessingService.isLegacyConvertible(capCol),
+                "a compressed column must NEVER be converted to a legacy shape");
+        assertTrue(RequestProcessingService.isLegacyConvertible(rawCol),
+                "a raw column is what the legacy shapes can carry");
     }
 
     /** Codec 0 IS the raw constant the guard tests for, and it is the byte a v16 client

@@ -43,6 +43,9 @@ class HandshakeGateTest {
 
     @Test
     void olderClientVersionSendsNothing() {
+        // V-1 is protocol 18 since the v0.9.0 bump: on the STRICT (4-arg, both compat
+        // flags off) ladder it must still be the silent mismatch — the v18 rung exists
+        // only behind enableV18Compat (the 6-arg form; see the v18 section below).
         var d = HandshakeGate.evaluate(V - 1, VOXEL_CAPS, true, true);
         assertEquals(Outcome.VERSION_MISMATCH, d.outcome());
         assertFalse(d.sendSessionConfig());
@@ -170,9 +173,12 @@ class HandshakeGateTest {
     }
 
     @Test
-    void onlyExactly16GetsTheCompatRungAndV18KeepsItsDialect() {
-        // 15 and 17 are NOT compat candidates even with the flag on — the shim speaks
-        // exactly the v0.6.x wire, nothing else.
+    void onlyExactly16GetsTheV16RungAndCurrentKeepsItsDialect() {
+        // (Renamed from ...AndV18KeepsItsDialect — "V18" was the CURRENT dialect's old
+        // name; a real V18 compat dialect exists now.) 15 and 17 are NOT compat
+        // candidates even with the v16 flag on — the shim speaks exactly the v0.6.x
+        // wire, nothing else. 18 on this (5-arg, v18-flag-off) overload is pinned by
+        // v18WithCompatDisabledStaysTheSilentVersionMismatch below.
         for (int version : new int[]{15, 17}) {
             var d = HandshakeGate.evaluate(version, VOXEL_CAPS, true, true, true);
             assertEquals(Outcome.VERSION_MISMATCH, d.outcome(), "version " + version);
@@ -181,6 +187,63 @@ class HandshakeGateTest {
         var current = HandshakeGate.evaluate(V, VOXEL_CAPS, true, true, true);
         assertEquals(Outcome.REGISTER, current.outcome());
         assertEquals(HandshakeGate.WireDialect.CURRENT, current.dialect());
+    }
+
+    // ---- v18 compat dialect rung (docs/planning/v18-compat-design.md §2.1) ----
+
+    @Test
+    void v18WithCompatEnabledTakesTheNormalLadderWithTheV18Dialect() {
+        // Same dialect-decided-by-the-version-rung-only contract as v16: the rest of the
+        // ladder is dialect-agnostic, so reply/registration policy cannot drift.
+        var register = HandshakeGate.evaluate(18, VOXEL_CAPS, true, true, true, true);
+        assertEquals(Outcome.REGISTER, register.outcome());
+        assertEquals(HandshakeGate.WireDialect.V18, register.dialect());
+        assertTrue(register.registerPlayer());
+
+        var noConsumer = HandshakeGate.evaluate(18, 0, true, true, true, true);
+        assertEquals(Outcome.NO_CONSUMER, noConsumer.outcome());
+        assertEquals(HandshakeGate.WireDialect.V18, noConsumer.dialect());
+        assertTrue(noConsumer.sendSessionConfig());
+        assertFalse(noConsumer.registerPlayer());
+
+        var disabled = HandshakeGate.evaluate(18, VOXEL_CAPS, false, true, true, true);
+        assertEquals(Outcome.DISABLED, disabled.outcome());
+        assertEquals(HandshakeGate.WireDialect.V18, disabled.dialect());
+        assertTrue(disabled.sendSessionConfig());
+        assertFalse(disabled.effectiveEnabled());
+    }
+
+    @Test
+    void v18WithCompatDisabledStaysTheSilentVersionMismatch() {
+        var d = HandshakeGate.evaluate(18, VOXEL_CAPS, true, true, true, false);
+        assertEquals(Outcome.VERSION_MISMATCH, d.outcome());
+        assertFalse(d.sendSessionConfig());
+        // The 5-arg overload (pre-v18-compat call shape) is the v18-disabled ladder.
+        assertEquals(Outcome.VERSION_MISMATCH,
+                HandshakeGate.evaluate(18, VOXEL_CAPS, true, true, true).outcome());
+    }
+
+    @Test
+    void theTwoCompatFlagsAreIndependent() {
+        // Each rung answers ONLY to its own flag: 18 with only the v16 flag mismatches,
+        // 16 with only the v18 flag mismatches, and each version takes its own dialect
+        // with only its own flag on.
+        assertEquals(Outcome.VERSION_MISMATCH,
+                HandshakeGate.evaluate(18, VOXEL_CAPS, true, true, true, false).outcome());
+        assertEquals(Outcome.VERSION_MISMATCH,
+                HandshakeGate.evaluate(16, VOXEL_CAPS, true, true, false, true).outcome());
+        assertEquals(HandshakeGate.WireDialect.V18,
+                HandshakeGate.evaluate(18, VOXEL_CAPS, true, true, false, true).dialect());
+        assertEquals(HandshakeGate.WireDialect.V16,
+                HandshakeGate.evaluate(16, VOXEL_CAPS, true, true, true, false).dialect());
+    }
+
+    @Test
+    void v17StillMismatchesWithBothCompatFlagsOn() {
+        // Protocol 17 never shipped in a tagged release — there is deliberately no rung.
+        var d = HandshakeGate.evaluate(17, VOXEL_CAPS, true, true, true, true);
+        assertEquals(Outcome.VERSION_MISMATCH, d.outcome());
+        assertFalse(d.sendSessionConfig());
     }
 
     @Test

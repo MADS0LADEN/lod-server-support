@@ -248,10 +248,11 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
 
     /**
      * Test seam: the session-config reply send, production-wired to
-     * {@link PaperPayloadHandler#sendSessionConfig} (V18) or
-     * {@link PaperPayloadHandler#sendSessionConfigV16} (V16 dialect — the legacy 6-field
-     * layout echoing protocol 16; the caps are the old client's pacing) for the handshaking
-     * player.
+     * {@link PaperPayloadHandler#sendSessionConfig} (CURRENT echoes {@code PROTOCOL_VERSION};
+     * the V18 dialect echoes 18 on the same 4-field layout — the old client's gate
+     * hard-requires its own version) or {@link PaperPayloadHandler#sendSessionConfigV16}
+     * (V16 dialect — the legacy 6-field layout echoing protocol 16; the caps are the old
+     * client's pacing) for the handshaking player.
      */
     @FunctionalInterface
     interface SessionConfigSender {
@@ -281,20 +282,27 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
         var service = this.requestService;
         handleHandshake(data, nmsPlayer.getName().getString(), this.lssConfig, service != null,
                 (dialect, enabled, lodDistanceChunks, syncCap, genCap, generationEnabled) -> {
+                    // A cross-dialect re-handshake sheds the stale compat identities it is
+                    // NOT — otherwise columns keep shipping the old dialect's shape and
+                    // hard-kick the re-armed decoder. Placed on the sender seam because it
+                    // fires for every replying outcome (REGISTER and NO_CONSUMER/DISABLED
+                    // alike); reply-only sheds run inline on the region thread, an
+                    // inherited accepted residual (v18-compat design §2.3).
+                    if (service != null) {
+                        if (dialect != HandshakeGate.WireDialect.V16) {
+                            service.getV16CompatManager().onNonV16Handshake(nmsPlayer.getUUID());
+                        }
+                        if (dialect != HandshakeGate.WireDialect.V18) {
+                            service.getV18CompatTracker().onNonV18Handshake(nmsPlayer.getUUID());
+                        }
+                    }
                     if (dialect == HandshakeGate.WireDialect.V16) {
                         PaperPayloadHandler.sendSessionConfigV16(bukkitPlayer, enabled,
                                 lodDistanceChunks, syncCap, genCap, generationEnabled);
                     } else {
-                        // A current-protocol re-handshake sheds any stale v16 session —
-                        // otherwise columns keep shipping legacy-shaped and hard-kick the
-                        // now-v18 decoder. Placed on the sender seam because it fires for
-                        // every replying outcome (REGISTER and NO_CONSUMER/DISABLED alike).
-                        if (service != null) {
-                            service.getV16CompatManager().onNonV16Handshake(nmsPlayer.getUUID());
-                        }
                         PaperPayloadHandler.sendSessionConfig(bukkitPlayer,
-                                LSSConstants.PROTOCOL_VERSION, enabled, lodDistanceChunks,
-                                generationEnabled);
+                                sessionConfigVersionFor(dialect),
+                                enabled, lodDistanceChunks, generationEnabled);
                     }
                 },
                 (capabilities, dialect, replyAfterRegister) -> {
@@ -313,12 +321,52 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                     //     new-dialect columns to a decoder still armed for the old one — a
                     //     malformed frame, and a disconnect. (Round-3 review; the first
                     //     bullet's fix originally introduced the second bullet's race.)
-                    // Both directions go through the hook so neither can drift off-pump.
-                    Runnable dialectFlip = dialect == HandshakeGate.WireDialect.V16
-                            ? () -> service.getV16CompatManager().onHandshake(nmsPlayer.getUUID())
-                            : () -> service.getV16CompatManager().onNonV16Handshake(nmsPlayer.getUUID());
-                    service.enqueueRegister(nmsPlayer, capabilities, dialectFlip, replyAfterRegister);
+                    // All directions go through the hook so none can drift off-pump: each
+                    // dialect marks its own identity and sheds the other's (the v18
+                    // membership especially must NEVER be marked on the region thread —
+                    // v18-compat design §2.3, review F1).
+                    service.enqueueRegister(nmsPlayer, capabilities,
+                            dialectFlipFor(dialect, service.getV16CompatManager(),
+                                    service.getV18CompatTracker(), nmsPlayer.getUUID()),
+                            replyAfterRegister);
                 });
+    }
+
+    /** The SessionConfig version echo per dialect (v18-compat design §2.4): the V18
+     *  dialect echoes 18 on the CURRENT 4-field layout — the v0.8.x client's gate
+     *  hard-requires its own version and self-disables on 19. Extracted static so the
+     *  literal is pinnable (execution-review finding 1: the production lambda sat one
+     *  seam above every test, and a silent V18->PROTOCOL_VERSION regression compiled
+     *  clean). V16 never reaches this — it takes the 6-field legacy sender. */
+    static int sessionConfigVersionFor(HandshakeGate.WireDialect dialect) {
+        return dialect == HandshakeGate.WireDialect.V18
+                ? LSSConstants.V18_COMPAT_PROTOCOL_VERSION
+                : LSSConstants.PROTOCOL_VERSION;
+    }
+
+    /** The pump-deferred dialect flip per dialect: mark own identity, shed the other's
+     *  (CURRENT sheds both). Extracted static so the switch BODY is pinnable against
+     *  real manager/tracker instances (execution-review finding 1: dropping the V18
+     *  case's mark — which mis-derives wantsCompressedColumns and leaks the codec byte
+     *  to every v0.8.x client — passed the whole suite). */
+    static Runnable dialectFlipFor(HandshakeGate.WireDialect dialect,
+                                   dev.vox.lss.common.compat.V16CompatManager v16,
+                                   dev.vox.lss.common.compat.V18CompatTracker v18,
+                                   java.util.UUID uuid) {
+        return switch (dialect) {
+            case V16 -> () -> {
+                v16.onHandshake(uuid);
+                v18.onNonV18Handshake(uuid);
+            };
+            case V18 -> () -> {
+                v18.onHandshake(uuid);
+                v16.onNonV16Handshake(uuid);
+            };
+            case CURRENT -> () -> {
+                v16.onNonV16Handshake(uuid);
+                v18.onNonV18Handshake(uuid);
+            };
+        };
     }
 
     /**
@@ -341,7 +389,7 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
 
         var decision = HandshakeGate.evaluate(handshake.protocolVersion(),
                 handshake.capabilities(), config.enabled, servicePresent,
-                config.enableV16Compat);
+                config.enableV16Compat, config.enableV18Compat);
 
         if (!decision.sendSessionConfig()) {
             // See HandshakeGate.Outcome.VERSION_MISMATCH: replying would kick the player.
@@ -359,6 +407,7 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
         }
 
         boolean v16 = decision.dialect() == HandshakeGate.WireDialect.V16;
+        boolean v18 = decision.dialect() == HandshakeGate.WireDialect.V18;
         Runnable reply = () -> configSender.send(decision.dialect(),
                 decision.effectiveEnabled(),
                 config.lodDistanceChunks,
@@ -387,7 +436,8 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
             registrar.register(handshake.capabilities(), decision.dialect(), reply);
             LSSLogger.info("Player " + playerName
                     + " registered for " + Brand.shortName() + " LOD request processing (caps="
-                    + handshake.capabilities() + (v16 ? ", v16-compat" : "") + ")");
+                    + handshake.capabilities()
+                    + (v16 ? ", v16-compat" : "") + (v18 ? ", v18-compat" : "") + ")");
         } else {
             // Reply-without-register (e.g. DISABLED advertisement): nothing to race.
             reply.run();
@@ -410,10 +460,13 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
             // Mailboxed: on Folia this event fires on the quitting player's region thread,
             // and removal mutates pump-owned state (generation service maps among others).
             service.enqueueRemove(event.getPlayer().getUniqueId());
-            // Network-level and immediate (the session map is any-thread safe): the quit
-            // drops the v16 session identity; the mailboxed removePlayer above only resets
-            // a want-set that no longer exists — a no-op.
+            // Network-level and immediate (both structures are any-thread safe): the quit
+            // drops the compat session identities; the mailboxed removePlayer above only
+            // resets a want-set that no longer exists — a no-op. The v18 membership is
+            // ALSO dropped by the mailbox Remove drain (the quit-race leak guard —
+            // v18-compat design §2.3).
             service.getV16CompatManager().onDisconnect(event.getPlayer().getUniqueId());
+            service.getV18CompatTracker().onDisconnect(event.getPlayer().getUniqueId());
         }
     }
 

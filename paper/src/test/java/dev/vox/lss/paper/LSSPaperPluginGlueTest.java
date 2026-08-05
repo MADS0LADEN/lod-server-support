@@ -134,7 +134,9 @@ class LSSPaperPluginGlueTest {
     void versionMismatchSendsZeroFramesAndRegistersNobody() {
         var sender = new RecordingSender();
         var registrar = new RecordingRegistrar();
-        for (int version : new int[]{V + 1, V - 1}) {
+        // V-1 (18) and 16 are no longer mismatches on default config — they have compat
+        // rungs (tested below); 17 never shipped and V+1 is the future-client shape.
+        for (int version : new int[]{V + 1, 17}) {
             LSSPaperPlugin.handleHandshake(handshakeFrame(version, VOXEL_CAPS),
                     "Steve", config(true), true, sender, registrar);
         }
@@ -229,6 +231,86 @@ class LSSPaperPluginGlueTest {
         assertEquals(List.of(), sender.replies,
                 "the kill switch restores the strict silent version gate");
         assertEquals(List.of(), registrar.caps);
+    }
+
+    @Test
+    void v18HandshakeGetsTheV18DialectReplyAndRegistration() {
+        // A protocol-18 client (v0.7.x–v0.8.x) under enableV18Compat (default true) takes
+        // the SAME ladder with the V18 dialect, and this drives the PRODUCTION
+        // handleHandshake — the 6-arg gate call site — so a silent fall-back to the 5-arg
+        // overload (which would drop v18 clients to the v16 fallback) fails here
+        // (v18-compat design §2.1, review F5). The reply is deferred exactly like every
+        // registering outcome: the pre-registration gap applies to v18 joins too.
+        var config = config(true);
+        config.lodDistanceChunks = 101;
+        config.generationConcurrencyLimitPerPlayer = 7;
+        config.enableChunkGeneration = false; // opposed to effectiveEnabled=true (swap guard)
+        var sender = new RecordingSender();
+        var registrar = new RecordingRegistrar();
+        LSSPaperPlugin.handleHandshake(handshakeFrame(18, VOXEL_CAPS),
+                "vx7m", config, true, sender, registrar);
+
+        assertEquals(List.of(), sender.replies, "v18 registration defers its reply too");
+        registrar.runDeferredReplies();
+        assertEquals(List.of(new Reply(HandshakeGate.WireDialect.V18, true, 101,
+                        LSSConstants.SYNC_ON_LOAD_SLOT_CAP, 7, false)), sender.replies);
+        assertEquals(List.of(VOXEL_CAPS), registrar.caps);
+        assertEquals(List.of(HandshakeGate.WireDialect.V18), registrar.dialects);
+    }
+
+    @Test
+    void v18HandshakeWithCompatDisabledSendsNothing() {
+        var config = config(true);
+        config.enableV18Compat = false;
+        var sender = new RecordingSender();
+        var registrar = new RecordingRegistrar();
+        LSSPaperPlugin.handleHandshake(handshakeFrame(18, VOXEL_CAPS),
+                "vx7m", config, true, sender, registrar);
+        assertEquals(List.of(), sender.replies,
+                "the v18 kill switch restores the strict silent version gate");
+        assertEquals(List.of(), registrar.caps);
+    }
+
+    // ---- the production sender/flip bodies (execution-review finding 1: these sat one
+    // seam ABOVE the recording seams, so a silent regression in either compiled clean) ----
+
+    @Test
+    void sessionConfigVersionEchoes18ForTheV18DialectOnly() {
+        // A V18 session answered with version 19 self-disables the v0.8.x client
+        // ("incompatible protocol version"); CURRENT must keep echoing PROTOCOL_VERSION.
+        assertEquals(LSSConstants.V18_COMPAT_PROTOCOL_VERSION,
+                LSSPaperPlugin.sessionConfigVersionFor(HandshakeGate.WireDialect.V18));
+        assertEquals(LSSConstants.PROTOCOL_VERSION,
+                LSSPaperPlugin.sessionConfigVersionFor(HandshakeGate.WireDialect.CURRENT));
+        assertEquals(LSSConstants.PROTOCOL_VERSION,
+                LSSPaperPlugin.sessionConfigVersionFor(HandshakeGate.WireDialect.V16),
+                "V16 never reaches the 4-field sender, but a defined answer keeps the "
+                        + "helper total");
+    }
+
+    @Test
+    void dialectFlipMarksOwnIdentityAndShedsTheOther() {
+        // The switch body the pump runs before registerPlayer: V18 must MARK v18
+        // membership (dropping that mark mis-derives wantsCompressedColumns and leaks
+        // the codec byte to every v0.8.x client) and shed v16; V16 the mirror; CURRENT
+        // sheds both. Driven against real manager/tracker instances.
+        var uuid = java.util.UUID.randomUUID();
+
+        var v16 = new dev.vox.lss.common.compat.V16CompatManager();
+        var v18 = new dev.vox.lss.common.compat.V18CompatTracker();
+        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.V18, v16, v18, uuid).run();
+        assertTrue(v18.isV18(uuid), "the V18 flip must mark v18 membership");
+        assertFalse(v16.isV16(uuid));
+
+        // V16 flip on the same player (a cross-dialect re-handshake): marks v16, sheds v18.
+        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.V16, v16, v18, uuid).run();
+        assertTrue(v16.isV16(uuid), "the V16 flip must mark the v16 session");
+        assertFalse(v18.isV18(uuid), "the V16 flip must shed stale v18 membership");
+
+        // CURRENT flip sheds both.
+        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.CURRENT, v16, v18, uuid).run();
+        assertFalse(v16.isV16(uuid), "the CURRENT flip must shed the v16 session");
+        assertFalse(v18.isV18(uuid), "the CURRENT flip must shed v18 membership");
     }
 
     @Test

@@ -722,10 +722,14 @@ public class ServiceLifecycleGameTests {
     }
 
     /**
-     * WP-035 (server direction): a crafted v15 handshake through the real receiver body
-     * must produce ZERO reply frames — replying would kick the client, because a
-     * mismatched client's SessionConfig codec has a different field layout on the same
-     * channel id — and must leave the connection and player list untouched.
+     * WP-035 (server direction): a crafted foreign-version handshake through the real
+     * receiver body must produce ZERO reply frames — replying would kick the client,
+     * because a mismatched client's SessionConfig codec has a different field layout on
+     * the same channel id — and must leave the connection and player list untouched.
+     * Protocol 17 is the mismatch specimen: it never shipped, and BOTH its neighbors now
+     * have compat rungs (16 since v0.7.0, 18 since v0.9.1 — see
+     * v18HandshakeRegistersNativelyAndEchoesProtocol18 below), so PROTOCOL_VERSION - 1
+     * no longer mismatches on default config.
      */
     @GameTest(structure = "fabric-gametest-api-v1:empty")
     public void foreignVersionHandshakeProducesNoReplyAndNoKick(GameTestHelper helper) {
@@ -737,8 +741,7 @@ public class ServiceLifecycleGameTests {
         var replies = new ArrayList<SessionConfigS2CPayload>();
         try {
             LSSServerNetworking.handleHandshake(
-                    new HandshakeC2SPayload(LSSConstants.PROTOCOL_VERSION - 1,
-                            LSSConstants.CAPABILITY_VOXEL_COLUMNS),
+                    new HandshakeC2SPayload(17, LSSConstants.CAPABILITY_VOXEL_COLUMNS),
                     mock, service, replies::add);
             helper.assertTrue(replies.isEmpty(),
                     "a version-mismatched handshake must produce zero reply frames (any reply "
@@ -749,6 +752,55 @@ public class ServiceLifecycleGameTests {
             helper.assertTrue(playerList.getPlayer(uuid) == mock && !mock.isRemoved()
                             && mock.connection != null,
                     "the mismatch path must leave the player connected and its connection untouched");
+        } finally {
+            service.shutdown();
+            playerList.remove(mock);
+        }
+        helper.succeed();
+    }
+
+    /**
+     * v18 compat rung (docs/planning/v18-compat-design.md §2.1/§5): a crafted protocol-18
+     * handshake through the PRODUCTION Fabric receiver body — this is the pin that a call
+     * site silently left on the 5-arg gate overload cannot pass (review F5: that miss
+     * compiles clean and drops v18 clients to the v16 fallback, the exact symptom the rung
+     * removes). The reply must be exactly one CURRENT-layout SessionConfig echoing 18 (the
+     * v0.8.x gate hard-requires its own version), the player must register with v18
+     * membership, and the session must be forced codec-RAW.
+     */
+    @GameTest(structure = "fabric-gametest-api-v1:empty")
+    public void v18HandshakeRegistersNativelyAndEchoesProtocol18(GameTestHelper helper) {
+        var server = helper.getLevel().getServer();
+        var playerList = server.getPlayerList();
+        var mock = placeMockServerPlayer(helper);
+        var uuid = mock.getUUID();
+        var service = new RequestProcessingService(server);
+        var replies = new ArrayList<SessionConfigS2CPayload>();
+        try {
+            // caps=3 (the HOSTILE shape — a real v0.8.x client hardcodes caps=1): with the
+            // zstd bit set, the forced-RAW assertion below actually exercises the v18 term
+            // of the derivation instead of passing vacuously off the missing bit.
+            LSSServerNetworking.handleHandshake(
+                    new HandshakeC2SPayload(LSSConstants.V18_COMPAT_PROTOCOL_VERSION,
+                            LSSConstants.CAPABILITY_VOXEL_COLUMNS
+                                    | LSSConstants.CAPABILITY_ZSTD_COLUMNS),
+                    mock, service, replies::add);
+            helper.assertTrue(replies.size() == 1,
+                    "a v18 handshake on default config must be answered, got " + replies.size());
+            helper.assertTrue(replies.get(0).protocolVersion()
+                            == LSSConstants.V18_COMPAT_PROTOCOL_VERSION,
+                    "the reply must echo protocol 18 — the v0.8.x client disables itself on "
+                            + "any other version, got " + replies.get(0).protocolVersion());
+            var state = service.getPlayers().get(uuid);
+            helper.assertTrue(state != null,
+                    "a v18 handshake must register natively (not fall to the v16 shim)");
+            helper.assertTrue(service.getV18CompatTracker().isV18(uuid),
+                    "the session must carry v18 membership (the egress strips the codec byte off it)");
+            helper.assertTrue(!service.getV16CompatManager().isV16(uuid),
+                    "a v18 session is NOT a v16 compat session");
+            helper.assertTrue(!state.wantsCompressedColumns(),
+                    "a v18 session must be forced codec-RAW even when the handshake "
+                            + "(hostilely) declares the zstd capability bit");
         } finally {
             service.shutdown();
             playerList.remove(mock);

@@ -15,9 +15,11 @@ import net.minecraft.resources.Identifier;
  * to with {@link #v16Legacy}, which encodes the OLD 6-field layout — version echoing 16
  * (the v0.6.2 client's codec hard-gates on that leading VarInt and disables itself
  * otherwise) with the two concurrency-cap VarInts restored between lodDistance and
- * generationEnabled. The legacy components are server-encode-only: the read side is
- * v18-only and always produces {@code v16Wire=false}, and when the flag is off the encode
- * is byte-identical to the pre-compat 4-field layout (pinned by the wire tests).
+ * generationEnabled. The legacy components are server-encode-only: the read side decodes
+ * only the current 4-field layout and always produces {@code v16Wire=false}, and when the
+ * flag is off the encode is byte-identical to the pre-compat 4-field layout (pinned by
+ * the wire tests). The v18 compat rung needs no shape of its own here — it is the SAME
+ * 4-field encode with the version value 18 (the encoder never branches on the value).
  */
 public record SessionConfigS2CPayload(
         int protocolVersion,

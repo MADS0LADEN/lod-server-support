@@ -164,7 +164,7 @@ public class LSSServerNetworking {
         var config = LSSServerConfig.CONFIG;
         var decision = HandshakeGate.evaluate(payload.protocolVersion(),
                 payload.capabilities(), config.enabled, service != null,
-                config.enableV16Compat);
+                config.enableV16Compat, config.enableV18Compat);
 
         if (!decision.sendSessionConfig()) {
             // See HandshakeGate.Outcome.VERSION_MISMATCH: replying would kick the player.
@@ -183,11 +183,13 @@ public class LSSServerNetworking {
         }
 
         boolean v16 = decision.dialect() == HandshakeGate.WireDialect.V16;
-        if (!v16 && service != null) {
-            // A current-protocol re-handshake on a connection that previously negotiated
-            // v16 must shed the stale compat session — otherwise every column keeps
-            // shipping legacy-shaped and hard-kicks the now-v18 decoder. No-op normally.
-            service.getV16CompatManager().onNonV16Handshake(player.getUUID());
+        boolean v18 = decision.dialect() == HandshakeGate.WireDialect.V18;
+        if (service != null) {
+            // A cross-dialect re-handshake must shed the stale compat identity — otherwise
+            // every column keeps shipping the old dialect's shape and hard-kicks the
+            // re-armed decoder. Each reply sheds the dialects it is NOT. No-op normally.
+            if (!v16) service.getV16CompatManager().onNonV16Handshake(player.getUUID());
+            if (!v18) service.getV18CompatTracker().onNonV18Handshake(player.getUUID());
         }
         responder.send(v16
                 ? SessionConfigS2CPayload.v16Legacy(
@@ -199,7 +201,10 @@ public class LSSServerNetworking {
                         config.generationConcurrencyLimitPerPlayer,
                         config.enableChunkGeneration)
                 : new SessionConfigS2CPayload(
-                        LSSConstants.PROTOCOL_VERSION,
+                        // v18 compat: the CURRENT 4-field layout, echoing 18 — the old
+                        // client's gate hard-requires its own version (v18-compat §2.4).
+                        v18 ? LSSConstants.V18_COMPAT_PROTOCOL_VERSION
+                            : LSSConstants.PROTOCOL_VERSION,
                         decision.effectiveEnabled(),
                         config.lodDistanceChunks,
                         config.enableChunkGeneration));
@@ -217,10 +222,16 @@ public class LSSServerNetworking {
                 // Session identity first, so drip batches merge from the first frame.
                 service.getV16CompatManager().onHandshake(player.getUUID());
             }
+            if (v18) {
+                // Membership first: registerPlayer derives wantsCompressedColumns from it
+                // (v18-compat §2.4 — same main-thread mark-before-register as v16).
+                service.getV18CompatTracker().onHandshake(player.getUUID());
+            }
             service.registerPlayer(player, payload.capabilities());
             LSSLogger.info("Player " + player.getName().getString()
                     + " registered for " + Brand.shortName() + " LOD request processing (caps="
-                    + payload.capabilities() + (v16 ? ", v16-compat" : "") + ")");
+                    + payload.capabilities()
+                    + (v16 ? ", v16-compat" : "") + (v18 ? ", v18-compat" : "") + ")");
         }
     }
 
@@ -272,9 +283,11 @@ public class LSSServerNetworking {
             var service = requestService;
             if (service != null) {
                 service.removePlayer(handler.getPlayer().getUUID());
-                // Network-level: the disconnect drops the v16 session identity (removePlayer
-                // above only reset its want-set — dim changes reuse that path).
+                // Network-level: the disconnect drops the compat session identities
+                // (removePlayer above only reset the v16 want-set and touches neither
+                // membership — dim changes reuse that path and must keep both).
                 service.getV16CompatManager().onDisconnect(handler.getPlayer().getUUID());
+                service.getV18CompatTracker().onDisconnect(handler.getPlayer().getUUID());
             }
         });
     }

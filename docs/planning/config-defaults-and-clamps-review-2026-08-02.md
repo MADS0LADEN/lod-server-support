@@ -154,6 +154,7 @@ conservatism — above it the number would describe something the reader cannot 
 | `useNbtTranscode` | `true` | — | On is right; see §6 for its retirement schedule. |
 | `useCompressedColumns` | `true` | — | On is right. Costs ~+12% wire for a large CPU saving; the store-hit verbatim path is why. |
 | `enableV16Compat` | `true` | — | Correct until v0.6.x clients are gone. |
+| `enableV18Compat` | `true` | — | (Added v0.9.1, docs/planning/v18-compat-design.md.) Correct until v0.7.x–v0.8.x clients are gone — a LATER sunset than the v16 set: the protocol-18 install base is the newer and larger one. Membership-only rung; off restores the strict silent gate for 18 and those clients degrade to the v16 fallback. |
 | `generationTimeoutSeconds` | `60` | 1..600 | Fine. Timeouts are transient outcomes that heal by re-declaration. |
 | `dirtyBroadcastIntervalSeconds` | `10` | 1..300 | Fine. |
 | `lodStoreResweepSeconds` | 0 Fabric / 300 Paper | 0..3600 | The platform asymmetry is well-reasoned and should stay: Fabric's content-hash pipeline invalidates at runtime, so a periodic resweep there would only churn-drop rows on metadata-only re-saves. |
@@ -307,6 +308,7 @@ on a schedule rather than accumulate.
 | `useNbtTranscode` | **Keep one more release** | Youngest of the four; the per-section fallback ladder is intricate enough that a whole-feature rollback is still worth having. |
 | `useCompressedColumns` | **Keep** | Newest, and it is the one that changes wire bytes. Keep until it has a release cycle of live exposure. |
 | `enableV16Compat` / `enableV16ServerCompat` / `enableV16Generation` | **Keep, retire together** | Legacy shims with a natural sunset condition (no v0.6.x peers). Retire as a set when that condition is met, not piecemeal. |
+| `enableV18Compat` | **Keep, separate sunset** | (v0.9.1.) Same shape, DIFFERENT condition: no v0.7.x–v0.8.x peers — later than the v16 set's. Do not bundle it into the v16 retirement. |
 
 Retiring a key is cheap and safe in this codebase: GSON ignores unknown keys on load and
 `validate()`'s next save drops them, exactly as `syncOnLoadConcurrencyLimitPerPlayer` and

@@ -169,6 +169,39 @@ public final class PaperPayloadHandler {
         });
     }
 
+    /**
+     * v18 compat (docs/planning/v18-compat-design.md §2.6): splice a CURRENT column frame
+     * into the protocol-18 layout by removing exactly the codec byte — the source byte
+     * stays, verbatim (unknown source values incl. 3/store pass through under the
+     * forward-safety rule). A CURRENT-shaped frame reaching a v18 client hard-kicks it
+     * (its decode reads the byte after the source as the section-array length VarInt), so
+     * the per-player column egress converts UNCONDITIONALLY for v18 sessions. THROWS on a
+     * non-RAW codec, like the v16 splice: the v18 layout has nowhere to carry a codec and
+     * a spliced zstd body decodes as garbage on the old client. Reachable in the same
+     * cross-dialect downgrade window; the egress guard's warn-drop contains it and the
+     * client's re-declaration heals the dropped column.
+     */
+    public static byte[] rewriteColumnToV18(byte[] frame) {
+        return withReadBuffer(frame, buf -> {
+            buf.readInt();                                            // chunkX
+            buf.readInt();                                            // chunkZ
+            buf.readUtf(LSSConstants.MAX_DIMENSION_STRING_LENGTH);    // dimension
+            buf.readLong();                                           // columnTimestamp
+            int sourceIndex = buf.readerIndex();
+            byte codec = frame[sourceIndex + 1];
+            if (codec != LSSConstants.COLUMN_CODEC_RAW) {
+                throw new IllegalStateException("v18 splice on codec-" + codec
+                        + " column frame — the session flag should have forced raw");
+            }
+            int codecIndex = sourceIndex + 1;
+            byte[] out = new byte[frame.length - 1];
+            System.arraycopy(frame, 0, out, 0, codecIndex);
+            System.arraycopy(frame, codecIndex + 1, out, codecIndex,
+                    frame.length - codecIndex - 1);
+            return out;
+        });
+    }
+
     /** The packed chunk position of an encoded column frame (its first 8 bytes are the two
      *  big-endian coordinate ints) — the v16 shim's prune key at the column egress. */
     public static long readColumnPackedPos(byte[] frame) {
