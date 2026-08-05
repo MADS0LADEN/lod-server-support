@@ -7,6 +7,7 @@ import dev.vox.lss.common.LogThrottle;
 import dev.vox.lss.common.PositionUtil;
 import dev.vox.lss.common.SharedBandwidthLimiter;
 import dev.vox.lss.common.compat.V16CompatManager;
+import dev.vox.lss.common.compat.V18CompatTracker;
 import dev.vox.lss.common.processing.IncomingBatch;
 import dev.vox.lss.common.processing.IncomingRequest;
 import dev.vox.lss.common.processing.LoadedColumnData;
@@ -68,6 +69,10 @@ public class RequestProcessingService {
     // never consults it: a v16 player is an ordinary registered player whose want-set is
     // declared by the shim at 1 Hz. See docs/planning/v16-compat-design.md.
     private final V16CompatManager v16Compat = new V16CompatManager();
+    // The v18 compat rung's membership (protocol-18 clients, v0.7.x–v0.8.x): an ordinary
+    // CURRENT-dialect session forced codec-RAW whose column frames drop the codec byte at
+    // the egress seam. See docs/planning/v18-compat-design.md.
+    private final V18CompatTracker v18Compat = new V18CompatTracker();
     // Keyed by the lightweight ResourceKey (not ServerLevel): a ServerLevel key strongly
     // retains every world an LSS player ever visited — harmless for vanilla's permanent
     // dimensions, but a leak on world-cycling servers. The dimension string is derivable
@@ -309,13 +314,16 @@ public class RequestProcessingService {
         });
         this.diskReader.registerPlayer(player.getUUID());
         state.setCapabilities(capabilities);
-        // The four-term AND (plan §2): capability bit x config+native latch x NOT-v16.
-        // The v16 manager is marked BEFORE registerPlayer on the handshake path (and a
-        // dimension-change re-registration re-derives), so the dialect term is reliable
-        // here — a v16 handshake maliciously setting 0x2 never gets a codec byte.
+        // The five-term AND (plan §2 + v18-compat §2.5): capability bit x config+native
+        // latch x NOT-v16 x NOT-v18. Both dialect marks land BEFORE registerPlayer on the
+        // handshake path (and a dimension-change re-registration re-derives through the
+        // surviving membership), so the dialect terms are reliable here — a legacy
+        // handshake maliciously setting 0x2 never gets a codec byte its wire layout has
+        // nowhere to carry.
         state.setWantsCompressedColumns(this.wireCompressionLive
                 && (capabilities & LSSConstants.CAPABILITY_ZSTD_COLUMNS) != 0
-                && !this.v16Compat.isV16(player.getUUID()));
+                && !this.v16Compat.isV16(player.getUUID())
+                && !this.v18Compat.isV18(player.getUUID()));
         state.markHandshakeComplete();
         return state;
     }
@@ -562,15 +570,20 @@ public class RequestProcessingService {
      *  guard cannot convert is DROPPED with a warn-once (design §5): a dropped frame
      *  self-heals by re-declaration, a wrong-shaped one kicks the client. Unreachable
      *  today — only buildAndEnqueueColumnPayload feeds this queue. */
-    /** Whether a column may be converted to the legacy v16 shape. Extracted so the
+    /** Whether a column may be converted to a legacy (v16 OR v18) shape. Extracted so the
      *  guard's decision is pinnable: {@code sendColumnPayload} is private and needs a
      *  live server, so this — the only thing standing between a codec-1 payload and a
-     *  hard-kicked v16 client — had no test on either side of the Fabric module, while
-     *  Paper pins its equivalent twice. (v0.9.0 review.) The legacy layout has nowhere
-     *  to carry a codec byte, so only RAW converts; anything else must be dropped. */
-    static boolean isV16Convertible(dev.vox.lss.networking.payloads.VoxelColumnS2CPayload col) {
+     *  hard-kicked legacy client — had no test on either side of the Fabric module, while
+     *  Paper pins its equivalent twice. (v0.9.0 review.) Neither legacy layout has a
+     *  place to carry a codec byte (v18 reads the byte after the source as the
+     *  section-array length VarInt), so only RAW converts; anything else must be
+     *  dropped. */
+    static boolean isLegacyConvertible(dev.vox.lss.networking.payloads.VoxelColumnS2CPayload col) {
         return col.codec() == LSSConstants.COLUMN_CODEC_RAW;
     }
+
+    /** Warn-once latch for the v18 egress guard (MAIN thread only). */
+    private boolean v18UnconvertibleWarned;
 
     private void sendColumnPayload(PlayerRequestState state, CustomPacketPayload payload)
             throws Exception {
@@ -585,7 +598,7 @@ public class RequestProcessingService {
                 }
                 return;
             }
-            if (!isV16Convertible(col)) {
+            if (!isLegacyConvertible(col)) {
                 // Codec-0 assert at the seam (plan review A6): the legacy layout has
                 // nowhere to carry a codec, so a framed payload converted here would
                 // ship a zstd body the old client decodes as garbage (hard-kick class).
@@ -607,6 +620,26 @@ public class RequestProcessingService {
             ServerPlayNetworking.send(state.getPlayer(), col.asV16());
             this.v16Compat.onColumnSent(uuid,
                     PositionUtil.packPosition(col.chunkX(), col.chunkZ()));
+            return;
+        }
+        if (this.v18Compat.isV18(uuid)) {
+            // v18 egress (v18-compat design §2.6): strip the codec byte, keep the source
+            // byte. No prune bookkeeping — there is no synthetic want-set; the client's
+            // own re-declaration heals any drop. The RAW guard mirrors the v16 one and is
+            // reachable in the same narrow window (an established zstd session's queued
+            // codec-1 payloads draining across a cross-dialect re-handshake).
+            if (!(payload instanceof dev.vox.lss.networking.payloads.VoxelColumnS2CPayload col)
+                    || !isLegacyConvertible(col)) {
+                if (!this.v18UnconvertibleWarned) {
+                    this.v18UnconvertibleWarned = true;
+                    LSSLogger.warn("v18-compat: dropping unconvertible column-queue payload for "
+                            + state.getPlayerName()
+                            + " — a v18 frame has nowhere to carry a codec"
+                            + " (further drops are silent)");
+                }
+                return;
+            }
+            ServerPlayNetworking.send(state.getPlayer(), col.asV18());
             return;
         }
         ServerPlayNetworking.send(state.getPlayer(), payload);
@@ -875,6 +908,10 @@ public class RequestProcessingService {
 
     public V16CompatManager getV16CompatManager() {
         return this.v16Compat;
+    }
+
+    public V18CompatTracker getV18CompatTracker() {
+        return this.v18Compat;
     }
 
     public ChunkDiskReader getDiskReader() {

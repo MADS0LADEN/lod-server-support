@@ -33,6 +33,14 @@ class PaperConfigValidationTest {
                 "Paper's periodic resweep default is its unfired-event staleness bound");
     }
 
+    /** Twin of the Fabric pin: both compat rungs ship ON so released v0.6.x (protocol 16)
+     *  and v0.7.x–v0.8.x (protocol 18) clients keep working across a server upgrade. */
+    @Test
+    void compatRungsDefaultOn() {
+        assertTrue(new PaperConfig().enableV16Compat);
+        assertTrue(new PaperConfig().enableV18Compat);
+    }
+
     @Test
     void validateClampsInheritedFieldsAndGuardsUpdateEvents() {
         PaperConfig c = new PaperConfig();

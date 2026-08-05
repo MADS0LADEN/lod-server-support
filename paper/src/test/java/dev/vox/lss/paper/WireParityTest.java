@@ -17,6 +17,7 @@ import java.util.function.Consumer;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * Mirror of the Fabric {@code dev.vox.lss.networking.payloads.WireParityTest}: pins the Paper
@@ -275,6 +276,7 @@ class WireParityTest {
         assertEquals(2, LSSConstants.RESPONSE_NOT_GENERATED);
         assertEquals(0, LSSConstants.RESPONSE_RATE_LIMITED_V16);
         assertEquals(16, LSSConstants.V16_COMPAT_PROTOCOL_VERSION);
+        assertEquals(18, LSSConstants.V18_COMPAT_PROTOCOL_VERSION);
         assertEquals(1, LSSConstants.CAPABILITY_VOXEL_COLUMNS);
         assertEquals(0, LSSConstants.COLUMN_SOURCE_IN_MEMORY);
         assertEquals(1, LSSConstants.COLUMN_SOURCE_DISK);
@@ -361,5 +363,81 @@ class WireParityTest {
         byte[] v18Frame = PaperPayloadHandler.encodeVoxelColumnPreEncoded(
                 0, 0, longDim, 42L, LSSConstants.COLUMN_SOURCE_IN_MEMORY, new byte[0]);
         assertArrayEquals(expected, PaperPayloadHandler.rewriteColumnToV16(v18Frame));
+    }
+
+    // ---- v18 compat legacy shapes (docs/planning/v18-compat-design.md §2.6) ----
+    // Reference ops mirror the v0.8.2 decoder VERBATIM and are IDENTICAL to the Fabric
+    // twin's v18 tests — the cross-impl parity guard for the protocol-18 dialect.
+
+    @Test
+    void sessionConfigEchoing18IsTheCurrentFourFieldLayout() {
+        // The v18 reply is NOT a new shape — the same 4-field encode with the version
+        // value 18 (the v0.8.x gate hard-requires its own version; the encoder must not
+        // branch on the value).
+        byte[] expected = ref(b -> {
+            b.writeVarInt(LSSConstants.V18_COMPAT_PROTOCOL_VERSION);
+            b.writeBoolean(true);
+            b.writeVarInt(256);
+            b.writeBoolean(true);
+        });
+        assertArrayEquals(expected, PaperPayloadHandler.encodeSessionConfig(
+                LSSConstants.V18_COMPAT_PROTOCOL_VERSION, true, 256, true));
+    }
+
+    @Test
+    void rewriteColumnToV18DropsExactlyTheCodecByteForEveryProducerTag() {
+        // Dialect totality at the wire: whichever producer baked the frame — INCLUDING the
+        // store (source 3, a value no v0.8.x client ever saw; it passes through verbatim
+        // under the forward-safety rule) — the splice must keep the source byte and drop
+        // only the codec byte. A leaked codec byte is parsed by the v18 client as the
+        // section-array length VarInt and hard-kicks it.
+        byte[] sections = {9, 8, 7};
+        byte[] sources = {LSSConstants.COLUMN_SOURCE_IN_MEMORY, LSSConstants.COLUMN_SOURCE_DISK,
+                LSSConstants.COLUMN_SOURCE_GENERATION, LSSConstants.COLUMN_SOURCE_STORE, (byte) -1};
+        for (byte source : sources) {
+            byte[] expectedV18 = ref(b -> {
+                b.writeInt(3);
+                b.writeInt(-4);
+                b.writeUtf("minecraft:overworld");
+                b.writeLong(1234L);
+                b.writeByte(source); // kept verbatim — the v18 layout HAS the source byte
+                b.writeByteArray(sections);
+            });
+            byte[] currentFrame = PaperPayloadHandler.encodeVoxelColumnPreEncoded(
+                    3, -4, "minecraft:overworld", 1234L, source, sections);
+            assertArrayEquals(expectedV18, PaperPayloadHandler.rewriteColumnToV18(currentFrame),
+                    "source tag " + source + " must survive with only the codec byte gone");
+        }
+    }
+
+    @Test
+    void rewriteColumnToV18ThrowsOnANonRawCodec() {
+        // The v18 layout has nowhere to carry a codec: a zstd-framed body spliced through
+        // would decode as garbage on the old client (hard-kick class), so the splice must
+        // THROW and let the egress guard's warn-drop contain it — mirroring the v16 pin.
+        byte[] framed = PaperPayloadHandler.encodeVoxelColumnPreEncoded(
+                1, 2, "minecraft:overworld", 7L, LSSConstants.COLUMN_SOURCE_DISK,
+                LSSConstants.COLUMN_CODEC_ZSTD, new byte[]{1, 2, 3});
+        assertThrows(IllegalStateException.class,
+                () -> PaperPayloadHandler.rewriteColumnToV18(framed));
+    }
+
+    @Test
+    void rewriteColumnToV18KeepsTheGhostClearAndLongDimensions() {
+        // The 0-section authoritative clear must survive the splice (the v0.8.x client
+        // handles it: isClearColumn + air-fill), and a >127-char dimension string (2-byte
+        // VarInt UTF prefix) must not shift the computed codec-byte offset.
+        String longDim = "lsstest:" + "d".repeat(120);
+        byte[] expected = ref(b -> {
+            b.writeInt(0);
+            b.writeInt(0);
+            b.writeUtf(longDim);
+            b.writeLong(42L);
+            b.writeByte(LSSConstants.COLUMN_SOURCE_IN_MEMORY);
+            b.writeByteArray(new byte[0]);
+        });
+        byte[] currentFrame = PaperPayloadHandler.encodeVoxelColumnPreEncoded(
+                0, 0, longDim, 42L, LSSConstants.COLUMN_SOURCE_IN_MEMORY, new byte[0]);
+        assertArrayEquals(expected, PaperPayloadHandler.rewriteColumnToV18(currentFrame));
     }
 }

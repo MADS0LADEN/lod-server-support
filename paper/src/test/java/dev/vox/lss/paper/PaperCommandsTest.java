@@ -149,6 +149,7 @@ class PaperCommandsTest {
         when(service.getDiskReader()).thenReturn(diskReader);
         when(service.getBandwidthLimiter()).thenReturn(new SharedBandwidthLimiter(1024));
         when(service.getV16CompatManager()).thenReturn(new V16CompatManager());
+        when(service.getV18CompatTracker()).thenReturn(new dev.vox.lss.common.compat.V18CompatTracker());
         when(service.getTickDiagnostics()).thenReturn("tick");
         when(service.getTickDiag()).thenReturn(new dev.vox.lss.common.processing.TickDiagnostics());
         when(service.getPlayers()).thenReturn(Map.of());
@@ -177,6 +178,7 @@ class PaperCommandsTest {
         when(service.getDiskReader()).thenReturn(diskReader);
         when(service.getBandwidthLimiter()).thenReturn(new SharedBandwidthLimiter(1024));
         when(service.getV16CompatManager()).thenReturn(new V16CompatManager());
+        when(service.getV18CompatTracker()).thenReturn(new dev.vox.lss.common.compat.V18CompatTracker());
         when(service.getTickDiagnostics()).thenReturn("tick");
         when(service.getTickDiag()).thenReturn(new dev.vox.lss.common.processing.TickDiagnostics());
         when(service.getPlayers()).thenReturn(Map.of());

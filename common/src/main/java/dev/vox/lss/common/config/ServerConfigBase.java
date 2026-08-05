@@ -167,6 +167,16 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public boolean enableV16Compat = true;
     /**
+     * When true (default), clients running the protocol-18 mod (v0.7.x–v0.8.x) get a native
+     * LOD session through the v18 compat rung (docs/planning/v18-compat-design.md): the
+     * current session shape with the SessionConfig echoing 18, columns forced codec-RAW, and
+     * the codec byte stripped at egress. Without the rung those clients degrade to the v16
+     * fallback session after their 5 s discovery timeout. Inert for current-protocol
+     * clients; set false as the kill switch to restore the strict version gate for 18.
+     * No clamp: boolean.
+     */
+    public boolean enableV18Compat = true;
+    /**
      * The LOD store switch (docs/planning/lod-store-implementation-plan.md):
      * "off" (no store — the kill switch every store gate A/Bs against) and
      * <b>"full" (the SQLite disk store — the DEFAULT since 2026-08-02)</b>, alone since the

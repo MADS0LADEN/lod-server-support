@@ -1078,4 +1078,63 @@ class PaperRequestProcessingServiceTest {
                 LSSConstants.CAPABILITY_VOXEL_COLUMNS | LSSConstants.CAPABILITY_ZSTD_COLUMNS);
         assertFalse(state.wantsCompressedColumns());
     }
+
+    // ---- v18 compat rung (docs/planning/v18-compat-design.md §2.3/§2.5) ----
+
+    @Test
+    void compressedFlagClearForAV18DialectSessionEvenWithTheBit() {
+        // The v18 twin of the pin above: a real v0.8.x client hardcodes caps=1, so this
+        // guards the HOSTILE caps=3 shape — the v18 layout has nowhere to carry a codec
+        // byte either. The tracker is marked before registration (the dialectFlip runs
+        // in the drain's beforeRegister); mirror that ordering here.
+        var svc = liveCompressionService();
+        var uuid = UUID.randomUUID();
+        svc.getV18CompatTracker().onHandshake(uuid);
+        var state = svc.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS | LSSConstants.CAPABILITY_ZSTD_COLUMNS);
+        assertFalse(state.wantsCompressedColumns());
+    }
+
+    @Test
+    void v18MembershipSurvivesTheDimensionChangeCycleAndKeepsTheFlagClear() {
+        // The load-bearing lifecycle property (v18-compat §2.3, plan-review F6): the
+        // dimension-change remove+register cycle calls removePlayer DIRECTLY (not the
+        // mailbox Remove), so the membership must survive it and the re-derivation must
+        // stay false — losing it here would re-grow the codec byte mid-session and
+        // hard-kick the client on its next column.
+        var svc = liveCompressionService();
+        var uuid = UUID.randomUUID();
+        svc.getV18CompatTracker().onHandshake(uuid);
+        svc.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS | LSSConstants.CAPABILITY_ZSTD_COLUMNS);
+
+        svc.removePlayer(uuid); // the dimension-change half: direct, NOT the mailbox
+        assertTrue(svc.getV18CompatTracker().isV18(uuid),
+                "removePlayer must not shed the v18 identity (dim changes reuse it)");
+
+        var state = svc.registerPlayer(playerIn(uuid, level(Level.END)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS | LSSConstants.CAPABILITY_ZSTD_COLUMNS);
+        assertFalse(state.wantsCompressedColumns(),
+                "the re-registration must re-derive false through the surviving membership");
+    }
+
+    @Test
+    void quitOriginatedMailboxRemoveDropsV18Membership() {
+        // The quit-race leak guard (v18-compat §2.3, plan-review F2): a quit's direct
+        // onDisconnect can run BEFORE a deferred Register's dialectFlip marked the
+        // membership — the mailbox Remove draining AFTER the register must drop it, or
+        // the entry (and the diag count) leaks forever. Sequence exactly the race:
+        // enqueueRegister(mark) then enqueueRemove then the direct onDisconnect (no-op,
+        // too early), then drain.
+        var uuid = UUID.randomUUID();
+        var player = playerIn(uuid, level(Level.OVERWORLD));
+        service.enqueueRegister(player, LSSConstants.CAPABILITY_VOXEL_COLUMNS,
+                () -> service.getV18CompatTracker().onHandshake(uuid), () -> {});
+        service.getV18CompatTracker().onDisconnect(uuid); // the quit's direct drop: too early
+        service.enqueueRemove(uuid);
+        service.tick(); // drain: Register (marks) then Remove (must drop the mark)
+        assertFalse(service.getV18CompatTracker().isV18(uuid),
+                "the mailbox Remove must drop membership the direct disconnect missed");
+        assertEquals(0, service.getV18CompatTracker().sessionCount());
+    }
 }

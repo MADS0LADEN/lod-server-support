@@ -261,6 +261,16 @@ public final class LSSConstants {
      *  echoing 16, source-less VoxelColumn frames, and the synthetic want-set recordkeeping. */
     public static final int V16_COMPAT_PROTOCOL_VERSION = 16;
 
+    /** The protocol-18 compat rung (docs/planning/v18-compat-design.md): a v0.7.x–v0.8.x
+     *  client handshaking 18 (and {@code enableV18Compat}) gets a NATIVE session — the wire
+     *  is the current one minus the codec byte: SessionConfig echoes 18 (the old client's
+     *  gate hard-requires it), columns are forced codec-RAW and ship WITHOUT the codec tag
+     *  (the v18 decode would consume it as the section-array length VarInt — hard kick),
+     *  and C2S is byte-identical, so the want-set pipeline never learns the session is
+     *  legacy. Membership only ({@code V18CompatTracker}) — no v16-style synthetic
+     *  want-set. */
+    public static final int V18_COMPAT_PROTOCOL_VERSION = 18;
+
     // Capabilities bitmask
     public static final int CAPABILITY_VOXEL_COLUMNS = 1;
     /** Client can decode zstd-framed column payloads (declared only when its zstd native

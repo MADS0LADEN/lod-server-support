@@ -35,6 +35,7 @@ public final class DiagnosticsFormatter {
             long bwWindowRate,
             List<PlayerDiag> players,
             String v16Line,
+            String v18Line,
             String xrayLine,
             long wireTotal, long colsZstd, long colsRaw
     ) {
@@ -53,7 +54,7 @@ public final class DiagnosticsFormatter {
                     cumInMem, cumUtd, cumGen, cumReResolved, cumGraceSkipped, diskCompleted,
                     tickDiagnostics, diskReaderDiagnostics, generationDiagnostics,
                     generationEnabled, genOrderGated, genInversions, bwTotal, bwWindowRate,
-                    players, v16Line, xrayLine, 0L, 0L, 0L);
+                    players, v16Line, null, xrayLine, 0L, 0L, 0L);
         }
         /** Pre-v16-compat shape (no shim/xray lines) — keeps existing constructions/tests intact. */
         public DiagData(boolean enabled, int lodDist, long bwPerPlayer, long bwGlobal,
@@ -78,7 +79,17 @@ public final class DiagnosticsFormatter {
                     totalBytes, cumInMem, cumUtd, cumGen, cumReResolved, cumGraceSkipped,
                     diskCompleted, tickDiagnostics, diskReaderDiagnostics, generationDiagnostics,
                     generationEnabled, genOrderGated, genInversions, bwTotal, bwWindowRate,
-                    players, line, xrayLine, wireTotal, colsZstd, colsRaw);
+                    players, line, v18Line, xrayLine, wireTotal, colsZstd, colsRaw);
+        }
+
+        /** Attach the v18 compat rung's one-line summary (null when the rung is untouched —
+         *  the line is omitted, mirroring the v16 line). Renders right after the v16 slot. */
+        public DiagData withV18Line(String line) {
+            return new DiagData(enabled, lodDist, bwPerPlayer, bwGlobal, uptimeSec, totalSent,
+                    totalBytes, cumInMem, cumUtd, cumGen, cumReResolved, cumGraceSkipped,
+                    diskCompleted, tickDiagnostics, diskReaderDiagnostics, generationDiagnostics,
+                    generationEnabled, genOrderGated, genInversions, bwTotal, bwWindowRate,
+                    players, v16Line, line, xrayLine, wireTotal, colsZstd, colsRaw);
         }
 
         /** Attach the x-ray masking one-line summary (always shown when non-null — the off
@@ -88,7 +99,7 @@ public final class DiagnosticsFormatter {
                     totalBytes, cumInMem, cumUtd, cumGen, cumReResolved, cumGraceSkipped,
                     diskCompleted, tickDiagnostics, diskReaderDiagnostics,
                     generationDiagnostics, generationEnabled, genOrderGated, genInversions,
-                    bwTotal, bwWindowRate, players, v16Line, line,
+                    bwTotal, bwWindowRate, players, v16Line, v18Line, line,
                     wireTotal, colsZstd, colsRaw);
         }
     }
@@ -147,6 +158,11 @@ public final class DiagnosticsFormatter {
         // v16 compat shim (omitted while untouched — most servers never see a legacy client)
         if (d.v16Line != null) {
             lines.add(d.v16Line);
+        }
+
+        // v18 compat rung (omitted while untouched — same stance as the v16 line)
+        if (d.v18Line != null) {
+            lines.add(d.v18Line);
         }
 
         // X-ray masking (docs/planning/antixray-compat-design.md §3 Diagnostics)
@@ -250,7 +266,7 @@ public final class DiagnosticsFormatter {
                 diag.getTotalGenOrderGated(), diag.getTotalGenCompletionInversions(),
                 bwLimiter.getTotalBytesSent(),
                 windowBandwidthRate,
-                players, null, null,
+                players, null, null, null,
                 serviceWireBytes, diag.getTotalColumnsCompressed(), diag.getTotalColumnsRaw()
         );
     }

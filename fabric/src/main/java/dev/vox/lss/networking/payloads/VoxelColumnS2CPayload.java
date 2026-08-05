@@ -52,12 +52,16 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
      * honest frames keep the raw-work denomination the pressure gates are calibrated in.
      */
     private final int rawSize;
-    /** v16 compat: encode the pre-18 layout WITHOUT the source and codec bytes.
-     *  Server-encode-only — {@link #read} never produces it — and set exclusively by
-     *  {@link #asV16()} at the per-player column send seam, whose egress guard drops any
-     *  non-RAW payload first (a v18/v19-shaped or zstd-framed column reaching a v16
-     *  client hard-kicks it). */
-    private final boolean v16Wire;
+    /** Server-encode-only wire shape (docs/planning/v18-compat-design.md §2.6):
+     *  {@code CURRENT} writes source + codec bytes (the protocol-19 layout), {@code V18}
+     *  writes the source byte only (the protocol-18 layout), {@code V16} writes neither
+     *  (the pre-18 layout). {@link #read} never produces a legacy shape — they are set
+     *  exclusively by {@link #asV16()} / {@link #asV18()} at the per-player column send
+     *  seam, whose egress guard drops any non-RAW payload first (a codec-carrying or
+     *  zstd-framed column reaching a legacy client hard-kicks it). */
+    enum WireShape { CURRENT, V18, V16 }
+
+    private final WireShape wireShape;
 
     /** Source-less convenience (tests/legacy rigs): tags the column with source -1
      *  ("unknown"), a legal wire value the client passes through verbatim. Production
@@ -75,7 +79,7 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
                                   byte source, byte[] sectionBytes) {
         this(chunkX, chunkZ, dimension, columnTimestamp, source,
                 LSSConstants.COLUMN_CODEC_RAW, sectionBytes,
-                sectionBytes == null ? 0 : sectionBytes.length, false);
+                sectionBytes == null ? 0 : sectionBytes.length, WireShape.CURRENT);
     }
 
     /** Full server-build constructor: {@code sectionBytes} are the SHIPPED bytes for the
@@ -84,13 +88,13 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
                                   ResourceKey<Level> dimension, long columnTimestamp,
                                   byte source, byte codec, byte[] sectionBytes, int rawSize) {
         this(chunkX, chunkZ, dimension, columnTimestamp, source, codec, sectionBytes,
-                rawSize, false);
+                rawSize, WireShape.CURRENT);
     }
 
     private VoxelColumnS2CPayload(int chunkX, int chunkZ,
                                   ResourceKey<Level> dimension, long columnTimestamp,
                                   byte source, byte codec, byte[] sectionBytes, int rawSize,
-                                  boolean v16Wire) {
+                                  WireShape wireShape) {
         this.chunkX = chunkX;
         this.chunkZ = chunkZ;
         this.dimension = dimension;
@@ -99,7 +103,7 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         this.codec = codec;
         this.sectionBytes = sectionBytes;
         this.rawSize = rawSize;
-        this.v16Wire = v16Wire;
+        this.wireShape = wireShape;
     }
 
     /** The v16 compat copy: same column, legacy source-less/codec-less wire layout.
@@ -110,7 +114,19 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
     public VoxelColumnS2CPayload asV16() {
         return new VoxelColumnS2CPayload(this.chunkX, this.chunkZ, this.dimension,
                 this.columnTimestamp, this.source, this.codec, this.sectionBytes,
-                this.rawSize, true);
+                this.rawSize, WireShape.V16);
+    }
+
+    /** The v18 compat copy: same column, protocol-18 layout — source byte kept, codec
+     *  byte stripped (docs/planning/v18-compat-design.md §2.6). Section bytes are shared,
+     *  not copied. PRECONDITION (enforced by the egress guard, not here): codec is
+     *  {@code COLUMN_CODEC_RAW} — the v18 decode reads the byte after the source as the
+     *  section-array length VarInt, so a framed payload must be dropped at the seam,
+     *  never converted. */
+    public VoxelColumnS2CPayload asV18() {
+        return new VoxelColumnS2CPayload(this.chunkX, this.chunkZ, this.dimension,
+                this.columnTimestamp, this.source, this.codec, this.sectionBytes,
+                this.rawSize, WireShape.V18);
     }
 
     public int chunkX() { return chunkX; }
@@ -150,9 +166,13 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         buf.writeInt(payload.chunkZ);
         buf.writeUtf(payload.dimension.identifier().toString(), LSSConstants.MAX_DIMENSION_STRING_LENGTH);
         buf.writeLong(payload.columnTimestamp);
-        if (!payload.v16Wire) {
-            buf.writeByte(payload.source);
-            buf.writeByte(payload.codec);
+        switch (payload.wireShape) {
+            case CURRENT -> {
+                buf.writeByte(payload.source);
+                buf.writeByte(payload.codec);
+            }
+            case V18 -> buf.writeByte(payload.source); // protocol 18: no codec byte
+            case V16 -> {} // pre-18: neither byte
         }
         buf.writeByteArray(payload.sectionBytes);
     }
@@ -187,7 +207,7 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         }
 
         return new VoxelColumnS2CPayload(cx, cz, dim, columnTimestamp, source, codec,
-                sectionBytes, rawSize, false);
+                sectionBytes, rawSize, WireShape.CURRENT);
     }
 
     @Override

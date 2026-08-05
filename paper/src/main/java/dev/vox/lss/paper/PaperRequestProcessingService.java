@@ -6,6 +6,7 @@ import dev.vox.lss.common.LSSLogger;
 import dev.vox.lss.common.PositionUtil;
 import dev.vox.lss.common.SharedBandwidthLimiter;
 import dev.vox.lss.common.compat.V16CompatManager;
+import dev.vox.lss.common.compat.V18CompatTracker;
 import dev.vox.lss.common.processing.IncomingBatch;
 import dev.vox.lss.common.processing.IncomingRequest;
 import dev.vox.lss.common.processing.LoadedColumnData;
@@ -56,6 +57,11 @@ public class PaperRequestProcessingService {
     // never consults it: a v16 player is an ordinary registered player whose want-set is
     // declared by the shim at 1 Hz. See docs/planning/v16-compat-design.md.
     private final V16CompatManager v16Compat = new V16CompatManager();
+    // The v18 compat rung's membership (protocol-18 clients, v0.7.x–v0.8.x): an ordinary
+    // CURRENT-dialect session forced codec-RAW whose column frames drop the codec byte at
+    // the egress seam. Marked ONLY on the pump (the dialectFlip runnable) — see
+    // docs/planning/v18-compat-design.md §2.3.
+    private final V18CompatTracker v18Compat = new V18CompatTracker();
 
     private final long startTimeNanos = System.nanoTime();
     // Keyed by the lightweight ResourceKey (not ServerLevel): a ServerLevel key strongly
@@ -109,6 +115,8 @@ public class PaperRequestProcessingService {
 
     /** Warn-once latch for the v16 egress splice guard (pump thread only). */
     private boolean v16SpliceWarned;
+    /** Warn-once latch for the v18 egress splice guard (pump thread only). */
+    private boolean v18SpliceWarned;
 
     /** The per-player column egress (PUMP). For a v16 session, splices the frame
      *  UNCONDITIONALLY into the legacy source-less shape — every producer
@@ -138,6 +146,27 @@ public class PaperRequestProcessingService {
             PaperPayloadHandler.sendRawNmsPayload(state.getPlayer().getBukkitEntity(),
                     PaperPayloadHandler.ID_VOXEL_COLUMN, legacy);
             this.v16Compat.onColumnSent(uuid, packedPos);
+            return;
+        }
+        if (this.v18Compat.isV18(uuid)) {
+            // v18 egress (v18-compat design §2.6): strip the codec byte, keep the source
+            // byte. No prune — there is no synthetic want-set; the client's own
+            // re-declaration heals any drop. The splice THROWS on a non-RAW codec (same
+            // narrow cross-dialect downgrade window as the v16 guard); the warn-drop
+            // contains it, mirroring the v16 branch above.
+            byte[] v18Frame;
+            try {
+                v18Frame = PaperPayloadHandler.rewriteColumnToV18(data);
+            } catch (Exception e) {
+                if (!this.v18SpliceWarned) {
+                    this.v18SpliceWarned = true;
+                    LSSLogger.error("v18-compat: dropping unspliceable column frame for "
+                            + state.getPlayerName() + " (further drops are silent)", e);
+                }
+                return;
+            }
+            PaperPayloadHandler.sendRawNmsPayload(state.getPlayer().getBukkitEntity(),
+                    PaperPayloadHandler.ID_VOXEL_COLUMN, v18Frame);
             return;
         }
         PaperPayloadHandler.sendRawNmsPayload(state.getPlayer().getBukkitEntity(),
@@ -539,7 +568,17 @@ public class PaperRequestProcessingService {
                             }
                         }
                     }
-                    case LifecycleEvent.Remove r -> removePlayer(r.uuid());
+                    case LifecycleEvent.Remove r -> {
+                        removePlayer(r.uuid());
+                        // Quit-race leak guard (v18-compat §2.3, review F2): the quit's
+                        // direct onDisconnect can run BEFORE a deferred Register's
+                        // dialectFlip marked membership, leaking the entry forever. The
+                        // mailbox Remove is quit-originated ONLY (the dimension-change
+                        // cycle calls removePlayer directly), so dropping here is exactly
+                        // the network-disconnect semantics and cannot break the
+                        // identity-survives-dim-change contract.
+                        this.v18Compat.onDisconnect(r.uuid());
+                    }
                 }
             } catch (Exception e) {
                 LSSLogger.error("Lifecycle event failed to apply (" + ev.getClass().getSimpleName()
@@ -562,12 +601,14 @@ public class PaperRequestProcessingService {
         });
         this.diskReader.registerPlayer(player.getUUID());
         state.setCapabilities(capabilities);
-        // The four-term AND (plan §2) — twin of the Fabric derivation. The v16 manager is
-        // marked before the register event is enqueued (handshake path), and the drain
-        // runs registerPlayer before the deferred reply, so no serve precedes the flag.
+        // The five-term AND (plan §2 + v18-compat §2.5) — twin of the Fabric derivation.
+        // Both dialect marks run in the drain's beforeRegister (the dialectFlip, pump
+        // thread) immediately before this, and the drain runs registerPlayer before the
+        // deferred reply, so no serve precedes the flag.
         state.setWantsCompressedColumns(this.wireCompressionLive
                 && (capabilities & LSSConstants.CAPABILITY_ZSTD_COLUMNS) != 0
-                && !this.v16Compat.isV16(player.getUUID()));
+                && !this.v16Compat.isV16(player.getUUID())
+                && !this.v18Compat.isV18(player.getUUID()));
         state.markHandshakeComplete();
         return state;
     }
@@ -1157,6 +1198,10 @@ public class PaperRequestProcessingService {
 
     public V16CompatManager getV16CompatManager() {
         return this.v16Compat;
+    }
+
+    public V18CompatTracker getV18CompatTracker() {
+        return this.v18Compat;
     }
 
     public PaperChunkDiskReader getDiskReader() {

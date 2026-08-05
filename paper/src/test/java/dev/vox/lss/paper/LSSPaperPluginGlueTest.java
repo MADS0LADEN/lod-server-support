@@ -134,7 +134,9 @@ class LSSPaperPluginGlueTest {
     void versionMismatchSendsZeroFramesAndRegistersNobody() {
         var sender = new RecordingSender();
         var registrar = new RecordingRegistrar();
-        for (int version : new int[]{V + 1, V - 1}) {
+        // V-1 (18) and 16 are no longer mismatches on default config — they have compat
+        // rungs (tested below); 17 never shipped and V+1 is the future-client shape.
+        for (int version : new int[]{V + 1, 17}) {
             LSSPaperPlugin.handleHandshake(handshakeFrame(version, VOXEL_CAPS),
                     "Steve", config(true), true, sender, registrar);
         }
@@ -228,6 +230,44 @@ class LSSPaperPluginGlueTest {
                 "Herobrine", config, true, sender, registrar);
         assertEquals(List.of(), sender.replies,
                 "the kill switch restores the strict silent version gate");
+        assertEquals(List.of(), registrar.caps);
+    }
+
+    @Test
+    void v18HandshakeGetsTheV18DialectReplyAndRegistration() {
+        // A protocol-18 client (v0.7.x–v0.8.x) under enableV18Compat (default true) takes
+        // the SAME ladder with the V18 dialect, and this drives the PRODUCTION
+        // handleHandshake — the 6-arg gate call site — so a silent fall-back to the 5-arg
+        // overload (which would drop v18 clients to the v16 fallback) fails here
+        // (v18-compat design §2.1, review F5). The reply is deferred exactly like every
+        // registering outcome: the pre-registration gap applies to v18 joins too.
+        var config = config(true);
+        config.lodDistanceChunks = 101;
+        config.generationConcurrencyLimitPerPlayer = 7;
+        config.enableChunkGeneration = false; // opposed to effectiveEnabled=true (swap guard)
+        var sender = new RecordingSender();
+        var registrar = new RecordingRegistrar();
+        LSSPaperPlugin.handleHandshake(handshakeFrame(18, VOXEL_CAPS),
+                "vx7m", config, true, sender, registrar);
+
+        assertEquals(List.of(), sender.replies, "v18 registration defers its reply too");
+        registrar.runDeferredReplies();
+        assertEquals(List.of(new Reply(HandshakeGate.WireDialect.V18, true, 101,
+                        LSSConstants.SYNC_ON_LOAD_SLOT_CAP, 7, false)), sender.replies);
+        assertEquals(List.of(VOXEL_CAPS), registrar.caps);
+        assertEquals(List.of(HandshakeGate.WireDialect.V18), registrar.dialects);
+    }
+
+    @Test
+    void v18HandshakeWithCompatDisabledSendsNothing() {
+        var config = config(true);
+        config.enableV18Compat = false;
+        var sender = new RecordingSender();
+        var registrar = new RecordingRegistrar();
+        LSSPaperPlugin.handleHandshake(handshakeFrame(18, VOXEL_CAPS),
+                "vx7m", config, true, sender, registrar);
+        assertEquals(List.of(), sender.replies,
+                "the v18 kill switch restores the strict silent version gate");
         assertEquals(List.of(), registrar.caps);
     }
 

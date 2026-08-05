@@ -200,6 +200,53 @@ class DiagnosticsFormatterTest {
                 "line order must stay v16 then xray: " + both);
     }
 
+    @Test
+    void diagV18LineRendersInItsSlotOnlyWhenPresent() {
+        // The v18 compat rung's line (v18-compat design §2.7): omitted while untouched,
+        // rendered right after the v16 slot (before xray) when present, counters intact.
+        var d = new DiagnosticsFormatter.DiagData(
+                true, 24,
+                2048, 1_048_576,
+                100, 5000, 10_485_760,
+                11, 33, 44, 55, 66,
+                22,
+                "sent=9, disk=1/2",
+                "submitted=5, completed=5",
+                "active=1/32", true,
+                7, 3,
+                2_097_152,
+                512,
+                List.of());
+
+        var without = DiagnosticsFormatter.formatDiagnostics(d);
+        assertTrue(without.stream().noneMatch(l -> l.startsWith("V18Compat")),
+                "an untouched rung (null line) must add nothing");
+
+        var with = DiagnosticsFormatter.formatDiagnostics(
+                d.withV18Line("V18Compat: clients=1, started=1"));
+        assertTrue(with.contains(
+                "Sources (total): in_mem=11, disk=22, up_to_date=33, gen=44, re_resolved=55, grace_skipped=66"),
+                "the withV18Line copy constructor must preserve every counter: " + with);
+        int genIdx = indexOfPrefix(with, "Generation:");
+        int v18Idx = indexOfPrefix(with, "V18Compat:");
+        int bwIdx = indexOfPrefix(with, "Bandwidth:");
+        assertTrue(genIdx < v18Idx && v18Idx < bwIdx,
+                "the v18 line sits between Generation and Bandwidth: " + with);
+        assertEquals(without.size() + 1, with.size());
+
+        // All three optional lines together: v16, then v18, then xray.
+        var all = DiagnosticsFormatter.formatDiagnostics(
+                d.withV16Line("V16Compat: clients=1")
+                        .withV18Line("V18Compat: clients=2, started=3")
+                        .withXrayLine("Xray: active=config, masked_sections=0"));
+        assertTrue(indexOfPrefix(all, "V16Compat:") < indexOfPrefix(all, "V18Compat:")
+                        && indexOfPrefix(all, "V18Compat:") < indexOfPrefix(all, "Xray:"),
+                "line order must stay v16 then v18 then xray: " + all);
+        // And the with-chain must commute (the copy constructors do not clobber each other).
+        assertEquals("V18Compat: clients=2, started=3",
+                all.get(indexOfPrefix(all, "V18Compat:")));
+    }
+
     private static int indexOfPrefix(List<String> lines, String prefix) {
         for (int i = 0; i < lines.size(); i++) {
             if (lines.get(i).startsWith(prefix)) return i;
