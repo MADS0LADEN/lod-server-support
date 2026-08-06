@@ -189,6 +189,12 @@ public final class SqliteLodStore implements LodStoreService {
     /** Regions whose seen_mtime a deposit cleared since the last sweep pass (review
      *  B13 memo — batcher-thread only, reset by runSweep). */
     private final Map<Integer, java.util.HashSet<Long>> sweepReopened = new HashMap<>();
+    /** {dimId, rpos} memo entries added during the OPEN txn (2026-08-05 review F5,
+     *  batcher-thread only): a rollback undoes the txn's regions-DELETEs while the
+     *  sweepReopened memo survived, so a later same-region deposit skipped the clear and
+     *  the stale seen_mtime row ==-skipped every future sweep. rollbackTxn prunes exactly
+     *  these entries; commitTxn clears the list once the deletes are durable. */
+    private final java.util.ArrayDeque<long[]> txnReopened = new java.util.ArrayDeque<>();
     /** Bumped by every applied DropAll (review B9): the backfill snapshots it per
      *  region and skips the done-mark when it changed — a region judged before the
      *  drop must not be marked done after it (permanent warm hole otherwise). */
@@ -450,31 +456,31 @@ public final class SqliteLodStore implements LodStoreService {
         try {
             Connection c = readerConnection();
             if (c == null) return null;
-            try (PreparedStatement ps = c.prepareStatement(
-                    "SELECT ts, chash, usize, blob FROM lods_" + dimId + " WHERE pos=?")) {
-                ps.setLong(1, packed);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (!rs.next()) return null;
-                    long ts = rs.getLong(1);
-                    long chash = rs.getLong(2);
-                    int usize = rs.getInt(3);
-                    if (usize == 0) return new StoreHit(EMPTY, ts);
-                    if (usize < 0 || usize > MAX_ROW_USIZE) {
-                        // Bound the alloc BEFORE trusting the row's own size field — a
-                        // bit-rotted usize otherwise allocates whatever it says (R1).
-                        throw new IllegalStateException("row integrity failure at " + packed
-                                + " (usize " + usize + " out of bounds)");
-                    }
-                    byte[] blob = rs.getBytes(4);
-                    byte[] raw = this.codec.decompress(blob, usize);
-                    if (raw.length != usize || fnv1a(raw) != chash) {
-                        throw new IllegalStateException("row integrity failure at " + packed
-                                + " (usize/chash mismatch)");
-                    }
-                    return new StoreHit(raw, ts);
+            PreparedStatement ps = readerStatement(c, dimId, READER_STMT_GET,
+                    "SELECT ts, chash, usize, blob FROM lods_" + dimId + " WHERE pos=?");
+            ps.setLong(1, packed);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                long ts = rs.getLong(1);
+                long chash = rs.getLong(2);
+                int usize = rs.getInt(3);
+                if (usize == 0) return new StoreHit(EMPTY, ts);
+                if (usize < 0 || usize > MAX_ROW_USIZE) {
+                    // Bound the alloc BEFORE trusting the row's own size field — a
+                    // bit-rotted usize otherwise allocates whatever it says (R1).
+                    throw new IllegalStateException("row integrity failure at " + packed
+                            + " (usize " + usize + " out of bounds)");
                 }
+                byte[] blob = rs.getBytes(4);
+                byte[] raw = this.codec.decompress(blob, usize);
+                if (raw.length != usize || fnv1a(raw) != chash) {
+                    throw new IllegalStateException("row integrity failure at " + packed
+                            + " (usize/chash mismatch)");
+                }
+                return new StoreHit(raw, ts);
             }
         } catch (Throwable t) {
+            invalidateReaderStatement(dimId, READER_STMT_GET);
             this.diag.recordError();
             // Purge ONLY row-poison failures (our integrity throws, a decompress
             // failure) — a transient SQLException (SQLITE_BUSY under the WAL watchdog,
@@ -512,29 +518,29 @@ public final class SqliteLodStore implements LodStoreService {
         try {
             Connection c = readerConnection();
             if (c == null) return null;
-            try (PreparedStatement ps = c.prepareStatement(
-                    "SELECT ts, fhash, usize, blob FROM lods_" + dimId + " WHERE pos=?")) {
-                ps.setLong(1, packed);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (!rs.next()) return null;
-                    long ts = rs.getLong(1);
-                    long fhash = rs.getLong(2);
-                    int usize = rs.getInt(3);
-                    if (usize == 0) return new FrameHit(EMPTY, 0, ts);
-                    if (usize < 0 || usize > MAX_ROW_USIZE) {
-                        throw new IllegalStateException("row integrity failure at " + packed
-                                + " (usize " + usize + " out of bounds)");
-                    }
-                    byte[] blob = rs.getBytes(4);
-                    if (fnv1a(blob) != fhash
-                            || this.codec.declaredContentSize(blob) != usize) {
-                        throw new IllegalStateException("row integrity failure at " + packed
-                                + " (fhash/declared-size mismatch)");
-                    }
-                    return new FrameHit(blob, usize, ts);
+            PreparedStatement ps = readerStatement(c, dimId, READER_STMT_GET_FRAME,
+                    "SELECT ts, fhash, usize, blob FROM lods_" + dimId + " WHERE pos=?");
+            ps.setLong(1, packed);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                long ts = rs.getLong(1);
+                long fhash = rs.getLong(2);
+                int usize = rs.getInt(3);
+                if (usize == 0) return new FrameHit(EMPTY, 0, ts);
+                if (usize < 0 || usize > MAX_ROW_USIZE) {
+                    throw new IllegalStateException("row integrity failure at " + packed
+                            + " (usize " + usize + " out of bounds)");
                 }
+                byte[] blob = rs.getBytes(4);
+                if (fnv1a(blob) != fhash
+                        || this.codec.declaredContentSize(blob) != usize) {
+                    throw new IllegalStateException("row integrity failure at " + packed
+                            + " (fhash/declared-size mismatch)");
+                }
+                return new FrameHit(blob, usize, ts);
             }
         } catch (Throwable t) {
+            invalidateReaderStatement(dimId, READER_STMT_GET_FRAME);
             this.diag.recordError();
             // Same purge triage as get(): row-poison throws purge; transient
             // SQLExceptions read as a miss and retry on the next re-declaration.
@@ -554,23 +560,84 @@ public final class SqliteLodStore implements LodStoreService {
         Connection c = this.readerConn.get();
         if (c != null) return c;
         if (this.shutdown.get()) return null; // closing conns; a new one would leak
+        Connection created = null;
         try {
             var ds = new org.sqlite.SQLiteDataSource();
             ds.setUrl("jdbc:sqlite:" + this.dbPath);
-            c = ds.getConnection();
-            try (Statement st = c.createStatement()) {
+            created = ds.getConnection();
+            try (Statement st = created.createStatement()) {
                 st.execute("PRAGMA busy_timeout=3000"); // see openWriter
                 st.execute("PRAGMA query_only=1");
                 st.execute("PRAGMA wal_autocheckpoint=0");
             }
-            this.readerConn.set(c);
             synchronized (this.allReaderConns) {
-                this.allReaderConns.add(c);
+                // Re-check under the SAME lock shutdown's close loop holds: a shutdown that
+                // ran completely between the entry check and here has already cleared the
+                // list, and registering now would leak a native handle past close — on
+                // Windows a held handle can fail a later same-JVM drop-and-rebuild (see
+                // dropDimensionRows). Any interleaving either lands here (self-close) or
+                // registers before shutdown's loop takes the lock (closed by the loop).
+                if (this.shutdown.get()) {
+                    closeQuietly(created);
+                    return null;
+                }
+                this.allReaderConns.add(created);
             }
-            return c;
+            // Publish to the thread-local only AFTER registration — a self-closed
+            // connection must never be handed to later reads on this thread.
+            this.readerConn.set(created);
+            return created;
         } catch (Throwable t) {
+            // A throw from the pragmas (or registration) after getConnection() succeeded
+            // used to leak the unregistered handle — and because readerConn was never set,
+            // EVERY subsequent read on the thread re-opened and re-leaked one (2026-08-05
+            // review F3), unbounded on exactly the box already in trouble.
+            closeQuietly(created);
             this.diag.recordError();
             return null;
+        }
+    }
+
+    private static void closeQuietly(Connection c) {
+        if (c == null) return;
+        try { c.close(); } catch (Exception ignored) { }
+    }
+
+    private static final int READER_STMT_GET = 0;
+    private static final int READER_STMT_GET_FRAME = 1;
+
+    /**
+     * Per-thread per-dimension cached reader SELECTs (2026-08-05 review P4): every disk
+     * submit while the store serves pays a {@code get}/{@code getFrame}, and re-preparing
+     * the SELECT cost ~5-20 µs against a ~100 µs hit. Readers are thread-confined
+     * ({@link #readerConnection()}), so the cache is race-free by construction; statements
+     * die with their connection (sqlite-jdbc closes statements on {@code Connection.close()}),
+     * and the map is per-store-instance so a drop-and-rebuild (a fresh instance) can never
+     * serve stale handles. No DDL touches the lods tables while serving (schema/mask/registry
+     * drift rebuilds the whole store; {@code dropDimensionRows} DELETEs), so a cached
+     * statement cannot silently go stale — a broken one throws and is invalidated below.
+     */
+    private final ThreadLocal<java.util.HashMap<Long, PreparedStatement>> readerStatements =
+            ThreadLocal.withInitial(java.util.HashMap::new);
+
+    private PreparedStatement readerStatement(Connection c, int dimId, int kind, String sql)
+            throws SQLException {
+        long key = ((long) dimId << 1) | kind;
+        var cache = this.readerStatements.get();
+        PreparedStatement ps = cache.get(key);
+        if (ps == null || ps.isClosed()) {
+            ps = c.prepareStatement(sql);
+            cache.put(key, ps);
+        }
+        return ps;
+    }
+
+    /** Drop (and close) the calling thread's cached statement after a read failure — a
+     *  broken statement must not wedge the thread's future reads on that dimension. */
+    private void invalidateReaderStatement(int dimId, int kind) {
+        PreparedStatement ps = this.readerStatements.get().remove(((long) dimId << 1) | kind);
+        if (ps != null) {
+            try { ps.close(); } catch (Exception ignored) { }
         }
     }
 
@@ -894,7 +961,7 @@ public final class SqliteLodStore implements LodStoreService {
                 // soak false-positive (store.errors == 0 checks) on shutdown timing.
                 if (t instanceof InterruptedException && this.shutdown.get()) break;
                 this.diag.recordError();
-                try { this.writer.rollback(); this.txnRows = 0; } catch (Throwable ignored) { }
+                rollbackTxn();
                 // A DELETE must never be lost to a transient failure: its tombstone
                 // expires after TOMBSTONE_TTL_NANOS and the row would resurrect.
                 // Re-queue it — retries are bounded by the failure latch below, and
@@ -917,7 +984,7 @@ public final class SqliteLodStore implements LodStoreService {
                 try {
                     apply(op);
                 } catch (Throwable ignored) {
-                    try { this.writer.rollback(); this.txnRows = 0; } catch (Throwable ignored2) { }
+                    rollbackTxn();
                 }
             }
         }
@@ -943,6 +1010,14 @@ public final class SqliteLodStore implements LodStoreService {
 
     void failNextOpsForTest(int n) {
         this.failOpsForTest = n;
+    }
+
+    /** TEST-ONLY: registered reader connections (review F3 — must be 0 after shutdown;
+     *  a nonzero count would be a native-handle leak past the close loop). */
+    int readerConnCountForTest() {
+        synchronized (this.allReaderConns) {
+            return this.allReaderConns.size();
+        }
     }
 
     private void apply(Op op) throws Exception {
@@ -1098,6 +1173,10 @@ public final class SqliteLodStore implements LodStoreService {
         long rpos = regionOf(dep.packed());
         if (this.sweepReopened.computeIfAbsent(dimId, k -> new java.util.HashSet<>())
                 .add(rpos)) {
+            // Record for rollback pruning BEFORE the DELETE executes — if executeUpdate
+            // itself throws, the failure handler must already hold the entry to un-poison
+            // the memo (review F5).
+            this.txnReopened.add(new long[]{dimId, rpos});
             try (PreparedStatement ps = this.writer.prepareStatement(
                     "DELETE FROM regions WHERE dim=? AND rpos=?")) {
                 ps.setInt(1, dimId);
@@ -1174,6 +1253,29 @@ public final class SqliteLodStore implements LodStoreService {
         if (this.txnRows > 0) {
             this.writer.commit();
             this.txnRows = 0;
+        }
+        // The open txn's memo clears are durable now (a memo DELETE always bumps txnRows,
+        // so it cannot be pending when the branch above skipped) — review F5.
+        this.txnReopened.clear();
+    }
+
+    /**
+     * Roll back the open txn and un-poison the B13 memo (2026-08-05 review F5): the
+     * rollback undoes any {@code DELETE FROM regions} that rode the txn while its
+     * {@code sweepReopened} entry survived — a later same-region deposit would then skip
+     * the clear, and the surviving stale seen_mtime row would {@code ==}-skip every future
+     * sweep of the region until its next real save (unbounded cross-restart staleness, the
+     * exact shape seen_mtime exists to prevent). Pruning this txn's entries lets the next
+     * deposit re-clear. Entries whose DELETE an intervening direct commit already flushed
+     * are pruned too — the next deposit then re-executes an idempotent DELETE; one extra
+     * statement, conservative direction.
+     */
+    private void rollbackTxn() {
+        try { this.writer.rollback(); this.txnRows = 0; } catch (Throwable ignored) { }
+        long[] entry;
+        while ((entry = this.txnReopened.pollFirst()) != null) {
+            var set = this.sweepReopened.get((int) entry[0]);
+            if (set != null) set.remove(entry[1]);
         }
     }
 
@@ -1480,9 +1582,10 @@ public final class SqliteLodStore implements LodStoreService {
         return this.capLogEmissions;
     }
 
-    /** Oldest-ts eviction across all dims, sized to the DEFICIT rather than to a fixed
-     *  batch, and bounded at {@link #EVICTION_MAX_ROWS_PER_DIM} rows/dim per pass so
-     *  one pass cannot monopolise the batcher.
+    /** Oldest-ts eviction ACROSS all dims (a real cross-dimension merge since the
+     *  2026-08-05 review's F4 — see below), sized to the DEFICIT rather than to a fixed
+     *  batch, and bounded at {@link #EVICTION_MAX_ROWS_PER_DIM} candidate rows/dim per
+     *  pass so one pass cannot monopolise the batcher.
      *
      *  <p>This used to delete a flat 512 rows/dim however far over the cap the store
      *  actually was, and {@link #MAX_EVICTION_PASSES_PER_TICK} compounded that to 4096
@@ -1492,26 +1595,51 @@ public final class SqliteLodStore implements LodStoreService {
      *  between passes, but the FIRST pass already overshoots. Reading each candidate's
      *  {@code length(blob)} lets the pass stop the moment enough bytes are covered.
      *
+     *  <p><b>Cross-dim fairness (review F4):</b> the pre-merge shape iterated dims in
+     *  HashMap order against one shared budget, so the first dimension absorbed the
+     *  entire deficit per pass and across passes — under sustained cap pressure one
+     *  dim's genuinely-warm rows were hollowed out while the others kept everything.
+     *  Candidates (≤ {@link #EVICTION_MAX_ROWS_PER_DIM} per dim, today's worst-case pass
+     *  work) are now merged by ascending ts — ties broken by dimId then pos for
+     *  determinism — and consumed in GLOBAL age order until the deficit is covered
+     *  ({@code remaining > 0} checked before each victim, so the last one may overshoot,
+     *  exactly like the per-dim loop did). Single-dim stores behave bit-identically.
+     *
      *  <p>Freed pages are ≥ freed blob bytes (page granularity), so covering the
      *  deficit in blob bytes always clears it in page bytes; the caller re-measures
      *  and runs another pass if not. Evicted positions go through the tombstone
      *  protocol like any delete so readers cannot race a half-removed row. */
     private int evictOldestBatch(long bytesToFree) throws SQLException {
-        int evicted = 0;
-        long remaining = bytesToFree;
+        record Candidate(String dim, int dimId, long pos, long len, long ts) { }
+        var candidates = new ArrayList<Candidate>();
         for (var entry : List.copyOf(this.dimIds.entrySet())) {
-            if (remaining <= 0) break;
-            List<Long> oldest = new ArrayList<>();
             try (Statement st = this.writer.createStatement();
-                 ResultSet rs = st.executeQuery("SELECT pos, length(\"blob\") FROM lods_"
+                 ResultSet rs = st.executeQuery("SELECT pos, length(\"blob\"), ts FROM lods_"
                          + entry.getValue() + " ORDER BY ts ASC LIMIT "
                          + EVICTION_MAX_ROWS_PER_DIM)) {
-                while (rs.next() && remaining > 0) {
-                    oldest.add(rs.getLong(1));
-                    remaining -= Math.max(1L, rs.getLong(2));
+                while (rs.next()) {
+                    candidates.add(new Candidate(entry.getKey(), entry.getValue(),
+                            rs.getLong(1), rs.getLong(2), rs.getLong(3)));
                 }
             }
-            if (oldest.isEmpty()) continue;
+        }
+        candidates.sort(java.util.Comparator.comparingLong(Candidate::ts)
+                .thenComparingInt(Candidate::dimId).thenComparingLong(Candidate::pos));
+
+        // Victims in global age order, grouped per dim for the delete ladder below.
+        var victimsByDim = new java.util.LinkedHashMap<String, List<Long>>();
+        var dimIdByKey = new HashMap<String, Integer>();
+        long remaining = bytesToFree;
+        for (var cand : candidates) {
+            if (remaining <= 0) break;
+            victimsByDim.computeIfAbsent(cand.dim(), k -> new ArrayList<>()).add(cand.pos());
+            dimIdByKey.put(cand.dim(), cand.dimId());
+            remaining -= Math.max(1L, cand.len());
+        }
+
+        int evicted = 0;
+        for (var entry : victimsByDim.entrySet()) {
+            List<Long> oldest = entry.getValue();
             var tombs = this.tombstones.computeIfAbsent(entry.getKey(),
                     k -> new ConcurrentHashMap<>());
             long now = System.nanoTime();
@@ -1534,7 +1662,7 @@ public final class SqliteLodStore implements LodStoreService {
                 }
             }
             this.writer.commit();
-            evicted += deleteRows(entry.getValue(), oldest);
+            evicted += deleteRows(dimIdByKey.get(entry.getKey()), oldest);
         }
         return evicted;
     }
