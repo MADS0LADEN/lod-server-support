@@ -284,6 +284,31 @@ class ColumnStateMap {
         long old = this.timestamps.get(packed);
         if (old == -1L) return;
 
+        // Parked: any further report is a sibling consumer's echo of the capping delivery
+        // (a parked position is never re-declared this session; revival via
+        // markDirtyIfKnown removes the mark before any new delivery can be rejected).
+        // Absorbing it protects the clear-flavor park's retained pre-clear stamp — without
+        // this, a post-park echo re-enters the cap branch, finds clearedResync already
+        // removed, and takes the lost-content flavor, destroying the retained stamp and
+        // recreating the permanent ghost-terrain hole the retention exists to prevent
+        // (2026-08-05 review F2).
+        if (this.sessionSatisfied.contains(packed)) return;
+
+        long clearPreStamp = this.clearedResync.getOrDefault(packed, -1L);
+        // Sibling echo of an already-handled lost clear: the pinned invariant is "strikes
+        // count DELIVERIES, not consumer reports". The lost-content path absorbs siblings
+        // for free (the first report removes the stamp, so echoes hit the old == -1 guard);
+        // the clear path restores a >0 stamp, so without this guard each sibling counted a
+        // fresh strike — parking after MAX/N failed clear deliveries with N consumers. The
+        // first report leaves exactly (stamp == pre-clear stamp) + a live retry mark; a
+        // fresh clear delivery always re-sets the stamp to the CLEAR's ts and consumes the
+        // retry mark via onReceived before any report of it can arrive, so this cannot
+        // absorb a legitimate first strike. (A straggler report for delivery N landing
+        // after delivery N+1's onReceived counts against N+1 and then absorbs N+1's own
+        // first report — a one-strike under-count that only delays the park; safe
+        // direction, narrow window.)
+        if (clearPreStamp > 0 && old == clearPreStamp && this.retry.contains(packed)) return;
+
         int priorFailures = this.ingestFailures.addTo(packed, 1);
         if (priorFailures + 1 > MAX_INGEST_FAILURES) {
             long parkPreStamp = this.clearedResync.getOrDefault(packed, -1L);
@@ -317,7 +342,6 @@ class ColumnStateMap {
             return;
         }
 
-        long clearPreStamp = this.clearedResync.getOrDefault(packed, -1L);
         if (clearPreStamp > 0) {
             // Lost CLEAR (the consumer rejected a 0-section content->air column). Re-request with
             // the pre-clear content stamp — a real server-issued value that is < the server's

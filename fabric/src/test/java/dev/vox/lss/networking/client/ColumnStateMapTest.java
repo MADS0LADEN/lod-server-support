@@ -553,6 +553,62 @@ class ColumnStateMapTest {
                 "park trips at the 4th failed delivery (MAX_INGEST_FAILURES + 1), independent of consumer count");
     }
 
+    /**
+     * The CL-029 invariant's CLEAR-path twin (2026-08-05 review F2): the lost-clear branch
+     * restores a &gt;0 stamp instead of unstamping, so before the sibling-echo guard each
+     * consumer's report of the SAME rejected clear delivery counted a fresh strike — with
+     * two consumers the park tripped after 2 failed clear deliveries instead of 4.
+     */
+    @Test
+    void clearPathIngestFailuresCountDeliveriesNotConsumerReports() {
+        map.onReceived(POS, 5000L); // the content the client holds pre-clear
+        for (int delivery = 1; delivery <= ColumnStateMap.MAX_INGEST_FAILURES; delivery++) {
+            // A clearing column arrives (content->air, newer stamp), flagged with the
+            // pre-clear stamp, and is rejected by TWO consumers — one delivery, one strike.
+            map.onReceived(POS, 6000L + delivery);
+            map.markAuthoritativeClear(POS, 5000L);
+            map.onIngestFailed(POS);
+            map.onIngestFailed(POS); // sibling echo of the same delivery — absorbed
+            assertEquals(5000L, map.timestampFor(POS),
+                    "delivery " + delivery + ": pre-clear stamp restored exactly once");
+            assertFalse(map.isSessionSatisfied(POS),
+                    "delivery " + delivery + " must not park — per-report counting would");
+        }
+        // The (MAX + 1)-th failed clear delivery parks, retaining the honest pre-clear stamp.
+        map.onReceived(POS, 6099L);
+        map.markAuthoritativeClear(POS, 5000L);
+        map.onIngestFailed(POS);
+        assertTrue(map.isSessionSatisfied(POS),
+                "park trips at the (MAX_INGEST_FAILURES + 1)-th failed clear delivery");
+        assertEquals(5000L, map.timestampFor(POS),
+                "clear-flavor park retains the pre-clear stamp (next session re-draws the clear)");
+    }
+
+    /**
+     * A sibling echo arriving AFTER the park must be absorbed outright: before the
+     * sessionSatisfied guard it re-entered the cap branch, found clearedResync already
+     * consumed by the park, took the lost-CONTENT flavor, and destroyed the retained
+     * pre-clear stamp — recreating the permanent ghost-terrain hole the clear-flavor
+     * park's stamp retention exists to prevent.
+     */
+    @Test
+    void postParkSiblingEchoKeepsTheRetainedPreClearStamp() {
+        map.onReceived(POS, 5000L);
+        for (int delivery = 1; delivery <= ColumnStateMap.MAX_INGEST_FAILURES + 1; delivery++) {
+            map.onReceived(POS, 6000L + delivery);
+            map.markAuthoritativeClear(POS, 5000L);
+            map.onIngestFailed(POS);
+        }
+        assertTrue(map.isSessionSatisfied(POS), "precondition: parked on the capping delivery");
+        assertEquals(5000L, map.timestampFor(POS), "precondition: stamp retained by the park");
+
+        map.onIngestFailed(POS); // the capping delivery's sibling echo, landing post-park
+
+        assertTrue(map.isSessionSatisfied(POS), "still parked");
+        assertEquals(5000L, map.timestampFor(POS),
+                "the echo must not strip the retained stamp (the pre-guard stamp-destruction bug)");
+    }
+
     @Test
     void dirtyUnparksAnIngestParkedPositionSoItReRequests() {
         parkViaIngestFailures(POS);

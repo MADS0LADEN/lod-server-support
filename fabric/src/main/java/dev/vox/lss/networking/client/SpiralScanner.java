@@ -87,6 +87,15 @@ class SpiralScanner {
     private int confirmedRing = 0;
     private int scanRing = 0;
     /**
+     * The vanilla-view exclusion radius the last walk ran with, -1 = no walk yet. A SHRINK
+     * (render distance lowered) turns positions inside the old exclusion — which confirmed
+     * their rings without ever being declared — into LOD-needing positions below the
+     * confirmed prefix, structurally unreachable until movement; the walk resets the prefix
+     * once per shrink (see {@link #scan}). A grow needs nothing: newly excluded positions
+     * are skipped without breaking confirmation.
+     */
+    private int lastExclusionRadius = -1;
+    /**
      * Did the last walk stop early because the budget filled? Decides which end
      * {@link #predictedWalkCost()} measures to: a truncated walk stops at {@link #scanRing},
      * an untruncated one iterates every ring out to the LOD distance. Starts false so a
@@ -416,6 +425,15 @@ class SpiralScanner {
         int queued = 0;
         boolean truncated = false;
 
+        // A SHRUNK exclusion radius (render distance lowered) resets the prefix once: the
+        // rings between the new and old radius confirmed while vanilla rendered them and
+        // would otherwise never be walked again for a stationary player (2026-08-05 review
+        // F1). Cheap — fires once per change, and the shrink walk has real work to declare.
+        if (this.lastExclusionRadius >= 0 && exclusionRadius < this.lastExclusionRadius) {
+            this.confirmedRing = 0;
+        }
+        this.lastExclusionRadius = exclusionRadius;
+
         // Only an ACTIONABLE retry mark (outside the vanilla-view exclusion) resets the
         // confirmed ring. A mark whose position slipped INSIDE the exclusion after it was
         // set is unconsumable — an excluded position is never declared, so no terminal
@@ -425,7 +443,8 @@ class SpiralScanner {
         // stays; movement recenters the walk from ring 0 anyway, so once the exclusion
         // moves off the position the mark is reachable again. (A mark beyond a SHRUNK
         // lodDistance is a separate, deliberately-unhandled flavor — it still resets the
-        // ring every scan, bounded by the smaller walk it forces.)
+        // ring every scan, bounded by the smaller walk it forces. An exclusion-radius
+        // shrink is handled above.)
         if (columns.hasActionableRetries(playerCx, playerCz, exclusionRadius)) {
             this.confirmedRing = 0;
         }
@@ -519,6 +538,7 @@ class SpiralScanner {
     void reset() {
         this.confirmedRing = 0;
         this.scanRing = 0;
+        this.lastExclusionRadius = -1; // next session re-anchors; no spurious shrink reset
         this.lastWalkTruncated = false; // fresh session predicts the full disc — fail closed
         this.scanTickCounter = LSSConstants.TICKS_PER_SECOND - 1;
         this.missingVanillaChunks = Integer.MAX_VALUE;

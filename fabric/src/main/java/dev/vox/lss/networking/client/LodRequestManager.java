@@ -37,6 +37,20 @@ public class LodRequestManager {
 
     private int lastChunkX;
     private int lastChunkZ;
+    /**
+     * Movement-prune hysteresis (2026-08-05 review P2): the out-of-range prunes iterate the
+     * ENTIRE per-column state (~263k timestamp entries plus sibling sets at the default
+     * distance 256) and used to run on EVERY chunk crossing (~2.7 Hz in elytra flight) even
+     * when nothing was out of range — a plausible dropped frame per crossing for work that
+     * is memory-bounding, not latency-critical. Prunes now run only after this much
+     * accumulated Chebyshev travel from the last-pruned center; a teleport (≥ the
+     * threshold in one hop) prunes immediately by construction. Deferral slack is bounded:
+     * entries linger at most this many chunks past getPruneDistance(). recenter() and the
+     * scan cadence are untouched — those still fire per crossing (pinned).
+     */
+    static final int PRUNE_HYSTERESIS_CHUNKS = 8;
+    private int lastPruneChunkX;
+    private int lastPruneChunkZ;
     private ResourceKey<Level> lastDimension;
 
     // Per-column state: timestamps + dirty/retry/validated marks (single owner)
@@ -257,12 +271,21 @@ public class LodRequestManager {
                         + "],\"to\":[" + playerCx + "," + playerCz
                         + "],\"confirmed_before\":" + this.scanner.getConfirmedRing());
             }
-            int pruneDistance = this.scanner.getPruneDistance();
-            this.columns.pruneOutOfRange(playerCx, playerCz, pruneDistance);
-            this.tracker.pruneOutOfRange(playerCx, playerCz, pruneDistance);
-            // Pruned in-flight requests will never get a tracked answer — drop their RTT
-            // stamps with them or they orphan toward the sampling cap.
-            this.metrics.pruneRttStampsOutOfRange(playerCx, playerCz, pruneDistance);
+            // Hysteresis: the prunes are full-state iterations and memory-bounding only —
+            // run them once per PRUNE_HYSTERESIS_CHUNKS of accumulated travel, not per
+            // crossing (see the constant). Everything else about the crossing (recenter,
+            // trace, anchor update) keeps firing every time.
+            if (Math.max(Math.abs(playerCx - this.lastPruneChunkX),
+                    Math.abs(playerCz - this.lastPruneChunkZ)) >= PRUNE_HYSTERESIS_CHUNKS) {
+                int pruneDistance = this.scanner.getPruneDistance();
+                this.columns.pruneOutOfRange(playerCx, playerCz, pruneDistance);
+                this.tracker.pruneOutOfRange(playerCx, playerCz, pruneDistance);
+                // Pruned in-flight requests will never get a tracked answer — drop their RTT
+                // stamps with them or they orphan toward the sampling cap.
+                this.metrics.pruneRttStampsOutOfRange(playerCx, playerCz, pruneDistance);
+                this.lastPruneChunkX = playerCx;
+                this.lastPruneChunkZ = playerCz;
+            }
             this.lastChunkX = playerCx;
             this.lastChunkZ = playerCz;
             this.scanner.recenter();
@@ -633,6 +656,11 @@ public class LodRequestManager {
         LSSClientNetworking.reportUndispatchedColumns(this);
         saveCache();
         resetRequestState();
+        // Re-anchor the prune hysteresis: the cleared state has nothing to prune, and a
+        // stale anchor from the old dimension would fire (or defer) the first new-dimension
+        // prune arbitrarily.
+        this.lastPruneChunkX = this.lastChunkX;
+        this.lastPruneChunkZ = this.lastChunkZ;
         this.scanner.resetScanCounter();
         this.cacheLoaded = true;
         startAsyncCacheLoad(newDimension);
