@@ -481,6 +481,9 @@ public final class BenchmarkMetricsExporter {
         // is suppressing the feature. Additive key; check_soak.py validates top-level
         // client keys only.
         scan.put("fast", manager != null ? manager.getFastScans() : 0L);
+        // Manual column-rate cap (client-column-rate-cap-design.md): spacing-gate refusals.
+        // Additive key, 0 whenever the cap is off (the shipped default).
+        scan.put("rate_gated", manager != null ? manager.getRateGated() : 0L);
         result.put("scan", scan);
 
         // Declared-and-unanswered (the awaiting-answer set), replaced per scan.

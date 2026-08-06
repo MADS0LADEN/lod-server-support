@@ -28,6 +28,7 @@ scan.confirmed=int
 scan.fast=long
 scan.missing_vanilla=int
 scan.queued=int
+scan.rate_gated=long
 scan.ring=int
 send_cycles=long
 server_enabled=boolean
