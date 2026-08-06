@@ -517,3 +517,26 @@ P1 dedicated map, P3 narrowed gate) confirmed right. Amendments applied above:
    sound as planned; F2 gained a comment-worthy note (a straggler report for delivery N
    landing after delivery N+1's `onReceived` counts against N+1 then absorbs N+1's first
    report — one-strike under-count, safe direction, narrow window).
+
+## Implementation review round (2026-08-06, one subagent over the branch diff)
+
+Zero blockers/majors. Two MINORs, both addressed in follow-up commits:
+
+1. **P1 residual named honestly:** the (grace, TTL] window's disk-read shift has two
+   sharper flavors the "still correct" framing hid — a loaded-never-saved chunk under
+   generation-DISABLED parks session-permanent `NOT_GENERATED` (a new entry path into the
+   documented `MAX_PROBES_PER_TICK_GLOBAL` accepted corner, same heals), and a
+   loaded-with-unsaved-edits chunk serves pre-edit disk bytes (healed by its own save's
+   dirty broadcast). Documented on the `probeSuppress` field. A one-cycle retain fix in
+   `resolvedAsDuplicate` (clear the mark, retain the entry, let next tick's probe serve
+   it) was sketched by the reviewer but NOT implemented — it edits the pinned honest
+   re-resolution ladder; left as a recommendation for a future round.
+2. **Probe-filter rungs now pinned:** the three `isProbeSuppressed` read sites had no
+   test that would red on revert. Added `RegionProbeSchedulingTest` pins for the Paper
+   pump rung and the Folia `snapshotProbePositions` rung (suppressed head skipped,
+   sibling probes, dirty-clear un-suppresses). The Fabric rung has no seam (no Mockito in
+   the fabric module; `probeLoadedChunks` needs a real `ServerLevel`) — it is textually
+   identical to the Paper pump rung and covered by inspection + the shared state tests.
+
+Everything else verified clean, including all five plan-review amendments, every
+lifecycle path over the new fields, and the four commit messages vs the code.

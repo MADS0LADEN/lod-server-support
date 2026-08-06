@@ -198,6 +198,66 @@ class RegionProbeSchedulingTest {
                 "sync mode serves the probe in the SAME tick's snapshot");
     }
 
+    /** 2026-08-05 review P1, pump rung: a probe-suppressed want-set entry (just sent, or
+     *  just answered up_to_date) must not be re-serialized by the sync probe pass while
+     *  an unsuppressed sibling still probes. Reverting the {@code isProbeSuppressed}
+     *  rung reds here. */
+    @Test
+    void syncProbeSkipsSuppressedPositionsAndStillProbesSiblings() {
+        service.setRegionizedProbing(false);
+        service.setLoadedColumnProbe((level, cx, cz) -> column(cx, cz));
+        var uuid = UUID.randomUUID();
+        var player = playerIn(uuid, level(Level.OVERWORLD));
+        var state = service.registerPlayer(player, 1);
+        long suppressed = PositionUtil.packPosition(3, 4);
+        long sibling = PositionUtil.packPosition(3, 5);
+        publish(state, new IncomingRequest(3, 4, -1), new IncomingRequest(3, 5, -1));
+        state.stampProbeSuppress(suppressed);
+
+        service.tick();
+
+        var probes = probesInLastSnapshot(uuid);
+        assertNotNull(probes);
+        assertFalse(probes.containsKey(suppressed),
+                "a suppressed head must not re-serialize in the probe pass");
+        assertTrue(probes.containsKey(sibling), "the unsuppressed sibling still probes");
+
+        // The suppress mark dies with a dirty clear (the edited-column path): the next
+        // pass probes it again.
+        state.clearDiskReadDone(suppressed);
+        service.tick();
+        var probes2 = probesInLastSnapshot(uuid);
+        assertNotNull(probes2);
+        assertTrue(probes2.containsKey(suppressed),
+                "an un-suppressed (dirty-cleared) position probes again immediately");
+    }
+
+    /** The Folia twin of the pin above: {@code snapshotProbePositions} — the held-batch
+     *  snapshot the region task probes — honors the suppress mark too (plan review
+     *  amendment 4). */
+    @Test
+    void regionProbeSnapshotSkipsSuppressedPositions() {
+        service.setLoadedColumnProbe((level, cx, cz) -> column(cx, cz));
+        var uuid = UUID.randomUUID();
+        var player = playerIn(uuid, level(Level.OVERWORLD));
+        var state = service.registerPlayer(player, 1);
+        long suppressed = PositionUtil.packPosition(6, 7);
+        long sibling = PositionUtil.packPosition(6, 8);
+        offer(state, new IncomingRequest(6, 7, -1), new IncomingRequest(6, 8, -1));
+        state.stampProbeSuppress(suppressed);
+
+        service.tick();                    // schedules with the filtered snapshot
+        assertEquals(1, scheduledTasks.size());
+        scheduledTasks.get(0).run();       // "region thread" probes and publishes
+        service.tick();                    // consumes into the next snapshot
+
+        var probes = probesInLastSnapshot(uuid);
+        assertNotNull(probes);
+        assertFalse(probes.containsKey(suppressed),
+                "the region task must never have been handed the suppressed position");
+        assertTrue(probes.containsKey(sibling), "the unsuppressed sibling rode the batch");
+    }
+
     // ---- RP-002: one-tick merge and single consumption ----
 
     @Test

@@ -672,10 +672,18 @@ public abstract class AbstractPlayerRequestState<T> {
      * semantics, and up_to_date stamps there would corrupt them. Any thread; swept
      * beside the departure sweep; cleared by the dirty-clear events and the honest
      * re-resolution ({@link #clearDiskReadDone}) so an edited column probes again
-     * immediately. Accepted residual (plan review): a ts&le;0 re-ask landing between
-     * the departure grace and this TTL — a genuinely lost delivery — takes a disk read
-     * where it used to be probe-served; rare, still correct, and bounded to one cycle
-     * by the clearing.
+     * immediately. Accepted residual (plan review + implementation review): a ts&le;0
+     * re-ask landing between the departure grace and this TTL — a genuinely lost
+     * delivery — takes a disk read where it used to be probe-served. Two sharper flavors
+     * of that shift, both healed by the normal dirty-broadcast/reconnect ladder: a
+     * loaded-NEVER-SAVED chunk's disk read is a not-found, which with generation
+     * DISABLED answers the session-permanent NOT_GENERATED for a column that is live in
+     * memory (a new entry path into the documented MAX_PROBES_PER_TICK_GLOBAL accepted
+     * corner — same heal: first save's dirty broadcast, or reconnect; on Paper's default
+     * updateEvents, reconnect); and a loaded chunk with unsaved edits serves its
+     * pre-edit disk bytes (healed by the edit's own save → dirty broadcast, the system's
+     * normal staleness bound). Requires losing a delivery AND re-asking inside a ~1 s
+     * window — judged acceptable against re-serializing every served head every tick.
      */
     private final ConcurrentHashMap<Long, Long> probeSuppress = new ConcurrentHashMap<>();
     static final long PROBE_SUPPRESS_TTL_NANOS = 1_500L * 1_000_000L;
