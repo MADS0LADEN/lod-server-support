@@ -27,18 +27,24 @@ public class TickDiagnostics {
     private int curTickQueuePeak;
 
     // Cumulative send counters — service-scoped, so they survive the per-player state
-    // teardown on kick and dimension change (single-writer: main thread)
-    private long totalSectionsSent;
-    private long totalBytesSent;
-    private long totalWireBytesSent;
+    // teardown on kick and dimension change. Single-writer (main/pump thread), volatile
+    // because /lsslod stats|diag reads them from the invoking player's REGION thread on
+    // Folia (2026-08-05 review H3 — the PaperChunkGenerationService house rule: counters
+    // a command renders must be JMM-visible off the writer thread).
+    private volatile long totalSectionsSent;
+    private volatile long totalBytesSent;
+    private volatile long totalWireBytesSent;
 
-    // Sliding window bandwidth rate (~5s at 20 TPS)
+    // Sliding window bandwidth rate (~5s at 20 TPS). The scalars are volatile for the
+    // same Folia command-thread reads as the totals above; the ring ARRAYS stay plain, so
+    // a cross-thread getWindowBytesPerSecond() is best-effort — a mid-reset read can
+    // misreport one command's rate (diag-only, bounded, self-corrects next invocation).
     private static final int WINDOW_TICKS = 100;
     private final int[] byteRing = new int[WINDOW_TICKS];
     private final long[] nanosRing = new long[WINDOW_TICKS];
-    private long windowByteSum;
-    private int ringPos;
-    private int ringCount;
+    private volatile long windowByteSum;
+    private volatile int ringPos;
+    private volatile int ringCount;
 
     /**
      * Snapshot current tick values into last-tick fields, pull off-thread counters,

@@ -382,4 +382,68 @@ class FlushSendQueueTest {
         for (long v : arr) if (v == value) return true;
         return false;
     }
+
+    // ---- Probe suppression (2026-08-05 review P1) ----
+
+    @Test
+    void probeSuppressStampsOnSendSuccessOnlyAndSurvivesGraceDisabled() throws Exception {
+        // Grace DISABLED: stampDeparted no-ops, but the probe-suppress stamp is a sibling
+        // call and must still land — a grace-disabled rig losing probe filtering would
+        // silently re-open the per-tick re-serialization P1 closed.
+        state.setDepartureGraceForTest(0, () -> 1_000_000_000L);
+        state.addReadyPayload(new QueuedPayload<>("first", 0, 0, POS_1));
+        state.addReadyPayload(new QueuedPayload<>("second", 0, 1, POS_2));
+        Thread.sleep(50);
+
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, p -> {
+            if (!sent.isEmpty()) throw new Exception("broken connection");
+            sent.add(p);
+        });
+
+        assertEquals(0, state.departedColumnCountForTest(), "grace 0 writes no grace stamps");
+        assertTrue(state.isProbeSuppressed(POS_1),
+                "send success suppresses the probe even with the grace disabled");
+        assertFalse(state.isProbeSuppressed(POS_2),
+                "a failure-dropped payload never suppresses — its loss must heal instantly");
+    }
+
+    @Test
+    void probeSuppressExpiresOnReadAndTheFlushSweepPrunesUnconsultedStamps() throws Exception {
+        var clock = new AtomicLong(1_000_000_000L);
+        state.setDepartureGraceForTest(500_000_000L, clock::get);
+        state.addReadyPayload(new QueuedPayload<>("a", 0, 0, POS_1));
+        state.addReadyPayload(new QueuedPayload<>("b", 0, 1, POS_2));
+        Thread.sleep(50);
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add);
+        assertTrue(state.isProbeSuppressed(POS_1), "stamped at send success");
+        assertEquals(2, state.probeSuppressCountForTest());
+
+        clock.addAndGet(AbstractPlayerRequestState.PROBE_SUPPRESS_TTL_NANOS + 1);
+        assertFalse(state.isProbeSuppressed(POS_1), "the TTL has expired");
+        assertEquals(1, state.probeSuppressCountForTest(), "the expired read removes its entry");
+
+        // POS_2 is never probed again (the common case): only the flush-path sweep can
+        // prune it, or the map grows with every column ever sent.
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add);
+        assertEquals(0, state.probeSuppressCountForTest(),
+                "the idle flush sweep prunes stamps the probe never consulted");
+    }
+
+    @Test
+    void probeSuppressClearsWithTheDiskReadDoneBit() throws Exception {
+        state.setDepartureGraceForTest(500_000_000L, () -> 1_000_000_000L);
+        state.addReadyPayload(new QueuedPayload<>("a", 0, 0, POS_1));
+        state.addReadyPayload(new QueuedPayload<>("b", 0, 1, POS_2));
+        Thread.sleep(50);
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add);
+        assertTrue(state.isProbeSuppressed(POS_1));
+        assertTrue(state.isProbeSuppressed(POS_2));
+
+        // The dirty-clear event (array) and the honest re-resolution (single) both drop
+        // the suppress mark with the done-bit: an edited column must probe again NOW.
+        state.clearDiskReadDone(new long[]{POS_1});
+        assertFalse(state.isProbeSuppressed(POS_1), "dirty-cleared positions probe again");
+        state.clearDiskReadDone(POS_2);
+        assertFalse(state.isProbeSuppressed(POS_2), "honest re-resolution un-suppresses too");
+    }
 }

@@ -64,20 +64,22 @@ public class PaperConfig extends ServerConfigBase {
     public void validate() {
         super.validate();
         if (updateEvents == null) updateEvents = List.of();
-        // The Folia default above is a DEFAULT, and JsonConfig saves every live field back
-        // on load — so any Paper run writes "lodStore": "full" into the file, and carrying
-        // that plugins folder to Folia arms the store there with no opt-in the admin would
-        // recognise as one. That is the population the guard exists to protect. It stays a
-        // default rather than becoming a gate (an admin who deliberately sets full on Folia
-        // should get it), but it must not be silent. (Round-3 review.)
+        // The shared default is `off` on every platform (2026-08-03 — the store is
+        // opt-in), so an armed store on Folia means an admin explicitly set "full" here
+        // or carried a plugins folder whose config had it set. It stays a warning rather
+        // than a gate (an admin who deliberately sets full on Folia should get it), but
+        // it must not be silent: the store is unvalidated on Folia. (Round-3 review;
+        // message text refreshed by the 2026-08-05 review D3 — it used to claim "Paper
+        // writes lodStore=full into the file on every run", the retired v0.9.0-dev
+        // default.)
         if (FoliaSupport.IS_FOLIA
                 && dev.vox.lss.common.store.LodStoreMode.normalize(lodStore)
                         != dev.vox.lss.common.store.LodStoreMode.OFF) {
             LSSLogger.warn("lodStore=" + lodStore + " is set on FOLIA, where the LOD store is"
                     + " NOT validated (single-player soaks only; concurrent multi-region"
-                    + " ingress is untested). This is usually a Paper config carried over —"
-                    + " Paper writes lodStore=full into the file on every run. Set"
-                    + " lodStore=off unless you intend to test it.");
+                    + " ingress is untested). The default is off on every platform, so this"
+                    + " was explicitly enabled — set lodStore=off unless you intend to"
+                    + " test it.");
         }
     }
 

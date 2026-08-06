@@ -817,11 +817,14 @@ public class PaperRequestProcessingService {
             for (UUID uuid : lifecycle.toRemove) {
                 this.removePlayer(uuid);
                 // The sweep IS a disconnect (entity removed, no PlayerList entry — the
-                // quit event never fired for this player), so drop v18 membership like
-                // the quit hook would; without this the entry and the diag clients=
-                // count leak until a same-UUID rejoin (execution-review finding 2 — the
-                // v16 manager's identical inherited shape stays as-is, out of scope).
+                // quit event never fired for this player), so drop BOTH compat
+                // identities like the quit hook would; without this the entries and the
+                // diag clients= counts leak until a same-UUID rejoin (execution-review
+                // finding 2 for v18; 2026-08-05 review H2 closed the v16 twin —
+                // removePlayer's onServiceRemove deliberately keeps identity, so the
+                // sweep was the one removal path that leaked it).
                 this.v18Compat.onDisconnect(uuid);
+                this.v16Compat.onDisconnect(uuid);
             }
         }
 
@@ -1034,13 +1037,14 @@ public class PaperRequestProcessingService {
                 continue;
             if (skipPositions != null && skipPositions.contains(packed))
                 continue;
-            // Served-head filter: a payload already in the send pipeline means the router
-            // resolves this position as a duplicate — the probe is guaranteed-unused, and
-            // under backlog retention the published want-set re-lists it every tick until
-            // the next 1 Hz declaration, re-serializing the same head for a whole second.
-            // Only enqueuedColumns is checked: it is the one served-set structure safe off
-            // the processing thread (pendingByPosition/diskReadDone are single-threaded).
-            if (state.hasEnqueuedColumn(packed))
+            // Served-head filter: a payload in the send pipeline, recently sent, or just
+            // answered up_to_date means the router resolves this position without the
+            // probe — the serialization is guaranteed-unused, and under backlog retention
+            // the published want-set re-lists it every tick until the next declaration
+            // (review P1: the enqueued-only filter left served/answered heads
+            // re-serializing for up to a second). Both structures are any-thread safe
+            // (pendingByPosition/diskReadDone are single-threaded and stay unconsulted).
+            if (state.hasEnqueuedColumn(packed) || state.isProbeSuppressed(packed))
                 continue;
 
             var column = this.loadedColumnProbe.probe(level, req.cx(), req.cz());
@@ -1127,16 +1131,17 @@ public class PaperRequestProcessingService {
     private static final long[] NO_POSITIONS = new long[0];
 
     /** Up to {@link #MAX_PROBES_PER_TICK_PER_PLAYER} distinct positions from the held batch.
-     *  Served-head filter mirrors the sync probes: a payload already in the send pipeline
-     *  resolves as a duplicate, so probing it wastes a region-thread serialization
-     *  (enqueuedColumns is the one served-set structure safe off the processing thread). */
+     *  Served-head filter mirrors the sync probes (incl. the review-P1 suppress rung): a
+     *  payload in the send pipeline, recently sent, or just answered up_to_date resolves
+     *  without the probe, so probing it wastes a region-thread serialization (both
+     *  structures are safe off the processing thread). */
     private long[] snapshotProbePositions(PaperPlayerRequestState state, IncomingBatch held,
                                           LongOpenHashSet skipPositions) {
         LongOpenHashSet positions = null;
         for (var req : held.requests()) {
             long packed = PositionUtil.packPosition(req.cx(), req.cz());
             if (skipPositions != null && skipPositions.contains(packed)) continue;
-            if (state.hasEnqueuedColumn(packed)) continue;
+            if (state.hasEnqueuedColumn(packed) || state.isProbeSuppressed(packed)) continue;
             if (positions == null) positions = new LongOpenHashSet();
             if (!positions.add(packed)) continue;
             if (positions.size() >= MAX_PROBES_PER_TICK_PER_PLAYER) break;

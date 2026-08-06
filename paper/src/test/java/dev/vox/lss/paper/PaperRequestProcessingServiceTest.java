@@ -1137,4 +1137,27 @@ class PaperRequestProcessingServiceTest {
                 "the mailbox Remove must drop membership the direct disconnect missed");
         assertEquals(0, service.getV18CompatTracker().sessionCount());
     }
+
+    /** 2026-08-05 review H2: the lifecycle SWEEP (entity removed, no PlayerList entry —
+     *  the quit event never fired) is a disconnect and must drop BOTH compat identities.
+     *  The v18 half was closed by execution-review finding 2; the v16 twin was explicitly
+     *  scoped out there and leaked the session (bounded memory + an inflated
+     *  {@code V16Compat: clients=} diag count) until a same-UUID rejoin. */
+    @Test
+    void lifecycleSweepDropsBothCompatIdentities() {
+        var uuid = UUID.randomUUID();
+        var player = playerIn(uuid, level(Level.OVERWORLD));
+        service.getV16CompatManager().onHandshake(uuid);
+        service.getV18CompatTracker().onHandshake(uuid);
+        service.registerPlayer(player, LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+
+        // The player's entity vanishes with no PlayerList entry and no quit event.
+        when(player.isRemoved()).thenReturn(true);
+        service.tick(); // the lifecycle pass sweeps the player out
+
+        assertFalse(service.getV18CompatTracker().isV18(uuid),
+                "the sweep drops v18 membership (execution-review finding 2)");
+        assertFalse(service.getV16CompatManager().isV16(uuid),
+                "…and the v16 session with it (review H2 — the leaked twin)");
+    }
 }

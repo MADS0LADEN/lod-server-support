@@ -29,7 +29,10 @@ public class SharedBandwidthLimiter {
     private long availableTokens;
     private long lastRefillNanos;
 
-    private long totalBytesSent;
+    // Volatile as the ONE sanctioned cross-thread read (2026-08-05 review H3): /lsslod
+    // stats|diag renders it from the invoking player's region thread on Folia. Every
+    // other field keeps the class contract above — tick-thread only.
+    private volatile long totalBytesSent;
 
     public SharedBandwidthLimiter(long maxBytesPerSecond) {
         this(maxBytesPerSecond, System::nanoTime);

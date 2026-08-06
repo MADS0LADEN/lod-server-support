@@ -106,6 +106,20 @@ public class LSSServerNetworking {
         if (!(chunk instanceof LevelChunk levelChunk)) return;
         var service = requestService;
         if (service == null || !LSSServerConfig.CONFIG.enabled) return;
+        // Skip gate (2026-08-05 review P3): until the FIRST LSS client handshakes this
+        // session, and only while the store is off, nothing the content hash maintains is
+        // observable — no timestamp-cache entries (only serves populate it), no
+        // client-held columns, no store rows to invalidate, and dirty marks with no
+        // audience. A server running LSS for no LSS-playing users otherwise paid a
+        // serialize+hash per chunk save forever (~30-60 µs each; 10-40 ms per save-all).
+        // Accepted cost once a client DOES join: skip-era positions have no stored hash,
+        // so their first post-join save reads absent-hash -> changed -> one spurious
+        // dirty mark+broadcast each (bounded by loaded chunks, drained per interval).
+        // The latch is one-way — after the first registration the hash always runs,
+        // because session state (tscache stamps, held columns) can outlive its player,
+        // and with the store ON the hash must run from boot (a skipped edit would leave
+        // a pre-edit store row serving hits all session — Fabric sweeps at boot only).
+        if (!service.hasEverRegisteredPlayer() && service.getLodStore() == null) return;
         String dimension = DIMENSION_STRINGS.computeIfAbsent(level.dimension(),
                 key -> key.identifier().toString());
         var obs = service.getDirtyContentFilter().observeSave(level, levelChunk, dimension);

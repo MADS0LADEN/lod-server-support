@@ -166,4 +166,41 @@ class SendActionIdentityTest {
             proc.shutdown();
         }
     }
+
+    /** 2026-08-05 review P1: the drain is the ONE choke point that stamps probe
+     *  suppression for up_to_date answers (all five producer sites funnel through it) —
+     *  and only for actions that pass the identity gate; a NotGenerated answer must not
+     *  stamp (its position may still need the probe on revival). */
+    @Test
+    void drainStampsProbeSuppressOnDeliveredUpToDateOnly() throws Exception {
+        var u = UUID.randomUUID();
+        var state = new TestState(u);
+        state.markHandshakeComplete();
+        var players = new ConcurrentHashMap<UUID, TestState>();
+        players.put(u, state);
+        var proc = new TestProcessor(players);
+        long utdPos = PositionUtil.packPosition(4, 0);
+        long ngPos = PositionUtil.packPosition(5, 0);
+        long stalePos = PositionUtil.packPosition(6, 0);
+        try {
+            proc.enqueueSendActionForTest(new SendAction.ColumnUpToDate(u, utdPos, state));
+            proc.enqueueSendActionForTest(new SendAction.ColumnNotGenerated(u, ngPos, state));
+            // Identity-gated action: produced for a replaced session — must not stamp the
+            // LIVE state either (it never delivers).
+            var replaced = new TestState(u);
+            replaced.markHandshakeComplete();
+            proc.enqueueSendActionForTest(new SendAction.ColumnUpToDate(u, stalePos, replaced));
+
+            var delivered = drainOnce(proc);
+            assertEquals(2, delivered.size(), "the stale-session action must not deliver");
+            assertTrue(state.isProbeSuppressed(utdPos),
+                    "a delivered up_to_date suppresses the probe for its position");
+            assertFalse(state.isProbeSuppressed(ngPos),
+                    "a NotGenerated answer never suppresses");
+            assertFalse(state.isProbeSuppressed(stalePos),
+                    "an identity-dropped action never suppresses");
+        } finally {
+            proc.shutdown();
+        }
+    }
 }

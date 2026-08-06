@@ -369,6 +369,10 @@ public class ServiceLifecycleGameTests {
         var liveService = LSSServerNetworking.getRequestService();
         helper.assertTrue(liveService != null,
                 "live RequestProcessingService must be active (save-hook leg depends on it)");
+        // The save-hook leg asserts through the LIVE service, but this test's player
+        // registers on its own service — arm the P3 never-registered skip gate (one-way;
+        // no Tier 2 test pins the skip).
+        liveService.armSaveHookForTest();
 
         var mock = placeMockServerPlayer(helper);
         int pcx = mock.getBlockX() >> 4;
@@ -1134,6 +1138,9 @@ public class ServiceLifecycleGameTests {
         ServerLevel level = helper.getLevel();
         var liveService = LSSServerNetworking.getRequestService();
         helper.assertTrue(liveService != null, "live service required (the save hook feeds it)");
+        // Arm the P3 never-registered skip gate — the control assertion below needs the
+        // live hook to hash (one-way latch; no Tier 2 test pins the skip).
+        liveService.armSaveHookForTest();
         var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
         var dim = LSSConstants.DIM_STR_OVERWORLD;
         var chunkSource = level.getChunkSource();
