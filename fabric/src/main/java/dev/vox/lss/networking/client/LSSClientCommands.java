@@ -3,6 +3,7 @@ package dev.vox.lss.networking.client;
 import com.mojang.brigadier.Command;
 import dev.vox.lss.common.Brand;
 import dev.vox.lss.common.DiagnosticsFormatter;
+import dev.vox.lss.config.LSSClientConfig;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommands;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
@@ -126,12 +127,16 @@ public class LSSClientCommands {
         )).withStyle(ChatFormatting.GRAY));
 
         // Budget line (ingest_backlog: the consumer-reported pending sections driving the
-        // #71 taper/halt; -1 = no consumer reports)
+        // #71 taper/halt; -1 = no consumer reports. rate_cap: the manual column-rate cap,
+        // 0=off; rate_gated: TICKS the cap's spacing gate held a would-be fast fire back
+        // (one delayed fire can count several) — nonzero means the knob is binding, the
+        // discriminator for weak-client reports)
         int budget = manager.getLastBudget();
         int lastQueued = manager.getLastQueued();
         source.sendFeedback(Component.literal(String.format(
-                "Budget: used=%d/%d, ingest_backlog=%d",
-                lastQueued, budget, manager.getLastIngestBacklog()
+                "Budget: used=%d/%d, ingest_backlog=%d, rate_cap=%d, rate_gated=%d",
+                lastQueued, budget, manager.getLastIngestBacklog(),
+                LSSClientConfig.CONFIG.lodColumnsPerSecondLimit, manager.getRateGated()
         )).withStyle(ChatFormatting.GRAY));
     }
 }

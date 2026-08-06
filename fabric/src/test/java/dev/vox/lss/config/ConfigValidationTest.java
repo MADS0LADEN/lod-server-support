@@ -548,4 +548,46 @@ class ConfigValidationTest {
         assertFalse(loaded.enableIngestBackpressure, "a saved false must bind back as false");
     }
 
+    @Test
+    void lodColumnsPerSecondLimitDefaultsOffAndClamps() {
+        // The manual column-rate cap (docs/planning/client-column-rate-cap-design.md):
+        // 0 = off is the shipped default and must survive validate() bit-identically.
+        var c = clientConfig();
+        assertEquals(0, c.lodColumnsPerSecondLimit, "the cap must ship OFF");
+        c.validate();
+        assertEquals(0, c.lodColumnsPerSecondLimit, "0 must stay 0 (never clamped up to the floor)");
+
+        // A negative hand-edit means "off" — clamping it to the floor would silently ARM a
+        // cap the user meant to disable.
+        c.lodColumnsPerSecondLimit = -5;
+        c.validate();
+        assertEquals(0, c.lodColumnsPerSecondLimit, "negatives normalize to off, never to 50");
+
+        c.lodColumnsPerSecondLimit = 10;
+        c.validate();
+        assertEquals(50, c.lodColumnsPerSecondLimit, "positive values clamp to the 50 floor");
+
+        c.lodColumnsPerSecondLimit = 1_000_000;
+        c.validate();
+        assertEquals(100_000, c.lodColumnsPerSecondLimit, "...and to the 100k ceiling");
+
+        // Every nonzero Sodium slider stop (step 50, range 50..3200) round-trips unchanged.
+        c.lodColumnsPerSecondLimit = 3200;
+        c.validate();
+        assertEquals(3200, c.lodColumnsPerSecondLimit);
+    }
+
+    @Test
+    void lodColumnsPerSecondLimitRoundTripsThroughJson() {
+        // Same GSON contract as the toggles: exact key, and a saved nonzero binds back.
+        var gson = new com.google.gson.Gson();
+        String saved = gson.toJson(clientConfig());
+        assertTrue(saved.contains("\"lodColumnsPerSecondLimit\":0"),
+                "a fresh config must persist the off default under the exact key: " + saved);
+        var loaded = gson.fromJson(saved.replace(
+                "\"lodColumnsPerSecondLimit\":0", "\"lodColumnsPerSecondLimit\":400"),
+                LSSClientConfig.class);
+        assertEquals(400, loaded.lodColumnsPerSecondLimit, "a saved cap must bind back");
+    }
+
 }

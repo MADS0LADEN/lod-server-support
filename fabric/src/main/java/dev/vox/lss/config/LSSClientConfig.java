@@ -48,6 +48,22 @@ public class LSSClientConfig extends JsonConfig {
     // Kill switch: false restores pre-#71 pacing (decode-queue signal only). No effect when no
     // consumer reports a backlog.
     public boolean enableIngestBackpressure = true;
+    // Manual column-rate cap (docs/planning/client-column-rate-cap-design.md): bounds how many
+    // LOD columns per second the server streams to this client — the MANUAL override for the
+    // cases the automatic #71 taper cannot see (pressure showing up as frame time/GC rather
+    // than queue depth, or a consumer that never reports an ingest backlog). Denominated in
+    // columns/sec, NOT want-set size: a raw budget clamp is compensated away by the adaptive
+    // cadence (smaller batches complete sooner and fire faster — budget x cadence is the
+    // sustained rate). Nonzero R clamps the want-set budget to min(WANT_SET_BUDGET, R) (bounds
+    // the burst) AND spaces fast re-scans so each declared batch pre-pays its interval (bounds
+    // the sustained rate at R/sec); the 1 Hz fallback — the want-set's only self-heal — is
+    // never gated. Composes with the #71 taper by MIN. Below 776 the want-set no longer
+    // dominates the server's worst-case in-flight set: the frontier advances behind its own
+    // awaited positions across more scans — slower, never wedged; that is the dial doing its
+    // job. On v16 server sessions only the budget clamp applies (no fast path there). Also a
+    // Sodium settings slider ("Max LOD Download Rate"). 0 (and any non-positive value) = OFF,
+    // bit-identical to pre-cap behavior.
+    public int lodColumnsPerSecondLimit = 0;
 
     @Override
     protected String getFileName() {
@@ -57,5 +73,15 @@ public class LSSClientConfig extends JsonConfig {
     @Override
     public void validate() {
         lodDistanceChunks = Math.clamp(lodDistanceChunks, 0, LSSConstants.MAX_LOD_DISTANCE); // 0 = use server default
+        // <= 0 normalizes to 0 (off) — a negative hand-edit means "off", and clamping it to the
+        // floor would silently ARM a cap the user meant to disable. Positive values clamp to
+        // [50, 100000]: below 50 the scanner still functions but starves the frontier to a
+        // near-wedge cadence for no plausible use; the ceiling is inert (the mechanism no-ops
+        // above ~3200) but bounds what a typo can store.
+        if (lodColumnsPerSecondLimit <= 0) {
+            lodColumnsPerSecondLimit = 0;
+        } else {
+            lodColumnsPerSecondLimit = Math.clamp(lodColumnsPerSecondLimit, 50, 100_000);
+        }
     }
 }

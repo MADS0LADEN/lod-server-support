@@ -1518,4 +1518,199 @@ class SpiralScannerTest {
         assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire());
         assertEquals(1, rig.missingVanillaCalls, "the fast fire kept the last value");
     }
+
+    // ---- manual column-rate cap (docs/planning/client-column-rate-cap-design.md) ----
+    // The dial is columns/SEC, not batch size: budget clamp bounds the burst, the
+    // size-weighted fast-fire spacing bounds the sustained rate, and the 1 Hz fallback —
+    // the want-set's only self-heal — is never gated. Default (cap 0) is bit-identical:
+    // every rig above runs with the seam at its production default reading the test
+    // config's 0.
+
+    @Test
+    void capZeroIsBitIdenticalToNoCap() {
+        // Explicit cap-0 seam: full batch armed, everything answered → fast fire at the
+        // floor, exactly the un-capped fastRescanFiresAtTheFloor... behavior, and the
+        // budget stays the constant.
+        var rig = new AdaptiveRig(scanner(16));
+        rig.s.columnRateCap = () -> 0;
+        assertEquals(LSSConstants.WANT_SET_BUDGET, rig.primeAndArm(),
+                "cap 0 must not touch the budget");
+        rig.outstanding = 0;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(),
+                "cap 0 must not space fast fires");
+        assertEquals(0, rig.s.getRateGated());
+    }
+
+    @Test
+    void capClampsTheBudgetAndTaperScalesTheCappedBase() {
+        // Burst half: budget = min(WANT_SET_BUDGET, cap), and the #71 taper MIN-composes by
+        // scaling the already-clamped base (cap 600 x queue-scale 0.5 = 300 — not 400, not
+        // scale-then-min).
+        var s = scanner(16);
+        s.columnRateCap = () -> 300;
+        var queue = new Sink();
+        assertEquals(300, fireScan(s, 2, new ColumnStateMap(), queue),
+                "cap below the constant budget must win");
+
+        var s2 = scanner(16);
+        s2.columnRateCap = () -> 600;
+        assertEquals(300, fireScan(s2, 2, 500, 1000, 0, new ColumnStateMap(), queue),
+                "the pressure scale applies AFTER the cap clamp: 0.5 x min(800, 600) = 300");
+    }
+
+    @Test
+    void spacingGateChargesTheLastBatchAgainstTheCap() {
+        // Sustained half: after declaring N, the next FAST fire waits ceil(20*N/R) ticks.
+        // N=800 at R=1600 → 10 ticks; the boundary is exact (10*1600 == 20*800 admits).
+        // rateGated counts exactly the ticks where the cap was the binding refusal:
+        // ticks 1-4 are floor-gated (no increment), 5-9 rate-gated.
+        var rig = new AdaptiveRig(scanner(16));
+        rig.s.columnRateCap = () -> 1600;
+        rig.primeAndArm();
+        rig.s.noteDeclared(800);
+        rig.outstanding = 0;
+        assertEquals(10, rig.ticksToFire(),
+                "800 declared at cap 1600/s must space the fast fire to 10 ticks");
+        assertTrue(rig.s.wasLastScanFast(), "...and it is still a FAST fire, just spaced");
+        assertEquals(5, rig.s.getRateGated(),
+                "ticks 5-9 were refused by the spacing gate alone");
+    }
+
+    @Test
+    void smallTailBatchesStillRideTheFloor() {
+        // The converging-tail sparkle survives: N=10 at R=100 prices to 2 ticks → the
+        // 5-tick floor binds, and the floor ticks never count as rate-gated.
+        var rig = new AdaptiveRig();
+        rig.s.columnRateCap = () -> 100;
+        rig.primeAndArm();
+        rig.s.noteDeclared(10);
+        rig.outstanding = 0;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(),
+                "a tail batch under the cap's price stays at the 250 ms floor");
+        assertEquals(0, rig.s.getRateGated());
+    }
+
+    @Test
+    void capThirtyTwoHundredIsTheContinuityPoint() {
+        // Today's max sustained is 800 x 4 Hz = 3200/s: a full batch at R=3200 spaces to
+        // exactly the existing floor, so current behavior IS the R=3200 point of this
+        // family (and the Sodium slider's top is honest).
+        var rig = new AdaptiveRig(scanner(16));
+        rig.s.columnRateCap = () -> 3200;
+        rig.primeAndArm();
+        rig.s.noteDeclared(800);
+        rig.outstanding = 0;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(),
+                "20*800/3200 = 5 = the floor: R=3200 must change nothing");
+        assertEquals(0, rig.s.getRateGated(), "the boundary tick admits (== is not <)");
+    }
+
+    @Test
+    void theFallbackIsNeverGatedByTheCap() {
+        // THE safety property: re-declaration is the sole self-heal for silent server-side
+        // drops, so the 20-tick fallback must fire regardless of any cap/batch combination.
+        // N=800 at R=50 prices a fast fire at 320 ticks — the fallback still fires at 20,
+        // and as a PERIODIC fire.
+        var rig = new AdaptiveRig(scanner(16));
+        rig.s.columnRateCap = () -> 50;
+        rig.primeAndArm();
+        rig.s.noteDeclared(800);
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "the fallback fires on schedule no matter how far the cap spaced the fast path");
+        assertFalse(rig.s.wasLastScanFast(), "...and it is the periodic fire, not a late fast one");
+    }
+
+    @Test
+    void convergedDisarmStillHoldsUnderACap() {
+        // The disarm ladder is orthogonal to the cap: a 0-count declaration (the manager's
+        // converged disarm) keeps the 1 Hz fallback even though the spacing gate would
+        // price a 0-batch at 0 ticks.
+        var rig = new AdaptiveRig();
+        rig.s.columnRateCap = () -> 100;
+        rig.primeAndArm();
+        rig.s.noteDeclared(0);
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "disarmed stays disarmed — the cap must not create a fast path");
+    }
+
+    @Test
+    void theDefaultSeamReadsTheProductionConfigField() {
+        // Review finding 1: every other cap test overrides the seam, so a typo'd field
+        // read (or a dropped lambda) in the default would keep the whole suite green while
+        // the live knob went dead. Same save/restore pattern as the adaptive kill switch's
+        // production-binding pin in LodRequestManagerTickTest.
+        int old = LSSClientConfig.CONFIG.lodColumnsPerSecondLimit;
+        LSSClientConfig.CONFIG.lodColumnsPerSecondLimit = 300;
+        try {
+            var s = scanner(16); // default seam untouched
+            var queue = new Sink();
+            assertEquals(300, fireScan(s, 2, new ColumnStateMap(), queue),
+                    "a fresh scanner must bind the cap from the production config field");
+        } finally {
+            LSSClientConfig.CONFIG.lodColumnsPerSecondLimit = old;
+        }
+    }
+
+    @Test
+    void rateGatedDoesNotCountTicksWhereOutstandingWasTheRefusal() {
+        // Review finding 2: the cap gate sits LAST in the ladder so rateGated counts
+        // exactly the ticks where the cap was the BINDING refusal. A reorder ahead of the
+        // outstanding check would corrupt the diag discriminator ("nonzero = the knob is
+        // binding") by counting ticks the 5% threshold was already refusing — here, ticks
+        // 5-9 have unpaid spacing (t*1600 < 20*800) but an unanswered batch, and must not
+        // count.
+        var rig = new AdaptiveRig(scanner(16));
+        rig.s.columnRateCap = () -> 1600;
+        rig.primeAndArm();
+        rig.s.noteDeclared(800);
+        rig.outstanding = 800; // nothing answered: the completion threshold refuses first
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "an unanswered batch keeps the fallback cadence, cap or no cap");
+        assertEquals(0, rig.s.getRateGated(),
+                "unpaid spacing behind an outstanding refusal must not count as rate-gated");
+    }
+
+    @Test
+    void deepTaperUnderACapStillFloorsTheBudgetAtOne() {
+        // The max(1, ...) floor applies to the CAPPED base: cap + at-halt backlog must
+        // yield 1, never 0 (a skipped scan) — the capped twin of
+        // ingestBacklogAtOrPastTheHaltFloorsTheBudgetAtOne.
+        var s = scanner(16);
+        s.columnRateCap = () -> 300;
+        var queue = new Sink();
+        assertEquals(1, fireScan(s, 2, 0, 1000, 6144, 6144, 0, new ColumnStateMap(), queue),
+                "backlog at the halt threshold floors the capped budget at 1");
+    }
+
+    @Test
+    void v16SessionsGetTheBudgetClampButNeverTheFastPath() {
+        // Design §6: on a legacy session only the budget clamp applies. The cap must not
+        // create a fast path where the v16 exclusion forbids one, and the exclusion sits
+        // before the cap gate, so none of the refusals count as rate-gated.
+        var legacy = new SpiralScanner();
+        legacy.setConfig(new SessionConfigS2CPayload(
+                LSSConstants.V16_COMPAT_PROTOCOL_VERSION, true, 16, true));
+        legacy.columnRateCap = () -> 300;
+        var rig = new AdaptiveRig(legacy);
+        assertEquals(300, rig.primeAndArm(), "the budget clamp applies on a v16 session");
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "...and the cadence stays 1 Hz — the cap adds no fast path");
+        assertEquals(0, rig.s.getRateGated(), "the v16 exclusion refuses before the cap gate");
+    }
+
+    @Test
+    void rateGatedResetsWithTheSessionState() {
+        var rig = new AdaptiveRig(scanner(16));
+        rig.s.columnRateCap = () -> 1600;
+        rig.primeAndArm();
+        rig.s.noteDeclared(800);
+        rig.outstanding = 0;
+        rig.ticksToFire();
+        assertTrue(rig.s.getRateGated() > 0, "premise: refusals were counted");
+        rig.s.reset();
+        assertEquals(0, rig.s.getRateGated(), "reset() zeroes rateGated with fastScans");
+    }
 }

@@ -755,6 +755,7 @@ public class LodRequestManager {
     public int getMissingVanillaChunks() { return this.scanner.getMissingVanillaChunks(); }
     /** Fast (completion-triggered) scan fires this session — the adaptive-cadence liveness signal. */
     public long getFastScans() { return this.scanner.getFastScans(); }
+    public long getRateGated() { return this.scanner.getRateGated(); }
 
     // Response counters
     public long getTotalColumnsReceived() { return this.metrics.getTotalColumnsReceived(); }

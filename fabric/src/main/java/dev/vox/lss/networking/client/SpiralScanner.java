@@ -116,8 +116,26 @@ class SpiralScanner {
      *  don't mutate the global CONFIG (the ingestBacklogSupplier pattern). */
     BooleanSupplier adaptiveCadenceEnabled =
             () -> LSSClientConfig.CONFIG.enableAdaptiveScanCadence;
+    /**
+     * Manual column-rate cap seam (docs/planning/client-column-rate-cap-design.md), the
+     * {@link #adaptiveCadenceEnabled} pattern so tests don't mutate the global CONFIG.
+     * {@code <= 0} = off, bit-identical to pre-cap behavior. A positive R clamps the
+     * want-set budget to {@code min(WANT_SET_BUDGET, R)} (bounds the burst any one
+     * declaration can trigger) and adds the size-weighted spacing gate to
+     * {@link #fastRescanDue} (bounds the sustained rate: after declaring N positions the
+     * next FAST fire waits at least {@code 20*N/R} ticks — each batch pre-pays its own
+     * interval, a stateless token bucket, so rate {@code <= R/sec} by construction). The
+     * 20-tick fallback is deliberately not consulted here: re-declaration is the want-set's
+     * only self-heal and must stay un-gateable, and with the budget clamped to R the
+     * fallback alone stays {@code <= R/sec} anyway.
+     */
+    IntSupplier columnRateCap = () -> LSSClientConfig.CONFIG.lodColumnsPerSecondLimit;
     private boolean lastScanWasFast;
     private long fastScans; // session-scoped diagnostic counter (reset() zeroes it)
+    /** Ticks the rate cap's spacing gate refused when every OTHER fast-fire condition had
+     *  passed — "the knob is binding" evidence for weak-client reports (surfaced in the
+     *  client diag Budget line). Session-scoped like {@link #fastScans}; reset() zeroes it. */
+    private long rateGated;
 
     // Last scan budget tracking
     private int lastBudget;
@@ -189,6 +207,15 @@ class SpiralScanner {
         // until arrivals match the consumer's real drain rate — a proportional controller
         // whose equilibrium IS rate-matching (docs/planning/ingest-backpressure-design.md).
         int budget = LSSConstants.WANT_SET_BUDGET;
+        // Manual column-rate cap, burst half (docs/planning/client-column-rate-cap-design.md):
+        // at most R columns outstanding, so at most ~R can arrive inside one declaration
+        // interval. MIN-composes with the pressure taper below — the scale applies to the
+        // already-clamped base, which is <= both, the same composition rule as the taper's
+        // own two factors. The sustained-rate half lives in fastRescanDue's spacing gate.
+        int rateCap = this.columnRateCap.getAsInt();
+        if (rateCap > 0) {
+            budget = Math.min(budget, rateCap);
+        }
         float scale = 1f;
         if (columnQueueSize > 0) {
             scale = Math.min(scale, 1f - (float) columnQueueSize / columnQueueHaltThreshold);
@@ -279,8 +306,24 @@ class SpiralScanner {
         if (columnQueueBytes >= columnQueueByteHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR) return false;
         if (ingestBacklogSections >= ingestBacklogHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR) return false;
         if (columns.hasActionableRetries(playerCx, playerCz, viewDistance)) return false;
-        return this.outstandingSupplier.getAsInt()
-                <= this.lastSentCount / FAST_RESCAN_OUTSTANDING_DIVISOR;
+        if (this.outstandingSupplier.getAsInt()
+                > this.lastSentCount / FAST_RESCAN_OUTSTANDING_DIVISOR) {
+            return false;
+        }
+        // Manual column-rate cap, sustained half: the last batch of N positions pre-pays a
+        // 20*N/R-tick interval before the next FAST fire (the 5-tick floor above still binds
+        // for small tails, so the converging-tail sparkle survives; a full 800 batch at
+        // R=3200 spaces to exactly the floor — today's behavior IS the R=3200 point). LAST
+        // in the ladder deliberately: rateGated then counts exactly the ticks where the cap
+        // was the binding refusal, and the supplier read costs only near-fire ticks. Long
+        // math is belt-and-braces (max real product ~2M fits int comfortably).
+        int cap = this.columnRateCap.getAsInt();
+        if (cap > 0 && (long) ticksSinceFire * cap
+                < (long) LSSConstants.TICKS_PER_SECOND * this.lastSentCount) {
+            this.rateGated++;
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -484,6 +527,7 @@ class SpiralScanner {
         this.lastSentCount = 0; // disarm the fast cadence with the rest of the session state
         this.lastScanWasFast = false;
         this.fastScans = 0;
+        this.rateGated = 0;
     }
 
     void resetScanCounter() {
@@ -565,4 +609,5 @@ class SpiralScanner {
     int getLastQueued() { return this.lastQueued; }
     boolean wasLastScanFast() { return this.lastScanWasFast; }
     long getFastScans() { return this.fastScans; }
+    long getRateGated() { return this.rateGated; }
 }
