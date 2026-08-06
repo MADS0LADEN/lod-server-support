@@ -609,6 +609,28 @@ class ColumnStateMapTest {
                 "the echo must not strip the retained stamp (the pre-guard stamp-destruction bug)");
     }
 
+    /**
+     * Three-lens review scoping pin: the post-park absorb guard covers the CAP park only.
+     * A NOT_GENERATED park deliberately keeps a real &gt;0 stamp; a straggler ingest
+     * report against it (cache-load failure replay, undispatched-at-teardown) must still
+     * take the honest lost-content unstamp — an absorbed report would persist a false
+     * data claim to the cache file.
+     */
+    @Test
+    void reportAgainstANotGeneratedParkedStampStillUnstampsHonestly() {
+        map.onReceived(POS, 5000L);
+        map.onNotGenerated(POS);
+        assertTrue(map.isSessionSatisfied(POS), "premise: parked by NOT_GENERATED");
+        assertEquals(5000L, map.timestampFor(POS), "premise: the stale-but-real stamp is kept");
+
+        map.onIngestFailed(POS);
+
+        assertEquals(-1L, map.timestampFor(POS),
+                "the honest unstamp must apply — the guard is scoped to the cap park");
+        assertFalse(map.mapForSave().containsKey(POS),
+                "no false data claim persists to the cache file");
+    }
+
     @Test
     void dirtyUnparksAnIngestParkedPositionSoItReRequests() {
         parkViaIngestFailures(POS);

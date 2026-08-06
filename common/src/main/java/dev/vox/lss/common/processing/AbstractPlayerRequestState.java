@@ -704,8 +704,36 @@ public abstract class AbstractPlayerRequestState<T> {
         return false;
     }
 
+    /**
+     * The ONE probe-filter predicate for all three platform probe loops (Fabric main
+     * thread, Paper pump, Folia snapshot — three-lens review T10: per-site copies could
+     * be reverted individually with every tier green): a position whose payload is in
+     * the send pipeline, recently sent, or just answered up_to_date resolves at the
+     * router without the probe, so serializing it is guaranteed-unused work. Any thread.
+     */
+    public boolean skipProbe(long packed) {
+        return hasEnqueuedColumn(packed) || isProbeSuppressed(packed);
+    }
+
     int probeSuppressCountForTest() {
         return this.probeSuppress.size();
+    }
+
+    /**
+     * Direct (non-mailboxed) probe-suppress clear for the dirty broadcasters (three-lens
+     * review, concurrency MINOR). The done-bit clear rides the processing-thread mailbox,
+     * but the suppress stamp is written at send success on the MAIN/pump thread — so a
+     * stale payload flushing after the mailboxed clear applied would re-suppress the
+     * edited column for the full TTL, and unlike {@code departedColumns} (whose check is
+     * nested under the done-bit) this map is consulted unconditionally by the probe, so a
+     * cleared done-bit does not disarm it. The broadcast tick runs strictly AFTER the
+     * same tick's send-queue flush on both platforms, so a direct clear here can never be
+     * outrun by a stamp for the payload that triggered the edit's re-serve. Any thread.
+     */
+    public void clearProbeSuppress(long[] positions) {
+        for (long pos : positions) {
+            this.probeSuppress.remove(pos);
+        }
     }
 
     // ---- Duplicate-serve grace (see the departedColumns field comment) ----
@@ -735,8 +763,15 @@ public abstract class AbstractPlayerRequestState<T> {
     private void sweepDepartedColumns() {
         if (this.departedColumns.isEmpty() && this.probeSuppress.isEmpty()) return;
         long now = this.departureClock.getAsLong();
+        // Grace-disabled hardening (three-lens review): with departureGraceNanos = 0 the
+        // gate below would pass every flush and the probeSuppress removeIf would run
+        // full-map every tick — fall back to the suppress TTL as the sweep interval
+        // (grace entries don't exist in that configuration). The grace's own 500 ms
+        // cadence is pinned and unchanged when the grace is on.
+        long gateNanos = this.departureGraceNanos > 0
+                ? this.departureGraceNanos : PROBE_SUPPRESS_TTL_NANOS;
         if (this.departedSweepMarkNanos != 0
-                && now - this.departedSweepMarkNanos <= this.departureGraceNanos) return;
+                && now - this.departedSweepMarkNanos <= gateNanos) return;
         this.departedSweepMarkNanos = now;
         this.departedColumns.values().removeIf(stamp -> now - stamp > this.departureGraceNanos);
         // Piggybacked: unconsulted probe-suppress stamps must not outlive their window

@@ -311,6 +311,13 @@ class SpiralScanner {
             return false;
         }
         if (predictedWalkCost() > FAST_RESCAN_MAX_WALK_COST) return false;
+        // The F1 shrink reset is an IN-WALK prefix invalidation like hasActionableRetries
+        // below: scan() zeroes the prefix AFTER this predicate evaluated predictedWalkCost
+        // off the still-high confirmedRing, so without this rung the shrink tick could ride
+        // a fast fire straight into the full from-ring-0 walk the cost gate exists to
+        // refuse (three-lens review, correctness MINOR — dynamic-view-distance servers
+        // shrink repeatedly under load).
+        if (this.lastExclusionRadius >= 0 && viewDistance < this.lastExclusionRadius) return false;
         if (columnQueueSize >= columnQueueHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR) return false;
         if (columnQueueBytes >= columnQueueByteHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR) return false;
         if (ingestBacklogSections >= ingestBacklogHaltThreshold / FAST_RESCAN_PRESSURE_DIVISOR) return false;

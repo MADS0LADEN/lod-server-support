@@ -284,15 +284,22 @@ class ColumnStateMap {
         long old = this.timestamps.get(packed);
         if (old == -1L) return;
 
-        // Parked: any further report is a sibling consumer's echo of the capping delivery
-        // (a parked position is never re-declared this session; revival via
+        // CAP-parked: any further report is a sibling consumer's echo of the capping
+        // delivery (a parked position is never re-declared this session; revival via
         // markDirtyIfKnown removes the mark before any new delivery can be rejected).
         // Absorbing it protects the clear-flavor park's retained pre-clear stamp — without
         // this, a post-park echo re-enters the cap branch, finds clearedResync already
         // removed, and takes the lost-content flavor, destroying the retained stamp and
         // recreating the permanent ghost-terrain hole the retention exists to prevent
-        // (2026-08-05 review F2).
-        if (this.sessionSatisfied.contains(packed)) return;
+        // (2026-08-05 review F2). The counter term scopes the guard to the cap park it
+        // describes (three-lens review): sessionSatisfied has two OTHER producers —
+        // onNotGenerated deliberately keeps a real >0 stamp whose report must still take
+        // the honest lost-content unstamp below (or the false data claim persists to the
+        // cache file), and onUpToDate's all-air park is already absorbed by the old == -1
+        // guard above. The failure counter survives the park (the cap branch clears the
+        // marks, never the count), so a genuine post-park echo reads > MAX here.
+        if (this.sessionSatisfied.contains(packed)
+                && this.ingestFailures.get(packed) > MAX_INGEST_FAILURES) return;
 
         long clearPreStamp = this.clearedResync.getOrDefault(packed, -1L);
         // Sibling echo of an already-handled lost clear: the pinned invariant is "strikes
@@ -369,7 +376,11 @@ class ColumnStateMap {
 
     void pruneOutOfRange(int playerCx, int playerCz, int pruneDistance) {
         int removed = 0;
-        var iter = this.timestamps.long2LongEntrySet().iterator();
+        // fastIterator throughout (three-lens review): the entry-allocating iterator cost
+        // ~330k MapEntry allocations per pass on the timestamps map alone at distance 256.
+        // Safe here — key/value are read immediately, remove() is supported (the
+        // RequestMetrics sibling prune already used it).
+        var iter = this.timestamps.long2LongEntrySet().fastIterator();
         while (iter.hasNext()) {
             var entry = iter.next();
             if (PositionUtil.isOutOfRange(entry.getLongKey(), playerCx, playerCz, pruneDistance)) {
@@ -385,13 +396,13 @@ class ColumnStateMap {
         pruneSet(this.validated, playerCx, playerCz, pruneDistance);
         pruneSet(this.sessionSatisfied, playerCx, playerCz, pruneDistance);
         pruneSet(this.staleInFlight, playerCx, playerCz, pruneDistance);
-        var failIter = this.ingestFailures.long2IntEntrySet().iterator();
+        var failIter = this.ingestFailures.long2IntEntrySet().fastIterator();
         while (failIter.hasNext()) {
             if (PositionUtil.isOutOfRange(failIter.next().getLongKey(), playerCx, playerCz, pruneDistance)) {
                 failIter.remove();
             }
         }
-        var clearIter = this.clearedResync.long2LongEntrySet().iterator();
+        var clearIter = this.clearedResync.long2LongEntrySet().fastIterator();
         while (clearIter.hasNext()) {
             if (PositionUtil.isOutOfRange(clearIter.next().getLongKey(), playerCx, playerCz, pruneDistance)) {
                 clearIter.remove();

@@ -395,7 +395,12 @@ public class ServiceLifecycleGameTests {
 
         var service = new RequestProcessingService(server);
         var filter = service.getDirtyContentFilter();
+        // Review-P3 latch wiring pin (three-lens round): registerPlayer must arm the
+        // save-hook gate — the Tier 2 arming seams cannot notice a wiring regression.
+        helper.assertTrue(!service.hasEverRegisteredPlayer(), "premise: fresh service, latch unarmed");
         var state = service.registerPlayer(mock, LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        helper.assertTrue(service.hasEverRegisteredPlayer(),
+                "registerPlayer must flip the save-hook latch");
 
         // Tick 2 (generation light settled): baseline the filter like an earlier save would,
         // then edit, then request — the probe will serve the post-edit bytes.

@@ -10,16 +10,19 @@ import dev.vox.lss.common.LSSConstants;
  * the current tick values and reset accumulators.
  */
 public class TickDiagnostics {
-    // Last-tick snapshot (read by diagnostics/logging)
-    private int lastTickSectionsSent;
-    private int lastTickDiskQueued;
-    private int lastTickDiskDrained;
-    private int lastTickGenDrained;
-    private int lastTickInMemorySerialized;
-    private int lastTickBytesFlushed;
-    private int lastTickQueuePeak;
-    private int lastTickSkippedDuplicate;
-    private int lastTickUpToDate;
+    // Last-tick snapshot — volatile like the cumulative totals below: format() renders
+    // these on the invoking player's Folia region thread via /lsslod stats|diag, the
+    // same command call that reads the totals (three-lens review — H3 originally covered
+    // only the totals, leaving half the command's fields non-visible).
+    private volatile int lastTickSectionsSent;
+    private volatile int lastTickDiskQueued;
+    private volatile int lastTickDiskDrained;
+    private volatile int lastTickGenDrained;
+    private volatile int lastTickInMemorySerialized;
+    private volatile int lastTickBytesFlushed;
+    private volatile int lastTickQueuePeak;
+    private volatile int lastTickSkippedDuplicate;
+    private volatile int lastTickUpToDate;
 
     // Current-tick accumulators (written during tick processing)
     private int curTickSectionsSent;
@@ -82,8 +85,10 @@ public class TickDiagnostics {
         // N samples span N-1 intervals: the oldest bucket's bytes flushed during the tick
         // ENDING at its own stamp — before the measured span began — so it is excluded
         // from the numerator (including it inflated the rate ~N/(N-1): +100% at
-        // ringCount 2, ~+1% at the full window).
-        long spanBytes = windowByteSum - byteRing[oldestIdx];
+        // ringCount 2, ~+1% at the full window). Cross-thread reads are best-effort (see
+        // the field comments): clamp at 0 so a mid-reset torn read can never render a
+        // negative rate in /lsslod stats.
+        long spanBytes = Math.max(0L, windowByteSum - byteRing[oldestIdx]);
         return spanBytes * LSSConstants.NANOS_PER_SECOND / elapsedNanos;
     }
 

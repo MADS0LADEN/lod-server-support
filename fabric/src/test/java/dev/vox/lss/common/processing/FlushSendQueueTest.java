@@ -429,6 +429,29 @@ class FlushSendQueueTest {
                 "the idle flush sweep prunes stamps the probe never consulted");
     }
 
+    /** The ONE probe-filter predicate every platform probe loop calls (three-lens review
+     *  T10): pinning it here means a silent revert of any read site reduces to reverting
+     *  the shared method, which reds. */
+    @Test
+    void skipProbeCombinesEnqueuedAndSuppressed() throws Exception {
+        state.setDepartureGraceForTest(500_000_000L, () -> 1_000_000_000L);
+        assertFalse(state.skipProbe(POS_1), "neither enqueued nor suppressed: probe");
+
+        // Enqueued: payload drained into the send queue but not yet sent (0 allocation).
+        state.addReadyPayload(new QueuedPayload<>("a", 0, 0, POS_1));
+        state.flushSendQueue(0, limiter, diag, sent::add);
+        assertTrue(state.skipProbe(POS_1), "an enqueued payload skips the probe");
+        assertFalse(state.skipProbe(POS_2));
+
+        // Suppressed: recently sent or answered up_to_date.
+        state.stampProbeSuppress(POS_2);
+        assertTrue(state.skipProbe(POS_2), "a suppress stamp skips the probe");
+
+        // The broadcaster's direct clear re-enables the probe immediately.
+        state.clearProbeSuppress(new long[]{POS_2});
+        assertFalse(state.skipProbe(POS_2), "the direct dirty-broadcast clear un-suppresses");
+    }
+
     @Test
     void probeSuppressClearsWithTheDiskReadDoneBit() throws Exception {
         state.setDepartureGraceForTest(500_000_000L, () -> 1_000_000_000L);

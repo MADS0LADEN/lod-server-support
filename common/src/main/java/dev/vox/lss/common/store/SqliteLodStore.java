@@ -565,6 +565,14 @@ public final class SqliteLodStore implements LodStoreService {
             var ds = new org.sqlite.SQLiteDataSource();
             ds.setUrl("jdbc:sqlite:" + this.dbPath);
             created = ds.getConnection();
+            if (this.failNextReaderSetupForTest) {
+                // TEST-ONLY fault seam (three-lens review): the F3 pragma-throw path —
+                // a throw after getConnection() succeeded must close the handle, and the
+                // same thread must recover with a fresh connection on its next read.
+                this.failNextReaderSetupForTest = false;
+                this.lastReaderSetupFailureConnForTest = created;
+                throw new SQLException("test-injected reader setup failure");
+            }
             try (Statement st = created.createStatement()) {
                 st.execute("PRAGMA busy_timeout=3000"); // see openWriter
                 st.execute("PRAGMA query_only=1");
@@ -1020,6 +1028,24 @@ public final class SqliteLodStore implements LodStoreService {
         }
     }
 
+    /** TEST-ONLY fault seam for the F3 pragma-throw path — see readerConnection. */
+    private volatile boolean failNextReaderSetupForTest;
+    private volatile Connection lastReaderSetupFailureConnForTest;
+
+    void failNextReaderSetupForTest() {
+        this.failNextReaderSetupForTest = true;
+    }
+
+    Connection lastReaderSetupFailureConnForTest() {
+        return this.lastReaderSetupFailureConnForTest;
+    }
+
+    /** TEST-ONLY: the calling thread's cached reader-statement count (review P4 pin —
+     *  bounded at dims × 2 kinds; growth here is a statement leak). */
+    int readerStatementCacheSizeForTest() {
+        return this.readerStatements.get().size();
+    }
+
     private void apply(Op op) throws Exception {
         if (this.failOpsForTest > 0) {
             this.failOpsForTest--;
@@ -1458,6 +1484,11 @@ public final class SqliteLodStore implements LodStoreService {
         Connection c = this.readerConn.get();
         if (c == null) return;
         this.readerConn.remove();
+        // Keep the statement cache's "dies with its connection" invariant STRUCTURAL
+        // (three-lens review): the cache keys on dimId, not the connection, so dropping
+        // the connection without the cache would leave closed-statement handles that only
+        // self-heal through the invalidate-on-throw path.
+        this.readerStatements.remove();
         synchronized (this.allReaderConns) {
             this.allReaderConns.remove(c);
         }
@@ -1603,7 +1634,11 @@ public final class SqliteLodStore implements LodStoreService {
      *  work) are now merged by ascending ts — ties broken by dimId then pos for
      *  determinism — and consumed in GLOBAL age order until the deficit is covered
      *  ({@code remaining > 0} checked before each victim, so the last one may overshoot,
-     *  exactly like the per-dim loop did). Single-dim stores behave bit-identically.
+     *  exactly like the per-dim loop did). Single-dim stores behave bit-identically
+     *  modulo ts TIES, which the sort now breaks deterministically by pos where the old
+     *  path took SQLite's scan order. Per-dim candidate collection stops early once a
+     *  dim's own bytes cover the whole deficit (no later row of it can be a victim), so
+     *  the typical steady-state pass steps a handful of rows, not 512×dims.
      *
      *  <p>Freed pages are ≥ freed blob bytes (page granularity), so covering the
      *  deficit in blob bytes always clears it in page bytes; the caller re-measures
@@ -1613,13 +1648,23 @@ public final class SqliteLodStore implements LodStoreService {
         record Candidate(String dim, int dimId, long pos, long len, long ts) { }
         var candidates = new ArrayList<Candidate>();
         for (var entry : List.copyOf(this.dimIds.entrySet())) {
+            long dimBytes = 0;
             try (Statement st = this.writer.createStatement();
                  ResultSet rs = st.executeQuery("SELECT pos, length(\"blob\"), ts FROM lods_"
                          + entry.getValue() + " ORDER BY ts ASC LIMIT "
                          + EVICTION_MAX_ROWS_PER_DIM)) {
                 while (rs.next()) {
+                    long len = Math.max(1L, rs.getLong(2));
                     candidates.add(new Candidate(entry.getKey(), entry.getValue(),
-                            rs.getLong(1), rs.getLong(2), rs.getLong(3)));
+                            rs.getLong(1), len, rs.getLong(3)));
+                    // Per-dim early stop (three-lens review): the victim set is the
+                    // globally-oldest prefix covering the deficit, so no single dim can
+                    // ever contribute more than the rows covering the WHOLE deficit —
+                    // once this dim's own cumulative bytes reach it, later (younger) rows
+                    // of this dim cannot be victims. Restores the pre-merge shape's
+                    // typical-case cost (a handful of row-steps, not 512×dims per pass).
+                    dimBytes += len;
+                    if (dimBytes >= bytesToFree) break;
                 }
             }
         }
@@ -1634,7 +1679,7 @@ public final class SqliteLodStore implements LodStoreService {
             if (remaining <= 0) break;
             victimsByDim.computeIfAbsent(cand.dim(), k -> new ArrayList<>()).add(cand.pos());
             dimIdByKey.put(cand.dim(), cand.dimId());
-            remaining -= Math.max(1L, cand.len());
+            remaining -= cand.len(); // already floored at 1 during collection
         }
 
         int evicted = 0;

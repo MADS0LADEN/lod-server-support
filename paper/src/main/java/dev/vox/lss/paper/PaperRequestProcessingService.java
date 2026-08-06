@@ -1012,7 +1012,11 @@ public class PaperRequestProcessingService {
      * cycles that work it off (published exactly while the backlog is non-empty).
      *
      * <p>Both sources may list already-routed positions; such a probe is simply unused by the
-     * router, bounded by {@link #MAX_PROBES_PER_TICK_PER_PLAYER}.
+     * router, bounded by {@link #MAX_PROBES_PER_TICK_PER_PLAYER}. Positions whose payload
+     * sits in the send pipeline, left it within the probe-suppress TTL, or were answered
+     * up_to_date are filtered by {@code skipProbe} (review P1 — the Fabric twin's javadoc
+     * carries the full story), leaving a sub-tick residual between a processing-thread
+     * up_to_date resolution and the next pump action drain.
      */
     private Long2ObjectMap<LoadedColumnData> probeLoadedChunks(
             PaperPlayerRequestState state, ServerLevel level,
@@ -1044,7 +1048,7 @@ public class PaperRequestProcessingService {
             // (review P1: the enqueued-only filter left served/answered heads
             // re-serializing for up to a second). Both structures are any-thread safe
             // (pendingByPosition/diskReadDone are single-threaded and stay unconsulted).
-            if (state.hasEnqueuedColumn(packed) || state.isProbeSuppressed(packed))
+            if (state.skipProbe(packed))
                 continue;
 
             var column = this.loadedColumnProbe.probe(level, req.cx(), req.cz());
@@ -1141,7 +1145,7 @@ public class PaperRequestProcessingService {
         for (var req : held.requests()) {
             long packed = PositionUtil.packPosition(req.cx(), req.cz());
             if (skipPositions != null && skipPositions.contains(packed)) continue;
-            if (state.hasEnqueuedColumn(packed) || state.isProbeSuppressed(packed)) continue;
+            if (state.skipProbe(packed)) continue;
             if (positions == null) positions = new LongOpenHashSet();
             if (!positions.add(packed)) continue;
             if (positions.size() >= MAX_PROBES_PER_TICK_PER_PLAYER) break;

@@ -105,6 +105,10 @@ class PaperDirtyColumnBroadcaster {
                     // race is only an event landing inside the phase-4 window itself
                     // (milliseconds), not the old full-cycle skew.
                     this.offThreadProcessor.clearDiskReadDone(player.getUUID(), result);
+                    // Direct, non-mailboxed: a suppress stamp written by THIS tick's flush
+                    // (before this broadcast ran) must not outlive the edit — see
+                    // clearProbeSuppress (three-lens review, concurrency MINOR).
+                    state.clearProbeSuppress(result);
                     try {
                         this.dirtySender.send(player, result);
                     } catch (Exception e) {

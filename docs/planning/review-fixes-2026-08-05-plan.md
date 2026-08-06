@@ -540,3 +540,53 @@ Zero blockers/majors. Two MINORs, both addressed in follow-up commits:
 
 Everything else verified clean, including all five plan-review amendments, every
 lifecycle path over the new fields, and the four commit messages vs the code.
+
+## Three-lens Opus review round (2026-08-06, user-requested, over the full branch diff)
+
+Three parallel reviewers (correctness-vs-pins, concurrency/lifecycle, performance/test
+adequacy). Zero blockers. Everything below was fixed in the follow-up commit unless
+marked otherwise:
+
+1. **Correctness MAJOR — P3's premise was false on warm servers:** the timestamp cache
+   persists (`<world>/data/lss-timestamps.bin`), so a server that served LSS clients
+   LAST session boots with stamps a pre-first-join edit must invalidate — the two-term
+   gate would have answered a warm rejoin `up_to_date` for pre-edit terrain. Fixed with
+   the third conjunct (`timestampCacheBootedEmpty`, captured at construction) and the
+   pure `skipDirtyHash` predicate.
+2. **Test-adequacy MAJOR — P3 had no truth-table pins** (and the latch wiring was
+   unpinned): fixed — `skipDirtyHashRequiresAllThreeConjuncts` + the Tier 2 latch-flip
+   assertion in `ServiceLifecycleGameTests`.
+3. **Concurrency MINOR — a probeSuppress stamp could land after its own dirty-clear**
+   (the clear rides the processing-thread mailbox; the stamp fires at send success on
+   the pump), re-suppressing an EDITED column for the TTL and serving pre-edit disk
+   bytes until the next save. Fixed: `clearProbeSuppress` called directly (same thread,
+   post-flush) in both dirty broadcasters.
+4. **Correctness MINOR — F1's in-walk reset could ride a fast fire** into the full
+   from-ring-0 walk the cost gate refuses (the predicate evaluates before the walk
+   resets the prefix). Fixed: an explicit shrink refusal rung in `fastRescanDue`,
+   mirroring the `hasActionableRetries` twin.
+5. **Correctness MINOR — F2's park guard reached past the cap park it described**,
+   absorbing the honest lost-content unstamp for `NOT_GENERATED`-parked stamps (a false
+   data claim could persist to the cache file). Fixed: guard scoped with the surviving
+   failure counter (`> MAX_INGEST_FAILURES`); pinned.
+6. **Test-adequacy MINORs, all fixed:** the F3 test pinned pre-existing behavior — a
+   setup fault seam now drives the real pragma-throw path (handle closed, same-thread
+   recovery, no per-read re-leak); the probe-filter rungs are hoisted into ONE shared
+   `skipProbe` predicate used by all three platform loops and pinned; the F5 test's
+   fixed 1 s sleep (Tier 1 has no CI retry) replaced with polling the semaphore's
+   queued-threads estimate; a cache-size seam pins P4's boundedness.
+7. **Perf notes, fixed:** F4's per-dim candidate collection early-stops once a dim's own
+   bytes cover the deficit (restores the pre-merge typical-case cost); the three
+   entry-allocating prune iterators in `ColumnStateMap.pruneOutOfRange` switched to
+   `fastIterator` (~330k allocations/pass); H3 extended to the nine `lastTick*` fields
+   the same Folia command renders, with a `Math.max(0, …)` clamp on the torn-read window
+   rate; the grace-disabled sweep cadence hardened; `readerStatements.remove()` beside
+   the reader-connection close (structural confinement).
+8. **Documented, not changed:** the P1 residual's gen-disabled corner is a second entry
+   path into the documented accepted corner (CLAUDE.md updated); F4's single-dim
+   behavior is bit-identical modulo ts ties (now deterministic); H4's in-loop check
+   remains twin-parity (unreachable without a seam); `armSaveHookForTest` stays public
+   (gametests live outside the package; one-way, disables only an optimization).
+9. **Deferred:** the reviewer-sketched one-cycle retain in `resolvedAsDuplicate` (would
+   edit the pinned honest re-resolution ladder); a k-way cursor merge for F4 (the early
+   stop recovers the cost that mattered).

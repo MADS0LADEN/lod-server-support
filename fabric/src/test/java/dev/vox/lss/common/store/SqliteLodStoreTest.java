@@ -1117,7 +1117,46 @@ class SqliteLodStoreTest {
             assertNull(store.get(OW, PositionUtil.packPosition(30, 9)),
                     "round " + round + ": a miss through the cached statement stays a miss");
         }
+        assertEquals(2, store.readerStatementCacheSizeForTest(),
+                "three rounds of get+getFrame+miss on one dim hold exactly 2 cached"
+                        + " statements (dim × kind) — growth here is a statement leak");
         assertEquals(0, store.diagnostics().getErrors());
+        store.shutdown();
+    }
+
+    /** F3's actual defect paths, driven via the setup fault seam (three-lens review —
+     *  the shutdown test above pins pre-existing behavior, not the fix): a throw after
+     *  getConnection() succeeded must CLOSE the handle, read as a miss, and let the SAME
+     *  thread recover with a fresh registered connection on its next read (the pre-fix
+     *  shape re-opened and re-leaked one native handle per read on that thread). */
+    @Test
+    void readerSetupThrowClosesTheHandleAndTheThreadRecovers() throws Exception {
+        writeRegion(OW, 0, 0, Map.of());
+        SqliteLodStore store = open(defaultEnv());
+        long p = PositionUtil.packPosition(4, 9);
+        store.deposit(OW, p, bytes(5, 64), 100);
+        assertNotNull(awaitHit(store, OW, p));
+        int connsBefore = store.readerConnCountForTest();
+        long errsBefore = store.diagnostics().getErrors();
+
+        store.failNextReaderSetupForTest();
+        var results = new java.util.ArrayList<Object>();
+        Thread reader = new Thread(() -> {
+            results.add(store.get(OW, p)); // injected setup throw -> miss, handle closed
+            results.add(store.get(OW, p)); // same thread recovers on a fresh connection
+        });
+        reader.start();
+        reader.join(5000);
+
+        assertEquals(2, results.size(), "reader thread completed both reads");
+        assertNull(results.get(0), "the injected setup failure reads as a miss");
+        assertNotNull(results.get(1), "the same thread recovers on its next read");
+        var failed = store.lastReaderSetupFailureConnForTest();
+        assertNotNull(failed, "the seam captured the failed connection");
+        assertTrue(failed.isClosed(), "the failed setup's handle must be CLOSED, not leaked");
+        assertEquals(connsBefore + 1, store.readerConnCountForTest(),
+                "exactly the recovery connection registered — never the failed one");
+        assertTrue(store.diagnostics().getErrors() > errsBefore, "the failure counted");
         store.shutdown();
     }
 
@@ -1192,9 +1231,13 @@ class SqliteLodStoreTest {
         assertEquals(1, regionsRowCount(OW, 0L), "precondition: seen_mtime recorded");
 
         var permits = store.pauseBatcherForTest();
-        // Let the batcher's IN-FLIGHT iteration finish (its 200 ms queue.poll would
-        // otherwise grab a deposit without consuming a permit and shift every step below).
-        Thread.sleep(1000);
+        // Wait for the batcher to PARK at the step gate (observable via the semaphore's
+        // queued-threads estimate) — its in-flight iteration's 200 ms queue.poll would
+        // otherwise grab a deposit without consuming a permit and shift every step below.
+        // A fixed sleep here was flagged by the three-lens review as a Tier 1 flake seed
+        // (no retry on this tier); polling the actual parking is starvation-proof.
+        for (int i = 0; i < 400 && !permits.hasQueuedThreads(); i++) Thread.sleep(25);
+        assertTrue(permits.hasQueuedThreads(), "batcher must park at the step gate");
         store.deposit(OW, PositionUtil.packPosition(4, 0), bytes(2, 64), 2000); // C
         store.deposit(OW, PositionUtil.packPosition(5, 0), bytes(3, 64), 2001); // D (will fail)
         permits.release(); // step 1: C applies — memo add + regions-DELETE ride the open txn

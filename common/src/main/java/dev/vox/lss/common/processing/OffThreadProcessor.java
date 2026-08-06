@@ -333,6 +333,13 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
         this.sendActions.add(action);
     }
 
+    /** Whether the persisted timestamp cache loaded EMPTY at construction (the review-P3
+     *  skip gate's third conjunct — read once by the service constructor, before the
+     *  processing thread starts, so no confinement issue). */
+    public boolean isTimestampCacheEmpty() {
+        return this.timestampCache.size() == 0;
+    }
+
     /** Drain generation ticket requests (called by main thread). */
     public GenerationTicketRequest pollGenerationTicketRequest() {
         return this.generationTicketRequests.poll();
