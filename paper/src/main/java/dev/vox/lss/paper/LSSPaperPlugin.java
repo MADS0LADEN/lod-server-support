@@ -185,12 +185,16 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
         // (the service's shuttingDown flag covers the one already-in-flight tick).
         var service = this.requestService;
         this.requestService = null;
+        // Unregister the channels BEFORE shutdown (2026-08-05 review H5): a frame already
+        // dispatched into onPluginMessageReceived proceeds with its captured service
+        // reference (nothing can stop it; everything it touches is individually
+        // thread-safe), but unregistering first means no NEW frame can dispatch
+        // concurrently with the teardown below.
+        getServer().getMessenger().unregisterIncomingPluginChannel(this);
         if (service != null) {
             LSSLogger.info("Stopping " + Brand.shortName() + " LOD request processing service");
             service.shutdown();
         }
-
-        getServer().getMessenger().unregisterIncomingPluginChannel(this);
 
         LSSLogger.info(Brand.displayName() + " (Paper) disabled");
     }
@@ -264,12 +268,15 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
      * Test seam: player registration, production-wired to
      * {@link PaperRequestProcessingService#enqueueRegister} — on Folia the handshake message
      * arrives on the player's region thread, so registration is mailboxed and the pump
-     * applies it next tick. A V16 dialect additionally creates the compat session identity
-     * FIRST (directly, not mailboxed — the session map is any-thread safe and early drip
-     * batches must merge from the first frame, before the mailboxed registration lands).
-     * Only invoked when the {@link HandshakeGate} decision says to register, so the
-     * production lambda may capture a service reference that is non-null whenever
-     * servicePresent was true.
+     * applies it next tick. EVERY dialect identity mark (v16 and v18 alike) rides that
+     * mailbox too, as the {@link #dialectFlipFor} runnable the pump runs during its
+     * lifecycle drain — never directly from the region thread. (This javadoc used to
+     * describe a pre-round-3 design where V16 marked its session identity directly; that
+     * direct mark IS the hard-kick race the round-3 review fixed — a column egress
+     * deciding its wire shape off a half-published identity — so do not reintroduce it.
+     * 2026-08-05 review D1.) Only invoked when the {@link HandshakeGate} decision says to
+     * register, so the production lambda may capture a service reference that is non-null
+     * whenever servicePresent was true.
      */
     @FunctionalInterface
     interface HandshakeRegistrar {

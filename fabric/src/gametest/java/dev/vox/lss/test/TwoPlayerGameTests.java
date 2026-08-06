@@ -324,6 +324,11 @@ public class TwoPlayerGameTests {
         var playerList = server.getPlayerList();
         var liveService = LSSServerNetworking.getRequestService();
         helper.assertTrue(liveService != null, "live service required (the save hook feeds it)");
+        // The mock players below register on this test's OWN service, but the save-hook
+        // assertion at the end goes through the LIVE service's filter/tracker — arm its
+        // never-registered skip gate (review P3) or the hook would skip the hash and the
+        // dirty mark. One-way latch; arming cannot affect what other tests pin.
+        liveService.armSaveHookForTest();
         var mockA = placeMockServerPlayer(helper);
         var mockB = placeMockServerPlayer(helper);
         int pcx = mockA.getBlockX() >> 4;

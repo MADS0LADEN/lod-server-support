@@ -369,6 +369,10 @@ public class ServiceLifecycleGameTests {
         var liveService = LSSServerNetworking.getRequestService();
         helper.assertTrue(liveService != null,
                 "live RequestProcessingService must be active (save-hook leg depends on it)");
+        // The save-hook leg asserts through the LIVE service, but this test's player
+        // registers on its own service — arm the P3 never-registered skip gate (one-way;
+        // no Tier 2 test pins the skip).
+        liveService.armSaveHookForTest();
 
         var mock = placeMockServerPlayer(helper);
         int pcx = mock.getBlockX() >> 4;
@@ -391,7 +395,12 @@ public class ServiceLifecycleGameTests {
 
         var service = new RequestProcessingService(server);
         var filter = service.getDirtyContentFilter();
+        // Review-P3 latch wiring pin (three-lens round): registerPlayer must arm the
+        // save-hook gate — the Tier 2 arming seams cannot notice a wiring regression.
+        helper.assertTrue(!service.hasEverRegisteredPlayer(), "premise: fresh service, latch unarmed");
         var state = service.registerPlayer(mock, LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        helper.assertTrue(service.hasEverRegisteredPlayer(),
+                "registerPlayer must flip the save-hook latch");
 
         // Tick 2 (generation light settled): baseline the filter like an earlier save would,
         // then edit, then request — the probe will serve the post-edit bytes.
@@ -1134,6 +1143,9 @@ public class ServiceLifecycleGameTests {
         ServerLevel level = helper.getLevel();
         var liveService = LSSServerNetworking.getRequestService();
         helper.assertTrue(liveService != null, "live service required (the save hook feeds it)");
+        // Arm the P3 never-registered skip gate — the control assertion below needs the
+        // live hook to hash (one-way latch; no Tier 2 test pins the skip).
+        liveService.armSaveHookForTest();
         var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
         var dim = LSSConstants.DIM_STR_OVERWORLD;
         var chunkSource = level.getChunkSource();

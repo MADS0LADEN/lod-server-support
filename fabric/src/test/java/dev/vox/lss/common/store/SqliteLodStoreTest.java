@@ -1068,4 +1068,217 @@ class SqliteLodStoreTest {
         store.deposit(OW, PositionUtil.packPosition(0, 9), bytes(24, 100), 100);
         assertNull(store.get(OW, PositionUtil.packPosition(0, 9)));
     }
+
+    // ---- 2026-08-05 review round (F3/F4/F5/P4) ----
+
+    /** F3: after shutdown a reader thread must open NOTHING — the connection register
+     *  must stay empty (a registered-after-close handle is a native leak that can fail a
+     *  later same-JVM drop-and-rebuild on Windows). The interleaved flavor (shutdown
+     *  completing between the entry check and registration) is closed by the re-check
+     *  under the allReaderConns lock — the same lock shutdown's close loop holds. */
+    @Test
+    void readsAfterShutdownOpenAndRegisterNoConnections() throws Exception {
+        writeRegion(OW, 0, 0, Map.of());
+        SqliteLodStore store = open(defaultEnv());
+        long p = PositionUtil.packPosition(2, 9);
+        store.deposit(OW, p, bytes(3, 64), 100);
+        assertNotNull(awaitHit(store, OW, p));
+        store.shutdown();
+        assertEquals(0, store.readerConnCountForTest(), "shutdown closes and clears every reader");
+
+        var result = new java.util.concurrent.atomic.AtomicReference<Object>("unset");
+        Thread reader = new Thread(() -> result.set(store.get(OW, p)));
+        reader.start();
+        reader.join(5000);
+        assertNull(result.get(), "a post-shutdown read on a fresh thread must miss");
+        assertEquals(0, store.readerConnCountForTest(),
+                "…and must not have opened or registered a connection");
+    }
+
+    /** P4 (behavior-level): repeated reads on one thread ride the cached per-dimension
+     *  statements — both kinds interleaved, misses included, all correct. Contents are
+     *  the pin; the reuse itself is the perf half. */
+    @Test
+    void repeatedReadsOnOneThreadStayCorrectAcrossCachedStatements() throws Exception {
+        writeRegion(OW, 0, 0, Map.of());
+        SqliteLodStore store = open(defaultEnv());
+        long a = PositionUtil.packPosition(1, 9);
+        long b = PositionUtil.packPosition(3, 9);
+        store.deposit(OW, a, bytes(7, 512), 100);
+        store.deposit(OW, b, bytes(8, 2048), 200);
+        assertNotNull(awaitHit(store, OW, b));
+        for (int round = 0; round < 3; round++) {
+            var hitA = store.get(OW, a);
+            assertNotNull(hitA);
+            assertArrayEquals(bytes(7, 512), hitA.sectionBytes(), "round " + round + ": get(a)");
+            var frameB = store.getFrame(OW, b);
+            assertNotNull(frameB, "round " + round + ": getFrame(b)");
+            assertEquals(2048, frameB.usize());
+            assertNull(store.get(OW, PositionUtil.packPosition(30, 9)),
+                    "round " + round + ": a miss through the cached statement stays a miss");
+        }
+        assertEquals(2, store.readerStatementCacheSizeForTest(),
+                "three rounds of get+getFrame+miss on one dim hold exactly 2 cached"
+                        + " statements (dim × kind) — growth here is a statement leak");
+        assertEquals(0, store.diagnostics().getErrors());
+        store.shutdown();
+    }
+
+    /** F3's actual defect paths, driven via the setup fault seam (three-lens review —
+     *  the shutdown test above pins pre-existing behavior, not the fix): a throw after
+     *  getConnection() succeeded must CLOSE the handle, read as a miss, and let the SAME
+     *  thread recover with a fresh registered connection on its next read (the pre-fix
+     *  shape re-opened and re-leaked one native handle per read on that thread). */
+    @Test
+    void readerSetupThrowClosesTheHandleAndTheThreadRecovers() throws Exception {
+        writeRegion(OW, 0, 0, Map.of());
+        SqliteLodStore store = open(defaultEnv());
+        long p = PositionUtil.packPosition(4, 9);
+        store.deposit(OW, p, bytes(5, 64), 100);
+        assertNotNull(awaitHit(store, OW, p));
+        int connsBefore = store.readerConnCountForTest();
+        long errsBefore = store.diagnostics().getErrors();
+
+        store.failNextReaderSetupForTest();
+        var results = new java.util.ArrayList<Object>();
+        Thread reader = new Thread(() -> {
+            results.add(store.get(OW, p)); // injected setup throw -> miss, handle closed
+            results.add(store.get(OW, p)); // same thread recovers on a fresh connection
+        });
+        reader.start();
+        reader.join(5000);
+
+        assertEquals(2, results.size(), "reader thread completed both reads");
+        assertNull(results.get(0), "the injected setup failure reads as a miss");
+        assertNotNull(results.get(1), "the same thread recovers on its next read");
+        var failed = store.lastReaderSetupFailureConnForTest();
+        assertNotNull(failed, "the seam captured the failed connection");
+        assertTrue(failed.isClosed(), "the failed setup's handle must be CLOSED, not leaked");
+        assertEquals(connsBefore + 1, store.readerConnCountForTest(),
+                "exactly the recovery connection registered — never the failed one");
+        assertTrue(store.diagnostics().getErrors() > errsBefore, "the failure counted");
+        store.shutdown();
+    }
+
+    /** F4: eviction takes the GLOBALLY oldest rows. Ages are interleaved round-robin
+     *  across three dimensions, so correct oldest-first eviction removes each dim's
+     *  oldest band and keeps each dim's newest — while the pre-merge shape (dims in
+     *  HashMap order against one shared budget) empties the first-iterated dims
+     *  entirely (their newest rows included) and leaves the last dim untouched,
+     *  whatever that iteration order is. */
+    @Test
+    void sizeCapEvictionIsOldestFirstAcrossDimensions() throws Exception {
+        writeRegion(OW, 0, 0, Map.of());
+        var env = new SqliteLodStore.Environment(storeDir(), "26.2-test", WIRE,
+                this::regionDir, d -> "", 0, 2_000_000L); // ~2 MB cap
+        SqliteLodStore store = SqliteLodStore.createOrNull(LodStoreMode.FULL, env,
+                new LodStoreDiagnostics());
+        assertNotNull(store);
+        assertTrue(store.awaitSweep(10_000));
+        String third = "lss_test:third";
+        String[] dims = {OW, END, third};
+        // 3 dims x 70 x 20 KB ≈ 4.2 MB >> the 2 MB cap; ts interleaved round-robin so
+        // every dim holds globally-old AND globally-new rows.
+        for (int i = 0; i < 70; i++) {
+            for (int d = 0; d < dims.length; d++) {
+                store.deposit(dims[d], PositionUtil.packPosition(i, 12),
+                        bytes(100 + i * 3 + d, 20_000), 1000 + i * 3L + d);
+            }
+        }
+        assertNotNull(awaitHit(store, third, PositionUtil.packPosition(69, 12)));
+        boolean evicted = false;
+        for (int i = 0; i < 600 && !evicted; i++) { // gauge cadence is 5 s
+            evicted = store.get(OW, PositionUtil.packPosition(0, 12)) == null;
+            Thread.sleep(50);
+        }
+        assertTrue(evicted, "eviction must engage under the cap");
+        awaitStableEvictions(store);
+        for (String dim : dims) {
+            assertNull(store.get(dim, PositionUtil.packPosition(0, 12)),
+                    dim + ": every dim's globally-old band must be evicted");
+            assertNotNull(store.get(dim, PositionUtil.packPosition(69, 12)),
+                    dim + ": every dim's newest rows must survive — a shared-budget"
+                            + " iteration would have emptied the first dim instead");
+        }
+        assertEquals(0, store.diagnostics().getErrors());
+        store.shutdown();
+    }
+
+    /** F5: a writer-failure ROLLBACK must un-poison the B13 sweepReopened memo. The
+     *  memoized {@code DELETE FROM regions} rides the shared txn; before the fix a
+     *  rollback undid the applied delete while the memo survived, so the next
+     *  same-region deposit skipped the clear and the stale seen_mtime row would
+     *  {@code ==}-skip every future sweep of the region. */
+    @Test
+    void writerRollbackUnpoisonsTheSweepReopenedMemo() throws Exception {
+        long pSeed = PositionUtil.packPosition(3, 0);
+        long headerStamp = nowSec() - 100;
+        writeRegion(OW, 0, 0, Map.of(pSeed, (int) headerStamp));
+        // Boot 1: put a fresh row in region (0,0) so boot 2's sweep examines the region.
+        SqliteLodStore first = open(defaultEnv());
+        first.deposit(OW, pSeed, bytes(1, 64), 1000, headerStamp + 50);
+        assertNotNull(awaitHit(first, OW, pSeed));
+        first.shutdown();
+
+        // Backdate the .mca: the sweep withholds seen_mtime while the file's mtime sits
+        // in the CURRENT filesystem second (the R1 same-second anti-race rule), and the
+        // file was written milliseconds ago.
+        java.nio.file.Files.setLastModifiedTime(regionDir(OW).resolve("r.0.0.mca"),
+                java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis() - 5000));
+
+        // Boot 2: the sweep records the region's seen_mtime; runSweep clears the memo.
+        SqliteLodStore store = open(defaultEnv());
+        assertEquals(1, regionsRowCount(OW, 0L), "precondition: seen_mtime recorded");
+
+        var permits = store.pauseBatcherForTest();
+        // Wait for the batcher to PARK at the step gate (observable via the semaphore's
+        // queued-threads estimate) — its in-flight iteration's 200 ms queue.poll would
+        // otherwise grab a deposit without consuming a permit and shift every step below.
+        // A fixed sleep here was flagged by the three-lens review as a Tier 1 flake seed
+        // (no retry on this tier); polling the actual parking is starvation-proof.
+        for (int i = 0; i < 400 && !permits.hasQueuedThreads(); i++) Thread.sleep(25);
+        assertTrue(permits.hasQueuedThreads(), "batcher must park at the step gate");
+        store.deposit(OW, PositionUtil.packPosition(4, 0), bytes(2, 64), 2000); // C
+        store.deposit(OW, PositionUtil.packPosition(5, 0), bytes(3, 64), 2001); // D (will fail)
+        permits.release(); // step 1: C applies — memo add + regions-DELETE ride the open txn
+        for (int i = 0; i < 400 && store.diagnostics().getDeposits() == 0; i++) Thread.sleep(25);
+        assertEquals(1, store.diagnostics().getDeposits(), "step 1 must apply exactly C");
+        store.failNextOpsForTest(1);
+        permits.release(); // step 2: D throws before its writes -> rollbackTxn undoes C + the DELETE
+        for (int i = 0; i < 200 && store.diagnostics().getErrors() == 0; i++) Thread.sleep(25);
+        assertTrue(store.diagnostics().getErrors() >= 1, "the injected failure must count");
+
+        // E: same region again. With the memo pruned by the rollback, the regions-DELETE
+        // re-executes and commits; with a poisoned memo it is skipped and the stale
+        // seen_mtime row survives forever.
+        store.deposit(OW, PositionUtil.packPosition(6, 0), bytes(4, 64), 2002);
+        permits.release(Integer.MAX_VALUE - 2);
+        boolean cleared = false;
+        for (int i = 0; i < 400 && !cleared; i++) {
+            cleared = regionsRowCount(OW, 0L) == 0;
+            Thread.sleep(25);
+        }
+        assertTrue(cleared,
+                "the post-rollback deposit must re-clear the region's seen_mtime (memo un-poisoned)");
+        store.shutdown();
+    }
+
+    private long regionsRowCount(String dim, long rpos) throws Exception {
+        var ds = new org.sqlite.SQLiteDataSource();
+        ds.setUrl("jdbc:sqlite:" + storeDir().resolve("store.db"));
+        try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
+            st.execute("PRAGMA busy_timeout=3000");
+            int dimId;
+            try (ResultSet rs = st.executeQuery(
+                    "SELECT id FROM dims WHERE name='" + dim + "'")) {
+                if (!rs.next()) return 0;
+                dimId = rs.getInt(1);
+            }
+            try (ResultSet rs = st.executeQuery(
+                    "SELECT COUNT(*) FROM regions WHERE dim=" + dimId + " AND rpos=" + rpos)) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }
+    }
 }

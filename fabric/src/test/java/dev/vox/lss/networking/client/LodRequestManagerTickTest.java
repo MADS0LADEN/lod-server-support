@@ -163,11 +163,15 @@ class LodRequestManagerTickTest {
         var overworld = dim("overworld");
         long far = PositionUtil.packPosition(500, 500);
         long near = PositionUtil.packPosition(1, 1);
-        manager.onColumnReceived(far, 5000L, overworld);
+        // Stamp far directly: manager.onColumnReceived range-guards ingress, so a (500,500)
+        // stamp from center (0,0) would be silently dropped and the prune assertion vacuous.
+        manager.columnsForTest().onReceived(far, 5000L);
         manager.onColumnReceived(near, 5000L, overworld);
         manager.trackerForTest().replaceWith(new long[]{far}, 1);
 
-        manager.tickWithContext(3, 0, overworld, 64, 0, 0L, -1, () -> 0); // movement: prune at lod+32 = 34
+        // Movement past the hysteresis threshold (≥ PRUNE_HYSTERESIS_CHUNKS): prune at lod+32 = 34.
+        manager.tickWithContext(LodRequestManager.PRUNE_HYSTERESIS_CHUNKS + 1, 0, overworld,
+                64, 0, 0L, -1, () -> 0);
 
         assertEquals(-1L, manager.columnsForTest().timestampFor(far),
                 "out-of-range stamp pruned (re-requested as unknown when back in range)");
@@ -175,6 +179,33 @@ class LodRequestManagerTickTest {
                 "out-of-range in-flight tracking pruned with it — no slot leak");
         assertEquals(5000L, manager.columnsForTest().timestampFor(near), "in-range state survives");
         assertEquals(1, manager.getReceivedColumnCount());
+    }
+
+    @Test
+    void movementPruneDefersBelowTheHysteresisThreshold() {
+        // 2026-08-05 review P2: the prunes are full-state iterations and memory-bounding
+        // only — a sub-threshold crossing must NOT pay them (a dropped frame per crossing
+        // in flight), while the state stays intact and a later threshold-crossing prune
+        // catches up. The scan recenter itself is not deferred (pinned elsewhere).
+        var overworld = dim("overworld");
+        long far = PositionUtil.packPosition(500, 500);
+        // Stamp far directly (bypassing the ingress range guard) so the survive/prune
+        // assertions below observe the real prune, not a never-stamped position. The
+        // tracker is deliberately not asserted here: the scan firing on these ticks
+        // replaces it wholesale, which would mask (or fake) the prune either way.
+        manager.columnsForTest().onReceived(far, 5000L);
+
+        manager.tickWithContext(3, 0, overworld, 64, 0, 0L, -1, () -> 0); // below threshold
+
+        assertEquals(5000L, manager.columnsForTest().timestampFor(far),
+                "sub-threshold crossing defers the prune — the stamp survives");
+
+        // Accumulated travel crosses the threshold: the deferred prune fires and catches up.
+        manager.tickWithContext(LodRequestManager.PRUNE_HYSTERESIS_CHUNKS, 0, overworld,
+                64, 0, 0L, -1, () -> 0);
+
+        assertEquals(-1L, manager.columnsForTest().timestampFor(far),
+                "accumulated ≥ threshold travel prunes what the deferral kept");
     }
 
     @Test
@@ -355,9 +386,11 @@ class LodRequestManagerTickTest {
     void movementPruneStillRunsOnABackpressuredTick() {
         var overworld = dim("overworld");
         long far = PositionUtil.packPosition(500, 500);
-        manager.onColumnReceived(far, 5000L, overworld);
+        // Direct stamp: the ingress range guard would drop a (500,500) receive from (0,0),
+        // leaving the pruned-to--1 assertion vacuously true.
+        manager.columnsForTest().onReceived(far, 5000L);
 
-        manager.tickWithContext(3, 0, overworld, 64,
+        manager.tickWithContext(LodRequestManager.PRUNE_HYSTERESIS_CHUNKS + 1, 0, overworld, 64,
                 ClientColumnProcessor.MAX_QUEUED_COLUMNS * 3 / 4, 0L, -1, () -> 0);
 
         assertEquals(-1L, manager.columnsForTest().timestampFor(far),

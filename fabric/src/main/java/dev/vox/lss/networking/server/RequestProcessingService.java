@@ -151,6 +151,8 @@ public class RequestProcessingService {
                 config.effectiveTimestampCacheMB(), config.missMemoTtlSeconds,
                 config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
                         + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS);
+        // Right after the constructor's cache load — see the field's javadoc.
+        this.timestampCacheBootedEmpty = this.offThreadProcessor.isTimestampCacheEmpty();
 
         // Compressed-column shipping (protocol 19, plan §0.11): the server-side native
         // probe latches ONCE here. Probe failure (musl servers — zstd-jni publishes no
@@ -307,6 +309,10 @@ public class RequestProcessingService {
 
     public PlayerRequestState registerPlayer(ServerPlayer player, int capabilities) {
         var config = LSSServerConfig.CONFIG;
+        // One-way latch for the save hook's skip gate (review P3): until the first LSS
+        // client handshakes, no session state (timestamp cache, client-held columns)
+        // exists for the dirty-content hash to protect.
+        this.everRegisteredPlayer = true;
         var state = this.players.computeIfAbsent(player.getUUID(), uuid -> {
             var s = new PlayerRequestState(player, LSSConstants.SYNC_ON_LOAD_SLOT_CAP,
                     config.generationConcurrencyLimitPerPlayer);
@@ -781,10 +787,14 @@ public class RequestProcessingService {
      * Both sources list positions that may already be routed; a probe for an already-routed
      * position is simply unused by the router, and the cost is bounded by
      * {@link #MAX_PROBES_PER_TICK_PER_PLAYER}, which the closest-first order spends on the
-     * head of the want-set. Positions whose payload already sits in the send pipeline are
-     * filtered below, so a retained backlog does not re-serialize its served head every
-     * tick; the residual waste is one re-probe of positions served-and-sent but not yet
-     * dropped by the next 1 Hz declaration.
+     * head of the want-set. Positions whose payload sits in the send pipeline, left it
+     * within the probe-suppress TTL (send success), or were answered up_to_date are
+     * filtered below (review P1 — the enqueued-only filter used to re-serialize each
+     * served or answered head EVERY tick until the next declaration dropped it, ~1-2 ms/tick
+     * bursts for up to a second per warm-rejoin/teleport episode; the D4 "one re-probe"
+     * claim this javadoc used to make was wrong). The residual is one probe per position
+     * in the sub-tick window between a processing-thread up_to_date resolution and the
+     * next main-thread action drain.
      *
      * @param skipPositions packed positions already extracted by the generation service (may be null)
      */
@@ -805,13 +815,14 @@ public class RequestProcessingService {
             long packed = PositionUtil.packPosition(req.cx(), req.cz());
             if (probes.containsKey(packed)) continue;
             if (skipPositions != null && skipPositions.contains(packed)) continue;
-            // Served-head filter: a payload already in the send pipeline means the router
-            // resolves this position as a duplicate — the probe is guaranteed-unused, and
-            // under backlog retention the published want-set re-lists it every tick until
-            // the next 1 Hz declaration, re-serializing the same head for a whole second.
-            // Only enqueuedColumns is checked: it is the one served-set structure safe off
-            // the processing thread (pendingByPosition/diskReadDone are single-threaded).
-            if (state.hasEnqueuedColumn(packed)) continue;
+            // Served-head filter: a payload in the send pipeline, recently sent, or just
+            // answered up_to_date means the router resolves this position without the
+            // probe — the serialization is guaranteed-unused, and under backlog retention
+            // the published want-set re-lists it every tick until the next declaration
+            // (review P1: the enqueued-only filter left served/answered heads
+            // re-serializing for up to a second). Both structures are any-thread safe
+            // (pendingByPosition/diskReadDone are single-threaded and stay unconsulted).
+            if (state.skipProbe(packed)) continue;
 
             LevelChunk chunk = level.getChunkSource().getChunkNow(req.cx(), req.cz());
             if (chunk != null) {
@@ -974,6 +985,38 @@ public class RequestProcessingService {
     /** The live LOD store (null while lodStore=off OR after the codec-probe degrade). */
     public dev.vox.lss.common.store.LodStoreService getLodStore() {
         return this.lodStore;
+    }
+
+    /** One-way latch: set by the first {@link #registerPlayer} this session (review P3 —
+     *  the save hook skips the dirty-content hash while it is false AND the store is off
+     *  AND the persisted timestamp cache booted empty: with no session ever started ON
+     *  ANY BOOT, nothing the hash maintains is observable). */
+    private volatile boolean everRegisteredPlayer;
+
+    public boolean hasEverRegisteredPlayer() {
+        return this.everRegisteredPlayer;
+    }
+
+    /** The P3 gate's third conjunct (three-lens review, correctness MAJOR): the timestamp
+     *  cache PERSISTS across restarts ({@code <world>/data/lss-timestamps.bin}), so a
+     *  server that served LSS clients last session boots with stamps a pre-first-join
+     *  edit must invalidate — skipping the hash there would answer a warm rejoin
+     *  up_to_date for pre-edit terrain. Captured once at construction, right after the
+     *  cache load; only serves populate the cache afterwards, and serves imply the
+     *  registration latch flipped first. */
+    private final boolean timestampCacheBootedEmpty;
+
+    public boolean timestampCacheBootedEmpty() {
+        return this.timestampCacheBootedEmpty;
+    }
+
+    /** TEST-ONLY (Tier 2): arm the save-hook latch without a handshake. The fan-out
+     *  gametest registers its mock players on its own service instance but asserts the
+     *  save hook through the LIVE service's filter/tracker — without arming, the P3 skip
+     *  gate would red that assertion (plan review finding 1). One-way, so arming cannot
+     *  invalidate other tests: the skip is an optimization no Tier 2 test pins. */
+    public void armSaveHookForTest() {
+        this.everRegisteredPlayer = true;
     }
 
     public DirtyColumnTracker getDirtyTracker() {

@@ -29,8 +29,9 @@ class ClientColumnProcessor {
     static final int MAX_QUEUED_COLUMNS = 8000;
     /** Byte budget for queued (still-compressed-in-memory) section payloads: the count cap
      *  alone admits up to 8000 x 2 MiB = 16 GiB from a hostile or misbehaving server before
-     *  any drop fires. 256 MiB is ~13 s of backlog at the default 20 MB/s bandwidth cap —
-     *  unreachable in normal play, fatal-allocation-proof under attack. */
+     *  any drop fires. 256 MiB is ~17 s of backlog at the default 15 MiB/s per-player
+     *  bandwidth cap (v0.9.1) — unreachable in normal play, fatal-allocation-proof under
+     *  attack. */
     static final long MAX_QUEUED_BYTES = 256L * 1024 * 1024;
     private static final long DROP_WARN_INTERVAL_MS = 5000;
 

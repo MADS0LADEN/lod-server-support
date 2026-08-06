@@ -877,6 +877,9 @@ public class GenerationLifecycleGameTests {
         ServerLevel level = helper.getLevel();
         var liveService = LSSServerNetworking.getRequestService();
         helper.assertTrue(liveService != null, "live service required (the save hook feeds it)");
+        // Arm the P3 never-registered skip gate: the quiet-save assertion below must
+        // observe the live hook actually hashing (a skipped hook would fake the quiet).
+        liveService.armSaveHookForTest();
         var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
         int cx = origin.x() + SEED_SUPPRESS_CHUNK_OFFSET;
         int cz = origin.z() + (int) Math.floorMod(System.nanoTime(), 64L);

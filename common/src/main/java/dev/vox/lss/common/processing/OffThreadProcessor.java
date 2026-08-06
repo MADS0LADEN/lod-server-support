@@ -301,6 +301,15 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
             // state — actions produced for the old session must not reach the new one.
             if (state == null || state != action.producerState()
                     || !state.hasCompletedHandshake()) continue;
+            // Probe-suppress choke point (review P1): an up_to_date answer means every
+            // re-declaration of the position resolves at the router's earlier rungs, so a
+            // probe for it is guaranteed-unused — up_to_date-resolved resync positions
+            // (never in enqueuedColumns) used to re-serialize every tick until the next
+            // declaration. ONE site covers all five producer paths (router timestamp/
+            // probe/duplicate rungs + the disk and generation all-air terminals).
+            if (action instanceof SendAction.ColumnUpToDate) {
+                state.stampProbeSuppress(action.packedPosition());
+            }
             this.sendActionBatcher.add(action.playerUuid(), action.responseType(), action.packedPosition());
         }
 
@@ -315,6 +324,20 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                 LSSLogger.error("Failed to send batch response to " + state.getPlayerName(), e);
             }
         });
+    }
+
+    /** TEST-ONLY (same package): enqueue a send action directly — the drain's
+     *  identity/probe-suppress choke-point pins need actions of both types without
+     *  driving a full disk/generation pipeline. */
+    void enqueueSendActionForTest(SendAction action) {
+        this.sendActions.add(action);
+    }
+
+    /** Whether the persisted timestamp cache loaded EMPTY at construction (the review-P3
+     *  skip gate's third conjunct — read once by the service constructor, before the
+     *  processing thread starts, so no confinement issue). */
+    public boolean isTimestampCacheEmpty() {
+        return this.timestampCache.size() == 0;
     }
 
     /** Drain generation ticket requests (called by main thread). */

@@ -724,6 +724,63 @@ class SpiralScannerTest {
         }
     }
 
+    /**
+     * 2026-08-05 review F1: vanilla-excluded (in-view) positions confirm their ring without
+     * ever being declared, and nothing used to reset the prefix when the exclusion radius
+     * SHRANK — a stationary player dropping render distance left the newly LOD-needing
+     * band below the confirmed prefix, structurally unreachable until movement. The walk
+     * now resets confirmedRing once per shrink; a grow still resets nothing.
+     */
+    @Test
+    void exclusionRadiusShrinkRescansTheNewlyExposedBand() {
+        var columns = new ColumnStateMap();
+        var s = scanner(8);
+        var queue = new Sink();
+
+        // Satisfy every position OUTSIDE the view-4 exclusion; the in-view ones stay
+        // unknown (vanilla renders them, LSS never declared them).
+        int[] c = new int[2];
+        for (int r = 1; r <= 8; r++) {
+            for (int i = 0; i < 8 * r; i++) {
+                SpiralScanner.ringIndexToCoord(r, i, CX, CZ, c);
+                if (SpiralScanner.isVanillaRendered(c[0], c[1], CX, CZ, 4)) continue;
+                long packed = PositionUtil.packPosition(c[0], c[1]);
+                columns.onReceived(packed, 1000L);
+                columns.onUpToDate(packed);
+            }
+        }
+        assertEquals(0, fireScan(s, 4, columns, queue));
+        assertEquals(9, s.getConfirmedRing(), "precondition: full disc confirmed at view 4");
+
+        // A GROW declares nothing and keeps the prefix (newly excluded positions skip free).
+        assertEquals(0, fireScan(s, 5, columns, queue), "a grown exclusion declares nothing");
+        assertEquals(9, s.getConfirmedRing(), "...and does not reset the prefix");
+
+        // The SHRINK: positions inside the old exclusion but outside the new one are newly
+        // LOD-needing and sit below the confirmed prefix — the reset makes them reachable.
+        int declared = fireScan(s, 2, columns, queue);
+        assertTrue(declared > 0, "shrunk exclusion re-walks and declares the newly exposed band");
+        for (int i = 0; i < declared; i++) {
+            int cx = PositionUtil.unpackX(queue.pos[i]);
+            int cz = PositionUtil.unpackZ(queue.pos[i]);
+            assertFalse(SpiralScanner.isVanillaRendered(cx, cz, CX, CZ, 2),
+                    "declared positions are outside the NEW exclusion");
+            assertTrue(SpiralScanner.isVanillaRendered(cx, cz, CX, CZ, 5),
+                    "...and were hidden inside the OLD one");
+            assertEquals(-1L, queue.ts[i], "never-served band re-asks as unknown");
+        }
+
+        // Serve the band; the disc re-converges and a repeat scan at the same radius is a
+        // clean no-op (the reset fires once per change, not per scan).
+        for (int i = 0; i < declared; i++) {
+            columns.onReceived(queue.pos[i], 2000L);
+            columns.onUpToDate(queue.pos[i]);
+        }
+        assertEquals(0, fireScan(s, 2, columns, queue), "band served: converged again");
+        assertEquals(9, s.getConfirmedRing());
+        assertEquals(0, fireScan(s, 2, columns, queue), "steady radius: no repeated reset churn");
+    }
+
     // ---- dirty under the vanilla exclusion (CL-018) ----
 
     @Test

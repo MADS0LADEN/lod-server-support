@@ -106,6 +106,9 @@ public class LSSServerNetworking {
         if (!(chunk instanceof LevelChunk levelChunk)) return;
         var service = requestService;
         if (service == null || !LSSServerConfig.CONFIG.enabled) return;
+        // Skip gate (2026-08-05 review P3 + the three-lens follow-up): see skipDirtyHash.
+        if (skipDirtyHash(service.hasEverRegisteredPlayer(), service.getLodStore() != null,
+                service.timestampCacheBootedEmpty())) return;
         String dimension = DIMENSION_STRINGS.computeIfAbsent(level.dimension(),
                 key -> key.identifier().toString());
         var obs = service.getDirtyContentFilter().observeSave(level, levelChunk, dimension);
@@ -126,6 +129,34 @@ public class LSSServerNetworking {
             applySaveObservationToStore(service.getLodStore(), dimension,
                     chunk.getPos().x(), chunk.getPos().z(), obs);
         }
+    }
+
+    /**
+     * The review-P3 skip-gate predicate, pure so the truth table is pinnable (three-lens
+     * review, test-adequacy MAJOR). Skip the dirty-content serialize+hash only while ALL
+     * three hold:
+     * <ul>
+     *   <li>no LSS client has EVER registered this session (one-way latch — session
+     *       state like held columns outlives its player, so the hash must resume forever
+     *       after the first join);</li>
+     *   <li>the store is inert (with a store, a skipped online edit would leave a
+     *       pre-edit store row serving hits all session — Fabric sweeps at boot only);</li>
+     *   <li>the persisted timestamp cache BOOTED EMPTY (correctness MAJOR:
+     *       {@code <world>/data/lss-timestamps.bin} survives restarts, so a server that
+     *       served clients last session boots with stamps a pre-first-join edit must
+     *       invalidate — else a warm rejoin draws up_to_date for pre-edit terrain).</li>
+     * </ul>
+     * Under the full conjunction nothing the hash maintains is observable: no cache
+     * stamps on any boot, no client-held columns, no store rows, and dirty marks with no
+     * audience. A server running LSS with no LSS-playing users otherwise paid a
+     * serialize+hash per chunk save forever (~30-60 µs each; 10-40 ms per save-all).
+     * Accepted cost once a client DOES join: skip-era positions have no stored hash, so
+     * their first post-join save reads absent-hash → changed → one spurious dirty
+     * mark+broadcast each (bounded by loaded chunks, drained per interval).
+     */
+    static boolean skipDirtyHash(boolean everRegistered, boolean storePresent,
+                                 boolean timestampCacheBootedEmpty) {
+        return !everRegistered && !storePresent && timestampCacheBootedEmpty;
     }
 
     /** The save-hook -> store bridge, extracted for direct testing: a content-changing

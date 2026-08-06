@@ -10,6 +10,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The save-hook -> store bridge ({@code LSSServerNetworking.applySaveObservationToStore}),
@@ -74,5 +76,28 @@ class SaveHookStoreBridgeTest {
         assertEquals(0, store.calls.size(), "a suppressed save must not touch the store");
         LSSServerNetworking.applySaveObservationToStore(null, OW, 3, 3,
                 new DirtyContentFilter.SaveObservation(true, true, new byte[]{1}));
+    }
+
+    /**
+     * The review-P3 skip gate's full truth table (three-lens review, test-adequacy
+     * MAJOR): the skip fires ONLY under the triple conjunction. Each conjunct carries a
+     * correctness failure if dropped — a registered client's session state, a store row
+     * an online edit must kill, and (the correctness MAJOR) a persisted timestamp-cache
+     * stamp from a PREVIOUS session that a pre-first-join edit must invalidate or a
+     * warm rejoin draws up_to_date for pre-edit terrain.
+     */
+    @Test
+    void skipDirtyHashRequiresAllThreeConjuncts() {
+        assertTrue(LSSServerNetworking.skipDirtyHash(false, false, true),
+                "never-registered + store-off + cache-booted-empty is the ONE skip cell");
+        assertFalse(LSSServerNetworking.skipDirtyHash(true, false, true),
+                "any registration this session keeps the hash forever (one-way latch)");
+        assertFalse(LSSServerNetworking.skipDirtyHash(false, true, true),
+                "a live store keeps the hash — a skipped edit leaves a stale store row");
+        assertFalse(LSSServerNetworking.skipDirtyHash(false, false, false),
+                "persisted stamps from a previous session keep the hash — the"
+                        + " stale-up_to_date-on-warm-rejoin MAJOR");
+        assertFalse(LSSServerNetworking.skipDirtyHash(true, true, false),
+                "all three observers present certainly hashes");
     }
 }

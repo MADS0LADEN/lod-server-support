@@ -177,6 +177,10 @@ public final class MemoryLodStore implements LodStoreService {
         var dep = new Deposit(dimension, packed, frame, columnTimestamp,
                 System.nanoTime(), true, usize);
         while (!this.queue.offer(dep)) {
+            // In-loop shutdown re-check (SQLite-twin parity, 2026-08-05 review H4): after
+            // shutdown the batcher is dead and the queue cleared, so a racing deposit
+            // would otherwise park entries in the dead queue permanently.
+            if (this.shutdown.get()) return false;
             if (this.queue.poll() != null) {
                 this.diag.recordDepositDrop();
                 // Shed still returns TRUE — see the SQLite twin's depositFrame comment.
@@ -195,6 +199,9 @@ public final class MemoryLodStore implements LodStoreService {
         var dep = new Deposit(dimension, packed, normalized, columnTimestamp, System.nanoTime());
         boolean shed = false;
         while (!this.queue.offer(dep)) {
+            // In-loop shutdown re-check (SQLite-twin parity, 2026-08-05 review H4) — see
+            // depositFrame.
+            if (this.shutdown.get()) return false;
             // Shed the OLDEST (head) — the store is derived data; a shed deposit
             // re-deposits on the next serve of that column.
             if (this.queue.poll() != null) {

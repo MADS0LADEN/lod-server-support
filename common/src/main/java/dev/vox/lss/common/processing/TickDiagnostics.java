@@ -10,16 +10,19 @@ import dev.vox.lss.common.LSSConstants;
  * the current tick values and reset accumulators.
  */
 public class TickDiagnostics {
-    // Last-tick snapshot (read by diagnostics/logging)
-    private int lastTickSectionsSent;
-    private int lastTickDiskQueued;
-    private int lastTickDiskDrained;
-    private int lastTickGenDrained;
-    private int lastTickInMemorySerialized;
-    private int lastTickBytesFlushed;
-    private int lastTickQueuePeak;
-    private int lastTickSkippedDuplicate;
-    private int lastTickUpToDate;
+    // Last-tick snapshot — volatile like the cumulative totals below: format() renders
+    // these on the invoking player's Folia region thread via /lsslod stats|diag, the
+    // same command call that reads the totals (three-lens review — H3 originally covered
+    // only the totals, leaving half the command's fields non-visible).
+    private volatile int lastTickSectionsSent;
+    private volatile int lastTickDiskQueued;
+    private volatile int lastTickDiskDrained;
+    private volatile int lastTickGenDrained;
+    private volatile int lastTickInMemorySerialized;
+    private volatile int lastTickBytesFlushed;
+    private volatile int lastTickQueuePeak;
+    private volatile int lastTickSkippedDuplicate;
+    private volatile int lastTickUpToDate;
 
     // Current-tick accumulators (written during tick processing)
     private int curTickSectionsSent;
@@ -27,18 +30,24 @@ public class TickDiagnostics {
     private int curTickQueuePeak;
 
     // Cumulative send counters — service-scoped, so they survive the per-player state
-    // teardown on kick and dimension change (single-writer: main thread)
-    private long totalSectionsSent;
-    private long totalBytesSent;
-    private long totalWireBytesSent;
+    // teardown on kick and dimension change. Single-writer (main/pump thread), volatile
+    // because /lsslod stats|diag reads them from the invoking player's REGION thread on
+    // Folia (2026-08-05 review H3 — the PaperChunkGenerationService house rule: counters
+    // a command renders must be JMM-visible off the writer thread).
+    private volatile long totalSectionsSent;
+    private volatile long totalBytesSent;
+    private volatile long totalWireBytesSent;
 
-    // Sliding window bandwidth rate (~5s at 20 TPS)
+    // Sliding window bandwidth rate (~5s at 20 TPS). The scalars are volatile for the
+    // same Folia command-thread reads as the totals above; the ring ARRAYS stay plain, so
+    // a cross-thread getWindowBytesPerSecond() is best-effort — a mid-reset read can
+    // misreport one command's rate (diag-only, bounded, self-corrects next invocation).
     private static final int WINDOW_TICKS = 100;
     private final int[] byteRing = new int[WINDOW_TICKS];
     private final long[] nanosRing = new long[WINDOW_TICKS];
-    private long windowByteSum;
-    private int ringPos;
-    private int ringCount;
+    private volatile long windowByteSum;
+    private volatile int ringPos;
+    private volatile int ringCount;
 
     /**
      * Snapshot current tick values into last-tick fields, pull off-thread counters,
@@ -76,8 +85,10 @@ public class TickDiagnostics {
         // N samples span N-1 intervals: the oldest bucket's bytes flushed during the tick
         // ENDING at its own stamp — before the measured span began — so it is excluded
         // from the numerator (including it inflated the rate ~N/(N-1): +100% at
-        // ringCount 2, ~+1% at the full window).
-        long spanBytes = windowByteSum - byteRing[oldestIdx];
+        // ringCount 2, ~+1% at the full window). Cross-thread reads are best-effort (see
+        // the field comments): clamp at 0 so a mid-reset torn read can never render a
+        // negative rate in /lsslod stats.
+        long spanBytes = Math.max(0L, windowByteSum - byteRing[oldestIdx]);
         return spanBytes * LSSConstants.NANOS_PER_SECOND / elapsedNanos;
     }
 

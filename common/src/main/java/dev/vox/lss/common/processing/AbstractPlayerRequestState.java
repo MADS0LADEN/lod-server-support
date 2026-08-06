@@ -253,7 +253,8 @@ public abstract class AbstractPlayerRequestState<T> {
     /**
      * Folia hold-release republish: put a held batch back ONLY if no newer batch arrived
      * during the hold — a newer batch supersedes the held one (never resurrect a
-     * superseded want). Returns true if republished.
+     * superseded want, modulo the nanoseconds-wide retract-failure window documented at
+     * the second guard below). Returns true if republished.
      *
      * <p>Two guards, both needed. The mailbox CAS catches a newer batch still SITTING in
      * the mailbox; the offer-generation guard catches one that passed THROUGH it (offered
@@ -272,8 +273,15 @@ public abstract class AbstractPlayerRequestState<T> {
         // generation check and the CAS leaves the mailbox empty, so the CAS succeeded on
         // stale data. Re-check and retract. A failed retract means the republished batch
         // already left the mailbox again — overwritten by a newer offer (whose getAndSet
-        // counted it superseded) or taken by routing (its entries then get ordinary
-        // dispositions, and the pass-through's backlog replace supersedes them).
+        // counted it superseded; benign), or TAKEN BY ROUTING before this retract could
+        // land. The taken case is the one narrow resurrection window this ladder cannot
+        // close (2026-08-05 review H1 corrected this comment — it used to claim the
+        // pass-through's backlog replace supersedes the stale entries, but that replace
+        // happened BEFORE the take: the stale batch's replace lands on top of it):
+        // accounting stays balanced, its entries get ordinary dispositions, and the
+        // client's next declaration (≤1 s fallback) re-supersedes the stale want-set —
+        // one interval of stale routing, nanoseconds-wide to enter, judged not worth a
+        // third guard's complexity.
         if (this.offerGeneration.get() != heldAtGeneration
                 && this.pendingBatch.compareAndSet(held, null)) {
             this.pendingSuperseded.addAndGet(held.size());
@@ -619,6 +627,9 @@ public abstract class AbstractPlayerRequestState<T> {
                 // would leave a nanosecond window (enqueued gone, stamp not yet visible)
                 // where a crossing re-ask slips past both rungs to a redundant re-serve.
                 stampDeparted(queued.packedPos());
+                // Sibling, not nested: stampDeparted no-ops when the grace is disabled,
+                // and probe suppression must not vanish with it (review P1).
+                stampProbeSuppress(queued.packedPos());
                 decrementEnqueued(queued.packedPos());
                 this.bandwidth.recordSend(queued.estimatedBytes());
                 globalLimiter.recordSend(queued.estimatedBytes());
@@ -643,6 +654,86 @@ public abstract class AbstractPlayerRequestState<T> {
         this.sendQueueSizeSnapshot = this.sendQueue.size();
         sweepDepartedColumns();
         return dropped;
+    }
+
+    // ---- Probe suppression (2026-08-05 review P1) ----
+
+    /**
+     * Positions whose payload just left the send queue (send success) or whose last
+     * resolution was {@code up_to_date}. The main-thread probe skips them for
+     * {@link #PROBE_SUPPRESS_TTL_NANOS} — a suppressed position that is re-declared
+     * resolves at the router's earlier rungs (duplicate grace for in-grace ts&le;0,
+     * timestamp cache for ts&gt;0), so its probe result was guaranteed-unused; without
+     * the filter a served, still-loaded column was fully re-serialized EVERY tick until
+     * the next declaration dropped it (up to 1 s), and up_to_date-resolved resync
+     * positions got no filtering at all. Deliberately SEPARATE from
+     * {@link #departedColumns}: the grace map's 500 ms TTL and
+     * stamp-on-send-success-only discipline are pinned for the router's duplicate-serve
+     * semantics, and up_to_date stamps there would corrupt them. Any thread; swept
+     * beside the departure sweep; cleared by the dirty-clear events and the honest
+     * re-resolution ({@link #clearDiskReadDone}) so an edited column probes again
+     * immediately. Accepted residual (plan review + implementation review): a ts&le;0
+     * re-ask landing between the departure grace and this TTL — a genuinely lost
+     * delivery — takes a disk read where it used to be probe-served. Two sharper flavors
+     * of that shift, both healed by the normal dirty-broadcast/reconnect ladder: a
+     * loaded-NEVER-SAVED chunk's disk read is a not-found, which with generation
+     * DISABLED answers the session-permanent NOT_GENERATED for a column that is live in
+     * memory (a new entry path into the documented MAX_PROBES_PER_TICK_GLOBAL accepted
+     * corner — same heal: first save's dirty broadcast, or reconnect; on Paper's default
+     * updateEvents, reconnect); and a loaded chunk with unsaved edits serves its
+     * pre-edit disk bytes (healed by the edit's own save → dirty broadcast, the system's
+     * normal staleness bound). Requires losing a delivery AND re-asking inside a ~1 s
+     * window — judged acceptable against re-serializing every served head every tick.
+     */
+    private final ConcurrentHashMap<Long, Long> probeSuppress = new ConcurrentHashMap<>();
+    static final long PROBE_SUPPRESS_TTL_NANOS = 1_500L * 1_000_000L;
+
+    /** Stamp sites: send success in {@code flushSendQueue} (a SIBLING of
+     *  {@code stampDeparted}, never nested in it — suppression must survive
+     *  grace-disabled rigs) and the {@code drainSendActions} up_to_date choke point. */
+    public void stampProbeSuppress(long packed) {
+        this.probeSuppress.put(packed, this.departureClock.getAsLong());
+    }
+
+    /** Any thread; expired entries removed on read (mirrors {@link #isWithinDepartureGrace}). */
+    public boolean isProbeSuppressed(long packed) {
+        var stamp = this.probeSuppress.get(packed);
+        if (stamp == null) return false;
+        if (this.departureClock.getAsLong() - stamp <= PROBE_SUPPRESS_TTL_NANOS) return true;
+        this.probeSuppress.remove(packed, stamp);
+        return false;
+    }
+
+    /**
+     * The ONE probe-filter predicate for all three platform probe loops (Fabric main
+     * thread, Paper pump, Folia snapshot — three-lens review T10: per-site copies could
+     * be reverted individually with every tier green): a position whose payload is in
+     * the send pipeline, recently sent, or just answered up_to_date resolves at the
+     * router without the probe, so serializing it is guaranteed-unused work. Any thread.
+     */
+    public boolean skipProbe(long packed) {
+        return hasEnqueuedColumn(packed) || isProbeSuppressed(packed);
+    }
+
+    int probeSuppressCountForTest() {
+        return this.probeSuppress.size();
+    }
+
+    /**
+     * Direct (non-mailboxed) probe-suppress clear for the dirty broadcasters (three-lens
+     * review, concurrency MINOR). The done-bit clear rides the processing-thread mailbox,
+     * but the suppress stamp is written at send success on the MAIN/pump thread — so a
+     * stale payload flushing after the mailboxed clear applied would re-suppress the
+     * edited column for the full TTL, and unlike {@code departedColumns} (whose check is
+     * nested under the done-bit) this map is consulted unconditionally by the probe, so a
+     * cleared done-bit does not disarm it. The broadcast tick runs strictly AFTER the
+     * same tick's send-queue flush on both platforms, so a direct clear here can never be
+     * outrun by a stamp for the payload that triggered the edit's re-serve. Any thread.
+     */
+    public void clearProbeSuppress(long[] positions) {
+        for (long pos : positions) {
+            this.probeSuppress.remove(pos);
+        }
     }
 
     // ---- Duplicate-serve grace (see the departedColumns field comment) ----
@@ -670,12 +761,23 @@ public abstract class AbstractPlayerRequestState<T> {
      *  {@code flushSendQueue}). Most stamps are never re-asked, so read-time removal alone
      *  would leak one entry per column ever sent. */
     private void sweepDepartedColumns() {
-        if (this.departedColumns.isEmpty()) return;
+        if (this.departedColumns.isEmpty() && this.probeSuppress.isEmpty()) return;
         long now = this.departureClock.getAsLong();
+        // Grace-disabled hardening (three-lens review): with departureGraceNanos = 0 the
+        // gate below would pass every flush and the probeSuppress removeIf would run
+        // full-map every tick — fall back to the suppress TTL as the sweep interval
+        // (grace entries don't exist in that configuration). The grace's own 500 ms
+        // cadence is pinned and unchanged when the grace is on.
+        long gateNanos = this.departureGraceNanos > 0
+                ? this.departureGraceNanos : PROBE_SUPPRESS_TTL_NANOS;
         if (this.departedSweepMarkNanos != 0
-                && now - this.departedSweepMarkNanos <= this.departureGraceNanos) return;
+                && now - this.departedSweepMarkNanos <= gateNanos) return;
         this.departedSweepMarkNanos = now;
         this.departedColumns.values().removeIf(stamp -> now - stamp > this.departureGraceNanos);
+        // Piggybacked: unconsulted probe-suppress stamps must not outlive their window
+        // (most are never re-probed, so read-time removal alone would leak one entry per
+        // column ever sent — the departedColumns argument, same shape).
+        this.probeSuppress.values().removeIf(stamp -> now - stamp > PROBE_SUPPRESS_TTL_NANOS);
     }
 
     /** Package-private test probes: the wired grace (pins the production default) and the
@@ -744,12 +846,16 @@ public abstract class AbstractPlayerRequestState<T> {
     public void clearDiskReadDone(long[] positions) {
         for (long pos : positions) {
             this.diskReadDone.remove(pos);
+            // An edited (or honestly re-resolved) column must probe again immediately —
+            // the suppress stamp's premise ("the router discards this probe") is gone.
+            this.probeSuppress.remove(pos);
         }
     }
 
     /** Clear one position from diskReadDone (processing thread, honest re-resolution of a ts&le;0 re-request). */
     public void clearDiskReadDone(long packed) {
         this.diskReadDone.remove(packed);
+        this.probeSuppress.remove(packed);
     }
 
     /**
