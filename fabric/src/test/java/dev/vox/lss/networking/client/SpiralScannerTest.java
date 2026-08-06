@@ -1636,6 +1636,72 @@ class SpiralScannerTest {
     }
 
     @Test
+    void theDefaultSeamReadsTheProductionConfigField() {
+        // Review finding 1: every other cap test overrides the seam, so a typo'd field
+        // read (or a dropped lambda) in the default would keep the whole suite green while
+        // the live knob went dead. Same save/restore pattern as the adaptive kill switch's
+        // production-binding pin in LodRequestManagerTickTest.
+        int old = LSSClientConfig.CONFIG.lodColumnsPerSecondLimit;
+        LSSClientConfig.CONFIG.lodColumnsPerSecondLimit = 300;
+        try {
+            var s = scanner(16); // default seam untouched
+            var queue = new Sink();
+            assertEquals(300, fireScan(s, 2, new ColumnStateMap(), queue),
+                    "a fresh scanner must bind the cap from the production config field");
+        } finally {
+            LSSClientConfig.CONFIG.lodColumnsPerSecondLimit = old;
+        }
+    }
+
+    @Test
+    void rateGatedDoesNotCountTicksWhereOutstandingWasTheRefusal() {
+        // Review finding 2: the cap gate sits LAST in the ladder so rateGated counts
+        // exactly the ticks where the cap was the BINDING refusal. A reorder ahead of the
+        // outstanding check would corrupt the diag discriminator ("nonzero = the knob is
+        // binding") by counting ticks the 5% threshold was already refusing — here, ticks
+        // 5-9 have unpaid spacing (t*1600 < 20*800) but an unanswered batch, and must not
+        // count.
+        var rig = new AdaptiveRig(scanner(16));
+        rig.s.columnRateCap = () -> 1600;
+        rig.primeAndArm();
+        rig.s.noteDeclared(800);
+        rig.outstanding = 800; // nothing answered: the completion threshold refuses first
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "an unanswered batch keeps the fallback cadence, cap or no cap");
+        assertEquals(0, rig.s.getRateGated(),
+                "unpaid spacing behind an outstanding refusal must not count as rate-gated");
+    }
+
+    @Test
+    void deepTaperUnderACapStillFloorsTheBudgetAtOne() {
+        // The max(1, ...) floor applies to the CAPPED base: cap + at-halt backlog must
+        // yield 1, never 0 (a skipped scan) — the capped twin of
+        // ingestBacklogAtOrPastTheHaltFloorsTheBudgetAtOne.
+        var s = scanner(16);
+        s.columnRateCap = () -> 300;
+        var queue = new Sink();
+        assertEquals(1, fireScan(s, 2, 0, 1000, 6144, 6144, 0, new ColumnStateMap(), queue),
+                "backlog at the halt threshold floors the capped budget at 1");
+    }
+
+    @Test
+    void v16SessionsGetTheBudgetClampButNeverTheFastPath() {
+        // Design §6: on a legacy session only the budget clamp applies. The cap must not
+        // create a fast path where the v16 exclusion forbids one, and the exclusion sits
+        // before the cap gate, so none of the refusals count as rate-gated.
+        var legacy = new SpiralScanner();
+        legacy.setConfig(new SessionConfigS2CPayload(
+                LSSConstants.V16_COMPAT_PROTOCOL_VERSION, true, 16, true));
+        legacy.columnRateCap = () -> 300;
+        var rig = new AdaptiveRig(legacy);
+        assertEquals(300, rig.primeAndArm(), "the budget clamp applies on a v16 session");
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "...and the cadence stays 1 Hz — the cap adds no fast path");
+        assertEquals(0, rig.s.getRateGated(), "the v16 exclusion refuses before the cap gate");
+    }
+
+    @Test
     void rateGatedResetsWithTheSessionState() {
         var rig = new AdaptiveRig(scanner(16));
         rig.s.columnRateCap = () -> 1600;

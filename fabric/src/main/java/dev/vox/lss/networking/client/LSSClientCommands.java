@@ -128,8 +128,9 @@ public class LSSClientCommands {
 
         // Budget line (ingest_backlog: the consumer-reported pending sections driving the
         // #71 taper/halt; -1 = no consumer reports. rate_cap: the manual column-rate cap,
-        // 0=off; rate_gated: fast fires the cap's spacing gate held back — nonzero means
-        // the knob is binding, the discriminator for weak-client reports)
+        // 0=off; rate_gated: TICKS the cap's spacing gate held a would-be fast fire back
+        // (one delayed fire can count several) — nonzero means the knob is binding, the
+        // discriminator for weak-client reports)
         int budget = manager.getLastBudget();
         int lastQueued = manager.getLastQueued();
         source.sendFeedback(Component.literal(String.format(

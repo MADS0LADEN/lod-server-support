@@ -1,6 +1,21 @@
 # Client column-rate cap — manual override for weak clients (design)
 
-Status: PLANNED (not implemented). 2026-08-05.
+Status: IMPLEMENTED 2026-08-05 (feat/client-column-rate-cap), one-subagent review round
+(no MAJORs; the five MINORs — seam-binding pin, rateGated-placement pin, floor-at-1 and
+v16 cap twins, doc/comment drift — fixed in the follow-up commit). Deviations from this
+doc as written:
+
+- **No `/lss trace` field** (§5 promised one): the trace is event-based and `rateGated`
+  increments on non-fire ticks, so a trace field would need delta plumbing the design
+  never specified; the scan event already carries `budget` (shows the clamp binding) and
+  `fast`. The diag Budget line (`rate_cap=`/`rate_gated=`) and the benchmark exporter's
+  `scan.rate_gated` carry the observability instead.
+- **§7's send-failure/disconnect disarm-under-cap cases are not separately pinned**: both
+  funnel through the same `noteDeclared(0)`/`reset()` paths the converged-disarm test
+  covers.
+- The production seam binding is pinned in `SpiralScannerTest`
+  (`theDefaultSeamReadsTheProductionConfigField`), not `LodRequestManagerTickTest` as
+  §7's preamble assumed — the cap seam is scanner-level; the manager never touches it.
 
 ## 1. Why
 
