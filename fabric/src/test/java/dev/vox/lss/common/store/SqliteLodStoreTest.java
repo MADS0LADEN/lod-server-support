@@ -296,6 +296,38 @@ class SqliteLodStoreTest {
         shifted.shutdown();
     }
 
+    /** The v3->v4 bump (R4: chash/fhash FNV-1a -> CRC32C): a store stamped with the
+     *  PREVIOUS schema version must drop-and-rebuild exactly once — old rows' hashes
+     *  would fail every validation under the new function. metaMatches is an equality
+     *  compare, so this out-of-band downgrade is byte-for-byte the "old store under a
+     *  new jar" upgrade case (and pins rollback symmetry: any mismatch rebuilds). */
+    @Test
+    void schemaVersionDriftDropsAndRebuildsTheStore() throws Exception {
+        long p = PositionUtil.packPosition(0, 2);
+        writeRegion(OW, 0, 0, Map.of(p, (int) (nowSec() - 1000)));
+        SqliteLodStore store = open(defaultEnv());
+        store.deposit(OW, p, bytes(7, 400), 100);
+        assertNotNull(awaitHit(store, OW, p));
+        store.shutdown();
+
+        var ds = new org.sqlite.SQLiteDataSource();
+        ds.setUrl("jdbc:sqlite:" + storeDir().resolve("store.db"));
+        try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
+            st.execute("PRAGMA busy_timeout=3000");
+            st.execute("UPDATE meta SET v='" + (SqliteLodStore.SCHEMA_VERSION - 1)
+                    + "' WHERE k='schema_version'");
+        }
+
+        SqliteLodStore reopened = open(defaultEnv());
+        assertNull(reopened.get(OW, p),
+                "rows hashed under the old schema must not survive the version bump");
+        assertEquals(0, reopened.diagnostics().getErrors(), "drop-and-rebuild is not an error");
+        // ...and the rebuilt store is fully functional under the new hash.
+        reopened.deposit(OW, p, bytes(8, 400), 200);
+        assertNotNull(awaitHit(reopened, OW, p), "rebuilt store must accept deposits");
+        reopened.shutdown();
+    }
+
     @Test
     void corruptDbFileIsDroppedAndRecreated() throws Exception {
         Files.createDirectories(storeDir());

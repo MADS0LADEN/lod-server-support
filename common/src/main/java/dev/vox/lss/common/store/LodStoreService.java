@@ -48,17 +48,31 @@ public interface LodStoreService {
      *  {@code usize == 0} = all-air ({@code frame} is empty). */
     record FrameHit(byte[] frame, int usize, long columnTimestamp) {}
 
-    /** The store's content hash (FNV-1a 64): {@code chash} over raw bytes, {@code fhash}
-     *  over the compressed frame. ONE canonical implementation — the frame-reuse deposit
-     *  computes both on the processing thread and the store validates against them, so
-     *  the function must be shared, not twinned. */
+    /** The store's content hash (CRC32C since schema v4, zero-extended into the 64-bit
+     *  hash columns): {@code chash} over raw bytes, {@code fhash} over the compressed
+     *  frame. ONE canonical implementation — the frame-reuse deposit computes both on
+     *  the processing thread and the store validates against them, so the function must
+     *  be shared, not twinned.
+     *
+     *  <p>CRC32C replaced FNV-1a 64 in the perf round (Phase 2 / R4): the serial byte
+     *  loop was ~28% of the SQLite batcher thread under deposit load, and CRC32C runs
+     *  as a hardware intrinsic. This is CORRUPTION DETECTION ONLY — never an
+     *  identity/dedup key, never crosses a jar boundary; detection strength drops
+     *  2^-64 to 2^-32 per corrupted row on DERIVED data whose worst case is one wrong
+     *  LOD column the purge ladder then deletes. {@code usize == 0} short-circuits
+     *  before any hash compare, so the CRC-of-empty degenerate value is never
+     *  consulted. ({@code DirtyContentFilter.fnv1a64} is a separate function with its
+     *  own 0-sentinel and stays FNV.)
+     *
+     *  <p><b>{@code new CRC32C()} per call — never a static field, never a
+     *  ThreadLocal:</b> the instance is mutable and non-thread-safe, and this is called
+     *  from three thread families (batcher, reader pool, processing thread); a shared
+     *  instance produces wrong hashes that drive the row-poison purge into deleting
+     *  good rows. The cost is the update intrinsic, not the allocation. */
     static long contentHash(byte[] data) {
-        long hash = 0xcbf29ce484222325L;
-        for (byte b : data) {
-            hash ^= (b & 0xFF);
-            hash *= 0x100000001b3L;
-        }
-        return hash;
+        var crc = new java.util.zip.CRC32C();
+        crc.update(data, 0, data.length);
+        return crc.getValue();
     }
 
     /** The mode this store was built for (memory tier only vs memory+disk). */
