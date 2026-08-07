@@ -299,9 +299,10 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                         if (dialect != HandshakeGate.WireDialect.V16) {
                             service.getV16CompatManager().onNonV16Handshake(nmsPlayer.getUUID());
                         }
-                        if (dialect != HandshakeGate.WireDialect.V18) {
-                            service.getV18CompatTracker().onNonV18Handshake(nmsPlayer.getUUID());
-                        }
+                        // Reply-only outcomes shed a stale CROSS-dialect membership; a
+                        // REGISTER's mark happens on the pump via dialectFlipFor.
+                        service.getDialectTracker().onNonRegisterHandshake(
+                                nmsPlayer.getUUID(), dialect);
                     }
                     if (dialect == HandshakeGate.WireDialect.V16) {
                         PaperPayloadHandler.sendSessionConfigV16(bukkitPlayer, enabled,
@@ -334,7 +335,7 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                     // v18-compat design §2.3, review F1).
                     service.enqueueRegister(nmsPlayer, capabilities,
                             dialectFlipFor(dialect, service.getV16CompatManager(),
-                                    service.getV18CompatTracker(), nmsPlayer.getUUID()),
+                                    service.getDialectTracker(), nmsPlayer.getUUID()),
                             replyAfterRegister);
                 });
     }
@@ -353,33 +354,24 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
         };
     }
 
-    /** The pump-deferred dialect flip per dialect: mark own identity, shed the other's
-     *  (CURRENT sheds both). Extracted static so the switch BODY is pinnable against
+    /** The pump-deferred dialect flip: mark the session's dialect in the single-map
+     *  tracker (any cross-dialect shed is the overwrite itself) and create/shed the v16
+     *  manager's ingress-shim session. Extracted static so the BODY is pinnable against
      *  real manager/tracker instances (execution-review finding 1: dropping the V18
      *  case's mark — which mis-derives wantsCompressedColumns and leaks the codec byte
      *  to every v0.8.x client — passed the whole suite). */
     static Runnable dialectFlipFor(HandshakeGate.WireDialect dialect,
                                    dev.vox.lss.common.compat.V16CompatManager v16,
-                                   dev.vox.lss.common.compat.V18CompatTracker v18,
+                                   dev.vox.lss.common.compat.WireDialectTracker dialects,
                                    java.util.UUID uuid) {
-        return switch (dialect) {
-            case V16 -> () -> {
+        return () -> {
+            dialects.onHandshake(uuid, dialect);
+            if (dialect == HandshakeGate.WireDialect.V16) {
+                // Session identity first, so drip batches merge from the first frame.
                 v16.onHandshake(uuid);
-                v18.onNonV18Handshake(uuid);
-            };
-            case V18 -> () -> {
-                v18.onHandshake(uuid);
+            } else {
                 v16.onNonV16Handshake(uuid);
-            };
-            // C1 INTERMEDIATE (WireDialectTracker replaces this switch): V19 sheds the
-            // legacy memberships like CURRENT; its own membership mark arrives with the
-            // tracker, together with the v19 egress drop-latch — until then a v19
-            // session is mis-served v20 bodies, acceptable only because no real v19
-            // client runs in CI and the tracker lands before the C1 PR.
-            case V19, CURRENT -> () -> {
-                v16.onNonV16Handshake(uuid);
-                v18.onNonV18Handshake(uuid);
-            };
+            }
         };
     }
 
@@ -480,7 +472,7 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
             // ALSO dropped by the mailbox Remove drain (the quit-race leak guard —
             // v18-compat design §2.3).
             service.getV16CompatManager().onDisconnect(event.getPlayer().getUniqueId());
-            service.getV18CompatTracker().onDisconnect(event.getPlayer().getUniqueId());
+            service.getDialectTracker().onDisconnect(event.getPlayer().getUniqueId());
         }
     }
 

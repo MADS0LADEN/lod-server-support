@@ -27,11 +27,12 @@ import java.util.concurrent.atomic.AtomicLong;
  * direct {@code onDisconnect} can run before a deferred Register's mark has applied —
  * the leak guard; quit-originated only, so dim-change survival is untouched).
  *
- * <p><b>The v16 single-lifetime rule</b> (the §4.3 review finding): v16 membership used
- * to have TWO lifetimes — the manager's 75 s synthetic-want-set session TTL vs the
- * egress checks' disconnect-scoped set. This tracker is the single truth; the manager's
- * session prune calls {@link #onSessionExpired} so an expired v16 session's egress
- * dialect dies WITH it (the client's next batch re-marks through the ingress shim).
+ * <p><b>The v16 single-lifetime rule</b> (the §4.3 review finding, RESOLVED here by
+ * inspection): the manager's 75 s TTL is per WANT-SET ENTRY, not per session — v16
+ * sessions themselves die only at disconnect/shed, exactly this tracker's lifetimes.
+ * Moving the egress checks onto this tracker therefore leaves ONE lifetime with no
+ * extra hook; the plan's "session prune is the tracker-removal hook" premise had no
+ * corresponding code (recorded in the C1 decisions log).
  */
 public final class WireDialectTracker {
 
@@ -79,12 +80,16 @@ public final class WireDialectTracker {
     }
 
     /**
-     * The v16 manager's session prune (75 s idle TTL) — the single-lifetime rule: an
-     * expired v16 session's egress dialect must expire WITH the session, not outlive it
-     * until disconnect. Removes ONLY a v16 mark; other dialects have no session TTL.
+     * A handshake that did NOT register (NO_CONSUMER / DISABLED): a CROSS-dialect
+     * re-handshake must still shed a stale membership (the old per-dialect
+     * {@code onNonV18Handshake} behavior — without this, a v18 member re-handshaking
+     * as a consumer-less current client would keep receiving v18-stripped frames from
+     * its surviving registration), while a SAME-dialect non-register handshake keeps
+     * the membership exactly as the old trackers did.
      */
-    public void onSessionExpired(UUID uuid) {
-        this.sessions.remove(uuid, WireDialect.V16);
+    public void onNonRegisterHandshake(UUID uuid, WireDialect handshakenDialect) {
+        this.sessions.computeIfPresent(uuid,
+                (k, existing) -> existing == handshakenDialect ? existing : null);
     }
 
     public int sessionCount(WireDialect dialect) {

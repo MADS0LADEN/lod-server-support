@@ -297,20 +297,27 @@ class LSSPaperPluginGlueTest {
         var uuid = java.util.UUID.randomUUID();
 
         var v16 = new dev.vox.lss.common.compat.V16CompatManager();
-        var v18 = new dev.vox.lss.common.compat.V18CompatTracker();
-        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.V18, v16, v18, uuid).run();
-        assertTrue(v18.isV18(uuid), "the V18 flip must mark v18 membership");
+        var dialects = new dev.vox.lss.common.compat.WireDialectTracker();
+        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.V18, v16, dialects, uuid).run();
+        assertTrue(dialects.isV18(uuid), "the V18 flip must mark v18 membership");
         assertFalse(v16.isV16(uuid));
 
         // V16 flip on the same player (a cross-dialect re-handshake): marks v16, sheds v18.
-        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.V16, v16, v18, uuid).run();
+        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.V16, v16, dialects, uuid).run();
         assertTrue(v16.isV16(uuid), "the V16 flip must mark the v16 session");
-        assertFalse(v18.isV18(uuid), "the V16 flip must shed stale v18 membership");
+        assertTrue(dialects.isV16(uuid), "the tracker must carry the v16 dialect");
+        assertFalse(dialects.isV18(uuid), "the V16 flip must shed stale v18 membership");
 
-        // CURRENT flip sheds both.
-        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.CURRENT, v16, v18, uuid).run();
+        // V19 flip on the same player: marks v19, sheds the v16 session.
+        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.V19, v16, dialects, uuid).run();
+        assertTrue(dialects.isV19(uuid), "the V19 flip must mark v19 membership");
+        assertFalse(v16.isV16(uuid), "the V19 flip must shed the v16 session");
+
+        // CURRENT flip sheds everything legacy.
+        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.CURRENT, v16, dialects, uuid).run();
         assertFalse(v16.isV16(uuid), "the CURRENT flip must shed the v16 session");
-        assertFalse(v18.isV18(uuid), "the CURRENT flip must shed v18 membership");
+        assertFalse(dialects.isV18(uuid) || dialects.isV19(uuid) || dialects.isV16(uuid),
+                "the CURRENT flip must leave no legacy membership");
     }
 
     @Test

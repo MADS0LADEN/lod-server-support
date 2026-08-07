@@ -1073,6 +1073,9 @@ class PaperRequestProcessingServiceTest {
         // the real handshake path; mirror that ordering here.
         var svc = liveCompressionService();
         var uuid = UUID.randomUUID();
+        // The dialect TRACKER is the egress/derivation source of truth now; the real
+        // dialectFlip marks both it and the manager's ingress session before register.
+        svc.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V16);
         svc.getV16CompatManager().onHandshake(uuid);
         var state = svc.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
                 LSSConstants.CAPABILITY_VOXEL_COLUMNS | LSSConstants.CAPABILITY_ZSTD_COLUMNS);
@@ -1089,7 +1092,7 @@ class PaperRequestProcessingServiceTest {
         // in the drain's beforeRegister); mirror that ordering here.
         var svc = liveCompressionService();
         var uuid = UUID.randomUUID();
-        svc.getV18CompatTracker().onHandshake(uuid);
+        svc.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V18);
         var state = svc.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
                 LSSConstants.CAPABILITY_VOXEL_COLUMNS | LSSConstants.CAPABILITY_ZSTD_COLUMNS);
         assertFalse(state.wantsCompressedColumns());
@@ -1104,12 +1107,12 @@ class PaperRequestProcessingServiceTest {
         // hard-kick the client on its next column.
         var svc = liveCompressionService();
         var uuid = UUID.randomUUID();
-        svc.getV18CompatTracker().onHandshake(uuid);
+        svc.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V18);
         svc.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
                 LSSConstants.CAPABILITY_VOXEL_COLUMNS | LSSConstants.CAPABILITY_ZSTD_COLUMNS);
 
         svc.removePlayer(uuid); // the dimension-change half: direct, NOT the mailbox
-        assertTrue(svc.getV18CompatTracker().isV18(uuid),
+        assertTrue(svc.getDialectTracker().isV18(uuid),
                 "removePlayer must not shed the v18 identity (dim changes reuse it)");
 
         var state = svc.registerPlayer(playerIn(uuid, level(Level.END)),
@@ -1129,13 +1132,13 @@ class PaperRequestProcessingServiceTest {
         var uuid = UUID.randomUUID();
         var player = playerIn(uuid, level(Level.OVERWORLD));
         service.enqueueRegister(player, LSSConstants.CAPABILITY_VOXEL_COLUMNS,
-                () -> service.getV18CompatTracker().onHandshake(uuid), () -> {});
-        service.getV18CompatTracker().onDisconnect(uuid); // the quit's direct drop: too early
+                () -> service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V18), () -> {});
+        service.getDialectTracker().onDisconnect(uuid); // the quit's direct drop: too early
         service.enqueueRemove(uuid);
         service.tick(); // drain: Register (marks) then Remove (must drop the mark)
-        assertFalse(service.getV18CompatTracker().isV18(uuid),
+        assertFalse(service.getDialectTracker().isV18(uuid),
                 "the mailbox Remove must drop membership the direct disconnect missed");
-        assertEquals(0, service.getV18CompatTracker().sessionCount());
+        assertEquals(0, service.getDialectTracker().sessionCount(dev.vox.lss.common.HandshakeGate.WireDialect.V18));
     }
 
     /** 2026-08-05 review H2: the lifecycle SWEEP (entity removed, no PlayerList entry —
@@ -1148,14 +1151,14 @@ class PaperRequestProcessingServiceTest {
         var uuid = UUID.randomUUID();
         var player = playerIn(uuid, level(Level.OVERWORLD));
         service.getV16CompatManager().onHandshake(uuid);
-        service.getV18CompatTracker().onHandshake(uuid);
+        service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V18);
         service.registerPlayer(player, LSSConstants.CAPABILITY_VOXEL_COLUMNS);
 
         // The player's entity vanishes with no PlayerList entry and no quit event.
         when(player.isRemoved()).thenReturn(true);
         service.tick(); // the lifecycle pass sweeps the player out
 
-        assertFalse(service.getV18CompatTracker().isV18(uuid),
+        assertFalse(service.getDialectTracker().isV18(uuid),
                 "the sweep drops v18 membership (execution-review finding 2)");
         assertFalse(service.getV16CompatManager().isV16(uuid),
                 "…and the v16 session with it (review H2 — the leaked twin)");
