@@ -70,6 +70,8 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
     // riskiest change gets a config rollback narrower than useBackgroundReadPriority
     // (which would also drop the Moonrise rung and all read protection).
     private final boolean useBackgroundReadSplit;
+    // Phase 4 (R2) selective root-whitelist parse at the split's pool-side parse site.
+    private final boolean useSelectiveNbtParse;
 
     /** Convenience for tests/gametests: production defaults for the serialize path
      *  (transcode ON — the {@code useNbtTranscode} default). */
@@ -82,12 +84,20 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
         this(threadCount, useBackgroundReadPriority, useNbtTranscode, true);
     }
 
+    /** Convenience: selective parse ON (the {@code useSelectiveNbtParse} default). */
     public ChunkDiskReader(int threadCount, boolean useBackgroundReadPriority,
                            boolean useNbtTranscode, boolean useBackgroundReadSplit) {
+        this(threadCount, useBackgroundReadPriority, useNbtTranscode, useBackgroundReadSplit, true);
+    }
+
+    public ChunkDiskReader(int threadCount, boolean useBackgroundReadPriority,
+                           boolean useNbtTranscode, boolean useBackgroundReadSplit,
+                           boolean useSelectiveNbtParse) {
         super(threadCount);
         this.useBackgroundReadPriority = useBackgroundReadPriority;
         this.useNbtTranscode = useNbtTranscode;
         this.useBackgroundReadSplit = useBackgroundReadSplit;
+        this.useSelectiveNbtParse = useSelectiveNbtParse;
     }
 
     public void submitReadDirect(UUID playerUuid, String dimension, ServerLevel level,
@@ -105,7 +115,8 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
         if (raw != null) {
             submitRead(playerUuid, chunkX, chunkZ, dimension, submissionOrder,
                     () -> NbtSectionSerializer.readAndSerializeSections(raw, registryAccess, chunkX, chunkZ,
-                            maskEntry, minSectionY, maxSectionY, this.useNbtTranscode));
+                            maskEntry, minSectionY, maxSectionY, this.useNbtTranscode,
+                            this.useSelectiveNbtParse));
             return;
         }
         NbtSectionSerializer.ChunkNbtRead read = chooseReadPath(level, chunkMap);
@@ -145,7 +156,8 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
         if (raw != null) {
             return NbtSectionSerializer.readAndSerializeSections(raw,
                     level.registryAccess(), chunkX, chunkZ, XrayMaskManager.entryForActive(level),
-                    level.getMinSectionY(), level.getMaxSectionY(), this.useNbtTranscode);
+                    level.getMinSectionY(), level.getMaxSectionY(), this.useNbtTranscode,
+                    this.useSelectiveNbtParse);
         }
         NbtSectionSerializer.ChunkNbtRead read = chooseReadPath(level, chunkMap);
         return NbtSectionSerializer.readAndSerializeSections(read,
@@ -397,7 +409,9 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
         // serves, so a silently-inert split (dispatcher drift, wiring slip) is visible
         // as a missing token / frozen counter — the gametest asserts it after a serve.
         if (this.useBackgroundReadSplit) {
-            return base + ", read_path=bg-split, raw_serves=" + this.rawServes.get();
+            return base + ", read_path=bg-split, raw_serves=" + this.rawServes.get()
+                    + ", sel=" + (this.useSelectiveNbtParse ? "on" : "off")
+                    + ", sel_fallbacks=" + NbtSectionSerializer.SELECTIVE_FALLBACKS.get();
         }
         return base;
     }

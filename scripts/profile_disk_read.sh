@@ -46,6 +46,8 @@ die() { echo "[profile] ERROR: $*" >&2; exit 1; }
 # PROFILE_NBT_TRANSCODE: useNbtTranscode override (default true) — set false for a
 # same-box-state object-path baseline matrix (round-2 A/B; pitfall: never compare
 # matrices across days or box states).
+# PROFILE_SELECTIVE_PARSE: useSelectiveNbtParse override (default true) — the Phase 4
+# kill-switch A/B arm variable (same jar, config-flipped).
 stage_server_config() { # <path>
     cat > "$1" <<EOF
 {
@@ -64,6 +66,7 @@ stage_server_config() { # <path>
   "missMemoTtlSeconds": 30,
   "useBackgroundReadPriority": true,
   "useNbtTranscode": ${PROFILE_NBT_TRANSCODE:-true},
+  "useSelectiveNbtParse": ${PROFILE_SELECTIVE_PARSE:-true},
   "enableV16Compat": true
 }
 EOF
@@ -203,6 +206,11 @@ cmd_run() {
     local echo_ok=true
     [[ "$echo_line" == *"useNbtTranscode=${PROFILE_NBT_TRANSCODE:-true}"* ]] || echo_ok=false
     [[ "$echo_line" == *"diskReaderThreads=5"* ]] || echo_ok=false
+    # Tolerant when the ref predates the key (pre-B4 base arms echo no such key —
+    # only an EXPLICIT mismatch invalidates the arm).
+    if [[ "$echo_line" == *"useSelectiveNbtParse="* ]]; then
+        [[ "$echo_line" == *"useSelectiveNbtParse=${PROFILE_SELECTIVE_PARSE:-true}"* ]] || echo_ok=false
+    fi
 
     local arm_valid=true
     { [[ "$warn_ok" == "true" ]] && [[ "$echo_ok" == "true" ]]; } || arm_valid=false
@@ -218,6 +226,7 @@ cmd_run() {
   "lod_distance": $LOD_R,
   "bw_per_player": ${PROFILE_BW_PER_PLAYER:-20971520},
   "nbt_transcode": ${PROFILE_NBT_TRANSCODE:-true},
+  "selective_parse": ${PROFILE_SELECTIVE_PARSE:-true},
   "fallback_warn": "$warn",
   "config_echo": "$echo_line",
   "arm_valid": $arm_valid,

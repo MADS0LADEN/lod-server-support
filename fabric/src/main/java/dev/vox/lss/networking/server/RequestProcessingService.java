@@ -137,7 +137,7 @@ public class RequestProcessingService {
         int readerThreads = config.effectiveDiskReaderThreads(prioritizedReads);
         this.diskReader = new ChunkDiskReader(readerThreads,
                 config.useBackgroundReadPriority, config.useNbtTranscode,
-                config.useBackgroundReadSplit);
+                config.useBackgroundReadSplit, config.useSelectiveNbtParse);
         if (config.enableChunkGeneration) {
             this.generationService = new ChunkGenerationService(config);
             this.generationService.setDirtyContentFilter(this.dirtyContentFilter);

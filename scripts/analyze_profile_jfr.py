@@ -175,7 +175,13 @@ def shorten(frame, width=90):
 BANDS = [
     ("store", ("org.sqlite.", "dev.vox.lss.common.store.")),
     ("zip", ("java.util.zip.", "com.github.luben.zstd.", "net.jpountz.lz4.")),
-    ("nbt", ("net.minecraft.nbt.",)),
+    # SelectiveChunkNbtLoader rides the nbt band (B4 review B4-7): its direct root-key
+    # reads (readByte/readUTF leaves under load()) are the same work the base arm's
+    # CompoundTag$1.readString does — classifying them lss-other would migrate part of
+    # gate 2's numerator out of the band it gates on.
+    ("nbt", ("net.minecraft.nbt.",
+             "dev.vox.lss.networking.server.SelectiveChunkNbtLoader",
+             "dev.vox.lss.paper.PaperSelectiveChunkNbtLoader")),
     ("serialize", ("dev.vox.lss.networking.server.NbtSectionSerializer",
                    "dev.vox.lss.networking.server.SectionSerializer",
                    "dev.vox.lss.networking.server.MemoizedNbtCodec",

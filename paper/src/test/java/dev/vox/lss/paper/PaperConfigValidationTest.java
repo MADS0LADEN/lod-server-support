@@ -246,7 +246,14 @@ class PaperConfigValidationTest {
         // the post-probe argument, never the config request (B0 review M1).
         c.useCompressedColumns = false;
         assertEquals("Effective config: useNbtTranscode=false, diskReaderThreads=7,"
-                        + " useCompressedColumns=true, useBackgroundReadSplit=true",
+                        + " useCompressedColumns=true, useBackgroundReadSplit=true,"
+                        + " useSelectiveNbtParse=true",
                 c.effectiveConfigEcho(7, true));
+    }
+
+    /** Phase 4 twin of the Fabric default pin (shared key, Fabric-only in effect). */
+    @Test
+    void selectiveNbtParseDefaultsOn() {
+        assertEquals(true, new PaperConfig().useSelectiveNbtParse);
     }
 }
