@@ -353,6 +353,15 @@ public class SerializerParityGameTests {
                     helper.assertTrue(bg != null, "waiting for the background read result");
                     helper.assertTrue(!bg.notFound() && !bg.saturated() && bg.sectionBytes() != null,
                             "background-priority read must return content, not not-found/saturated");
+                    // B3 liveness receipt (review F2): byte parity alone cannot distinguish
+                    // the SPLIT path from a silently-inert dispatcher falling back to the
+                    // full-read closure — the identical bytes are the point. The counter
+                    // proves the raw fetch actually served this read.
+                    helper.assertTrue(background.rawServesForTest() > 0,
+                            "the split raw path must have served the background read"
+                                    + " (raw_serves=0 means the dispatcher went inert)");
+                    helper.assertTrue(background.getDiagnostics().contains("read_path=bg-split"),
+                            "the split's diag receipt must be visible");
                     background.shutdown();
                     helper.assertTrue(Arrays.equals(fgResult.get().sectionBytes(), bg.sectionBytes()),
                             describeMismatch(fgResult.get().sectionBytes(), bg.sectionBytes()));

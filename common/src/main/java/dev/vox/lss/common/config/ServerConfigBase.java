@@ -155,6 +155,20 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public boolean useBackgroundReadPriority = true;
     /**
+     * When true (default), the Fabric vanilla-IOWorker background read is SPLIT (perf
+     * round Phase 3 / R1): the single-threaded IOWorker executor only fetches the
+     * chunk's raw compressed record; zlib inflate + NBT parse run on the LSS reader
+     * pool (or the backfill thread for backfill reads). The IOWorker was the busiest
+     * serving thread by ~7x per-thread — pread + inflate + full parse for every LOD
+     * read — and is the mechanism of the documented A7 read-timeout storms. Set false
+     * to restore the pre-split full-read-on-executor closure as a rollback NARROWER
+     * than {@code useBackgroundReadPriority=false} (which also drops the Moonrise rung
+     * and all read protection). Fabric-only in effect: Paper/Folia reads route through
+     * Moonrise, which never had the executor-parse problem; the Moonrise rung on
+     * Fabric is likewise untouched. No clamp: a boolean has no out-of-range value.
+     */
+    public boolean useBackgroundReadSplit = true;
+    /**
      * When true (default), disk-read column serving transcodes region NBT straight into
      * wire bytes — palette ids and bit-storage longs copied verbatim off the NBT — instead
      * of decoding every section into PalettedContainer objects and re-serializing them
@@ -371,7 +385,8 @@ public abstract class ServerConfigBase extends JsonConfig {
                                       boolean effectiveCompressedColumns) {
         return "Effective config: useNbtTranscode=" + useNbtTranscode
                 + ", diskReaderThreads=" + effectiveReaderThreads
-                + ", useCompressedColumns=" + effectiveCompressedColumns;
+                + ", useCompressedColumns=" + effectiveCompressedColumns
+                + ", useBackgroundReadSplit=" + useBackgroundReadSplit;
     }
     /**
      * LOD x-ray masking (docs/planning/antixray-compat-design.md §3). "auto" (default)

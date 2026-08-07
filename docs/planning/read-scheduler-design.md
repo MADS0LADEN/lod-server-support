@@ -324,6 +324,12 @@ read latency), so it is precisely what still works when A's substrate is gone.
 - **A is the default and is unchanged on the compatible path.** When the IOWorker executor resolves,
   reads schedule at `BACKGROUND` exactly as before; the throttle stays null (throttling a working-A
   server would only cost LSS throughput for zero gameplay benefit).
+  *(v0.10.0 update — perf round Phase 3/R1, `useBackgroundReadSplit` default true: the scheduled
+  task is now FETCH-ONLY — `RegionFileRawRead` resolves the raw compressed record on the executor,
+  and inflate + NBT parse run on the LSS reader pool via `NbtSectionSerializer.parseRawChunk`. §10.2's
+  "reads straight from `RegionFileStorage`" full-read closure survives only as the
+  `useBackgroundReadSplit=false` rollback. Priority semantics, the fallback ladder, and the
+  read-your-writes tradeoff are unchanged.)*
 - **Detection is maximally fail-safe** (`ChunkDiskReader.backgroundReaderOrFallback`): a null handle
   **or any `Throwable`** from accessor resolution latches a server-wide one-way `backgroundIncompatible`
   flag, enables the throttle, warns exactly once, and reads foreground thereafter. A mod we cannot

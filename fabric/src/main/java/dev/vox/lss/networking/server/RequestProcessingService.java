@@ -136,7 +136,8 @@ public class RequestProcessingService {
                 && dev.vox.lss.compat.MoonriseReadCompat.resolveOrNull() != null;
         int readerThreads = config.effectiveDiskReaderThreads(prioritizedReads);
         this.diskReader = new ChunkDiskReader(readerThreads,
-                config.useBackgroundReadPriority, config.useNbtTranscode);
+                config.useBackgroundReadPriority, config.useNbtTranscode,
+                config.useBackgroundReadSplit);
         if (config.enableChunkGeneration) {
             this.generationService = new ChunkGenerationService(config);
             this.generationService.setDirtyContentFilter(this.dirtyContentFilter);

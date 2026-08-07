@@ -9,6 +9,8 @@
     "AccessorServerChunkCache",
     "AccessorSimpleRegionStorage",
     "AccessorIOWorker",
+    "AccessorRegionFileStorage",
+    "AccessorRegionFile",
     "AccessorConnection",
     "AccessorServerCommonPacketListener",
     "ChunkSaveDataHook"

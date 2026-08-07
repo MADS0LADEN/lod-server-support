@@ -478,6 +478,14 @@ class ConfigValidationTest {
                 "NBT transcode must default on");
     }
 
+    /** Phase 3 (R1): the background-read split ships ON; false is the narrow rollback
+     *  that keeps read protection (unlike useBackgroundReadPriority=false). */
+    @Test
+    void backgroundReadSplitDefaultsOn() {
+        assertTrue(serverConfig().useBackgroundReadSplit,
+                "useBackgroundReadSplit must default on");
+    }
+
     // --- LSSClientConfig ---
 
     private LSSClientConfig clientConfig() {
@@ -614,15 +622,16 @@ class ConfigValidationTest {
         // probe-failed server must echo false so compress_gate reds the arm, B0 M1).
         c.useCompressedColumns = false;
         assertEquals("Effective config: useNbtTranscode=false, diskReaderThreads=7,"
-                        + " useCompressedColumns=true",
+                        + " useCompressedColumns=true, useBackgroundReadSplit=true",
                 c.effectiveConfigEcho(7, true),
                 "key order and key=value spelling are what the harnesses grep");
         // The thread count echoed is the RESOLVED one the caller passes (0=AUTO already
         // applied) — the scripts assert the staged explicit value appears verbatim.
         c.useNbtTranscode = true;
         c.useCompressedColumns = true;
+        c.useBackgroundReadSplit = false;
         assertEquals("Effective config: useNbtTranscode=true, diskReaderThreads=5,"
-                        + " useCompressedColumns=false",
+                        + " useCompressedColumns=false, useBackgroundReadSplit=false",
                 c.effectiveConfigEcho(5, false));
     }
 
