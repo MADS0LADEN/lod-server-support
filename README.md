@@ -72,15 +72,6 @@ Masking applies to columns served after it activates — columns already cached 
 
 ### Tuning
 
-The defaults suit a typical server and most admins never need this section.
-
-**To limit CPU, use the bandwidth and generation limiters.** LSS's cost is essentially how many columns per second it serves plus how many chunks it generates, and those two families cap exactly that:
-
-- `bytesPerSecondLimitPerPlayer` / `bytesPerSecondLimitGlobal` bound the serve rate. They count **uncompressed** bytes on purpose, so compression doesn't quietly raise the real ceiling.
-- `generationConcurrencyLimitGlobal` / `generationConcurrencyLimitPerPlayer` bound generation — by far the most expensive thing LSS can trigger, since it is worldgen. On a server exploring fresh terrain this dominates, and lowering it is the single biggest saving. `enableChunkGeneration: false` removes it entirely.
-
-Lowering either costs *speed*, not correctness: LOD fills in more slowly, nothing breaks. Most other settings change *how* the work is done rather than how much, so they are the wrong lever for a CPU problem.
-
 **Turn the LOD store on if you can spare the disk.** It is the single biggest performance win available here, and it is off by default only so that upgrading never doubles your world folder without you agreeing to it.
 
 ```json
@@ -91,10 +82,17 @@ That one key also enables the background warm-up. A repeat request is then answe
 
 The cost is disk — the store grows to roughly the size of your region files, so a 10 GB world adds about 7 GB. If that is too much, `lodStoreMaxMB` bounds it (oldest columns are evicted first and re-warm on demand). It is derived data, so deleting `lss-lod/` while the server is stopped is always safe.
 
-## Redistribution
+**To further limit CPU, use the bandwidth and generation limiters.** LSS's cost is essentially how many columns per second it serves plus how many chunks it generates, and those two families cap exactly that:
 
-MIT-licensed — redistribution with attribution is welcome, and modpacks can reference the official Modrinth project directly. Per Modrinth's reupload policy: **[XANTHA](https://modrinth.com/user/XANTHA) on [Voxy Server Side](https://modrinth.com/plugin/voxy-server-side) has the copyright holder's explicit permission to distribute this mod, and derivatives of it, on Modrinth.**
+- `bytesPerSecondLimitPerPlayer` / `bytesPerSecondLimitGlobal` bound the serve rate. They count **uncompressed** bytes on purpose, so compression doesn't quietly raise the real ceiling.
+- `generationConcurrencyLimitGlobal` / `generationConcurrencyLimitPerPlayer` bound generation — by far the most expensive thing LSS can trigger, since it is worldgen. On a server exploring fresh terrain this dominates, and lowering it is the single biggest saving. `enableChunkGeneration: false` removes it entirely.
+
+Lowering either costs *speed*, not correctness: LOD fills in more slowly, nothing breaks. Most other settings change *how* the work is done rather than how much, so they are the wrong lever for a CPU problem.
 
 ## License
 
 MIT
+
+## Redistribution
+
+Redistribution with attribution is welcome, and modpacks can reference the official Modrinth project directly. Per Modrinth's reupload policy: **[XANTHA](https://modrinth.com/user/XANTHA) on [Voxy Server Side](https://modrinth.com/plugin/voxy-server-side) has the copyright holder's explicit permission to distribute this mod, and derivatives of it, on Modrinth.**
