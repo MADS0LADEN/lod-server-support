@@ -135,8 +135,13 @@ public final class SectionSerializer {
                 }
             }
 
-            byte[] serialized = new byte[buf.readableBytes()];
-            buf.readBytes(serialized);
+            byte[] nativeBody = new byte[buf.readableBytes()];
+            buf.readBytes(nativeBody);
+            // C1 produce-path v20 hook (progress-doc decision 2026-08-07): the native
+            // emit above is unchanged; the v20 body is its canonical translation. Live,
+            // generation (which reuses this method), and the DirtyContentFilter hash all
+            // see the same translated bytes.
+            byte[] serialized = NbtSectionSerializer.toV20(nativeBody, level.registryAccess());
             return new LoadedColumnData(cx, cz, serialized, serialized.length);
         } finally {
             buf.release();

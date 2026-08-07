@@ -1033,9 +1033,12 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
         this.ctx.diagnostics().incrementDiskDrained();
     }
 
-    // A VoxelColumn body carrying zero sections (one varint 0). Sent to a data-claiming client
-    // for an all-air resolution so it clears ghost terrain by ingesting air for every section.
-    private static final byte[] ZERO_SECTION_COLUMN = new byte[]{0x00};
+    // A VoxelColumn body carrying zero sections. Sent to a data-claiming client for an
+    // all-air resolution so it clears ghost terrain by ingesting air for every section.
+    // v20 shape since C1: dictCount 0 + sectionCount 0 — the clear-column invariant
+    // (dictCount==0 ⇔ sectionCount==0); the client's isClearColumn still reads only the
+    // leading VarInt, and the C2 legacy translators collapse it back to the 1-byte form.
+    private static final byte[] ZERO_SECTION_COLUMN = new byte[]{0x00, 0x00};
 
     /**
      * Store deposit with opportunistic frame reuse (plan §3 "compress once, use twice"):

@@ -892,7 +892,8 @@ class OffThreadProcessorDiskResultTest {
 
             waitFor(() -> !rig.proc.enqueuedColumns.isEmpty(), "clearing column enqueued");
             var col = rig.proc.enqueuedColumns.poll();
-            assertArrayEquals(new byte[]{0x00}, col.bytes(), "authoritative clear = zero-section body");
+            assertArrayEquals(new byte[]{0x00, 0x00}, col.bytes(),
+                    "authoritative clear = the v20 zero-dict zero-section body (C1)");
             assertEquals(COLUMN_TS + 5, col.columnTimestamp(), "clear carries the server timestamp");
             assertTrue(rig.state.hasDiskReadDone(8, 8));
             assertEquals(0, rig.state.getHeldSyncSlots());
