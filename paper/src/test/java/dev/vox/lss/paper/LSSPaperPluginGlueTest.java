@@ -355,7 +355,8 @@ class LSSPaperPluginGlueTest {
             assertDoesNotThrow(() -> LSSPaperPlugin.dispatchPluginMessage(
                     LSSConstants.CHANNEL_HANDSHAKE, "Steve", garbage,
                     data -> LSSPaperPlugin.handleHandshake(data, "Steve", config(true), true, sender, (caps, dialect, reply) -> reply.run()),
-                    data -> { throw new AssertionError("handshake frame must not reach the chunk-request handler"); }),
+                    data -> { throw new AssertionError("handshake frame must not reach the chunk-request handler"); },
+                    data -> { throw new AssertionError("handshake frame must not reach the client-info handler"); }),
                     "a malformed frame must never propagate into Bukkit's messenger");
             assertEquals(List.of(), sender.replies, "no partial handshake handling");
 
@@ -370,7 +371,8 @@ class LSSPaperPluginGlueTest {
             LSSPaperPlugin.dispatchPluginMessage(
                     LSSConstants.CHANNEL_HANDSHAKE, "Steve", handshakeFrame(V, VOXEL_CAPS),
                     data -> LSSPaperPlugin.handleHandshake(data, "Steve", config(true), true, sender, (caps, dialect, reply) -> reply.run()),
-                    data -> { throw new AssertionError("handshake frame must not reach the chunk-request handler"); });
+                    data -> { throw new AssertionError("handshake frame must not reach the chunk-request handler"); },
+                    data -> { throw new AssertionError("handshake frame must not reach the client-info handler"); });
             assertEquals(1, sender.replies.size(), "subsequent messages still dispatch after a contained failure");
             assertEquals(1, capture.rows().stream().filter(r -> r.level() == Level.ERROR).count());
         }
@@ -394,7 +396,8 @@ class LSSPaperPluginGlueTest {
             assertDoesNotThrow(() -> LSSPaperPlugin.dispatchPluginMessage(
                     LSSConstants.CHANNEL_CHUNK_REQUEST, "Alex", garbage,
                     data -> { throw new AssertionError("chunk-request frame must not reach the handshake handler"); },
-                    chunkHandler));
+                    chunkHandler,
+                    data -> { throw new AssertionError("chunk-request frame must not reach the client-info handler"); }));
             assertEquals(List.of(), decoded, "no partial batch decode survives");
 
             var errors = capture.rows().stream().filter(r -> r.level() == Level.ERROR).toList();
@@ -410,7 +413,8 @@ class LSSPaperPluginGlueTest {
                         b.writeLong(123L);
                     }),
                     data -> { throw new AssertionError("chunk-request frame must not reach the handshake handler"); },
-                    chunkHandler);
+                    chunkHandler,
+                    data -> { throw new AssertionError("chunk-request frame must not reach the client-info handler"); });
             assertEquals(1, decoded.size(), "subsequent messages still dispatch after a contained failure");
             assertEquals(PositionUtil.packPosition(-3, 9), decoded.get(0).packedPositions()[0]);
         }
@@ -427,7 +431,8 @@ class LSSPaperPluginGlueTest {
                 LSSPaperPlugin.dispatchPluginMessage(
                         LSSConstants.CHANNEL_HANDSHAKE, "Griefer", garbage,
                         data -> { throw new IllegalStateException("injected hostile-frame failure"); },
-                        data -> { throw new AssertionError("handshake frame must not reach the chunk-request handler"); });
+                        data -> { throw new AssertionError("handshake frame must not reach the chunk-request handler"); },
+                        data -> { throw new AssertionError("handshake frame must not reach the client-info handler"); });
             }
             var errors = capture.rows().stream().filter(r -> r.level() == Level.ERROR).toList();
             assertEquals(1, errors.size(),
@@ -440,7 +445,8 @@ class LSSPaperPluginGlueTest {
         try (var capture = new LssLogCapture()) {
             LSSPaperPlugin.dispatchPluginMessage("lss:not_a_channel", "Steve", new byte[]{1, 2, 3},
                     data -> { throw new AssertionError("unknown channel must not reach the handshake handler"); },
-                    data -> { throw new AssertionError("unknown channel must not reach the chunk-request handler"); });
+                    data -> { throw new AssertionError("unknown channel must not reach the chunk-request handler"); },
+                    data -> { throw new AssertionError("unknown channel must not reach the client-info handler"); });
             assertEquals(List.of(), capture.rows(), "unknown channels are silently ignored");
         }
     }

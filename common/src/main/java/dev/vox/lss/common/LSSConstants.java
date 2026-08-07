@@ -42,6 +42,13 @@ public final class LSSConstants {
     public static final String CHANNEL_DIRTY_COLUMNS = "lss:dirty_columns";
     public static final String CHANNEL_VOXEL_COLUMN = "lss:voxel_column";
     public static final String CHANNEL_BATCH_RESPONSE = "lss:batch_response";
+    /** C2S sidecar carrying the client's MC data version (protocol 20, XVER §2.2): the
+     *  handshake byte shape is FROZEN at two VarInts forever (a trailing byte hard-kicks
+     *  the v20 client from every shipped Fabric server), so new client facts ship on
+     *  their own channel — legacy servers silently discard unregistered channels, and
+     *  the v20 server treats absence as "legacy client". Diagnostics + the C5 Via-guard
+     *  input; never needed to decode v20 data. */
+    public static final String CHANNEL_CLIENT_INFO = "lss:client_info";
 
     // Time conversion constants
     public static final long NANOS_PER_SECOND = 1_000_000_000L;

@@ -31,6 +31,17 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
     private PaperConfig lssConfig;
     private volatile PaperRequestProcessingService requestService;
 
+    // lss:client_info sidecar facts (XVER §2.2): the client's MC data version, keyed by
+    // UUID, swept at quit. Absence = legacy client (no sidecar channel). Consumed as
+    // diagnostics + the C5 Via-guard input.
+    private static final java.util.concurrent.ConcurrentHashMap<java.util.UUID, Integer>
+            CLIENT_DATA_VERSIONS = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** The client's announced MC data version, or null for a legacy client. */
+    public static Integer clientDataVersion(java.util.UUID uuid) {
+        return CLIENT_DATA_VERSIONS.get(uuid);
+    }
+
     /**
      * The onEnable step set, in the order {@link #runEnablePlan} drives them. The
      * production implementation lives in {@link #onEnable}; the interface is a test
@@ -120,6 +131,8 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                         LSSPaperPlugin.this, LSSConstants.CHANNEL_HANDSHAKE, LSSPaperPlugin.this);
                 getServer().getMessenger().registerIncomingPluginChannel(
                         LSSPaperPlugin.this, LSSConstants.CHANNEL_CHUNK_REQUEST, LSSPaperPlugin.this);
+                getServer().getMessenger().registerIncomingPluginChannel(
+                        LSSPaperPlugin.this, LSSConstants.CHANNEL_CLIENT_INFO, LSSPaperPlugin.this);
             }
 
             @Override
@@ -208,7 +221,9 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
         ServerPlayer nmsPlayer = ((CraftPlayer) player).getHandle();
         dispatchPluginMessage(channel, player.getName(), message,
                 data -> handleHandshake(player, nmsPlayer, data),
-                data -> handleBatchChunkRequest(nmsPlayer, data));
+                data -> handleBatchChunkRequest(nmsPlayer, data),
+                data -> CLIENT_DATA_VERSIONS.put(nmsPlayer.getUUID(),
+                        PaperPayloadHandler.decodeClientInfo(data)));
     }
 
     /** Test seam: a per-channel message handler; hostile-frame decodes may throw. */
@@ -234,11 +249,13 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
      */
     static void dispatchPluginMessage(String channel, String playerName, byte[] message,
                                       PluginMessageHandler handshakeHandler,
-                                      PluginMessageHandler chunkRequestHandler) {
+                                      PluginMessageHandler chunkRequestHandler,
+                                      PluginMessageHandler clientInfoHandler) {
         try {
             switch (channel) {
                 case LSSConstants.CHANNEL_HANDSHAKE -> handshakeHandler.handle(message);
                 case LSSConstants.CHANNEL_CHUNK_REQUEST -> chunkRequestHandler.handle(message);
+                case LSSConstants.CHANNEL_CLIENT_INFO -> clientInfoHandler.handle(message);
             }
         } catch (Exception e) {
             long released = hostileFrameLog.recordAndTryAcquire(System.nanoTime() / 1_000_000);
@@ -474,6 +491,9 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
             service.getV16CompatManager().onDisconnect(event.getPlayer().getUniqueId());
             service.getDialectTracker().onDisconnect(event.getPlayer().getUniqueId());
         }
+        // Service-independent: the sidecar fact is recorded at the network level
+        // (possibly before any service exists) and must die with the connection.
+        CLIENT_DATA_VERSIONS.remove(event.getPlayer().getUniqueId());
     }
 
     public PaperRequestProcessingService getRequestService() {

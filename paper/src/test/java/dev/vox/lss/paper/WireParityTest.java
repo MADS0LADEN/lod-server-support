@@ -129,6 +129,9 @@ class WireParityTest {
                 b.writeBoolean(true);
                 b.writeVarInt(lod);
                 b.writeBoolean(false);
+                // v20-only data-version append (XVER §2.2); Paper reads it directly.
+                b.writeVarInt(net.minecraft.SharedConstants.getCurrentVersion()
+                        .dataVersion().version());
             });
             assertArrayEquals(expected, PaperPayloadHandler.encodeSessionConfig(
                     LSSConstants.PROTOCOL_VERSION, true, lod, false),
@@ -297,11 +300,24 @@ class WireParityTest {
                 declared.add((String) f.get(null));
             }
         }
-        var covered = Set.of("lss:handshake_c2s", "lss:batch_chunk_req", "lss:session_config",
-                "lss:dirty_columns", "lss:voxel_column", "lss:batch_response");
+        var covered = Set.of("lss:handshake_c2s", "lss:batch_chunk_req", "lss:client_info",
+                "lss:session_config", "lss:dirty_columns", "lss:voxel_column", "lss:batch_response");
         assertEquals(covered, declared,
                 "every LSS channel must have a reference frame in this suite — a new payload"
                 + " requires frames in BOTH WireParityTests");
+    }
+
+    @Test
+    void clientInfoDecodesOneVarIntAndToleratesTrailingBytes() {
+        // The lss:client_info sidecar (XVER §2.2): one VarInt data version; trailing
+        // bytes tolerated (a future client may append fields).
+        byte[] plain = ref(b -> b.writeVarInt(3955));
+        assertEquals(3955, PaperPayloadHandler.decodeClientInfo(plain));
+        byte[] trailing = ref(b -> {
+            b.writeVarInt(3955);
+            b.writeVarInt(42);
+        });
+        assertEquals(3955, PaperPayloadHandler.decodeClientInfo(trailing));
     }
 
     // ---- v16 compat legacy shapes (docs/planning/v16-compat-design.md §2) ----

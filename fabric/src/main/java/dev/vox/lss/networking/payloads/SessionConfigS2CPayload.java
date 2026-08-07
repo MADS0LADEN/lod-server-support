@@ -28,13 +28,26 @@ public record SessionConfigS2CPayload(
         boolean generationEnabled,
         int legacySyncCap,
         int legacyGenCap,
-        boolean v16Wire
+        boolean v16Wire,
+        int serverDataVersion
 ) implements CustomPacketPayload {
 
-    /** Canonical current-protocol shape (the only one the client ever decodes). */
+    /** Canonical current-protocol shape (the only one the client ever decodes). The
+     *  data-version append rides ONLY version-20 frames (XVER §2.2): the v19/v18 echo
+     *  reuses this ctor with their version value and the encoder omits the append —
+     *  their strict 4-field clients would hard-kick on a trailing byte. */
+    public SessionConfigS2CPayload(int protocolVersion, boolean enabled,
+                                   int lodDistanceChunks, boolean generationEnabled,
+                                   int serverDataVersion) {
+        this(protocolVersion, enabled, lodDistanceChunks, generationEnabled, 0, 0, false,
+                serverDataVersion);
+    }
+
+    /** Test/legacy convenience: no data version (encodes without the append for any
+     *  non-20 version anyway; a version-20 frame built this way appends 0). */
     public SessionConfigS2CPayload(int protocolVersion, boolean enabled,
                                    int lodDistanceChunks, boolean generationEnabled) {
-        this(protocolVersion, enabled, lodDistanceChunks, generationEnabled, 0, 0, false);
+        this(protocolVersion, enabled, lodDistanceChunks, generationEnabled, 0);
     }
 
     /** The v16 compat reply: 6-field legacy layout echoing protocol version 16. The caps are
@@ -44,7 +57,7 @@ public record SessionConfigS2CPayload(
                                                     int syncCap, int genCap,
                                                     boolean generationEnabled) {
         return new SessionConfigS2CPayload(LSSConstants.V16_COMPAT_PROTOCOL_VERSION, enabled,
-                lodDistanceChunks, generationEnabled, syncCap, genCap, true);
+                lodDistanceChunks, generationEnabled, syncCap, genCap, true, 0);
     }
 
     public static final CustomPacketPayload.Type<SessionConfigS2CPayload> TYPE =
@@ -63,6 +76,13 @@ public record SessionConfigS2CPayload(
                             buf.writeVarInt(payload.legacyGenCap);
                         }
                         buf.writeBoolean(payload.generationEnabled);
+                        if (payload.protocolVersion == LSSConstants.PROTOCOL_VERSION
+                                && !payload.v16Wire) {
+                            // v20-only append (XVER §2.2): the client codec branches
+                            // per-frame on the leading version, so ONLY the version-20
+                            // arm reads this — the v19/v18 echoes must stay 4-field.
+                            buf.writeVarInt(payload.serverDataVersion);
+                        }
                     },
                     buf -> {
                         int version = buf.readVarInt();
@@ -74,7 +94,11 @@ public record SessionConfigS2CPayload(
                             boolean enabled = buf.readBoolean();
                             int lodDist = buf.readVarInt();
                             boolean genEnabled = buf.readBoolean();
-                            return new SessionConfigS2CPayload(version, enabled, lodDist, genEnabled);
+                            // Tolerate absence (a same-version peer built pre-append —
+                            // dev-window frames): absent decodes as 0 = unknown.
+                            int dataVersion = buf.isReadable() ? buf.readVarInt() : 0;
+                            return new SessionConfigS2CPayload(version, enabled, lodDist,
+                                    genEnabled, dataVersion);
                         }
                         if (version == LSSConstants.V16_COMPAT_PROTOCOL_VERSION) {
                             // Client v16 backward compat: an old server's 6-field layout — the

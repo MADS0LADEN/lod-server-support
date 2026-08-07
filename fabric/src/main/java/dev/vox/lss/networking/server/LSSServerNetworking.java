@@ -86,6 +86,17 @@ public class LSSServerNetworking {
     private static final ConcurrentHashMap<ResourceKey<Level>, String> DIMENSION_STRINGS =
             new ConcurrentHashMap<>();
 
+    // lss:client_info sidecar facts (XVER §2.2): the client's MC data version, keyed by
+    // UUID, swept at disconnect. Absence = legacy client (no sidecar channel). Consumed
+    // as diagnostics + the C5 Via-guard input.
+    private static final ConcurrentHashMap<java.util.UUID, Integer> CLIENT_DATA_VERSIONS =
+            new ConcurrentHashMap<>();
+
+    /** The client's announced MC data version, or null for a legacy client. */
+    public static Integer clientDataVersion(java.util.UUID uuid) {
+        return CLIENT_DATA_VERSIONS.get(uuid);
+    }
+
     /**
      * The dirty-detection hook body ({@code ChunkSaveDataHook}'s copyOf injection — the
      * choke point vanilla's {@code ChunkMap.save} and Moonrise's replacement save
@@ -248,7 +259,10 @@ public class LSSServerNetworking {
                                   : LSSConstants.PROTOCOL_VERSION,
                         decision.effectiveEnabled(),
                         config.lodDistanceChunks,
-                        config.enableChunkGeneration));
+                        config.enableChunkGeneration,
+                        // v20-only append (the encoder omits it for the echo versions).
+                        net.minecraft.SharedConstants.getCurrentVersion()
+                                .dataVersion().version()));
 
         if (decision.outcome() == HandshakeGate.Outcome.NO_CONSUMER) {
             // Visible to admins via this log.
@@ -281,6 +295,12 @@ public class LSSServerNetworking {
                 HandshakeC2SPayload.TYPE,
                 (payload, context) -> handleHandshake(payload, context.player(), requestService,
                         reply -> ServerPlayNetworking.send(context.player(), reply))
+        );
+
+        ServerPlayNetworking.registerGlobalReceiver(
+                dev.vox.lss.networking.payloads.ClientInfoC2SPayload.TYPE,
+                (payload, context) -> CLIENT_DATA_VERSIONS.put(
+                        context.player().getUUID(), payload.dataVersion())
         );
 
         ServerPlayNetworking.registerGlobalReceiver(
@@ -330,6 +350,9 @@ public class LSSServerNetworking {
                 service.getV16CompatManager().onDisconnect(handler.getPlayer().getUUID());
                 service.getDialectTracker().onDisconnect(handler.getPlayer().getUUID());
             }
+            // Service-independent: the sidecar fact is recorded at the network level
+            // (possibly before any service exists) and must die with the connection.
+            CLIENT_DATA_VERSIONS.remove(handler.getPlayer().getUUID());
         });
     }
 }
