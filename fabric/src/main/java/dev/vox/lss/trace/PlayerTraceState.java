@@ -16,6 +16,9 @@ final class PlayerTraceState {
     private final GapClock gapClock = new GapClock();
     private final FlightRing ring = new FlightRing();
     private ChannelPressureProbe probe;
+    /** The ServerPlayer identity the probe was built for (typed Object to keep this class
+     *  MC-free) — respawn replaces the instance, and the probe must follow (review A-10). */
+    private Object probeOwner;
     private long armedUntilMs;
 
     GapClock gapClock() {
@@ -30,8 +33,13 @@ final class PlayerTraceState {
         return probe;
     }
 
-    void setProbe(ChannelPressureProbe probe) {
+    Object probeOwner() {
+        return probeOwner;
+    }
+
+    void setProbe(ChannelPressureProbe probe, Object owner) {
         this.probe = probe;
+        this.probeOwner = owner;
     }
 
     void armFromEvent(long nowMs) {

@@ -92,13 +92,15 @@ public final class DiagnosticsFormatter {
         }
 
         /** Attach the v16 compat shim's one-line summary (null when the shim is untouched —
-         *  the line is omitted from the rendered diagnostics). */
+         *  the line is omitted from the rendered diagnostics). Passes every component —
+         *  incl. moveTraceLine — through the canonical constructor, so the with-chain
+         *  commutes in every order (review B-3). */
         public DiagData withV16Line(String line) {
             return new DiagData(enabled, lodDist, bwPerPlayer, bwGlobal, uptimeSec, totalSent,
                     totalBytes, cumInMem, cumUtd, cumGen, cumReResolved, cumGraceSkipped,
                     diskCompleted, tickDiagnostics, diskReaderDiagnostics, generationDiagnostics,
                     generationEnabled, genOrderGated, genInversions, bwTotal, bwWindowRate,
-                    players, line, v18Line, xrayLine, wireTotal, colsZstd, colsRaw);
+                    players, line, v18Line, xrayLine, moveTraceLine, wireTotal, colsZstd, colsRaw);
         }
 
         /** Attach the v18 compat rung's one-line summary (null when the rung is untouched —
@@ -108,7 +110,7 @@ public final class DiagnosticsFormatter {
                     totalBytes, cumInMem, cumUtd, cumGen, cumReResolved, cumGraceSkipped,
                     diskCompleted, tickDiagnostics, diskReaderDiagnostics, generationDiagnostics,
                     generationEnabled, genOrderGated, genInversions, bwTotal, bwWindowRate,
-                    players, v16Line, line, xrayLine, wireTotal, colsZstd, colsRaw);
+                    players, v16Line, line, xrayLine, moveTraceLine, wireTotal, colsZstd, colsRaw);
         }
 
         /** Attach the x-ray masking one-line summary (always shown when non-null — the off

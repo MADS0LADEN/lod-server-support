@@ -49,8 +49,9 @@ class MoveRowGoldenTest {
                 65536, 48, 12.5, 3, 0);
         var lssNative = new MoveRow.LssBlock(75, 1, 19, null, 40, 123456789L);
 
-        // flight: moonrise send state, registered native session.
-        rows.add(MoveRow.flight(env, true, lssNative, 100.5, 65.0, -200.25, 21.7, 50, 120,
+        // flight: moonrise send state, registered native session, awaiting_tp captured.
+        rows.add(MoveRow.flight(env, true, lssNative, 100.5, 65.0, -200.25, 21.7, false,
+                50, 120,
                 MoveRow.SendState.moonrise(6, -13, 0x1FFFFFF, 0x1FF, 5, 10, 6, -13, 3, 2),
                 4096));
 
@@ -63,17 +64,17 @@ class MoveRowGoldenTest {
         rows.add(MoveRow.flightRing(env, false, null, ring));
 
         // too_quickly: v16-dialect session; claimed chunk on the vanilla rung; NO
-        // simulated/residual keys exist for this type.
+        // simulated/residual keys exist for this type (and no awaiting_tp — flight-only).
         var lssV16 = new MoveRow.LssBlock(12, 1, 16, "v16", 0, 999L);
         rows.add(MoveRow.tooQuickly(env, true, lssV16,
                 new double[] {100.0, 64.0, -200.0}, new double[] {118.5, 64.0, -200.0},
-                true, 30.2, false, 40, 90, 7, 1, 0.09,
+                true, 30.2, 40, 90, 7, 1, 0.09,
                 MoveRow.SendState.vanilla(7, -13, true)));
 
         // wrongly: entity collision + stop block captured; control-arm (lss null).
         rows.add(MoveRow.collisionEvent(MoveRow.TYPE_WRONGLY, env, false, null,
                 new double[] {100.0, 64.0, -200.0}, new double[] {103.0, 64.0, -200.0},
-                false, 8.1, false, 45, 100,
+                false, 8.1, 45, 100,
                 new double[] {101.4, 64.0, -200.0}, 1.6, 1.6,
                 new double[] {100.0, 64.0, -200.0},
                 null, true, "minecraft:stone",
@@ -85,7 +86,7 @@ class MoveRowGoldenTest {
         var lssV18 = new MoveRow.LssBlock(300, 1, 18, "v18", 5, 42L);
         rows.add(MoveRow.collisionEvent(MoveRow.TYPE_REJECTED, env, true, lssV18,
                 new double[] {0.0, 70.0, 0.0}, new double[] {0.0, 66.0, 0.0},
-                false, 2.0, true, 60, 60,
+                false, 2.0, 60, 60,
                 new double[] {0.0, 68.5, 0.0}, 2.5, 0.0,
                 new double[] {0.0, 70.0, 0.0},
                 false, null, null,

@@ -30,6 +30,13 @@ final class GapClock {
         lastMoveMs = nowMs;
         lastGapMs = gap;
         long bucket = Math.floorDiv(nowMs, BUCKET_MILLIS);
+        if (currentBucket != Long.MIN_VALUE && bucket < currentBucket) {
+            // Backwards wall-clock step (NTP): a stale "future" maximum would otherwise
+            // be re-admitted by the window scan for up to one window (review A-9). Full
+            // reset — the clock re-learns in one bucket.
+            java.util.Arrays.fill(bucketMax, 0);
+            currentBucket = Long.MIN_VALUE;
+        }
         if (bucket != currentBucket) {
             // Zero every bucket the clock skipped over (idle players), then move in.
             long skipped = currentBucket == Long.MIN_VALUE ? BUCKETS : bucket - currentBucket;

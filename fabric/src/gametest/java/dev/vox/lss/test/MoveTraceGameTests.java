@@ -62,7 +62,7 @@ public class MoveTraceGameTests {
                 "both packet-count fields must be present (review F-8): " + row);
         helper.assertTrue(row.get("delta_packets_used").getAsInt() >= 1,
                 "the post-clamp count the check applied must be >= 1: " + row);
-        helper.assertTrue(row.has("expected_dist") && row.has("origin") && row.has("claimed"),
+        helper.assertTrue(row.has("expected_dist_sq") && row.has("origin") && row.has("claimed"),
                 "check-input reconstruction fields must be present: " + row);
         helper.assertTrue(!row.has("simulated") && !row.has("residual"),
                 "too_quickly fires before move() — no simulated stop may exist (U-14): " + row);
@@ -108,6 +108,16 @@ public class MoveTraceGameTests {
                 "the claim ended inside the wall — residual must be substantial: " + row);
         helper.assertTrue(row.has("send_state") && row.has("send_state_claimed"),
                 "send-state for BOTH the simulated-stop and claimed chunks: " + row);
+        // The gametest JVM has no Moonrise — this IS the vanilla rung's end-to-end
+        // coverage (review C-7): rung tag, the U-12 not_pending name, and no
+        // moonrise-rung keys leaking across.
+        var sendState = row.getAsJsonObject("send_state");
+        helper.assertTrue("vanilla".equals(sendState.get("rung").getAsString()),
+                "the gametest server resolves the vanilla rung: " + sendState);
+        helper.assertTrue(sendState.has("not_pending") && sendState.has("anchor"),
+                "the vanilla rung carries not_pending + anchor: " + sendState);
+        helper.assertTrue(!sendState.has("sent_mask_5x5") && !sendState.has("stage"),
+                "moonrise-rung keys must not leak onto the vanilla rung (U-12): " + sendState);
         helper.succeed();
     }
 

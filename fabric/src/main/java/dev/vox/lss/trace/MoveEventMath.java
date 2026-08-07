@@ -39,6 +39,12 @@ public final class MoveEventMath {
         return ((long) chunkZ << 32) | (chunkX & 0xFFFFFFFFL);
     }
 
+    /** Vanilla's burst penalty, replicated exactly (review F-8): a raw delta above 5 is
+     *  PENALIZED to 1 — the value the too-quickly threshold actually multiplied. */
+    public static int usedDeltaPackets(int rawDelta) {
+        return rawDelta > 5 ? 1 : rawDelta;
+    }
+
     /** Block coordinate → chunk coordinate (floor divide by 16). */
     public static int chunkCoord(double blockCoord) {
         return Math.floorDiv((int) Math.floor(blockCoord), 16);

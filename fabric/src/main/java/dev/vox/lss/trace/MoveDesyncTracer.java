@@ -117,6 +117,9 @@ public final class MoveDesyncTracer {
     }
 
     static void activate(MoveDesyncTracer tracer) {
+        // A stop->start in one JVM (integrated relaunch, gametest server) must never
+        // leave two writers appending to the same file (review A-8).
+        deactivate();
         active = tracer;
     }
 
@@ -140,9 +143,13 @@ public final class MoveDesyncTracer {
 
     // ---- emission ----
 
-    /** Non-blocking; called from game threads with a fully rendered row. */
+    /** Non-blocking; called from game threads with a fully rendered row. A null row is
+     *  a failed render (MoveRow contains it) — counted dropped, never thrown (A-6).
+     *  {@code rows=} counts WRITTEN rows (incremented by the writer thread after the
+     *  write), so the diag line cannot report rows the cap or an IO failure discarded
+     *  (review A-5). */
     void emit(String jsonRow) {
-        if (closed || capped) {
+        if (jsonRow == null || closed || capped) {
             dropped.incrementAndGet();
             return;
         }
@@ -151,9 +158,7 @@ public final class MoveDesyncTracer {
             rowsWritten.incrementAndGet();
             return;
         }
-        if (queue.offer(jsonRow)) {
-            rowsWritten.incrementAndGet();
-        } else {
+        if (!queue.offer(jsonRow)) {
             dropped.incrementAndGet();
         }
     }
@@ -207,6 +212,11 @@ public final class MoveDesyncTracer {
     private void writerLoop() {
         BufferedWriter out = null;
         long bytesWritten = 0;
+        // Rotation is once PER BOOT, over any stale .1 (review B-5): an operator who
+        // collected and deleted only the live file must not inherit a cap latch from a
+        // previous boot's leftover .1 — U-13's silent-stop, one restart later. Total
+        // disk stays bounded at 2x rotateBytes regardless.
+        boolean rotatedThisBoot = false;
         try {
             Files.createDirectories(file.getParent());
             bytesWritten = Files.exists(file) ? Files.size(file) : 0;
@@ -216,6 +226,11 @@ public final class MoveDesyncTracer {
                 try {
                     row = queue.poll(250, TimeUnit.MILLISECONDS);
                 } catch (InterruptedException e) {
+                    // A close() escalation or a stray interrupt: latch + drain so emit
+                    // callers and the diag counters stay honest (review A-5) — the
+                    // alternative is a silently dead writer under a healthy diag line.
+                    capped = true;
+                    drainRemainderAsDrops();
                     break;
                 }
                 if (row == null) {
@@ -223,21 +238,24 @@ public final class MoveDesyncTracer {
                     continue;
                 }
                 if (bytesWritten >= rotateBytes) {
-                    if (Files.exists(rotatedFile)) {
-                        // Second rotation point = the 2x total cap. latest.log is where
-                        // the operator greps — a sentinel row inside a file nobody is
-                        // watching is not an alert (U-13).
+                    if (rotatedThisBoot) {
+                        // Second crossing this boot = the 2x total cap. latest.log is
+                        // where the operator greps — a sentinel row inside a file nobody
+                        // is watching is not an alert (U-13).
                         capped = true;
                         LSSLogger.warn("Move trace hit its total size cap ("
                                 + (rotateBytes * 2 / (1 << 20)) + " MiB across " + file.getFileName()
                                 + " + " + rotatedFile.getFileName() + ") — tracing stopped, rows now drop");
                         out.close();
                         out = null;
+                        dropped.incrementAndGet(); // the row that hit the cap
                         drainRemainderAsDrops();
                         break;
                     }
                     out.close();
+                    Files.deleteIfExists(rotatedFile);
                     Files.move(file, rotatedFile);
+                    rotatedThisBoot = true;
                     LSSLogger.warn("Move trace rotated " + file.getFileName() + " -> "
                             + rotatedFile.getFileName() + " at " + (rotateBytes / (1 << 20))
                             + " MiB; one rotation remains before the cap");
@@ -250,18 +268,21 @@ public final class MoveDesyncTracer {
                 // Flush per row: rows are sparse, and a crash must not lose its own event.
                 out.flush();
                 bytesWritten += bytes.length;
+                rowsWritten.incrementAndGet();
             }
             if (out != null && closed) {
                 String row;
                 while ((row = queue.poll()) != null) {
                     out.write(row);
                     out.write('\n');
+                    rowsWritten.incrementAndGet();
                 }
                 out.flush();
             }
         } catch (IOException e) {
             LSSLogger.warn("Move trace writer failed (" + e + ") — tracing stopped, rows now drop");
             capped = true;
+            drainRemainderAsDrops();
         } finally {
             if (out != null) {
                 try {
@@ -283,12 +304,18 @@ public final class MoveDesyncTracer {
         }
     }
 
-    /** SERVER_STOPPING: drain and close (§1.1). */
+    /** SERVER_STOPPING: drain and close (§1.1). Escalates to an interrupt if the
+     *  writer is wedged past the bounded join, so a relaunch in the same JVM can never
+     *  find two live writers on one file (review A-8). */
     void close() {
         closed = true;
         if (writerThread != null) {
             try {
                 writerThread.join(2000);
+                if (writerThread.isAlive()) {
+                    writerThread.interrupt();
+                    writerThread.join(1000);
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }

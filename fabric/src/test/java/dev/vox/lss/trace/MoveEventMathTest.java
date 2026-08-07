@@ -127,4 +127,26 @@ class MoveEventMathTest {
         assertEquals(0, clock.record(5_000));
         assertEquals(0, clock.lastGapMs());
     }
+
+    @Test
+    void gapClockResetsOnABackwardsClockStep() {
+        // Review A-9: an NTP step backwards must not re-admit a stale "future" maximum.
+        var clock = new GapClock();
+        clock.record(100_000);
+        clock.record(102_000);   // 2000 ms gap recorded in a "future" bucket
+        clock.record(90_000);    // clock stepped back 12 s — full reset
+        clock.record(90_050);
+        assertEquals(50, clock.maxGapWindowMs(90_060),
+                "the pre-step 2000 ms gap must not survive the reset");
+    }
+
+    @Test
+    void usedDeltaPacketsReplicatesTheVanillaBurstPenalty() {
+        // Review F-8/C-6: a raw burst above 5 is PENALIZED to 1 — the value the
+        // too-quickly threshold actually multiplied.
+        assertEquals(1, MoveEventMath.usedDeltaPackets(1));
+        assertEquals(5, MoveEventMath.usedDeltaPackets(5));
+        assertEquals(1, MoveEventMath.usedDeltaPackets(6));
+        assertEquals(1, MoveEventMath.usedDeltaPackets(100));
+    }
 }

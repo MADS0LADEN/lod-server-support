@@ -104,21 +104,27 @@ public final class MoveRow {
         row.put("chunky", chunky);
         row.put("rung", rung);
         row.put("config", configSnapshot);
-        return GSON.toJson(row);
+        return render(row);
     }
 
-    /** 1 Hz flight row for armed players (§1.5). */
+    /** 1 Hz flight row for armed players (§1.5). {@code awaitingTp} lives HERE, not on
+     *  event rows: every event site sits inside the not-awaiting branch of
+     *  {@code updateAwaitingTeleport()}, so the field is structurally false there and
+     *  would be confidently wrong (review A-2); on the 1 Hz cadence it can vary. Null =
+     *  could not read (absent). */
     public static String flight(Envelope env, boolean lssPresent, LssBlock lss, double x,
-                                double y, double z, double speed, long gapMs, long gapMax5sMs,
+                                double y, double z, double speed, Boolean awaitingTp,
+                                long gapMs, long gapMax5sMs,
                                 SendState sendState, int loadedChunks) {
         var row = envelope(TYPE_FLIGHT, env, lssPresent, lss);
         row.put("pos", pos(x, y, z));
         row.put("speed", speed);
+        if (awaitingTp != null) row.put("awaiting_tp", awaitingTp);
         row.put("move_gap_ms", gapMs);
         row.put("move_gap_max_5s_ms", gapMax5sMs);
         row.put("send_state", sendState(sendState));
         row.put("loaded_chunks", loadedChunks);
-        return GSON.toJson(row);
+        return render(row);
     }
 
     /** The 5 Hz trailing ring, flushed ahead of an event row (§1.5, Fable F2-4). */
@@ -142,49 +148,52 @@ public final class MoveRow {
             samples.add(s);
         });
         row.put("samples", samples);
-        return GSON.toJson(row);
+        return render(row);
     }
 
     /** {@code too_quickly} event (§1.5): fires BEFORE {@code move()} — no simulated stop,
      *  no residual; the packet-count pair carries both the raw burst and the value the
-     *  check actually applied (review F-8). */
+     *  check actually applied (review F-8). {@code expected_dist_sq} is SQUARED — it is
+     *  the check's own {@code getDeltaMovement().lengthSqr()} input, and a squared
+     *  quantity gets a squared name (U-12/§0.5; review B-6). */
     public static String tooQuickly(Envelope env, boolean lssPresent, LssBlock lss,
                                     double[] origin, double[] claimed, boolean fallFlying,
-                                    double speed, boolean awaitingTp, long gapMs,
+                                    double speed, long gapMs,
                                     long gapMax5sMs, int deltaPackets, int deltaPacketsUsed,
-                                    double expectedDist, SendState claimedState) {
+                                    double expectedDistSq, SendState claimedState) {
         var row = envelope(TYPE_TOO_QUICKLY, env, lssPresent, lss);
-        common(row, origin, claimed, fallFlying, speed, awaitingTp, gapMs, gapMax5sMs);
+        common(row, origin, claimed, fallFlying, speed, gapMs, gapMax5sMs);
         row.put("delta_packets", deltaPackets);
         row.put("delta_packets_used", deltaPacketsUsed);
-        row.put("expected_dist", expectedDist);
+        row.put("expected_dist_sq", expectedDistSq);
         row.put("send_state_claimed", sendState(claimedState));
-        return GSON.toJson(row);
+        return render(row);
     }
 
     /** {@code wrongly} / {@code rejected} events (§1.5). {@code loggedWrongly} is only
      *  meaningful on {@code rejected} rows (pass null on {@code wrongly}); {@code stopBlock}
-     *  null = could not sample (absent). */
+     *  null = could not sample (absent); {@code restored} null = the HEAD capture never ran
+     *  (a partially-applied mixin) — absent, never a zero triple (review C-10). */
     public static String collisionEvent(String type, Envelope env, boolean lssPresent,
                                         LssBlock lss, double[] origin, double[] claimed,
-                                        boolean fallFlying, double speed, boolean awaitingTp,
+                                        boolean fallFlying, double speed,
                                         long gapMs, long gapMax5sMs, double[] simulated,
                                         double residual, double residualH, double[] restored,
                                         Boolean loggedWrongly, Boolean entityCollide,
                                         String stopBlock, SendState simulatedState,
                                         SendState claimedState) {
         var row = envelope(type, env, lssPresent, lss);
-        common(row, origin, claimed, fallFlying, speed, awaitingTp, gapMs, gapMax5sMs);
+        common(row, origin, claimed, fallFlying, speed, gapMs, gapMax5sMs);
         row.put("simulated", pos(simulated[0], simulated[1], simulated[2]));
         row.put("residual", residual);
         row.put("residual_h", residualH);
-        row.put("restored", pos(restored[0], restored[1], restored[2]));
+        if (restored != null) row.put("restored", pos(restored[0], restored[1], restored[2]));
         if (loggedWrongly != null) row.put("logged_wrongly", loggedWrongly);
         if (entityCollide != null) row.put("entity_collide", entityCollide);
         if (stopBlock != null) row.put("stop_block", stopBlock);
         row.put("send_state", sendState(simulatedState));
         row.put("send_state_claimed", sendState(claimedState));
-        return GSON.toJson(row);
+        return render(row);
     }
 
     // ---- shared assembly ----
@@ -224,14 +233,24 @@ public final class MoveRow {
 
     private static void common(LinkedHashMap<String, Object> row, double[] origin,
                                double[] claimed, boolean fallFlying, double speed,
-                               boolean awaitingTp, long gapMs, long gapMax5sMs) {
+                               long gapMs, long gapMax5sMs) {
         row.put("origin", pos(origin[0], origin[1], origin[2]));
         row.put("claimed", pos(claimed[0], claimed[1], claimed[2]));
         row.put("fall_flying", fallFlying);
         row.put("speed", speed);
-        row.put("awaiting_tp", awaitingTp);
         row.put("move_gap_ms", gapMs);
         row.put("move_gap_max_5s_ms", gapMax5sMs);
+    }
+
+    /** All rendering funnels here: a non-renderable row (a NaN/Infinity double reaches
+     *  Gson, any assembly surprise) returns null and the tracer counts it dropped —
+     *  a lost row, never a thrown-into-the-tick-loop exception (review A-6). */
+    private static String render(LinkedHashMap<String, Object> row) {
+        try {
+            return GSON.toJson(row);
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     private static Map<String, Object> sendState(SendState st) {
@@ -244,7 +263,9 @@ public final class MoveRow {
             block.put("sent_r1", st.maskR1());
             if (st.stage() != null) block.put("stage", st.stage());
             if (st.sendRadius() != null) block.put("send_radius", st.sendRadius());
-            if (st.loaderCx() != null) block.put("loader_center", chunk(st.loaderCx(), st.loaderCz()));
+            if (st.loaderCx() != null && st.loaderCz() != null) {
+                block.put("loader_center", chunk(st.loaderCx(), st.loaderCz()));
+            }
             if (st.sendQueue() != null) block.put("send_queue", st.sendQueue());
             if (st.sendHeadStage() != null) block.put("send_head_stage", st.sendHeadStage());
         } else {

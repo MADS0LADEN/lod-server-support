@@ -35,38 +35,52 @@ public final class FabricChannelPressure {
         return new ChannelPressureProbe() {
             @Override
             public long pendingOutboundBytes() {
-                var channel = channelOf(player);
-                if (channel == null) return OutboundBufferMath.NO_SIGNAL;
-                var config = channel.config();
-                return OutboundBufferMath.pendingBytes(
-                        channel.isActive(), channel.isWritable(),
-                        channel.bytesBeforeUnwritable(), channel.bytesBeforeWritable(),
-                        config.getWriteBufferHighWaterMark(), config.getWriteBufferLowWaterMark());
+                // The whole body is inside the catch (review A-3): the class doc's "must
+                // never throw" contract covers the netty reads too, not just resolution —
+                // flushSendQueue's belt catches only Exception, and a LinkageError from a
+                // drifted netty ABI must not take down every later player's flush.
+                try {
+                    var channel = channelOf(player);
+                    if (channel == null) return OutboundBufferMath.NO_SIGNAL;
+                    var config = channel.config();
+                    return OutboundBufferMath.pendingBytes(
+                            channel.isActive(), channel.isWritable(),
+                            channel.bytesBeforeUnwritable(), channel.bytesBeforeWritable(),
+                            config.getWriteBufferHighWaterMark(), config.getWriteBufferLowWaterMark());
+                } catch (Throwable t) {
+                    return OutboundBufferMath.NO_SIGNAL;
+                }
             }
 
             @Override
             public Snapshot snapshot() {
-                var channel = channelOf(player);
-                if (channel == null) {
+                try {
+                    var channel = channelOf(player);
+                    if (channel == null) {
+                        return new Snapshot(OutboundBufferMath.NO_SIGNAL, Snapshot.UNKNOWN_MARK,
+                                Writability.UNKNOWN);
+                    }
+                    var config = channel.config();
+                    // isActive/isWritable each read exactly ONCE per snapshot (review
+                    // A-4): a channel closing between two reads of the same flag must
+                    // not produce a snapshot asserting writability over a dead channel.
+                    boolean active = channel.isActive();
+                    boolean writable = channel.isWritable();
+                    long pending = OutboundBufferMath.pendingBytes(
+                            active, writable,
+                            channel.bytesBeforeUnwritable(), channel.bytesBeforeWritable(),
+                            config.getWriteBufferHighWaterMark(), config.getWriteBufferLowWaterMark());
+                    if (!active) {
+                        // A closed channel has no meaningful writability — and yielding to
+                        // a corpse would strand the queue until disconnect sweeps it.
+                        return new Snapshot(pending, Snapshot.UNKNOWN_MARK, Writability.UNKNOWN);
+                    }
+                    return new Snapshot(pending, config.getWriteBufferHighWaterMark(),
+                            writable ? Writability.WRITABLE : Writability.NOT_WRITABLE);
+                } catch (Throwable t) {
                     return new Snapshot(OutboundBufferMath.NO_SIGNAL, Snapshot.UNKNOWN_MARK,
                             Writability.UNKNOWN);
                 }
-                var config = channel.config();
-                // One coherent read: pending depth, mark, and writability off the same
-                // channel instant, so the yield gate and the diag gauge cannot disagree
-                // about which state they saw.
-                boolean writable = channel.isWritable();
-                long pending = OutboundBufferMath.pendingBytes(
-                        channel.isActive(), writable,
-                        channel.bytesBeforeUnwritable(), channel.bytesBeforeWritable(),
-                        config.getWriteBufferHighWaterMark(), config.getWriteBufferLowWaterMark());
-                if (!channel.isActive()) {
-                    // A closed channel has no meaningful writability — and yielding to a
-                    // corpse would strand the queue until disconnect sweeps it.
-                    return new Snapshot(pending, Snapshot.UNKNOWN_MARK, Writability.UNKNOWN);
-                }
-                return new Snapshot(pending, config.getWriteBufferHighWaterMark(),
-                        writable ? Writability.WRITABLE : Writability.NOT_WRITABLE);
             }
         };
     }

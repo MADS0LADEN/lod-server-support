@@ -27,7 +27,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p><b>Source-regex half</b> (the {@code SaveHookContractTest} idiom — mixin classes
  * refuse classloading under fabric-loader-junit): every inject targets
  * {@code handleMovePlayer} with {@code require = 0}, the slf4j {@code @At}s carry
- * {@code remap = false}, bodies delegate to {@code MoveDesyncHooks}, and the mixins live
+ * {@code remap = false}, every body delegates its logic to {@code MoveDesyncHooks} (plus the trivial
+ * {@code @Unique} captures), and the mixins live
  * in {@code lss-trace.mixins.json} with {@code "required": false} — the F-1 crash-surface
  * fix; a trace mixin in the REQUIRED config would hard-crash tracer-disabled servers on
  * MC drift.
@@ -57,8 +58,8 @@ class MoveTraceHookContractTest {
         while (m.find()) {
             injectBodies.add(m.group(1));
         }
-        assertEquals(4, injectBodies.size(), "exactly four injects: HEAD, too-quickly warn,"
-                + " wrongly warn, rejection teleport");
+        assertEquals(4, injectBodies.size(), "exactly four injects: post-ensure entry,"
+                + " too-quickly warn, wrongly warn, rejection teleport");
 
         for (String body : injectBodies) {
             assertTrue(Pattern.compile("method\\s*=\\s*\"handleMovePlayer\"").matcher(body).find(),
@@ -80,6 +81,46 @@ class MoveTraceHookContractTest {
         assertEquals(4, count(source, "MoveDesyncHooks\\.on"),
                 "every body delegates to MoveDesyncHooks (logic in a mixin is untestable logic)");
         assertTrue(source.contains("@Mixin(ServerGamePacketListenerImpl.class)"));
+
+        // The entry hook must NOT be @At("HEAD"): a HEAD inject runs on the netty event
+        // loop before ensureRunningOnSameThread's re-dispatch throw (review A-1) — it is
+        // anchored AFTER that call instead.
+        assertEquals(0, count(source, "@At\\(\\s*\"HEAD\"\\s*\\)"),
+                "no HEAD inject — it would run on the netty thread (review A-1)");
+        assertTrue(source.contains(
+                        "target = \"Lnet/minecraft/network/protocol/PacketUtils;ensureRunningOnSameThread("
+                        + "Lnet/minecraft/network/protocol/Packet;Lnet/minecraft/network/PacketListener;"
+                        + "Lnet/minecraft/server/level/ServerLevel;)V\"")
+                        && source.contains("shift = At.Shift.AFTER"),
+                "the entry hook anchors AFTER ensureRunningOnSameThread");
+
+        // Descriptor ASSIGNMENT, not just presence (review C-4): the Object[] descriptor
+        // belongs to the too-quickly body, the single-Object to the wrongly body — a swap
+        // would mislabel every event row.
+        String tooQuicklyBody = injectBodyOf(injectBodies, "lss\\$onMovedTooQuickly", source);
+        String wronglyBody = injectBodyOf(injectBodies, "lss\\$onMovedWrongly", source);
+        String rejectedBody = injectBodyOf(injectBodies, "lss\\$onMoveRejected", source);
+        assertTrue(tooQuicklyBody.contains("warn(Ljava/lang/String;[Ljava/lang/Object;)V"),
+                "too-quickly targets the Object[] warn descriptor");
+        assertTrue(wronglyBody.contains("warn(Ljava/lang/String;Ljava/lang/Object;)V")
+                        && !wronglyBody.contains("[Ljava/lang/Object;"),
+                "wrongly targets the single-Object warn descriptor");
+        assertTrue(Pattern.compile("ordinal\\s*=\\s*0").matcher(rejectedBody).find(),
+                "the sliced teleport pins ordinal = 0 within the slice");
+    }
+
+    /** The inject body whose following handler method carries the given name. */
+    private static String injectBodyOf(List<String> bodies, String handlerRegex, String source) {
+        Matcher m = INJECT.matcher(source);
+        int i = 0;
+        while (m.find()) {
+            String tail = source.substring(m.end(), Math.min(source.length(), m.end() + 250));
+            if (Pattern.compile(handlerRegex).matcher(tail).find()) {
+                return bodies.get(i);
+            }
+            i++;
+        }
+        throw new AssertionError("no inject found for handler " + handlerRegex);
     }
 
     @Test
@@ -132,6 +173,51 @@ class MoveTraceHookContractTest {
                         + " Order: teleports=" + teleports + " wrongly=" + wrongly);
     }
 
+    @Test
+    void ensureRunningOnSameThreadIsTheFirstInvoke() throws Exception {
+        // The A-1 premise: everything before ensureRunningOnSameThread runs on the netty
+        // event loop too. The entry hook anchors AFTER it; if vanilla ever hoists another
+        // call above it, the anchor must be re-verified.
+        MethodNode method = loadHandleMovePlayer();
+        var beforeEnsure = new ArrayList<String>();
+        int ensureCount = 0;
+        boolean seenEnsure = false;
+        for (AbstractInsnNode insn : method.instructions) {
+            if (insn instanceof MethodInsnNode call) {
+                if (call.name.equals("ensureRunningOnSameThread")) {
+                    ensureCount++;
+                    seenEnsure = true;
+                } else if (!seenEnsure) {
+                    beforeEnsure.add(call.name);
+                }
+            }
+        }
+        assertEquals(1, ensureCount, "exactly one ensureRunningOnSameThread INVOKE");
+        // Argument plumbing (this.player.level()) legitimately precedes the call; any
+        // OTHER preceding INVOKE means vanilla hoisted real work above the thread gate
+        // and the anchor's premise must be re-verified.
+        assertTrue(beforeEnsure.stream().allMatch(n -> n.equals("level")),
+                "only the level() argument getter may precede ensureRunningOnSameThread —"
+                        + " the entry hook's thread-safety anchor (review A-1); saw: " + beforeEnsure);
+    }
+
+    @Test
+    void ringFlushPrecedesEventEmissionInBothEventBodies() throws Exception {
+        // The v2.1 headline mechanism (Fable F2-4): the 5 Hz ring must flush AHEAD of the
+        // event row, or the §1.6 REFUTE arm is structurally unsatisfiable (review C-3).
+        String source = Files.readString(hooksSource());
+        for (String method : new String[] {"onMovedTooQuickly", "emitCollisionEvent"}) {
+            int start = source.indexOf("static void " + method);
+            assertTrue(start >= 0, method + " must exist in MoveDesyncHooks");
+            int end = source.indexOf("\n    }", start);
+            String body = source.substring(start, end);
+            int flush = body.indexOf("flushRingBeforeEvent(");
+            int emit = body.indexOf("tracer.emit(");
+            assertTrue(flush >= 0 && emit >= 0 && flush < emit,
+                    method + " must flush the ring BEFORE emitting the event row");
+        }
+    }
+
     private static MethodNode loadHandleMovePlayer() throws Exception {
         try (InputStream in = ServerGamePacketListenerImpl.class.getResourceAsStream(
                 "/net/minecraft/server/network/ServerGamePacketListenerImpl.class")) {
@@ -150,6 +236,12 @@ class MoveTraceHookContractTest {
         int n = 0;
         while (m.find()) n++;
         return n;
+    }
+
+    private static Path hooksSource() {
+        var moduleRelative = Path.of("src/main/java/dev/vox/lss/trace/MoveDesyncHooks.java");
+        if (Files.exists(moduleRelative)) return moduleRelative;
+        return Path.of("fabric").resolve(moduleRelative);
     }
 
     /** Survives both the Gradle CWD (module dir) and an IDE repo-root CWD. */

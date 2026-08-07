@@ -60,37 +60,48 @@ public final class PaperChannelPressure {
         return new ChannelPressureProbe() {
             @Override
             public long pendingOutboundBytes() {
-                var channel = channelOf(player);
-                if (channel == null) return OutboundBufferMath.NO_SIGNAL;
-                var config = channel.config();
-                return OutboundBufferMath.pendingBytes(
-                        channel.isActive(), channel.isWritable(),
-                        channel.bytesBeforeUnwritable(), channel.bytesBeforeWritable(),
-                        config.getWriteBufferHighWaterMark(), config.getWriteBufferLowWaterMark());
+                // Whole body inside the catch (review A-3), matching the Fabric twin.
+                try {
+                    var channel = channelOf(player);
+                    if (channel == null) return OutboundBufferMath.NO_SIGNAL;
+                    var config = channel.config();
+                    return OutboundBufferMath.pendingBytes(
+                            channel.isActive(), channel.isWritable(),
+                            channel.bytesBeforeUnwritable(), channel.bytesBeforeWritable(),
+                            config.getWriteBufferHighWaterMark(), config.getWriteBufferLowWaterMark());
+                } catch (Throwable t) {
+                    return OutboundBufferMath.NO_SIGNAL;
+                }
             }
 
             @Override
             public Snapshot snapshot() {
-                var channel = channelOf(player);
-                if (channel == null) {
+                try {
+                    var channel = channelOf(player);
+                    if (channel == null) {
+                        return new Snapshot(OutboundBufferMath.NO_SIGNAL, Snapshot.UNKNOWN_MARK,
+                                Writability.UNKNOWN);
+                    }
+                    var config = channel.config();
+                    // isActive/isWritable each read exactly ONCE per snapshot (review
+                    // A-4), matching the Fabric twin.
+                    boolean active = channel.isActive();
+                    boolean writable = channel.isWritable();
+                    long pending = OutboundBufferMath.pendingBytes(
+                            active, writable,
+                            channel.bytesBeforeUnwritable(), channel.bytesBeforeWritable(),
+                            config.getWriteBufferHighWaterMark(), config.getWriteBufferLowWaterMark());
+                    if (!active) {
+                        // A closed channel has no meaningful writability — yielding to a
+                        // corpse would strand the queue until disconnect sweeps it.
+                        return new Snapshot(pending, Snapshot.UNKNOWN_MARK, Writability.UNKNOWN);
+                    }
+                    return new Snapshot(pending, config.getWriteBufferHighWaterMark(),
+                            writable ? Writability.WRITABLE : Writability.NOT_WRITABLE);
+                } catch (Throwable t) {
                     return new Snapshot(OutboundBufferMath.NO_SIGNAL, Snapshot.UNKNOWN_MARK,
                             Writability.UNKNOWN);
                 }
-                var config = channel.config();
-                // One coherent read — depth, mark, and writability off the same channel
-                // instant, matching the Fabric twin.
-                boolean writable = channel.isWritable();
-                long pending = OutboundBufferMath.pendingBytes(
-                        channel.isActive(), writable,
-                        channel.bytesBeforeUnwritable(), channel.bytesBeforeWritable(),
-                        config.getWriteBufferHighWaterMark(), config.getWriteBufferLowWaterMark());
-                if (!channel.isActive()) {
-                    // A closed channel has no meaningful writability — yielding to a
-                    // corpse would strand the queue until disconnect sweeps it.
-                    return new Snapshot(pending, Snapshot.UNKNOWN_MARK, Writability.UNKNOWN);
-                }
-                return new Snapshot(pending, config.getWriteBufferHighWaterMark(),
-                        writable ? Writability.WRITABLE : Writability.NOT_WRITABLE);
             }
         };
     }

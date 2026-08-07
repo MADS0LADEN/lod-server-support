@@ -39,10 +39,26 @@ BOOT_KEYS = ["v", "type", "bootId", "wallMs", "tz_offset_min", "lss_version",
              "mc_version", "moonrise", "c2me", "chunky", "rung", "config"]
 LSS_KEYS = ["registered", "since_s", "caps", "proto", "send_queue", "bw_total"]
 
-EVENT_COMMON_KEYS = ["origin", "claimed", "fall_flying", "speed", "awaiting_tp",
+EVENT_COMMON_KEYS = ["origin", "claimed", "fall_flying", "speed",
                      "move_gap_ms", "move_gap_max_5s_ms"]
-COLLISION_KEYS = ["simulated", "residual", "residual_h", "restored",
-                  "send_state", "send_state_claimed"]
+# `restored` is OPTIONAL on collision events: it comes from the mixin's start capture,
+# and a partially-applied config leaves it absent rather than a zero triple (C-10).
+COLLISION_REQUIRED_KEYS = ["simulated", "residual", "residual_h",
+                           "send_state", "send_state_claimed"]
+# Explicitly named (not a slice of another list — C-9a): the keys a too_quickly row can
+# NEVER carry — no simulated stop exists before move(), and the wrongly/rejected-only
+# discriminators are meaningless there.
+TOO_QUICKLY_FORBIDDEN_KEYS = ["simulated", "residual", "residual_h", "restored",
+                              "send_state", "logged_wrongly", "entity_collide",
+                              "stop_block", "awaiting_tp"]
+# awaiting_tp lives on flight rows only (optional bool): every event site is inside the
+# not-awaiting branch of updateAwaitingTeleport, so the field is structurally false
+# there — confidently wrong, the one §0.5 sin (A-2).
+EVENT_FORBIDDEN_KEYS = ["awaiting_tp"]
+# The boot-row config keys the E4/§4.5 analysis partitions on — a boot row without them
+# is unanalyzable (C-9c).
+BOOT_CONFIG_REQUIRED_KEYS = ["bytesPerSecondLimitPerPlayer", "bytesPerSecondLimitGlobal",
+                             "lodDistanceChunks"]
 
 # Wall-clock NTP nudges must not red a whole week's collection; real ordering bugs
 # (queue reorder, cross-thread emission) show up far above this.
@@ -185,8 +201,14 @@ def check_row(row, line_no, v):
         _require(row, BOOT_KEYS, line_no, v)
         if row.get("rung") is not None and row.get("rung") not in RUNGS:
             v.add(line_no, f"boot rung '{row.get('rung')}' is not one of {sorted(RUNGS)}")
-        if "config" in row and not isinstance(row["config"], dict):
+        config = row.get("config")
+        if "config" in row and not isinstance(config, dict):
             v.add(line_no, "boot 'config' must be an object")
+        elif isinstance(config, dict):
+            for k in BOOT_CONFIG_REQUIRED_KEYS:
+                if k not in config:
+                    v.add(line_no, f"boot config missing partition key '{k}' "
+                                   "(the E4/yield analysis partitions on it)")
         return
 
     _require(row, ENVELOPE_KEYS, line_no, v)
@@ -196,22 +218,27 @@ def check_row(row, line_no, v):
         _require(row, ["pos", "speed", "move_gap_ms", "move_gap_max_5s_ms", "send_state",
                        "loaded_chunks"], line_no, v)
         _check_pos(row, "pos", line_no, v)
+        if "awaiting_tp" in row and not isinstance(row["awaiting_tp"], bool):
+            v.add(line_no, "flight 'awaiting_tp' must be a bool when present")
         if "send_state" in row:
             check_send_state(row["send_state"], line_no, v, "send_state")
     elif rtype == "flight_ring":
         check_ring_samples(row, line_no, v)
     elif rtype == "too_quickly":
         _require(row, EVENT_COMMON_KEYS + ["delta_packets", "delta_packets_used",
-                                           "expected_dist", "send_state_claimed"], line_no, v)
-        # too_quickly returns BEFORE move() runs — these fields cannot exist (U-14).
-        _forbid(row, COLLISION_KEYS[:5], line_no, v,
-                "no simulated stop exists before move() runs")
+                                           "expected_dist_sq", "send_state_claimed"], line_no, v)
+        # too_quickly returns BEFORE move() runs — these fields cannot exist (U-14),
+        # and awaiting_tp is flight-only (A-2).
+        _forbid(row, TOO_QUICKLY_FORBIDDEN_KEYS, line_no, v,
+                "no simulated stop exists before move() runs / flight-only field")
         for key in ("origin", "claimed"):
             _check_pos(row, key, line_no, v)
         if "send_state_claimed" in row:
             check_send_state(row["send_state_claimed"], line_no, v, "send_state_claimed")
     elif rtype in ("wrongly", "rejected"):
-        _require(row, EVENT_COMMON_KEYS + COLLISION_KEYS, line_no, v)
+        _require(row, EVENT_COMMON_KEYS + COLLISION_REQUIRED_KEYS, line_no, v)
+        _forbid(row, EVENT_FORBIDDEN_KEYS, line_no, v,
+                "awaiting_tp is structurally false at event sites — flight-only (A-2)")
         for key in ("origin", "claimed", "simulated", "restored"):
             _check_pos(row, key, line_no, v)
         for key in ("send_state", "send_state_claimed"):
@@ -347,6 +374,8 @@ def selftest():
     # Boot.
     hits("boot missing rung", _check_one(doctored(by_type["boot"],
          lambda r: r.pop("rung"))), "missing required key 'rung'")
+    hits("boot config missing partition key", _check_one(doctored(by_type["boot"],
+         lambda r: r["config"].pop("lodDistanceChunks"))), "partition key")
 
     # Send-state rung consistency (U-12).
     hits("mask on vanilla rung", _check_one(doctored(by_type["too_quickly"],
@@ -366,14 +395,28 @@ def selftest():
     # Per-type schema split (U-14).
     hits("simulated on too_quickly", _check_one(doctored(by_type["too_quickly"],
          lambda r: r.update(simulated=[0, 0, 0]))), "must not carry 'simulated'")
+    hits("stop_block on too_quickly", _check_one(doctored(by_type["too_quickly"],
+         lambda r: r.update(stop_block="minecraft:stone"))), "must not carry 'stop_block'")
     hits("rejected missing logged_wrongly", _check_one(doctored(by_type["rejected"],
          lambda r: r.pop("logged_wrongly"))), "missing 'logged_wrongly'")
     hits("logged_wrongly on wrongly", _check_one(doctored(by_type["wrongly"],
          lambda r: r.update(logged_wrongly=True))), "must not carry 'logged_wrongly'")
     hits("wrongly missing residual", _check_one(doctored(by_type["wrongly"],
          lambda r: r.pop("residual"))), "missing required key 'residual'")
+    clean("restored optional on collision events (C-10)", _check_one(doctored(
+        by_type["wrongly"], lambda r: r.pop("restored"))))
     hits("bad pos triple", _check_one(doctored(by_type["flight"],
          lambda r: r.update(pos=[1, 2]))), "number triple")
+    hits("expected_dist_sq renamed (B-6)", _check_one(doctored(by_type["too_quickly"],
+         lambda r: (r.pop("expected_dist_sq"), r.update(expected_dist=0.09)))),
+         "missing required key 'expected_dist_sq'")
+    # awaiting_tp: flight-only (A-2).
+    hits("awaiting_tp on an event row", _check_one(doctored(by_type["rejected"],
+         lambda r: r.update(awaiting_tp=False))), "must not carry 'awaiting_tp'")
+    clean("awaiting_tp absent on flight is legal", _check_one(doctored(by_type["flight"],
+          lambda r: r.pop("awaiting_tp"))))
+    hits("awaiting_tp wrong type on flight", _check_one(doctored(by_type["flight"],
+         lambda r: r.update(awaiting_tp=1))), "must be a bool")
 
     # Ring samples.
     hits("ring sample partial send-state", _check_one(doctored(by_type["flight_ring"],

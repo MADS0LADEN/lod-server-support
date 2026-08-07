@@ -7,7 +7,7 @@ package ca.spottedleaf.moonrise.patches.chunk_system.player;
  * 2026-08-06. The full five-method shape is kept (the {@code MoonriseReadCompatTest}
  * decoy culture) so a resolver regression to "any method on the interface" reds here.
  *
- * <p>Drives {@code ChunkSendStateCompatTest}; the production resolver takes the loader
+ * <p>Drives {@code MoonriseSendStateCompatTest}; the production resolver takes the loader
  * class from THIS method's return type, never from a hardcoded name.
  */
 public interface ChunkSystemServerPlayer {

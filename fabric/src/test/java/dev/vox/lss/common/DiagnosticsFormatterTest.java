@@ -297,6 +297,18 @@ class DiagnosticsFormatterTest {
         // The with-chain must commute (the copy constructors do not clobber each other).
         assertEquals(line, all.get(indexOfPrefix(all, "MoveTrace:")));
         assertEquals("V18Compat: clients=2, started=3", all.get(indexOfPrefix(all, "V18Compat:")));
+
+        // REVERSED order — MoveTrace attached FIRST, then v16/v18/xray: the older with*
+        // methods must route through the canonical constructor and preserve it (review
+        // B-3: they silently dropped it via the compat-ctor overload before).
+        var reversed = DiagnosticsFormatter.formatDiagnostics(
+                d.withMoveTraceLine(line)
+                        .withV16Line("V16Compat: clients=1")
+                        .withV18Line("V18Compat: clients=2, started=3")
+                        .withXrayLine("Xray: active=config, masked_sections=0"));
+        assertEquals(line, reversed.get(indexOfPrefix(reversed, "MoveTrace:")),
+                "withV16/V18/XrayLine must not clobber an earlier moveTraceLine");
+        assertEquals(all, reversed, "the with-chain must fully commute");
     }
 
     private static int indexOfPrefix(List<String> lines, String prefix) {

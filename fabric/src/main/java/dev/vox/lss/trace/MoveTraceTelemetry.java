@@ -34,11 +34,14 @@ final class MoveTraceTelemetry {
     private MoveTraceTelemetry() {}
 
     static PlayerTraceState stateFor(ServerPlayer player) {
-        return STATES.computeIfAbsent(player.getUUID(), uuid -> {
-            var state = new PlayerTraceState();
-            state.setProbe(FabricChannelPressure.forPlayer(player));
-            return state;
-        });
+        var state = STATES.computeIfAbsent(player.getUUID(), uuid -> new PlayerTraceState());
+        // Rebind on identity change: PlayerList.respawn replaces the ServerPlayer with
+        // no DISCONNECT event, and a probe bound to the dead instance would pin it for
+        // the rest of the session (review A-10).
+        if (state.probeOwner() != player) {
+            state.setProbe(FabricChannelPressure.forPlayer(player), player);
+        }
+        return state;
     }
 
     static void onMovePacket(ServerPlayer player) {
@@ -74,27 +77,46 @@ final class MoveTraceTelemetry {
             if (!ringTick && !flightTick) return;
             long now = System.currentTimeMillis();
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-                var state = stateFor(player);
-                if (!isArmed(player, state, now)) continue;
-                double speed = speedBlocksPerSecond(player);
-                long obuf = probeRead(state);
-                int cx = MoveEventMath.chunkCoord(player.getX());
-                int cz = MoveEventMath.chunkCoord(player.getZ());
-                var sendState = ChunkSendState.capture(player, cx, cz);
-                if (ringTick) {
-                    ringSample(state, now, player, speed, obuf, sendState);
-                }
-                if (flightTick) {
-                    tracer.emit(MoveRow.flight(envelope(tracer, player, now),
-                            lssRegistered(player), lssBlock(player),
-                            player.getX(), player.getY(), player.getZ(), speed,
-                            state.gapClock().lastGapMs(), state.gapClock().maxGapWindowMs(now),
-                            sendState,
-                            player.level().getChunkSource().getLoadedChunksCount()));
+                // Containment is PER PLAYER: one player with a pathological state (a
+                // NaN delta-movement, a half-dead connection) must not abort every
+                // later player's telemetry this tick (review A-6).
+                try {
+                    var state = stateFor(player);
+                    if (!isArmed(player, state, now)) continue;
+                    double speed = speedBlocksPerSecond(player);
+                    long obuf = probeRead(state);
+                    int cx = MoveEventMath.chunkCoord(player.getX());
+                    int cz = MoveEventMath.chunkCoord(player.getZ());
+                    var sendState = ChunkSendState.capture(player, cx, cz);
+                    if (ringTick) {
+                        ringSample(state, now, player, speed, obuf, sendState);
+                    }
+                    if (flightTick) {
+                        tracer.emit(MoveRow.flight(envelope(tracer, player, now),
+                                lssRegistered(player), lssBlock(player),
+                                player.getX(), player.getY(), player.getZ(), speed,
+                                awaitingTeleportOrNull(player),
+                                state.gapClock().lastGapMs(), state.gapClock().maxGapWindowMs(now),
+                                sendState,
+                                player.level().getChunkSource().getLoadedChunksCount()));
+                    }
+                } catch (Throwable t) {
+                    swallowed(t);
                 }
             }
         } catch (Throwable t) {
             swallowed(t);
+        }
+    }
+
+    /** {@code awaiting_tp} belongs on flight rows, where it can vary — every event site
+     *  is structurally not-awaiting (review A-2). Null = accessor unavailable (absent). */
+    private static Boolean awaitingTeleportOrNull(ServerPlayer player) {
+        try {
+            var acc = (dev.vox.lss.mixin.trace.AccessorServerGamePacketListener) player.connection;
+            return acc.lss$awaitingPositionFromClient() != null;
+        } catch (Throwable t) {
+            return null;
         }
     }
 
