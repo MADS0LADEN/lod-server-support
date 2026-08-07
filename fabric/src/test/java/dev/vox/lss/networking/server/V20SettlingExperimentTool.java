@@ -148,8 +148,8 @@ class V20SettlingExperimentTool {
                     byte[] v20Wire;
                     try {
                         v20Wire = NativeToV20Translator.translate(nativeWire,
-                                id -> blockIdentities[id],
-                                id -> biomeTable.identities()[id]);
+                                IdentityTables::blockIdentityFor,
+                                biomeTable::identityFor);
                     } catch (RuntimeException e) {
                         translateFailures++;
                         continue;
@@ -177,6 +177,14 @@ class V20SettlingExperimentTool {
         }
 
         assumeTrue(columns > 0, "corpus produced no columns");
+        // Self-invalidating gate (review MINOR 9): a failing column is EXCLUDED from
+        // the size series, so a run with failures would confidently report numbers
+        // computed over exactly the columns that happened to work. §8 gates every
+        // published size claim on this run — it must not under-report quietly.
+        if (translateFailures + reparseFailures > 0) {
+            throw new AssertionError("size figures are invalid: " + translateFailures
+                    + " translate + " + reparseFailures + " reparse failures were excluded");
+        }
         var report = new StringBuilder();
         report.append("{\n");
         report.append("  \"columns\": ").append(columns)

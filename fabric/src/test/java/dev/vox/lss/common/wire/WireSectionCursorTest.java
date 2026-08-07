@@ -195,6 +195,82 @@ class WireSectionCursorTest {
                 () -> WireSectionCursor.parse(empty.toByteArray(), Layout.V20));
     }
 
+    /** MAJOR 1: v20 palette values are dictionary references — the cursor owns the
+     *  range check on BOTH directions, so no consumer can index out of the dict. */
+    @Test
+    void v20PaletteIndicesAreRangeCheckedAgainstTheDictionaryBothDirections() {
+        // Parse: single-value index == dictSize (one past the end).
+        var out = new WireBytes.Writer(64);
+        out.writeVarInt(1).writeUtf("minecraft:stone")
+                .writeVarInt(1).writeByte(0).writeShort(0).writeShort(0)
+                .writeByte(0).writeVarInt(1);
+        assertThrows(WireFormatException.class,
+                () -> WireSectionCursor.parse(out.toByteArray(), Layout.V20));
+        // Parse: negative palette value (5-byte VarInt -1).
+        var neg = new WireBytes.Writer(64);
+        neg.writeVarInt(1).writeUtf("minecraft:stone")
+                .writeVarInt(1).writeByte(0).writeShort(0).writeShort(0)
+                .writeByte(0).writeVarInt(-1);
+        assertThrows(WireFormatException.class,
+                () -> WireSectionCursor.parse(neg.toByteArray(), Layout.V20));
+        // Emit: an index outside the dictionary must be refused, not shipped.
+        var single = new WireContainer(0, new int[] { 5 }, new long[0]);
+        var ok = new WireContainer(0, new int[] { 0 }, new long[0]);
+        assertThrows(WireFormatException.class, () -> WireSectionCursor.emit(
+                new WireColumn(List.of("minecraft:stone"),
+                        List.of(new WireSection(0, 1, 0, single, ok, null, null))), Layout.V20));
+        // Emit: negative native palette value refused too.
+        var negNative = new WireContainer(0, new int[] { -1 }, new long[0]);
+        assertThrows(WireFormatException.class, () -> WireSectionCursor.emit(
+                new WireColumn(List.of(),
+                        List.of(new WireSection(0, 1, 0, negNative, ok, null, null))), Layout.NATIVE));
+    }
+
+    /** MAJOR 4/5: block containers at bits 1-3 have no vanilla shape (native) and
+     *  violate the §2.1 floor (v20) — illegal on BOTH parse and emit, both layouts. */
+    @Test
+    void blockWidths1To3AreRejectedOnBothLayoutsAndBothDirections() {
+        for (int bits = 1; bits <= 3; bits++) {
+            var nat = new WireBytes.Writer(64);
+            nat.writeVarInt(1).writeByte(0).writeShort(0).writeShort(0).writeByte(bits);
+            byte[] natBytes = nat.toByteArray();
+            assertThrows(WireFormatException.class,
+                    () -> WireSectionCursor.parse(natBytes, Layout.NATIVE), "native parse bits " + bits);
+            var v20 = new WireBytes.Writer(64);
+            v20.writeVarInt(1).writeUtf("minecraft:stone")
+                    .writeVarInt(1).writeByte(0).writeShort(0).writeShort(0).writeByte(bits);
+            byte[] v20Bytes = v20.toByteArray();
+            assertThrows(WireFormatException.class,
+                    () -> WireSectionCursor.parse(v20Bytes, Layout.V20), "v20 parse bits " + bits);
+
+            var badBlocks = new WireContainer(bits, new int[] { 0, 1 },
+                    new long[(4096 + (64 / bits) - 1) / (64 / bits)]);
+            var okBiome = new WireContainer(0, new int[] { 0 }, new long[0]);
+            assertThrows(WireFormatException.class, () -> WireSectionCursor.emit(
+                    new WireColumn(List.of(), List.of(
+                            new WireSection(0, 1, 0, badBlocks, okBiome, null, null))), Layout.NATIVE),
+                    "native emit bits " + bits);
+        }
+        // Biomes keep their 1-3-bit linear shapes — bits 2 biomes must stay legal.
+        var biome2 = new WireContainer(2, new int[] { 0, 1, 2 }, new long[2]);
+        var single = new WireContainer(0, new int[] { 0 }, new long[0]);
+        byte[] ok = WireSectionCursor.emit(new WireColumn(List.of(),
+                List.of(new WireSection(0, 1, 0, single, biome2, null, null))), Layout.NATIVE);
+        assertEquals(2, WireSectionCursor.parse(ok, Layout.NATIVE).sections().get(0).biomes().bits());
+    }
+
+    /** Emit refuses out-of-domain scalar fields instead of silently truncating them. */
+    @Test
+    void emitRejectsOutOfRangeSectionYAndCounts() {
+        var single = new WireContainer(0, new int[] { 0 }, new long[0]);
+        assertThrows(WireFormatException.class, () -> WireSectionCursor.emit(
+                new WireColumn(List.of(), List.of(
+                        new WireSection(300, 1, 0, single, single, null, null))), Layout.NATIVE));
+        assertThrows(WireFormatException.class, () -> WireSectionCursor.emit(
+                new WireColumn(List.of(), List.of(
+                        new WireSection(0, 70000, 0, single, single, null, null))), Layout.NATIVE));
+    }
+
     @Test
     void emitRefusesMalformedColumns() {
         var direct = new WireContainer(15, null, filledData(4096, 15, 1));

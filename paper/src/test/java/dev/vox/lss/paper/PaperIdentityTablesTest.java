@@ -64,4 +64,35 @@ class PaperIdentityTablesTest {
             assertEquals(id, inverse.get(table[id]), "inverse of " + table[id]);
         }
     }
+
+    @Test
+    void boundsCheckedLookupReturnsNullOutsideTheTable() {
+        assertEquals(null, PaperIdentityTables.blockIdentityFor(-1));
+        assertEquals(null, PaperIdentityTables.blockIdentityFor(Integer.MAX_VALUE));
+        assertNotNull(PaperIdentityTables.blockIdentityFor(0));
+    }
+
+    @Test
+    void biomeTableCoversTheRegistryBothDirections() {
+        var provider = net.minecraft.data.registries.VanillaRegistries.createLookup();
+        var src = provider.lookupOrThrow(net.minecraft.core.registries.Registries.BIOME);
+        var registry = new net.minecraft.core.MappedRegistry<>(
+                net.minecraft.core.registries.Registries.BIOME,
+                com.mojang.serialization.Lifecycle.stable());
+        src.listElements().forEach(ref -> registry.register(ref.key(), ref.value(),
+                net.minecraft.core.RegistrationInfo.BUILT_IN));
+        registry.freeze();
+
+        var biomeTable = PaperIdentityTables.biomeTable(registry);
+        assertEquals(registry.size(), biomeTable.identities().length);
+        assertTrue(biomeTable.identities().length > 50, "vanilla has ~65 biomes");
+        for (int id = 0; id < biomeTable.identities().length; id++) {
+            String identity = biomeTable.identities()[id];
+            assertNotNull(identity, "hole at biome id " + id);
+            IdentityCodec.validate(identity);
+            assertEquals(id, biomeTable.idsByIdentity().get(identity));
+        }
+        assertTrue(biomeTable.idsByIdentity().containsKey("minecraft:plains"));
+        assertEquals(null, biomeTable.identityFor(-1));
+    }
 }

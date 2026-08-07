@@ -44,6 +44,11 @@ public final class IdentityCodec {
             var sb = new StringBuilder(name).append('[');
             boolean first = true;
             for (var e : sorted.entrySet()) {
+                if (e.getKey() == null || e.getValue() == null) {
+                    // StringBuilder would render a null as the literal "null", which
+                    // then VALIDATES — a silent-corruption path in a fail-loud class.
+                    throw new IllegalArgumentException("null property key/value for " + name);
+                }
                 if (!first) {
                     sb.append(',');
                 }

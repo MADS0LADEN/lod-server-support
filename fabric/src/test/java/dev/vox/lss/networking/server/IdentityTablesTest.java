@@ -84,6 +84,13 @@ class IdentityTablesTest {
     }
 
     @Test
+    void boundsCheckedLookupReturnsNullOutsideTheTable() {
+        assertEquals(null, IdentityTables.blockIdentityFor(-1));
+        assertEquals(null, IdentityTables.blockIdentityFor(Integer.MAX_VALUE));
+        assertNotNull(IdentityTables.blockIdentityFor(0));
+    }
+
+    @Test
     void biomeTableCoversTheRegistryBothDirections() {
         var biomeTable = IdentityTables.biomeTable(BIOMES);
         assertEquals(BIOMES.size(), biomeTable.identities().length);

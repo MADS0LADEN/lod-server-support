@@ -68,6 +68,18 @@ public final class PaperIdentityTables {
         return table;
     }
 
+    /**
+     * Bounds-checked lookup for wire-derived ids — the shape every consumer should
+     * use (a bare {@code table[id]} turns a corrupt palette id into
+     * {@code ArrayIndexOutOfBoundsException} instead of the translator's pinned
+     * loud failure). Returns null for an unknown id; {@code NativeToV20Translator}
+     * converts null into {@code IllegalArgumentException}.
+     */
+    public static String blockIdentityFor(int globalId) {
+        String[] table = blockIdentities();
+        return globalId >= 0 && globalId < table.length ? table[globalId] : null;
+    }
+
     /** The canonical identity of one block state — name + ALL properties, sorted. */
     public static String canonicalOf(BlockState state) {
         String name = BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString();
@@ -83,7 +95,12 @@ public final class PaperIdentityTables {
     }
 
     /** Both directions for one biome registry (dynamic — per RegistryAccess). */
-    public record BiomeTable(String[] identities, Map<String, Integer> idsByIdentity) {}
+    public record BiomeTable(String[] identities, Map<String, Integer> idsByIdentity) {
+        /** Bounds-checked lookup for wire-derived ids (see {@code blockIdentityFor}). */
+        public String identityFor(int id) {
+            return id >= 0 && id < identities.length ? identities[id] : null;
+        }
+    }
 
     public static BiomeTable biomeTable(Registry<Biome> biomes) {
         var identities = new String[biomes.size()];
@@ -92,7 +109,10 @@ public final class PaperIdentityTables {
             int id = biomes.getId(biome);
             var key = biomes.getKey(biome);
             if (key == null) {
-                continue;  // unkeyed intrusive entry: left null, translator fails loudly on use
+                // A registry-iterated value always has a key; a null here means the
+                // registry is broken — fail the table build loudly rather than leave
+                // a hole that surfaces as a per-serve exception later.
+                throw new IllegalStateException("biome id " + id + " has no registry key");
             }
             String identity = key.toString();
             IdentityCodec.validate(identity);

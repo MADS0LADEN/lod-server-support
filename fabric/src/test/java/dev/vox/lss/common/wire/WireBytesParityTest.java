@@ -41,6 +41,27 @@ class WireBytesParityTest {
         }
     }
 
+    /**
+     * Read-side parity on NON-canonical encodings (review MINOR 14): our writer never
+     * produces these, but a shared wire parser must agree with MC on every input it
+     * can receive — notably the 5-byte overflow form, whose high bits MC silently
+     * truncates via Java's int shift.
+     */
+    @Test
+    void varIntReadParityOnNonCanonicalEncodings() {
+        byte[][] forms = {
+                { (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, 0x7F },  // overflow-truncated
+                { (byte) 0x80, (byte) 0x80, (byte) 0x80, (byte) 0x80, 0x10 },  // high-bit-only 5th byte
+                { (byte) 0x80, 0x00 },                                          // non-minimal zero
+                { (byte) 0xFF, 0x00 },                                          // non-minimal 127
+        };
+        for (byte[] form : forms) {
+            var mc = new FriendlyByteBuf(Unpooled.wrappedBuffer(form));
+            assertEquals(mc.readVarInt(), new WireBytes.Reader(form).readVarInt(),
+                    "read of " + java.util.Arrays.toString(form));
+        }
+    }
+
     @Test
     void scalarAndUtfShapesMatchFriendlyByteBuf() {
         var mc = new FriendlyByteBuf(Unpooled.buffer());

@@ -10,7 +10,6 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -42,7 +41,10 @@ class WireSectionCursorCorpusTest {
         try (Stream<Path> files = Files.list(corpusDir())) {
             List<Path> bins = files.filter(p -> p.getFileName().toString().endsWith(".bin"))
                     .sorted().toList();
-            assertFalse(bins.isEmpty(), "corpus dir has no .bin goldens");
+            // Count-pinned like the repo's other fixture suites: a vanished golden must
+            // red THIS suite, not silently shrink its coverage. Update alongside any
+            // corpus addition (the generator lives in NbtSectionSerializerTest).
+            assertEquals(14, bins.size(), "nbt-corpus golden count drifted: " + bins);
             return bins;
         }
     }
@@ -71,5 +73,55 @@ class WireSectionCursorCorpusTest {
         }
         assertTrue(sawDirect, "corpus must exercise at least one DIRECT container "
                 + "(global-palette / biome-global goldens) or this suite lost its teeth");
+    }
+
+    /**
+     * The translator against the real emitter's output (review MINOR 11): every
+     * corpus golden — duplicate palettes, DIRECT/global tiers, masked sections —
+     * translates under synthetic identity tables, reparses as legal v20, and matches
+     * VOXEL FOR VOXEL: the identity at every block/biome position must equal the
+     * identity of the native id at that position. Sections, counts, and light must
+     * survive untouched.
+     */
+    @Test
+    void everyCorpusGoldenTranslatesToV20VoxelForVoxel() throws IOException {
+        java.util.function.IntFunction<String> blockIdentity = id -> "syntheticblocks:state_" + id;
+        java.util.function.IntFunction<String> biomeIdentity = id -> "syntheticbiomes:biome_" + id;
+        for (Path bin : corpusFiles()) {
+            byte[] body = Files.readAllBytes(bin);
+            var nat = WireSectionCursor.parse(body, WireSectionCursor.Layout.NATIVE);
+            byte[] v20Bytes = NativeToV20Translator.translate(body, blockIdentity, biomeIdentity);
+            var v20 = WireSectionCursor.parse(v20Bytes, WireSectionCursor.Layout.V20);
+            assertEquals(nat.sections().size(), v20.sections().size(), bin.getFileName().toString());
+            for (int i = 0; i < nat.sections().size(); i++) {
+                var n = nat.sections().get(i);
+                var v = v20.sections().get(i);
+                String at = bin.getFileName() + " section " + i;
+                assertEquals(n.sectionY(), v.sectionY(), at);
+                assertEquals(n.nonEmptyBlockCount(), v.nonEmptyBlockCount(), at);
+                assertEquals(n.fluidCount(), v.fluidCount(), at);
+                assertArrayEquals(n.blockLight(), v.blockLight(), at);
+                assertArrayEquals(n.skyLight(), v.skyLight(), at);
+                assertVoxelsMatch(n.blocks(), v.blocks(), 4096, blockIdentity, v20.dictionary(), at + " blocks");
+                assertVoxelsMatch(n.biomes(), v.biomes(), 64, biomeIdentity, v20.dictionary(), at + " biomes");
+            }
+        }
+    }
+
+    private static void assertVoxelsMatch(WireSectionCursor.WireContainer nat,
+                                          WireSectionCursor.WireContainer v20,
+                                          int entries,
+                                          java.util.function.IntFunction<String> identity,
+                                          List<String> dict, String at) {
+        int[] natValues = nat.bits() == 0 ? null
+                : WireSectionCursor.unpack(nat.data(), nat.bits(), entries);
+        int[] v20Values = v20.bits() == 0 ? null
+                : WireSectionCursor.unpack(v20.data(), v20.bits(), entries);
+        for (int i = 0; i < entries; i++) {
+            int natId = natValues == null ? nat.palette()[0]
+                    : (nat.isDirect() ? natValues[i] : nat.palette()[natValues[i]]);
+            int dictIndex = v20Values == null ? v20.palette()[0] : v20.palette()[v20Values[i]];
+            assertEquals(identity.apply(natId), dict.get(dictIndex), at + " voxel " + i);
+        }
     }
 }

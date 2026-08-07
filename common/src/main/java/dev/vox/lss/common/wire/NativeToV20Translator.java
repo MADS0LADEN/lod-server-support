@@ -73,21 +73,17 @@ public final class NativeToV20Translator {
         // DIRECT: synthesize a palette from the packed ids (the ViaVersion
         // PaletteType1_18.readValues maneuver), then repack at the v20 width.
         int[] ids = WireSectionCursor.unpack(c.data(), c.bits(), entries);
-        var seen = new java.util.LinkedHashMap<Integer, Integer>();
+        // Box-free first-seen remap (thousands of these run per store-migration row —
+        // a Map<Integer,Integer> boxes one Integer per voxel lookup).
+        var seen = new IntFirstSeen(entries);
         int[] remapped = new int[entries];
         for (int i = 0; i < entries; i++) {
-            Integer position = seen.get(ids[i]);
-            if (position == null) {
-                position = seen.size();
-                seen.put(ids[i], position);
-            }
-            remapped[i] = position;
+            remapped[i] = seen.indexOf(ids[i]);
         }
         int n = seen.size();
         int[] palette = new int[n];
-        int p = 0;
-        for (int id : seen.keySet()) {
-            palette[p++] = dict.indexOf(identityFor(identity, id, isBlocks));
+        for (int p = 0; p < n; p++) {
+            palette[p] = dict.indexOf(identityFor(identity, seen.idAt(p), isBlocks));
         }
         int bits = v20Bits(n, isBlocks);
         long[] data = bits == 0 ? new long[0] : WireSectionCursor.pack(remapped, bits);
@@ -110,5 +106,76 @@ public final class NativeToV20Translator {
         }
         int ceillog2 = 32 - Integer.numberOfLeadingZeros(paletteSize - 1);
         return isBlocks ? Math.max(4, Math.min(12, ceillog2)) : ceillog2;
+    }
+
+    /**
+     * Open-addressed {@code int -> first-seen index} map (power-of-two linear probe,
+     * {@code -1} = empty) — insertion order retrievable via {@link #idAt}. Ids are
+     * non-negative (unpack masks them), so {@code -1} is a safe sentinel.
+     */
+    private static final class IntFirstSeen {
+        private int[] keys;
+        private int[] values;
+        private int[] order;
+        private int size;
+
+        IntFirstSeen(int expectedEntries) {
+            int cap = Integer.highestOneBit(Math.max(16, expectedEntries / 4) - 1) << 1;
+            this.keys = new int[cap];
+            this.values = new int[cap];
+            this.order = new int[16];
+            java.util.Arrays.fill(this.keys, -1);
+        }
+
+        int indexOf(int id) {
+            int mask = keys.length - 1;
+            int slot = (id * 0x9E3779B9) >>> 16 & mask;
+            while (true) {
+                int k = keys[slot];
+                if (k == id) {
+                    return values[slot];
+                }
+                if (k == -1) {
+                    if (size * 2 >= keys.length) {
+                        grow();
+                        return indexOf(id);
+                    }
+                    keys[slot] = id;
+                    values[slot] = size;
+                    if (size == order.length) {
+                        order = java.util.Arrays.copyOf(order, size * 2);
+                    }
+                    order[size] = id;
+                    return size++;
+                }
+                slot = (slot + 1) & mask;
+            }
+        }
+
+        private void grow() {
+            int[] oldKeys = keys, oldValues = values;
+            keys = new int[oldKeys.length * 2];
+            values = new int[oldKeys.length * 2];
+            java.util.Arrays.fill(keys, -1);
+            int mask = keys.length - 1;
+            for (int i = 0; i < oldKeys.length; i++) {
+                if (oldKeys[i] != -1) {
+                    int slot = (oldKeys[i] * 0x9E3779B9) >>> 16 & mask;
+                    while (keys[slot] != -1) {
+                        slot = (slot + 1) & mask;
+                    }
+                    keys[slot] = oldKeys[i];
+                    values[slot] = oldValues[i];
+                }
+            }
+        }
+
+        int size() {
+            return size;
+        }
+
+        int idAt(int firstSeenIndex) {
+            return order[firstSeenIndex];
+        }
     }
 }
