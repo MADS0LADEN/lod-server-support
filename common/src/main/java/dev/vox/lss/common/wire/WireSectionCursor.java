@@ -287,6 +287,14 @@ public final class WireSectionCursor {
             return;
         }
         if (!c.isDirect()) {
+            int paletteThreshold = isBlocks
+                    ? NATIVE_BLOCK_PALETTE_MAX_BITS : NATIVE_BIOME_PALETTE_MAX_BITS;
+            if (layout == Layout.NATIVE && bits > paletteThreshold) {
+                // Asymmetry guard (review C1-16): parse treats bits>threshold as DIRECT,
+                // so an indexed container at that width would re-parse as garbage.
+                throw new WireFormatException("indexed " + (isBlocks ? "block" : "biome")
+                        + " container at DIRECT width " + bits);
+            }
             out.writeVarInt(c.palette().length);
             for (int v : c.palette()) {
                 out.writeVarInt(checkPaletteValue(v, layout, isBlocks, dictSize));

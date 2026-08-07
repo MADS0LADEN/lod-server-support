@@ -329,6 +329,9 @@ public class LSSServerNetworking {
                 service.shutdown();
                 requestService = null;
             }
+            // Sidecar facts die with the server (integrated-server world cycles would
+            // otherwise accrete entries across sessions — review C1-9).
+            CLIENT_DATA_VERSIONS.clear();
         });
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {

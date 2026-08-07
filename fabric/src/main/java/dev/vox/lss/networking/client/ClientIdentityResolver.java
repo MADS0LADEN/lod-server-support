@@ -70,12 +70,38 @@ final class ClientIdentityResolver {
         return this.fallbacks.get();
     }
 
+    /** Memo cap (review C1-3): identities are WIRE-CONTROLLED strings — a hostile or
+     *  buggy server can mint unbounded distinct ones. Past the cap, resolution still
+     *  works (correctness never depends on the memo), it just stops being cached. */
+    private static final int MAX_MEMOIZED_IDENTITIES = 65_536;
+    /** Global fallback-warn ceiling on top of the per-identity latch — the per-identity
+     *  bound is itself wire-controlled, so it alone permits a log flood. */
+    private static final int MAX_FALLBACK_WARNS = 256;
+
     int blockIdFor(String identity) {
-        return this.blockIds.computeIfAbsent(identity, this::resolveBlockId);
+        Integer hit = this.blockIds.get(identity);
+        if (hit != null) {
+            return hit;
+        }
+        // Resolve OUTSIDE any map lock (resolution may log); a racing duplicate resolve
+        // is benign — both arrive at the same id.
+        int id = resolveBlockId(identity);
+        if (this.blockIds.size() < MAX_MEMOIZED_IDENTITIES) {
+            this.blockIds.putIfAbsent(identity, id);
+        }
+        return id;
     }
 
     int biomeIdFor(String identity) {
-        return this.biomeIds.computeIfAbsent(identity, this::resolveBiomeId);
+        Integer hit = this.biomeIds.get(identity);
+        if (hit != null) {
+            return hit;
+        }
+        int id = resolveBiomeId(identity);
+        if (this.biomeIds.size() < MAX_MEMOIZED_IDENTITIES) {
+            this.biomeIds.putIfAbsent(identity, id);
+        }
+        return id;
     }
 
     private int resolveBlockId(String identity) {
@@ -170,11 +196,17 @@ final class ClientIdentityResolver {
     }
 
     private void noteFallback(String identity, String how) {
-        this.fallbacks.incrementAndGet();
-        // computeIfAbsent doubles as the once-per-identity log latch: resolution is
-        // memoized, so this method runs at most once per identity per session.
-        LSSLogger.warn("LOD identity '" + identity + "' not in this client's registries ("
-                + how + ") — a newer/modded server's content renders as its fallback");
+        long n = this.fallbacks.incrementAndGet();
+        // The memo is the per-identity latch (at most one resolve per cached identity);
+        // the global ceiling bounds what a hostile dictionary can flood past it.
+        if (n <= MAX_FALLBACK_WARNS) {
+            LSSLogger.warn("LOD identity '" + identity + "' not in this client's registries ("
+                    + how + ") — a newer/modded server's content renders as its fallback");
+            if (n == MAX_FALLBACK_WARNS) {
+                LSSLogger.warn("Fallback warn ceiling reached (" + MAX_FALLBACK_WARNS
+                        + ") — further identity fallbacks are counted but not logged");
+            }
+        }
     }
 
     private static String nameOf(String identity) {

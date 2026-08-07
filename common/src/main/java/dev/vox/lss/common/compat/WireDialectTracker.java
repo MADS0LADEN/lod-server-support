@@ -71,6 +71,13 @@ public final class WireDialectTracker {
         WireDialect previous = this.sessions.put(uuid, dialect);
         if (previous != dialect) {
             counterFor(dialect).incrementAndGet();
+            if (dialect != WireDialect.CURRENT) {
+                // Session-start log parity with the deleted per-dialect trackers
+                // (review C1-11): without it a Paper operator has no log evidence a
+                // legacy session ever existed, only the live Dialects: gauge.
+                dev.vox.lss.common.LSSLogger.info(dialect + "-compat session started for "
+                        + uuid + " (dialect tracker)");
+            }
         }
     }
 

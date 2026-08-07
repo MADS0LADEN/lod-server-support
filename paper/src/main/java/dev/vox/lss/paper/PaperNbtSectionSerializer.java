@@ -736,7 +736,14 @@ final class PaperNbtSectionSerializer {
         for (int id = 0; id < table.length; id++) {
             var holder = idMap.byId(id);
             var key = holder == null ? null : holder.unwrapKey().orElse(null);
-            table[id] = key == null ? null : key.identifier().toString();
+            if (key == null) {
+                // C0's fail-loud-at-build posture (review C1-7): a keyless holder would
+                // otherwise surface as a per-serve translation failure much later.
+                throw new IllegalStateException("biome id " + id + " has no registry key");
+            }
+            String identity = key.identifier().toString();
+            dev.vox.lss.common.wire.IdentityCodec.validate(identity);
+            table[id] = identity;
         }
         return id -> id >= 0 && id < table.length ? table[id] : null;
     }

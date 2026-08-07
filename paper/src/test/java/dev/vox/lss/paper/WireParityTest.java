@@ -308,6 +308,20 @@ class WireParityTest {
     }
 
     @Test
+    void v19EchoStaysFourFieldWithNoDataVersionAppend() {
+        // The v20-only append must NOT ride the v19 echo — the strict v0.9.x client
+        // hard-kicks on a trailing byte (Fabric twin pins the same shape).
+        byte[] expected = ref(b -> {
+            b.writeVarInt(LSSConstants.V19_COMPAT_PROTOCOL_VERSION);
+            b.writeBoolean(true);
+            b.writeVarInt(256);
+            b.writeBoolean(true);
+        });
+        assertArrayEquals(expected, PaperPayloadHandler.encodeSessionConfig(
+                LSSConstants.V19_COMPAT_PROTOCOL_VERSION, true, 256, true));
+    }
+
+    @Test
     void clientInfoDecodesOneVarIntAndToleratesTrailingBytes() {
         // The lss:client_info sidecar (XVER §2.2): one VarInt data version; trailing
         // bytes tolerated (a future client may append fields).

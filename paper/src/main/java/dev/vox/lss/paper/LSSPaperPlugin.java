@@ -198,6 +198,9 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
         // (the service's shuttingDown flag covers the one already-in-flight tick).
         var service = this.requestService;
         this.requestService = null;
+        // Static sidecar facts must not survive /reload or a plugin-manager disable —
+        // players who quit while disabled would leak entries forever (review C1-9).
+        CLIENT_DATA_VERSIONS.clear();
         // Unregister the channels BEFORE shutdown (2026-08-05 review H5): a frame already
         // dispatched into onPluginMessageReceived proceeds with its captured service
         // reference (nothing can stop it; everything it touches is individually

@@ -810,6 +810,10 @@ public class ServiceLifecycleGameTests {
             helper.assertTrue(!state.wantsCompressedColumns(),
                     "a v18 session must be forced codec-RAW even when the handshake "
                             + "(hostilely) declares the zstd capability bit");
+            // C1 INTERMEDIATE NOTE: this pin covers registration/echo/membership ONLY —
+            // column DELIVERY for v18 sessions is deliberately dropped until C2's body
+            // translator (the v18 splice would ship v20 dictionary bodies otherwise);
+            // C2 extends this case with a delivery assertion when it restores egress.
         } finally {
             service.shutdown();
             playerList.remove(mock);

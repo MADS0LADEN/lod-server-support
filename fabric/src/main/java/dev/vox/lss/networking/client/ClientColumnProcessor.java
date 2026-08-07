@@ -197,10 +197,16 @@ class ClientColumnProcessor {
 
     private void drainColumnQueue(ClientLevel level, int epoch) {
         var factory = PalettedContainerFactory.create(level.registryAccess());
+        var resolver = resolverFor(level, factory);
         drainColumnQueue(level.dimension(), level.getSectionsCount(), level.getMinSectionY(),
                 level.dimensionType().hasSkyLight(),
                 factory,
-                resolverFor(level, factory)::toNative,
+                // v16-compat servers ship NATIVE bodies — translating them would parse
+                // sectionCount as dictCount and fail every column (review C1-2). The
+                // per-application check keeps a session that re-handshakes across
+                // dialects correct without a drain restart.
+                bytes -> dev.vox.lss.networking.payloads.V16ClientWire.isColumnSourceless()
+                        ? bytes : resolver.toNative(bytes),
                 (dimension, chunkX, chunkZ, columnData) ->
                         LSSApi.dispatchColumn(level, dimension, chunkX, chunkZ, columnData),
                 epoch);
@@ -537,6 +543,16 @@ class ClientColumnProcessor {
 
     /** End the current session: any in-flight drain self-terminates at its next epoch check. */
     void shutdown() {
+        var resolver = this.identityResolver;
+        if (resolver != null && resolver.fallbackCount() > 0) {
+            // The §3 fallbacks= operator signal (review C1-5): one summary line per
+            // session, at teardown — the only client-side surface that needs no schema.
+            dev.vox.lss.common.LSSLogger.info("Session identity fallbacks: "
+                    + resolver.fallbackCount()
+                    + " (cross-version content rendered as fallback blocks)");
+        }
+        this.identityResolver = null;
+        this.identityResolverKey = null;
         this.sessionEpoch++;
         // Drain with the same poll+decrement discipline as the decode loop rather than
         // clear()+set(0): a set(0) races a decode iteration that already polled an item but

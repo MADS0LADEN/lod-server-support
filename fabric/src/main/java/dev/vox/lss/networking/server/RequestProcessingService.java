@@ -615,31 +615,50 @@ public class RequestProcessingService {
 
     /** Warn-once latch for the v18 egress guard (MAIN thread only). */
     private boolean v18UnconvertibleWarned;
-    /** Warn-once latch for the C1-intermediate v19 egress drop (MAIN thread only). */
-    private boolean v19DropWarned;
+    /** Warn-once latch for the C1-intermediate legacy-egress drop (MAIN thread only). */
+    private boolean legacyDropWarned;
+
+    /**
+     * C1 INTERMEDIATE (restored at C2): with v20 as the canonical internal form, EVERY
+     * legacy dialect needs a BODY translation before its header shape applies — the
+     * v18/v16 splices only rewrite headers, so they would ship v20 dictionary bodies a
+     * legacy decoder reads as garbage (review C1-1). Until the C2 translators land,
+     * column egress for ALL THREE legacy dialects is dropped behind this latch. The
+     * done-bit is cleared so the state never claims delivery; the client re-declares at
+     * 1 Hz and the loop is bounded by the same bandwidth accounting a healthy session
+     * gets (NOT "healthy-idle" — a real legacy client against a C1-window build churns
+     * one want-set of reads per second until C2; acceptable only because no such client
+     * exists in CI and C1–C5 merge to main together).
+     */
+    private boolean dropLegacyColumn(PlayerRequestState state, CustomPacketPayload payload,
+                                     String dialect) {
+        if (!(payload instanceof dev.vox.lss.networking.payloads.VoxelColumnS2CPayload col)) {
+            return false;
+        }
+        if (!this.legacyDropWarned) {
+            this.legacyDropWarned = true;
+            LSSLogger.warn(dialect + "-compat: column egress not yet translated (C1"
+                    + " intermediate) — dropping columns for legacy session "
+                    + state.getPlayerName() + " (further drops are silent)");
+        }
+        state.clearDiskReadDone(PositionUtil.packPosition(col.chunkX(), col.chunkZ()));
+        return true;
+    }
 
     private void sendColumnPayload(PlayerRequestState state, CustomPacketPayload payload)
             throws Exception {
         var uuid = state.getPlayerUUID();
         if (this.dialects.isV19(uuid)) {
-            // C1 INTERMEDIATE (restored at C2): the v19 rung needs a BODY translation
-            // (v20 dictionary body -> native global-id palettes), not a header splice —
-            // until the C2 translator lands, a v19 session registers and handshakes
-            // normally but its column egress is dropped (re-declaration keeps the client
-            // healthy-idle rather than hard-kicked by an undecodable v20 body).
-            if (payload instanceof dev.vox.lss.networking.payloads.VoxelColumnS2CPayload) {
-                if (!this.v19DropWarned) {
-                    this.v19DropWarned = true;
-                    LSSLogger.warn("v19-compat: column egress not yet translated (C1"
-                            + " intermediate) — dropping columns for v19 session "
-                            + state.getPlayerName() + " (further drops are silent)");
-                }
+            if (dropLegacyColumn(state, payload, "v19")) {
                 return;
             }
             ServerPlayNetworking.send(state.getPlayer(), payload);
             return;
         }
         if (this.dialects.isV16(uuid)) {
+            if (dropLegacyColumn(state, payload, "v16")) {
+                return;
+            }
             if (!(payload instanceof dev.vox.lss.networking.payloads.VoxelColumnS2CPayload col)) {
                 if (!this.v16UnconvertibleWarned) {
                     this.v16UnconvertibleWarned = true;
@@ -674,6 +693,9 @@ public class RequestProcessingService {
             return;
         }
         if (this.dialects.isV18(uuid)) {
+            if (dropLegacyColumn(state, payload, "v18")) {
+                return;
+            }
             // v18 egress (v18-compat design §2.6): strip the codec byte, keep the source
             // byte. No prune bookkeeping — there is no synthetic want-set; the client's
             // own re-declaration heals any drop. The RAW guard mirrors the v16 one and is
