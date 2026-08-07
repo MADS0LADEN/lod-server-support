@@ -29,7 +29,8 @@
     ]
   },
   "mixins": [
-    "lss.mixins.json"
+    "lss.mixins.json",
+    "lss-trace.mixins.json"
   ],
   "jars": [
     {

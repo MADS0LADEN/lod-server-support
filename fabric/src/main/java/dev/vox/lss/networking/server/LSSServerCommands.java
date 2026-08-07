@@ -187,7 +187,8 @@ class LSSServerCommands {
                 service.getPlayers().values()
         ).withV16Line(service.getV16CompatManager().diagLineOrNull())
                 .withV18Line(service.getV18CompatTracker().diagLineOrNull())
-                .withXrayLine(xrayDiagLine());
+                .withXrayLine(xrayDiagLine())
+                .withMoveTraceLine(moveTraceDiagLineOrNull());
 
         for (var line : DiagnosticsFormatter.formatDiagnostics(data)) {
             source.sendSuccess(() -> Component.literal(line), false);
@@ -198,5 +199,12 @@ class LSSServerCommands {
     private static String xrayDiagLine() {
         var manager = XrayMaskManager.current();
         return manager != null ? manager.diagLine() : "Xray: active=off, masked_sections=0";
+    }
+
+    /** Present ONLY while the tracer is active (move-desync-tracer-plan.md §2) — it is the
+     *  post-deploy rung verification and the silent-rejection rate in one RCON call. */
+    private static String moveTraceDiagLineOrNull() {
+        var tracer = dev.vox.lss.trace.MoveDesyncTracer.active();
+        return tracer != null ? tracer.diagLine() : null;
     }
 }

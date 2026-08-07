@@ -3,6 +3,7 @@ package dev.vox.lss;
 import dev.vox.lss.common.Brand;
 import dev.vox.lss.networking.LSSNetworking;
 import dev.vox.lss.networking.server.LSSServerNetworking;
+import dev.vox.lss.trace.MoveTraceBootstrap;
 import net.fabricmc.api.ModInitializer;
 
 public class LSSMod implements ModInitializer {
@@ -16,6 +17,9 @@ public class LSSMod implements ModInitializer {
         Brand.load(LSSMod.class.getClassLoader());
         LSSNetworking.registerPayloads();
         LSSServerNetworking.init();
+        // Tracer lifecycle hangs off LSSMod, never off RequestProcessingService — it must
+        // observe LSS-disabled servers and unregistered players (the E2 control arms).
+        MoveTraceBootstrap.init();
         BenchmarkBridge.initServer();
     }
 }

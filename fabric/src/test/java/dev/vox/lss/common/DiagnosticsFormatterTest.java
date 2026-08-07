@@ -247,6 +247,70 @@ class DiagnosticsFormatterTest {
                 all.get(indexOfPrefix(all, "V18Compat:")));
     }
 
+    @Test
+    void diagMoveTraceLineRendersAfterXrayOnlyWhileActive() {
+        // The move-desync tracer's line (move-desync-tracer-plan.md §2, Fable F2-10):
+        // present ONLY while the tracer is active — tracer off must leave the diag
+        // surface byte-identical.
+        var d = new DiagnosticsFormatter.DiagData(
+                true, 24,
+                2048, 1_048_576,
+                100, 5000, 10_485_760,
+                11, 33, 44, 55, 66,
+                22,
+                "sent=9, disk=1/2",
+                "submitted=5, completed=5",
+                "active=1/32", true,
+                7, 3,
+                2_097_152,
+                512,
+                List.of());
+
+        var without = DiagnosticsFormatter.formatDiagnostics(d);
+        assertTrue(without.stream().noneMatch(l -> l.startsWith("MoveTrace")),
+                "tracer off (null line) must add nothing");
+        // withMoveTraceLine(null) is the tracer-off wiring path — also nothing.
+        assertEquals(without, DiagnosticsFormatter.formatDiagnostics(d.withMoveTraceLine(null)));
+
+        String line = "MoveTrace: rung=moonrise rows=5 drops=0 tooquick=1 wrongly=0 rejected=1 silent=1";
+        var with = DiagnosticsFormatter.formatDiagnostics(d.withMoveTraceLine(line));
+        assertTrue(with.contains(
+                "Sources (total): in_mem=11, disk=22, up_to_date=33, gen=44, re_resolved=55, grace_skipped=66"),
+                "the withMoveTraceLine copy constructor must preserve every counter: " + with);
+        int genIdx = indexOfPrefix(with, "Generation:");
+        int mtIdx = indexOfPrefix(with, "MoveTrace:");
+        int bwIdx = indexOfPrefix(with, "Bandwidth:");
+        assertTrue(genIdx < mtIdx && mtIdx < bwIdx,
+                "the MoveTrace line sits between Generation and Bandwidth: " + with);
+        assertEquals(without.size() + 1, with.size());
+        assertEquals(line, with.get(mtIdx));
+
+        // All four optional lines together: v16, v18, xray, then MoveTrace.
+        var all = DiagnosticsFormatter.formatDiagnostics(
+                d.withV16Line("V16Compat: clients=1")
+                        .withV18Line("V18Compat: clients=2, started=3")
+                        .withXrayLine("Xray: active=config, masked_sections=0")
+                        .withMoveTraceLine(line));
+        assertTrue(indexOfPrefix(all, "Xray:") < indexOfPrefix(all, "MoveTrace:")
+                        && indexOfPrefix(all, "MoveTrace:") < indexOfPrefix(all, "Bandwidth:"),
+                "line order must stay xray then MoveTrace then Bandwidth: " + all);
+        // The with-chain must commute (the copy constructors do not clobber each other).
+        assertEquals(line, all.get(indexOfPrefix(all, "MoveTrace:")));
+        assertEquals("V18Compat: clients=2, started=3", all.get(indexOfPrefix(all, "V18Compat:")));
+
+        // REVERSED order — MoveTrace attached FIRST, then v16/v18/xray: the older with*
+        // methods must route through the canonical constructor and preserve it (review
+        // B-3: they silently dropped it via the compat-ctor overload before).
+        var reversed = DiagnosticsFormatter.formatDiagnostics(
+                d.withMoveTraceLine(line)
+                        .withV16Line("V16Compat: clients=1")
+                        .withV18Line("V18Compat: clients=2, started=3")
+                        .withXrayLine("Xray: active=config, masked_sections=0"));
+        assertEquals(line, reversed.get(indexOfPrefix(reversed, "MoveTrace:")),
+                "withV16/V18/XrayLine must not clobber an earlier moveTraceLine");
+        assertEquals(all, reversed, "the with-chain must fully commute");
+    }
+
     private static int indexOfPrefix(List<String> lines, String prefix) {
         for (int i = 0; i < lines.size(); i++) {
             if (lines.get(i).startsWith(prefix)) return i;

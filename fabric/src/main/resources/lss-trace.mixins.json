@@ -1,0 +1,12 @@
+{
+  "required": false,
+  "package": "dev.vox.lss.mixin.trace",
+  "compatibilityLevel": "JAVA_25",
+  "injectors": {
+    "defaultRequire": 0
+  },
+  "mixins": [
+    "AccessorServerGamePacketListener",
+    "MovementRejectHook"
+  ]
+}

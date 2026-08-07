@@ -75,10 +75,13 @@ choice, noted here per review F-13).
 - Single daemon writer thread (`LSS-MoveTrace`), `ArrayBlockingQueue<String>` 4096,
   `offer()` from game threads, `dropped` counter carried in the next row. Buffered
   writer, flush per row (rows are sparse; a crash must not lose its own event).
-- **Rotation, not truncation** (review U-13): at 128 MiB rotate once to
-  `lss-move-trace.1.jsonl` (256 MiB total cap), `LSSLogger.warn` on rotation and on
-  final cap — `latest.log` is where the operator greps; a sentinel row inside a file
-  nobody is watching is not an alert.
+- **Rotation, not truncation** (review U-13): at 128 MiB rotate once PER BOOT to
+  `lss-move-trace.1.jsonl` (replacing any stale `.1` from a previous boot — an
+  operator who collected and deleted only the live file must not inherit a cap latch
+  one restart later; implementation review B-5, v0.10.0-progress.md 2026-08-07);
+  a second crossing in one boot is the 256 MiB total cap. `LSSLogger.warn` on
+  rotation and on final cap — `latest.log` is where the operator greps; a sentinel
+  row inside a file nobody is watching is not an alert. Collect BOTH files each pass.
 - Shutdown: `SERVER_STOPPING` → drain, close.
 
 ### 1.2 Mixins — own config `lss-trace.mixins.json` with `"required": false`
@@ -103,7 +106,7 @@ callbacks `lss$`-prefixed per repo convention:
 
 | inject | target | purpose |
 |---|---|---|
-| `lss$onMoveHead` | `@At("HEAD")` | stores pre-move `player.getX/Y/Z()` into `@Unique lss$startX/Y/Z` (review F-5: at HEAD the entity has not moved — `resetPosition()` reseeds `firstGood*` only — so these equal the method's `startX/Y/Z` locals exactly, making claimed-target recomputation exact for `Rot`/`StatusOnly` packets whose `packet.get*(default)` falls back to the *current* position); updates the per-player move-packet gap clock (review U-5: `move_gap_ms` / `move_gap_max_5s_ms` — the only server-side client-stall measurement, and it works identically in the LOD-off control arms) |
+| `lss$onMoveHead` | `@At` INVOKE shift-AFTER `PacketUtils.ensureRunningOnSameThread` — NOT `@At("HEAD")`: HEAD runs on the NETTY thread first (the ensure call re-dispatches and throws there), racing the gap clock and the uniques; the implementation round's A-1 MAJOR, pinned by an ASM first-INVOKE check (v0.10.0-progress.md 2026-08-07) | stores pre-move `player.getX/Y/Z()` into `@Unique lss$startX/Y/Z` (review F-5: at HEAD the entity has not moved — `resetPosition()` reseeds `firstGood*` only — so these equal the method's `startX/Y/Z` locals exactly, making claimed-target recomputation exact for `Rot`/`StatusOnly` packets whose `packet.get*(default)` falls back to the *current* position); updates the per-player move-packet gap clock (review U-5: `move_gap_ms` / `move_gap_max_5s_ms` — the only server-side client-stall measurement, and it works identically in the LOD-off control arms) |
 | `lss$onMovedTooQuickly` | the `moved too quickly!` warn INVOKE — targeted by **descriptor alone**, `warn(String, Object[])`, `remap = false` on the slf4j `@At` (reviews F-6/F-7: the two warns have distinct descriptors, so no ordinal is needed) | reconstructs the check's inputs exactly: cumulative deltas from `firstGood*`, `expectedDist` from `getDeltaMovement()`, and **both** `delta_packets` (raw burst size) and `delta_packets_used` (the post-clamp value the check applied — review F-8: a >5 burst is *penalized* to 1, and an analyst given only the raw count computes the wrong threshold) |
 | `lss$onMovedWrongly` | the `moved wrongly!` warn INVOKE — descriptor `warn(String, Object)`, `remap = false` | at this point `player.getX/Y/Z()` IS the post-`move()` simulated stop (bytecode-verified); stores the packet reference into `@Unique lss$wronglyPacket` (review F-3: a packet-identity token, not a boolean — no HEAD clear needed, self-expires with the packet, and a partially-applied mixin degrades to `logged_wrongly:false` instead of latching true) |
 | `lss$onMoveRejected` | the rejection `teleport(DDDFF)V` INVOKE, anchored **semantically** by a `@Slice(from = the wrongly-warn INVOKE)` + ordinal 0 within the slice — "the first teleport after the `moved wrongly` warn site" (review F-6: a bare ordinal silently retargets if vanilla reorders; the slice encodes what the code means). The teleport `@At` keeps default `remap = true` — it is a target-class method | fires for BOTH the logged rejection and the **silent** `isEntityCollidingWithAnythingNew` rejection (zero observability today); `logged_wrongly = (lss$wronglyPacket == packet)` |
@@ -175,8 +178,12 @@ baseline that sizes the sent-staleness allowance, NOT a stall detector — revie
 `lss` block (null when unregistered/disabled — and that null is itself the A/B label):
 `registered`, `since_s`, `caps`, `proto`, `dialect` (v18/v16 rung if any — review
 U-16: "modded v19 client" is central to the census and must be machine-readable),
-`send_queue`, `bw_window`, and `yielded` **when the transport-yield feature exists**
-(phrased as a dependency; it is unimplemented today).
+`send_queue`, `bw_total` (shipped name — the sketch said `bw_window`, but no per-player
+rolling window exists server-side, so the CUMULATIVE per-player bytes ship under a
+different name per the U-12 discipline; `proto` is derived from the dialect rung and
+`since_s` from a new `AbstractPlayerRequestState.getCreatedAtMillis()` — see the
+v0.10.0-progress.md decisions log, 2026-08-06), and `yielded` **when the
+transport-yield feature exists** (phrased as a dependency; it is unimplemented today).
 
 **Boot row** (review U-7 — without it E4's bandwidth sweep is unanalyzable):
 `{"type":"boot"}` carrying schema version, `tz_offset_min` (log correlation needs the
@@ -193,15 +200,21 @@ Event rows (`too_quickly` / `wrongly` / `rejected`) — schema **split by type**
 
 - all: `origin` (`lastGood*` for wrongly/rejected, `firstGood*` for too_quickly —
   review U-4: v1 captured it and never emitted it, leaving the swept segment
-  unreconstructable), `claimed`, `fall_flying`, `speed`, `awaiting_tp`,
-  `move_gap_ms`, `move_gap_max_5s_ms`, send-state block(s);
-- `too_quickly`: `delta_packets`, `delta_packets_used`, `expected_dist`;
+  unreconstructable), `claimed`, `fall_flying`, `speed`,
+  `move_gap_ms`, `move_gap_max_5s_ms`, send-state block(s). (`awaiting_tp` moved to
+  the FLIGHT rows at implementation: every event site is inside the not-awaiting
+  branch of `updateAwaitingTeleport`, so the field is structurally false there —
+  implementation review A-2, v0.10.0-progress.md 2026-08-07);
+- `too_quickly`: `delta_packets`, `delta_packets_used`, `expected_dist_sq` (shipped
+  name — it is the check's own `lengthSqr()` input, and a squared quantity gets a
+  squared name; implementation review B-6);
 - `wrongly`/`rejected`: `simulated` (the collision point — `move()` sweeps, so the
   stop IS on the swept path), `residual`, `residual_h`, `restored` (the teleport
   destination = the pre-move position from `lss$startX/Y/Z` — the player-felt snap
   distance is `claimed − restored`, not `claimed − simulated`; reviews F-9/U-4),
-  `logged_wrongly`, `entity_collide` (`!level.getEntityCollisions(player,
-  sweptAABB).isEmpty()` — a boat/shulker produces the same residual as terrain and is
+  `logged_wrongly` (REJECTED rows only at implementation — on a `wrongly` row it is
+  definitionally true and ships nothing; implementation review B-2), `entity_collide`
+  (`!level.getEntityCollisions(player, sweptAABB).isEmpty()` — a boat/shulker produces the same residual as terrain and is
   otherwise invisible; review U-3), `stop_block` (the block state id at the collision
   face — names what the server thinks stopped them), and send-state for BOTH the
   simulated-stop chunk and the claimed chunk.
