@@ -104,7 +104,11 @@ cmd_run() {
     local sampler_pid=$!
 
     local rc=0
-    (cd "$MAIN_ROOT" && BENCHMARK_SERVER_GRADLE_ARGS="$extra_args" \
+    # BENCHMARK_CONFIG_STAGED: without it benchmark.sh's neutral-staging block (6856bcb,
+    # 2026-08-02) silently replaces the config staged above and every PROFILE_* knob is
+    # inert — found 2026-08-06 (this round's F1 ran shipped defaults; see the findings
+    # doc's erratum). store_gate.sh/benchmark_compare.sh always exported it.
+    (export BENCHMARK_CONFIG_STAGED=1; cd "$MAIN_ROOT" && BENCHMARK_SERVER_GRADLE_ARGS="$extra_args" \
         ./scripts/benchmark.sh no-cache "$duration") \
         > "$RUN_OUT/orchestrator.log" 2>&1 || rc=$?
 

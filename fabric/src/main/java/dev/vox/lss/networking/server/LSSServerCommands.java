@@ -188,7 +188,9 @@ class LSSServerCommands {
         ).withV16Line(service.getV16CompatManager().diagLineOrNull())
                 .withV18Line(service.getV18CompatTracker().diagLineOrNull())
                 .withXrayLine(xrayDiagLine())
-                .withMoveTraceLine(moveTraceDiagLineOrNull());
+                .withMoveTraceLine(moveTraceDiagLineOrNull())
+                .withYieldLine(DiagnosticsFormatter.yieldDiagLineOrNull(
+                        config.lodYieldsToVanillaTransport, service.getTickDiag()));
 
         for (var line : DiagnosticsFormatter.formatDiagnostics(data)) {
             source.sendSuccess(() -> Component.literal(line), false);

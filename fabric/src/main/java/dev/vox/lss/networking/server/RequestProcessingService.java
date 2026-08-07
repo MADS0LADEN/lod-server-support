@@ -570,7 +570,15 @@ public class RequestProcessingService {
         long perPlayerCap = Math.min(perPlayerAllocation, config.bytesPerSecondLimitPerPlayer);
         flushSendQueues(this.players.values(), perPlayerCap, this.bandwidthLimiter, this.diag,
                 this::sendColumnPayload, this.offThreadProcessor,
-                (long) config.outboundBufferCeilingKB * 1024L);
+                (long) config.outboundBufferCeilingKB * 1024L,
+                config.lodYieldsToVanillaTransport,
+                // The prune is the YIELD's companion (§2.1 — long queue residency is a
+                // yield phenomenon) and must not ship armed under the default-FALSE
+                // posture (review B-2): radius 0 disables it while the gate is off.
+                config.lodYieldsToVanillaTransport
+                        ? config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
+                                + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS
+                        : 0);
     }
 
     /** Warn-once latch for the v16 egress guard (MAIN thread only). */
@@ -669,25 +677,27 @@ public class RequestProcessingService {
                                  SharedBandwidthLimiter bandwidthLimiter, TickDiagnostics diag,
                                  ColumnPayloadSender sender,
                                  FabricOffThreadProcessor offThreadProcessor) {
-        flushSendQueues(states, perPlayerCap, bandwidthLimiter, diag, sender, offThreadProcessor, 0L);
+        flushSendQueues(states, perPlayerCap, bandwidthLimiter, diag, sender, offThreadProcessor,
+                0L, false, 0);
     }
 
     static void flushSendQueues(Iterable<PlayerRequestState> states, long perPlayerCap,
                                  SharedBandwidthLimiter bandwidthLimiter, TickDiagnostics diag,
                                  ColumnPayloadSender sender,
                                  FabricOffThreadProcessor offThreadProcessor,
-                                 long outboundCeilingBytes) {
+                                 long outboundCeilingBytes, boolean yieldToTransport,
+                                 int pruneRadiusChunks) {
         for (var state : states) {
             if (!state.hasCompletedHandshake()) continue;
             long[] dropped = state.flushSendQueue(perPlayerCap, bandwidthLimiter, diag,
                     payload -> {
                         if (consumeSendDropFault()) return;
                         sender.send(state, payload);
-                    }, outboundCeilingBytes);
+                    }, outboundCeilingBytes, yieldToTransport, pruneRadiusChunks);
             if (dropped.length > 0) {
-                // A send failure discarded resolved-but-undelivered columns: clear their
-                // done-bits so the client's re-requests re-resolve instead of being
-                // answered up-to-date for data that never arrived.
+                // A send failure or the relevance prune discarded resolved-but-undelivered
+                // columns: clear their done-bits so the client's re-requests re-resolve
+                // instead of being answered up-to-date for data that never arrived.
                 offThreadProcessor.clearDiskReadDone(state.getPlayerUUID(), dropped);
             }
         }

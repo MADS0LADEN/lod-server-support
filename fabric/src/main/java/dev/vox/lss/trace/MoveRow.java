@@ -51,7 +51,7 @@ public final class MoveRow {
      *  different quantity gets a different name than the plan's sketched {@code bw_window}
      *  (the U-12 discipline; deviation logged in v0.10.0-progress.md 2026-08-06). */
     public record LssBlock(long sinceS, int caps, int proto, String dialect, int sendQueue,
-                           long bwTotal) {}
+                           long bwTotal, long yielded) {}
 
     /**
      * Chunk-delivery state for one queried chunk (§1.3). Exactly one of the three rungs;
@@ -223,6 +223,7 @@ public final class MoveRow {
             if (lss.dialect() != null) block.put("dialect", lss.dialect());
             block.put("send_queue", lss.sendQueue());
             block.put("bw_total", lss.bwTotal());
+            block.put("yielded", lss.yielded());
             row.put("lss", block);
         } else {
             // Explicit null, not absent: the control-arm label (§1.4).

@@ -462,6 +462,14 @@ class ConfigValidationTest {
                         <= LSSConstants.MAX_DISK_READER_THREADS);
     }
 
+    /** The yield plan's recorded evidence discipline (§4): the mechanism ships UNARMED;
+     *  the default flips only in a later release citing the live E3 A/B. */
+    @Test
+    void transportYieldDefaultsOff() {
+        assertFalse(serverConfig().lodYieldsToVanillaTransport,
+                "lodYieldsToVanillaTransport must default FALSE");
+    }
+
     /** Disk serves transcode NBT straight to wire bytes out of the box; false is the
      *  documented rollback to the per-section object path (round 2, 2026-07-29). */
     @Test

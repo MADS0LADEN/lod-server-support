@@ -123,7 +123,7 @@ class DiagnosticsFormatterTest {
                 "DiskReader: submitted=5, completed=5",
                 "Generation: active=1/32, order_gated=7, inversions=3",
                 "Bandwidth: 512 B/s / 1.0 MB/s global (2.0 MB total, 0 B wire, cols zstd=0 raw=0)",
-                "  Steve: sq=3/4000, psync=2, pgen=1, sent=2000 (4.0 KB), rate=20/s, obuf=64.0 KB/128.0 KB, deferred=7"
+                "  Steve: sq=3/4000, psync=2, pgen=1, sent=2000 (4.0 KB), rate=20/s, obuf=64.0 KB/128.0 KB, deferred=7, yielded=0"
         ), DiagnosticsFormatter.formatDiagnostics(d));
     }
 
@@ -309,6 +309,54 @@ class DiagnosticsFormatterTest {
         assertEquals(line, reversed.get(indexOfPrefix(reversed, "MoveTrace:")),
                 "withV16/V18/XrayLine must not clobber an earlier moveTraceLine");
         assertEquals(all, reversed, "the with-chain must fully commute");
+    }
+
+    @Test
+    void diagYieldLineRendersAfterMoveTraceOnlyWhenArmedOrFired() {
+        var d = new DiagnosticsFormatter.DiagData(
+                true, 24,
+                2048, 1_048_576,
+                100, 5000, 10_485_760,
+                11, 33, 44, 55, 66,
+                22,
+                "sent=9, disk=1/2",
+                "submitted=5, completed=5",
+                "active=1/32", true,
+                7, 3,
+                2_097_152,
+                512,
+                List.of());
+
+        var without = DiagnosticsFormatter.formatDiagnostics(d);
+        assertTrue(without.stream().noneMatch(l -> l.startsWith("Yield")),
+                "unarmed-and-never-fired (null line) must add nothing");
+
+        String line = "Yield: armed=true, ticks_total=40, bytes_withheld=1.0 MB";
+        var with = DiagnosticsFormatter.formatDiagnostics(
+                d.withMoveTraceLine("MoveTrace: rung=vanilla rows=1 drops=0 tooquick=0 wrongly=0 rejected=0 silent=0")
+                        .withYieldLine(line));
+        int mtIdx = indexOfPrefix(with, "MoveTrace:");
+        int yIdx = indexOfPrefix(with, "Yield:");
+        int bwIdx = indexOfPrefix(with, "Bandwidth:");
+        assertTrue(mtIdx < yIdx && yIdx < bwIdx,
+                "the Yield line sits between MoveTrace and Bandwidth: " + with);
+        assertEquals(line, with.get(yIdx));
+        assertEquals(without.size() + 2, with.size());
+    }
+
+    @Test
+    void yieldDiagLineProducerHonorsTheArmedOrFiredContract() {
+        var diag = new dev.vox.lss.common.processing.TickDiagnostics();
+        assertEquals(null, DiagnosticsFormatter.yieldDiagLineOrNull(false, diag),
+                "unarmed + zero ticks = no line");
+        assertEquals("Yield: armed=true, ticks_total=0, bytes_withheld=0 B",
+                DiagnosticsFormatter.yieldDiagLineOrNull(true, diag),
+                "armed shows immediately, even at zero — the operator's arming receipt");
+        diag.recordYieldedTick(65536);
+        diag.recordYieldedTick(65536);
+        assertEquals("Yield: armed=false, ticks_total=2, bytes_withheld=128.0 KB",
+                DiagnosticsFormatter.yieldDiagLineOrNull(false, diag),
+                "armed-then-disarmed keeps its evidence (service-scoped counters)");
     }
 
     private static int indexOfPrefix(List<String> lines, String prefix) {

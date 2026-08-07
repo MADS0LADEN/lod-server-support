@@ -38,6 +38,11 @@ ENVELOPE_KEYS = ["v", "type", "bootId", "wallMs", "tick", "player", "name", "dim
 BOOT_KEYS = ["v", "type", "bootId", "wallMs", "tz_offset_min", "lss_version",
              "mc_version", "moonrise", "c2me", "chunky", "rung", "config"]
 LSS_KEYS = ["registered", "since_s", "caps", "proto", "send_queue", "bw_total"]
+# `yielded` is OPTIONAL in the lss block (reviews B-3/A-5): A1-era jars — including the
+# build staged on the live server — predate the yield and emit lss blocks without it;
+# absent means "pre-yield jar", exactly like the boot key below. When present it must
+# be an int. A2+ writers always emit it (the golden fixture pins that).
+LSS_OPTIONAL_INT_KEYS = ["yielded"]
 
 EVENT_COMMON_KEYS = ["origin", "claimed", "fall_flying", "speed",
                      "move_gap_ms", "move_gap_max_5s_ms"]
@@ -56,7 +61,9 @@ TOO_QUICKLY_FORBIDDEN_KEYS = ["simulated", "residual", "residual_h", "restored",
 # there — confidently wrong, the one §0.5 sin (A-2).
 EVENT_FORBIDDEN_KEYS = ["awaiting_tp"]
 # The boot-row config keys the E4/§4.5 analysis partitions on — a boot row without them
-# is unanalyzable (C-9c).
+# is unanalyzable (C-9c). "lodYieldsToVanillaTransport" is deliberately NOT here even
+# though §4.5 partitions on it: A1-era jars predate the yield, and analysis treats an
+# absent key as unarmed — which is exactly what those jars ran (reviews C-8/B-3).
 BOOT_CONFIG_REQUIRED_KEYS = ["bytesPerSecondLimitPerPlayer", "bytesPerSecondLimitGlobal",
                              "lodDistanceChunks"]
 
@@ -161,6 +168,9 @@ def check_lss(row, line_no, v):
     for k in LSS_KEYS:
         if k not in lss:
             v.add(line_no, f"lss block missing '{k}'")
+    for k in LSS_OPTIONAL_INT_KEYS:
+        if k in lss and not isinstance(lss[k], int):
+            v.add(line_no, f"lss.{k} must be an int when present")
     if "dialect" in lss and lss["dialect"] not in DIALECTS:
         v.add(line_no, f"lss.dialect '{lss['dialect']}' is not one of {sorted(DIALECTS)} "
                        "(absent means native)")
@@ -368,6 +378,10 @@ def selftest():
           lambda r: r.update(lss=None))))
     hits("lss block missing key", _check_one(doctored(by_type["flight"],
          lambda r: r["lss"].pop("proto"))), "lss block missing 'proto'")
+    clean("A1-era lss block without yielded is legal", _check_one(doctored(
+        by_type["flight"], lambda r: r["lss"].pop("yielded"))))
+    hits("yielded wrong type", _check_one(doctored(by_type["flight"],
+         lambda r: r["lss"].update(yielded="7"))), "must be an int")
     hits("bad dialect", _check_one(doctored(by_type["too_quickly"],
          lambda r: r["lss"].update(dialect="v12"))), "dialect")
 

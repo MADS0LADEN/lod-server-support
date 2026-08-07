@@ -108,6 +108,24 @@ public class TickDiagnostics {
 
     public long getTotalSectionsSent() { return this.totalSectionsSent; }
     public long getTotalBytesSent() { return this.totalBytesSent; }
+
+    // ---- Transport yield (lodYieldsToVanillaTransport; yield plan §5, A-7) ----
+    // SERVICE-scoped so the log-archive signal survives per-player state teardown
+    // (the R2-9 lesson: live-state sums collapse on every rejoin/dimension change).
+    // Volatile per the H3 pin the totals above carry: /lsslod diag renders on the
+    // invoking player's REGION thread on Folia while the pump writes.
+    private volatile long yieldTicksTotal = 0;
+    private volatile long yieldBytesWithheldTotal = 0;
+
+    /** One withheld flush tick; {@code queuedBytes} is that tick's held queue bytes
+     *  (a byte-tick pressure integral, never a delivered-bytes count). */
+    public void recordYieldedTick(long queuedBytes) {
+        this.yieldTicksTotal++;
+        this.yieldBytesWithheldTotal += queuedBytes;
+    }
+
+    public long getYieldTicksTotal() { return this.yieldTicksTotal; }
+    public long getYieldBytesWithheldTotal() { return this.yieldBytesWithheldTotal; }
     public long getTotalWireBytesSent() { return this.totalWireBytesSent; }
 
     public void updateQueuePeak(int queueSize) {

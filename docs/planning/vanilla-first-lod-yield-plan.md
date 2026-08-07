@@ -110,7 +110,10 @@ floor, exactly as today.
 
 Unchanged from v2 (A-4): if a player's flush has sent nothing for `YIELD_FLOOR_TICKS`
 (100 ticks = 5 s) and the queue is non-empty, send exactly one payload regardless of
-writability. Bounds worst-case LOD at ~1 column/5 s, distinguishes "yielding hard"
+writability. (Shipped refinement, A2 review round: the floor counter resets only when
+a floor payload ACTUALLY leaves — a floor tick whose send the limiter refuses stays
+armed and retries next tick, so "send exactly one payload" cannot silently degrade to
+"attempt one" under global bandwidth debt — reviews A-1/B-5.) Bounds worst-case LOD at ~1 column/5 s, distinguishes "yielding hard"
 from "dead", charges the limiter normally. The floor payload is drawn from the head of
 the *pruned* queue (§2.1 runs at the top of the same flush), so the floor never spends
 its one payload on terrain the prune was about to discard.
@@ -153,7 +156,12 @@ the **processing thread**, while the send queue is a non-thread-safe main-thread
 `PriorityQueue`: a data race as specified. v2.1: the prune runs **inside
 `flushSendQueue` on the owning thread**, gated by a tick counter to the same cadence
 (~once a minute; the queue is ≤1024 entries, an O(n) `removeIf` at that cadence is
-noise). Inputs (player chunk position, ingress radius + margin) are available
+noise). (Shipped refinements, v0.10.0 A2 review round — v0.10.0-progress.md
+2026-08-07: the prune is GATED on `lodYieldsToVanillaTransport` — it is the yield's
+companion and must not ship armed under the default-FALSE posture (B-2); and it
+ADDITIONALLY runs on every floor tick (≤ once per 5 s), because the minute cadence
+alone made §1.4's "floor draws from the post-prune head" true only 1 tick in 12
+(A-4).) Inputs (player chunk position, ingress radius + margin) are available
 main-thread. Per pruned entry: `decrementEnqueued` + clear its `diskReadDone` bit so a
 future declaration re-resolves honestly. No proximity re-ordering (same-position edit
 convergence depends on submission order); re-ordering stays the v3 option.
@@ -228,7 +236,13 @@ Support lines: 26.2/main only; backport on demand.
 - Service-level cumulative pair (A-7): `yield.ticks_total` +
   `yield.bytes_withheld_total` in the service diag block, plus a one-shot INFO the
   first time any player crosses N consecutive fully-yielded ticks — the log archive
-  carries the signal for after-the-fact complaints.
+  carries the signal for after-the-fact complaints. (Shipped shape, v0.10.0 A2: a
+  conditional `Yield: armed=…, ticks_total=…, bytes_withheld=…` diag line — armed
+  shows immediately as the arming receipt; counters live in `TickDiagnostics` so
+  they survive per-player teardown (the R2-9 lesson); the one-shot INFO fires at the
+  first FLOOR send, i.e. `YIELD_FLOOR_TICKS` consecutive withheld ticks;
+  `bytes_withheld_total` is a per-tick byte-tick pressure INTEGRAL of held queue
+  bytes, never a delivered-bytes count — v0.10.0-progress.md 2026-08-07.)
 - `check_soak.py`'s `SERVER_CONFIG_BOOL_KEYS` gains `lodYieldsToVanillaTransport` in
   the same commit (S-8 — the twice-shipped R4-class allowlist defect).
 - Tracer integration is a dependency, not a present surface (S-10): when the tracer

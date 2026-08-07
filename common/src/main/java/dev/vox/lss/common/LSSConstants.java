@@ -97,7 +97,10 @@ public final class LSSConstants {
     public static final int MAX_DISK_READER_THREADS = 64;
     /** Transport-deference ceiling bounds (0 = disabled, the default — see
      *  {@code outboundBufferCeilingKB}). The floor is well above one legal maximum-size
-     *  column so a single admissible payload can never trip the gate on its own. */
+     *  column so a single admissible payload can never trip the gate on its own. The
+     *  transport YIELD needs no such floor at all: it gates on netty's writability flag,
+     *  so a payload is only ever written to a writable channel and the single-payload
+     *  invariant holds by construction (yield plan §1.2). */
     public static final int MIN_OUTBOUND_BUFFER_CEILING_KB = 4_096;
     public static final int MAX_OUTBOUND_BUFFER_CEILING_KB = 262_144;
     public static final long MAX_BYTES_PER_SECOND_GLOBAL_LIMIT = 1_073_741_824;

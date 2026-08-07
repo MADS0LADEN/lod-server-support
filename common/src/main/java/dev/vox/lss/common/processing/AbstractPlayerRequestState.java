@@ -89,6 +89,21 @@ public abstract class AbstractPlayerRequestState<T> {
     /** Ticks on which the deference gate skipped the column flush. */
     private volatile long sendDeferrals = 0;
 
+    // ---- Transport yield (lodYieldsToVanillaTransport, yield plan v2.1) ----
+    /** 100 ticks = 5 s: the §1.4 starvation floor — bounds worst-case LOD at ~1 column/5 s
+     *  and distinguishes "yielding hard" from "dead". Yield starvation only; the ceiling
+     *  path has no floor (F2-7). */
+    public static final int YIELD_FLOOR_TICKS = 100;
+    /** ~once a minute at 20 TPS: the §2.1 relevance-prune cadence (O(n) removeIf over a
+     *  ≤1024-entry queue at this cadence is noise). */
+    static final int PRUNE_INTERVAL_TICKS = 1200;
+    private volatile long yieldedTicks = 0;
+    private int yieldNoSendTicks = 0;
+    private int flushTickCounter = 0;
+    /** One INFO per JVM the first time any player rides the floor — the log archive's
+     *  answer to an after-the-fact "LOD was slow" report (yield plan §5). */
+    private static volatile boolean sustainedYieldWarned;
+
     // ---- Want-set mailbox + backlog (protocol v17) ----
 
     // Network/region thread → processing thread, latest-wins: a batch overwritten before
@@ -564,8 +579,10 @@ public abstract class AbstractPlayerRequestState<T> {
      * re-requests re-resolve instead of being answered up-to-date for data that was never
      * delivered. Called by the main thread each tick.
      *
-     * @return packed positions of column payloads dropped by a send failure (empty when
-     *         everything sent or remains queued)
+     * @return packed positions whose resolved-but-undelivered payloads were discarded —
+     *         by a send failure OR by the relevance prune — for the caller to route to
+     *         {@code OffThreadProcessor.clearDiskReadDone} (empty when everything sent
+     *         or remains queued)
      */
     public long[] flushSendQueue(long allocationBytes, SharedBandwidthLimiter globalLimiter,
                                   TickDiagnostics diag, PayloadSender<T> sender) {
@@ -577,30 +594,69 @@ public abstract class AbstractPlayerRequestState<T> {
      * see {@code outboundBufferCeilingKB}). Above the ceiling this tick's column flush is
      * skipped and the queue RETAINED, matching the router's "a full slot cap retains the
      * entry" convention: nothing is dropped, and the next tick drains normally.
+     *
+     * <p>Short overloads pin the yield OFF (the S-9a defaults pin): only the full overload
+     * can arm it, and only the platform services call that with live config.
      */
     public long[] flushSendQueue(long allocationBytes, SharedBandwidthLimiter globalLimiter,
                                   TickDiagnostics diag, PayloadSender<T> sender,
                                   long outboundCeilingBytes) {
+        return flushSendQueue(allocationBytes, globalLimiter, diag, sender,
+                outboundCeilingBytes, false, 0);
+    }
+
+    /**
+     * Full flush overload carrying the transport-yield gate
+     * ({@code lodYieldsToVanillaTransport}, default false — vanilla-first-lod-yield-plan.md
+     * v2.1) and the relevance-prune radius (0 = prune disabled). The gate IS netty's
+     * writability flag: while the channel is writable the bandwidth limiter is the only
+     * constraint; while it is not, this tick's column flush is skipped and the queue
+     * retained — LSS never deepens an already-backed-up channel's queue ahead of
+     * vanilla's chunk packets. Writability UNKNOWN (legacy probe, closed channel, no
+     * signal) never yields — the fail-safe direction.
+     */
+    public long[] flushSendQueue(long allocationBytes, SharedBandwidthLimiter globalLimiter,
+                                  TickDiagnostics diag, PayloadSender<T> sender,
+                                  long outboundCeilingBytes, boolean yieldToTransport,
+                                  int pruneRadiusChunks) {
         QueuedPayload<T> ready;
         while ((ready = this.readyPayloads.poll()) != null) {
             this.sendQueue.add(ready);
         }
+
+        // Relevance prune (yield plan §2.1, cadence-gated): yield stretches queue
+        // residency from ~1 tick to minutes, and an unpruned post-yield drain ships
+        // kilometres-behind terrain oldest-first. Runs HERE on the owning thread (the
+        // v2 eviction-hook placement raced this main-thread PriorityQueue — F2-3),
+        // BEFORE the gate so the §1.4 floor draws from the post-prune head. Pruned
+        // positions ride the return array to the processor's clearDiskReadDone (the
+        // send-failure route) — diskReadDone is processing-thread-owned.
+        long[] prunedPositions = NO_DROPPED_POSITIONS;
+        if (pruneRadiusChunks > 0 && ++this.flushTickCounter >= PRUNE_INTERVAL_TICKS) {
+            this.flushTickCounter = 0;
+            prunedPositions = pruneSendQueueOutsideRange(pruneRadiusChunks);
+        }
         this.sendQueueSizeSnapshot = this.sendQueue.size();
 
-        // ONE authoritative probe read per tick — it is both the diag gauge and the
-        // deference input, so the two can never disagree. Contained: this runs inside the
-        // per-player flush loop, so a throwing probe would take every LATER player's flush
-        // down with it. Both shipped adapters already catch internally; this is the belt.
+        // ONE authoritative probe read per tick — it is the diag gauge, the deference
+        // input, AND the yield gate's writability source, so the three can never disagree
+        // about which channel state they saw. Contained: this runs inside the per-player
+        // flush loop, so a throwing probe would take every LATER player's flush down with
+        // it. Both shipped adapters already catch internally; this is the belt.
         long pending;
+        ChannelPressureProbe.Writability writable;
         try {
-            pending = this.channelPressure.pendingOutboundBytes();
+            var snapshot = this.channelPressure.snapshot();
+            pending = snapshot.pendingBytes();
+            writable = snapshot.writable();
         } catch (Exception e) {
             pending = -1L; // no signal — never throttle on a broken probe
+            writable = ChannelPressureProbe.Writability.UNKNOWN;
         }
         this.outboundPendingBytes = pending;
         if (pending > this.outboundPendingHighWater) this.outboundPendingHighWater = pending;
 
-        long[] dropped = NO_DROPPED_POSITIONS;
+        long[] dropped = prunedPositions;
 
         // Transport deference. A deep outbound buffer means LSS payloads are already
         // queued AHEAD of vanilla's chunk packets on the shared channel; writing more
@@ -615,10 +671,62 @@ public abstract class AbstractPlayerRequestState<T> {
         // skipping it leaks one entry per column ever sent.
         if (outboundCeilingBytes > 0 && pending > outboundCeilingBytes) {
             // Count only ticks that actually withheld work: `deferred=` is the operator's
-            // tripwire, and an idle-queue tick skipped nothing.
+            // tripwire, and an idle-queue tick skipped nothing. Ceiling first, yield
+            // second (S-6) — and the ceiling path deliberately has NO floor (F2-7): an
+            // operator-armed ceiling keeps today's exact semantics.
             if (!this.sendQueue.isEmpty()) this.sendDeferrals++;
             sweepDepartedColumns();
             return dropped;
+        }
+
+        // The yield gate (§1.2): while the channel is NOT writable, skip this tick's
+        // column flush and retain the queue — with the §1.4 starvation floor: after
+        // YIELD_FLOOR_TICKS consecutive withheld ticks, exactly one payload goes out
+        // regardless of writability (bounds worst-case LOD at ~1 column/5 s and
+        // distinguishes "yielding hard" from "dead"). UNKNOWN never yields.
+        boolean floorSendThisTick = false;
+        if (yieldToTransport && writable == ChannelPressureProbe.Writability.NOT_WRITABLE
+                && !this.sendQueue.isEmpty()) {
+            this.yieldedTicks++;
+            // A byte-tick pressure integral, not a distinct-bytes count: each withheld
+            // tick adds the bytes that were ready and held. Useful as a magnitude gauge;
+            // never a delivered-bytes term. Service-scoped only (TickDiagnostics) —
+            // the per-player twin was dead API and dropped (review C-7/A-7).
+            long queuedBytes = 0;
+            for (var entry : this.sendQueue) {
+                queuedBytes += entry.estimatedBytes();
+            }
+            diag.recordYieldedTick(queuedBytes);
+            // The counter is NOT reset here: it resets only when a floor payload actually
+            // leaves (review A-1/B-5 — a floor tick whose send the limiter refuses must
+            // stay armed, not silently spend its window). §1.4's contract is "send
+            // exactly one payload", not "attempt one".
+            if (++this.yieldNoSendTicks >= YIELD_FLOOR_TICKS) {
+                floorSendThisTick = true;
+                // The floor draws from the POST-PRUNE head on EVERY floor tick, not just
+                // the 1-in-12 where the minute cadence lines up (review A-4): a bounded
+                // extra prune (≤ once per 5 s) keeps §1.4's "never spends its one payload
+                // on terrain the prune was about to discard" true always.
+                if (pruneRadiusChunks > 0) {
+                    long[] floorPruned = pruneSendQueueOutsideRange(pruneRadiusChunks);
+                    if (floorPruned.length > 0) {
+                        var merged = new LongArrayList(dropped.length + floorPruned.length);
+                        merged.addElements(0, dropped);
+                        merged.addElements(merged.size(), floorPruned);
+                        dropped = merged.toLongArray();
+                        this.sendQueueSizeSnapshot = this.sendQueue.size();
+                        if (this.sendQueue.isEmpty()) {
+                            sweepDepartedColumns();
+                            return dropped;
+                        }
+                    }
+                }
+            } else {
+                sweepDepartedColumns();
+                return dropped;
+            }
+        } else {
+            this.yieldNoSendTicks = 0;
         }
         while (!this.sendQueue.isEmpty()) {
             if (!this.bandwidth.canSend(allocationBytes)) break;
@@ -643,10 +751,29 @@ public abstract class AbstractPlayerRequestState<T> {
                 // makes /lsslod diag match observed bandwidth (design §5: the limiter
                 // keeps charging raw; this counter is the observability half).
                 diag.recordWireSent(queued.wireBytes());
+                if (floorSendThisTick) {
+                    // The starvation floor sends EXACTLY ONE payload (§1.4) — the yield
+                    // is still holding; this send only proves liveness. The counter and
+                    // the one-shot INFO fire only HERE, on a send that actually left
+                    // (review A-1/B-5).
+                    this.yieldNoSendTicks = 0;
+                    if (!sustainedYieldWarned) {
+                        sustainedYieldWarned = true;
+                        LSSLogger.info("Transport yield sustained for " + YIELD_FLOOR_TICKS
+                                + " ticks on " + getPlayerName() + " — LOD is running at the"
+                                + " starvation floor (~1 column/5 s) while vanilla traffic"
+                                + " drains; this is lodYieldsToVanillaTransport working");
+                    }
+                    break;
+                }
             } catch (Exception e) {
                 LSSLogger.error("Failed to send queued payload to " + getPlayerName()
                         + ", dropping remaining queue (" + this.sendQueue.size() + " entries)", e);
-                var droppedList = new LongArrayList(this.sendQueue.size());
+                // Seeded with any prune-cleared positions from this tick: both classes
+                // need the caller's clearDiskReadDone routing, and overwriting would
+                // leak the pruned ones' stale done-bits.
+                var droppedList = new LongArrayList(dropped.length + this.sendQueue.size());
+                droppedList.addElements(0, dropped);
                 for (var entry : this.sendQueue) {
                     droppedList.add(entry.packedPos());
                     decrementEnqueued(entry.packedPos());
@@ -660,6 +787,56 @@ public abstract class AbstractPlayerRequestState<T> {
         sweepDepartedColumns();
         return dropped;
     }
+
+    /**
+     * Remove send-queue entries beyond {@code radiusChunks} (Chebyshev) of the player's
+     * current chunk (yield plan §2.1): each pruned entry releases its enqueued mark and
+     * returns its position so the CALLER routes it to the processor's
+     * {@code clearDiskReadDone} — a future declaration then re-resolves honestly.
+     * In-departure-grace entries are kept (their done-bit semantics are pinned); no
+     * proximity re-ordering (edit convergence depends on submission order — the v3
+     * lever). Owning (main) thread only.
+     *
+     * <p>Unstated-elsewhere invariant (review N1): this radius (ingress + margin) is
+     * strictly LARGER than the client's own movement-prune distance, so the client
+     * always forgets a position before the server may prune its payload — a ts&gt;0
+     * re-ask that was answered up_to_date can therefore never be stranded stale by a
+     * prune. A future change to either radius must preserve that ordering.
+     */
+    private long[] pruneSendQueueOutsideRange(int radiusChunks) {
+        long playerPacked = this.playerChunkPacked;
+        if (playerPacked == NO_PLAYER_CHUNK || this.sendQueue.isEmpty()) {
+            return NO_DROPPED_POSITIONS;
+        }
+        int pcx = PositionUtil.unpackX(playerPacked);
+        int pcz = PositionUtil.unpackZ(playerPacked);
+        LongArrayList pruned = null;
+        var it = this.sendQueue.iterator();
+        while (it.hasNext()) {
+            var entry = it.next();
+            long packed = entry.packedPos();
+            if (PositionUtil.chebyshevDistance(PositionUtil.unpackX(packed),
+                    PositionUtil.unpackZ(packed), pcx, pcz) <= radiusChunks) continue;
+            if (isWithinDepartureGrace(packed)) continue;
+            it.remove();
+            decrementEnqueued(packed);
+            if (pruned == null) pruned = new LongArrayList();
+            pruned.add(packed);
+        }
+        return pruned == null ? NO_DROPPED_POSITIONS : pruned.toLongArray();
+    }
+
+    /** Test seam: position the prune cadence counter (the interval is 1200 flushes —
+     *  driving it for real would floor-send the queue empty long before the prune). */
+    void setFlushTickCounterForTest(int value) {
+        this.flushTickCounter = value;
+    }
+
+    /** Cumulative ticks the transport yield withheld this player's column flush. */
+    public long getYieldedTicks() {
+        return this.yieldedTicks;
+    }
+
 
     // ---- Probe suppression (2026-08-05 review P1) ----
 
