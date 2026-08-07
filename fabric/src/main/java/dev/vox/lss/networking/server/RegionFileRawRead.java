@@ -43,8 +43,12 @@ final class RegionFileRawRead {
     static Optional<NbtSectionSerializer.RawChunkRecord> read(RegionFile regionFile, ChunkPos pos)
             throws IOException {
         var acc = (AccessorRegionFile) (Object) regionFile;
-        // Vanilla's getChunkDataInputStream is synchronized — same instance monitor here,
-        // so raw reads serialize against vanilla's own reads/writes of this region file.
+        // Instance monitor mirroring vanilla's synchronized reader — but note (review C5)
+        // the monitor covers getChunkDataInputStream and write only; clear/close/flush
+        // are unsynchronized in vanilla. The LOAD-BEARING guarantee is executor
+        // confinement: this runs inside the IOWorker's own consecutive-executor task,
+        // the same sequencing point every vanilla load/save/clear/close uses — the
+        // monitor is belt-and-braces on top.
         synchronized (regionFile) {
             int offset = acc.lss$getOffset(pos);
             if (offset == 0) {
@@ -56,7 +60,7 @@ final class RegionFileRawRead {
             ByteBuffer buffer = ByteBuffer.allocate(numSectors * sectorBytes);
             acc.lss$getFile().read(buffer, (long) sectorNumber * sectorBytes);
             buffer.flip();
-            if (buffer.remaining() < 5) {
+            if (buffer.remaining() < AccessorRegionFile.lss$chunkHeaderSize()) {
                 return corrupt("truncated header for chunk " + pos);
             }
             int length = buffer.getInt();
@@ -66,7 +70,15 @@ final class RegionFileRawRead {
             }
             int streamLength = length - 1;
             if (AccessorRegionFile.lss$isExternalStreamChunk(versionId)) {
-                // External .mcc — vanilla warns on a dual stream and prefers the external.
+                // External .mcc — mirrored from vanilla incl. the dual-stream warn and
+                // the external preference. The whole-file read happens HERE, under the
+                // monitor and on the executor: bounded work holds for internal records
+                // (<= 255 sectors); the external branch is unbounded exactly as it is in
+                // vanilla, and reading it here closes the non-ATOMIC_MOVE replace window
+                // the withdrawn lazy-pool-IO design would have re-opened (review C7).
+                if (streamLength != 0) {
+                    LSSLogger.warn("Chunk " + pos + " has both internal and external streams");
+                }
                 Path external = acc.lss$getExternalChunkPath(pos);
                 if (!Files.isRegularFile(external)) {
                     return corrupt("external chunk path " + external + " is not a file");

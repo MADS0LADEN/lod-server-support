@@ -91,7 +91,8 @@ class ChunkDiskReaderTest {
      *  Accessor consults are COUNTED (never thrown from — {@code backgroundReaderOrFallback}'s
      *  {@code catch (Throwable)} swallows resolver throws by design, so an AssertionError
      *  there would be vacuous): tests that forbid the accessor assert the count stays 0. */
-    private static final class MoonriseRigReader extends ChunkDiskReader {
+    // Not final: SplitRigReader (the Phase 3 dispatcher pins) subclasses it.
+    private static class MoonriseRigReader extends ChunkDiskReader {
         final AtomicReference<MoonriseReadCompat.LowPriorityRead> bridge = new AtomicReference<>();
         final AtomicInteger bridgeConsults = new AtomicInteger();
         final AtomicInteger bridgeReads = new AtomicInteger();
@@ -195,14 +196,17 @@ class ChunkDiskReaderTest {
         var reader = new MoonriseRigReader(true);
         reader.setBridge(null);
         try {
-            assertFalse(reader.getDiagnostics().contains("read_path="),
-                    "no Moonrise = no token — diagnostics goldens do not move");
+            assertTrue(reader.getDiagnostics().contains("read_path=bg-split, raw_serves=0"),
+                    "no Moonrise + split on = the split receipt token (B3 review F2 — this"
+                            + " deliberately replaced the old no-token golden)");
             reader.chooseReadPath(null, null);
             assertEquals(1, reader.accessorConsults.get(),
                     "with a null bridge the ladder reaches the IOWorker accessor exactly as today");
             assertTrue(reader.isBackgroundIncompatibleForTest(),
                     "the rig simulates a nulled worker, which latches the C2ME-style fallback");
             assertTrue(reader.adaptiveThrottleLimitOrDisabled() >= 0);
+            assertFalse(reader.getDiagnostics().contains("read_path="),
+                    "a latched incompatible clears every read_path token");
         } finally {
             reader.shutdown();
         }
@@ -356,44 +360,87 @@ class ChunkDiskReaderTest {
         }
     }
 
+    /**
+     * The AGREEMENT pin (review F3): for each state, assert the PAIR — what
+     * chooseRawReadOrNull returns AND which rung chooseReadPath actually takes
+     * (identified through the rig's rung counters, evaluated in production order:
+     * raw first, then the nbt ladder). The one state the rigs cannot fabricate is
+     * real resolvable IOWorker handles; there, "both dispatchers judge the state as
+     * background-rung" is pinned via the accessor-consult counter, and the LIVENESS
+     * of the real raw path is the parity gametest's raw_serves receipt.
+     */
     @Test
     void rawDispatcherAgreesWithTheNbtLadderOnEveryRung() {
-        // Background rung + split on -> raw path chosen.
+        // Background-rung state + split on: raw chosen AND the nbt ladder would consult
+        // the IOWorker accessor (both dispatchers call the state "background rung").
         var reader = new SplitRigReader(true, true);
         try {
             assertSame(SplitRigReader.SENTINEL, reader.chooseRawReadOrNull(null, null),
                     "the vanilla BACKGROUND rung must take the split path");
+            reader.chooseReadPath(null, null);
+            assertEquals(1, reader.accessorConsults.get(),
+                    "the nbt ladder agrees: this state is the background rung");
         } finally {
             reader.shutdown();
         }
 
-        // Split kill switch -> null (the ChunkNbtRead ladder serves, pre-split shape).
+        // Split kill switch: raw null, but the nbt ladder STILL judges background rung
+        // (accessor consulted) — the split alone stepped aside, pre-split shape.
         var off = new SplitRigReader(true, false);
         try {
             assertNull(off.chooseRawReadOrNull(null, null),
                     "useBackgroundReadSplit=false must fully disable the raw path");
+            off.chooseReadPath(null, null);
+            assertEquals(1, off.accessorConsults.get(),
+                    "with the split off, the nbt ladder's background rung serves");
         } finally {
             off.shutdown();
         }
 
-        // Foreground rollback -> null (mirrors chooseReadPath's first rung).
+        // Foreground rollback: raw null AND the nbt ladder never touches the accessor.
         var fg = new SplitRigReader(false, true);
         try {
             assertNull(fg.chooseRawReadOrNull(null, null),
                     "useBackgroundReadPriority=false must keep the raw path off");
+            var read = fg.chooseReadPath(null, null);
+            read.read(0, 0);
+            assertEquals(1, fg.foregroundReads.get(), "the nbt ladder agrees: foreground");
+            assertEquals(0, fg.accessorConsults.get());
         } finally {
             fg.shutdown();
         }
 
-        // Moonrise rung available -> null (its bridge returns PARSED NBT by contract).
+        // Moonrise rung available: raw null AND the bridge serves (its future carries
+        // PARSED NBT by contract — parse placement is the bridge's, not ours).
         var moonrise = new SplitRigReader(true, true);
+        var served = new CompoundTag();
         moonrise.setBridge((level, cx, cz) ->
-                CompletableFuture.completedFuture(Optional.empty()));
+                CompletableFuture.completedFuture(Optional.of(served)));
         try {
             assertNull(moonrise.chooseRawReadOrNull(null, null),
                     "the Moonrise rung wins over the raw split, mirroring chooseReadPath");
+            moonrise.chooseReadPath(null, null).read(0, 0);
+            assertEquals(1, moonrise.bridgeReads.get(), "the nbt ladder agrees: Moonrise");
+            assertEquals(0, moonrise.accessorConsults.get());
         } finally {
             moonrise.shutdown();
+        }
+
+        // Latched incompatible (review F3's missing fifth case): once the nbt ladder
+        // latches, the raw dispatcher must go null on the LATCH CONDITION itself —
+        // before any handle resolution.
+        var latched = new SplitRigReader(true, true);
+        try {
+            // MoonriseRigReader resolves handles to (null, null): this latches.
+            latched.backgroundReaderOrFallback(null);
+            assertTrue(latched.isBackgroundIncompatibleForTest(), "precondition: latched");
+            int consultsAfterLatch = latched.accessorConsults.get();
+            assertNull(latched.chooseRawReadOrNull(null, null),
+                    "a latched incompatible must keep the raw path off");
+            assertEquals(consultsAfterLatch, latched.accessorConsults.get(),
+                    "…without re-consulting the accessor (the latch short-circuits)");
+        } finally {
+            latched.shutdown();
         }
     }
 

@@ -324,7 +324,11 @@ over a value object, not an open resource:
   `callSerializing` shim (the existing comment documents that exclusion; update it).
 - Mixin surface: the `getRegionFile` invoker + the `RegionFile` raw-read method, both
   registered in `lss.mixins.json` and pinned by a listing test
-  (`ChannelAccessorContractTest` pattern). The raw-read method must **prefer
+  (`ChannelAccessorContractTest` pattern). *(B3 as shipped: the "raw-read method" is
+  NOT a @Unique mixin method — the record logic lives in the plain class
+  `RegionFileRawRead` behind a pure @Accessor/@Invoker interface (`AccessorRegionFile`),
+  which satisfies the shadow-over-rederive rule with less mixin surface; see the B3
+  decisions entry in v0.10.0-progress.md.)* The raw-read method must **prefer
   `@Shadow`/`@Invoker` on vanilla's own private helpers** (`getOffset`,
   `isExternalStreamChunk`, `createStream`, the external-path resolution) over
   re-deriving the header/sector constants — the region record format is a

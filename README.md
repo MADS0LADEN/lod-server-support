@@ -62,6 +62,7 @@ Config is generated on first run at the paths in the install table above. The ge
 | `lodStoreMaxMB` | `0` | Size cap for the store. `0` = uncapped; set a value to bound it, and the oldest columns are evicted first |
 | `useCompressedColumns` | `true` | Send LOD columns pre-compressed, which cuts CPU on both server and client. Clients that do not support it are served the old format automatically; `false` disables it entirely as a rollback |
 | `useBackgroundReadPriority` | `true` | LOD disk reads yield to normal chunk loading, so streaming distant terrain doesn't delay the chunks players are actively walking into |
+| `useBackgroundReadSplit` | `true` | Fabric: LOD reads only fetch raw bytes on Minecraft's shared chunk-IO thread; decompression and parsing run on LSS's own reader threads (set `false` to restore the old single-thread behavior) |
 | `enableV16Compat` | `true` | Serve legacy v0.4.x–v0.6.x clients through a built-in translation layer. `false` requires every client to match the server's protocol |
 | `enableV18Compat` | `true` | Serve v0.7.x–v0.8.x clients natively — a full session, minus only the column compression their client predates. `false` drops them to the `enableV16Compat` fallback |
 | `xrayObfuscation` | `"auto"` | Anti-xray masking for LOD data. `"auto"` mirrors your anti-xray engine's own hidden-block list and height cutoff whenever one is detected (Paper's built-in, per world; the DrexHD AntiXray mod on Fabric). `"on"` forces masking, `"off"` disables it — LOD data then carries real ore locations even on anti-xray servers |

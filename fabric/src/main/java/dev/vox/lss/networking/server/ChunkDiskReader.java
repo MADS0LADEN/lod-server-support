@@ -214,12 +214,16 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
                         try {
                             var region = ((dev.vox.lss.mixin.AccessorRegionFileStorage) (Object) storage)
                                     .lss$getRegionFile(pos);
-                            f.complete(RegionFileRawRead.read(region, pos));
-                        } catch (Exception e) {
-                            // Same breadth as the full-read task above (vanilla's own read
-                            // task catches Exception): an escape leaves the future
-                            // uncompleted and stalls a reader thread to the timeout.
-                            f.completeExceptionally(e);
+                            var record = RegionFileRawRead.read(region, pos);
+                            this.rawServes.incrementAndGet();
+                            f.complete(record);
+                        } catch (Throwable t) {
+                            // BROADER than the full-read task's catch (Exception), review C2:
+                            // the raw path can raise Errors by construction (an unapplied
+                            // accessor mixin's AssertionError body), and an escape leaves the
+                            // future uncompleted — every read then burns the full timeout and
+                            // the pool wedges with nothing naming the cause.
+                            f.completeExceptionally(t);
                         }
                     });
         };
@@ -388,7 +392,23 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
         if (!this.useBackgroundReadPriority) return base;
         if (this.moonriseIncompatible) return base + ", read_path=moonrise-incompatible";
         if (this.backgroundIncompatible) return base;
-        return moonriseBridgeOrNull() != null ? base + ", read_path=moonrise-low" : base;
+        if (moonriseBridgeOrNull() != null) return base + ", read_path=moonrise-low";
+        // The split's live receipt (B3 review F2): rawServes counts actual raw-path
+        // serves, so a silently-inert split (dispatcher drift, wiring slip) is visible
+        // as a missing token / frozen counter — the gametest asserts it after a serve.
+        if (this.useBackgroundReadSplit) {
+            return base + ", read_path=bg-split, raw_serves=" + this.rawServes.get();
+        }
+        return base;
+    }
+
+    /** Raw-path serve counter — the F2 liveness receipt (see getDiagnostics). */
+    private final java.util.concurrent.atomic.AtomicLong rawServes = new java.util.concurrent.atomic.AtomicLong();
+
+    /** Test seam: actual raw-path fetch completions (public — the parity gametest's
+     *  liveness receipt lives in another package). */
+    public long rawServesForTest() {
+        return this.rawServes.get();
     }
 
     /** The PRE-SPLIT full read: pread + inflate + full NBT parse all on the IOWorker

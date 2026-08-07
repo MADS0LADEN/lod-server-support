@@ -169,6 +169,7 @@ class ChannelAccessorContractTest {
         var rf = net.minecraft.world.level.chunk.storage.RegionFile.class;
         rf.getDeclaredField("file");
         rf.getDeclaredField("SECTOR_BYTES");
+        rf.getDeclaredField("CHUNK_HEADER_SIZE");
         rf.getDeclaredMethod("getOffset", net.minecraft.world.level.ChunkPos.class);
         rf.getDeclaredMethod("getExternalChunkPath", net.minecraft.world.level.ChunkPos.class);
         rf.getDeclaredMethod("getSectorNumber", int.class);
@@ -182,6 +183,18 @@ class ChannelAccessorContractTest {
                                 net.minecraft.world.level.ChunkPos.class).getModifiers()),
                 "vanilla's reader is no longer synchronized — the raw read's instance-monitor"
                         + " serialization premise broke");
+    }
+
+    @Test
+    void diskReaderCtorWiringPassesTheSplitConfig() throws Exception {
+        // B3 review F7: backgroundReadSplitDefaultsOn pins only the FIELD default — a
+        // literal or wrong field at the ctor call site ships a permanently inert split
+        // with every test green (the echo call site has the same pin for the same
+        // reason).
+        String fabric = Files.readString(Path.of(
+                "src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
+        assertTrue(fabric.contains("config.useBackgroundReadSplit"),
+                "the ChunkDiskReader construction must pass config.useBackgroundReadSplit");
     }
 
     @Test

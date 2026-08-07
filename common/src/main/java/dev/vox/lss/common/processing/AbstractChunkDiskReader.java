@@ -345,6 +345,11 @@ public abstract class AbstractChunkDiskReader {
         try {
             serializedSections = operation.read();
         } catch (Throwable e) {
+            // Failure shapes here arrive BOTH wrapped (fetch failures in
+            // ExecutionException from future.get) and unwrapped (the B3 split's
+            // pool-side parse throws raw). The triage deliberately branches on nothing
+            // but the top-level TimeoutException — do NOT add an ExecutionException
+            // unwrap, it would silently reclassify the split path (B3 review F9).
             if (e instanceof java.util.concurrent.TimeoutException) {
                 // A read exceeding DISK_READ_TIMEOUT_SECONDS is a documented TRANSIENT on
                 // slow IO under generation save pressure (miss-memo-design.md A/B finding):

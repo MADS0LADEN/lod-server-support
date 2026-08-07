@@ -385,7 +385,8 @@ public abstract class ServerConfigBase extends JsonConfig {
                                       boolean effectiveCompressedColumns) {
         return "Effective config: useNbtTranscode=" + useNbtTranscode
                 + ", diskReaderThreads=" + effectiveReaderThreads
-                + ", useCompressedColumns=" + effectiveCompressedColumns;
+                + ", useCompressedColumns=" + effectiveCompressedColumns
+                + ", useBackgroundReadSplit=" + useBackgroundReadSplit;
     }
     /**
      * LOD x-ray masking (docs/planning/antixray-compat-design.md §3). "auto" (default)

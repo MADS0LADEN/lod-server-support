@@ -32,6 +32,7 @@ class RawChunkParseTest {
     private static final byte VERSION_GZIP = 1;
     private static final byte VERSION_DEFLATE = 2;
     private static final byte VERSION_NONE = 3;
+    private static final byte VERSION_LZ4 = 4;
     private static final byte VERSION_CUSTOM = 127;
 
     private static CompoundTag chunkTag() {
@@ -54,28 +55,45 @@ class RawChunkParseTest {
         return new NbtSectionSerializer.RawChunkRecord(payload, version);
     }
 
+    /** Compress through VANILLA's own writer wrapper for the id (review F8: this is
+     *  what the on-disk bytes actually are — no assumption that a JDK stream matches). */
+    private static byte[] vanillaCompressed(CompoundTag tag, byte versionId) throws Exception {
+        var version = net.minecraft.world.level.chunk.storage.RegionFileVersion.fromId(versionId);
+        var out = new ByteArrayOutputStream();
+        try (var wrapped = version.wrap((java.io.OutputStream) out)) {
+            wrapped.write(nbtBytes(tag));
+        }
+        return out.toByteArray();
+    }
+
     @Test
     void deflateRecordRoundTrips() throws Exception {
         var tag = chunkTag();
-        var out = new ByteArrayOutputStream();
-        try (var deflate = new DeflaterOutputStream(out)) {
+        var parsed = NbtSectionSerializer.parseRawChunk(
+                Optional.of(record(vanillaCompressed(tag, VERSION_DEFLATE), VERSION_DEFLATE)), 3, -4);
+        assertEquals(tag, parsed, "DEFLATE (the on-disk default) must round-trip");
+        // A plain JDK DeflaterOutputStream is also inflatable by vanilla's wrapper —
+        // pinned so foreign-tool-written regions keep working.
+        var jdk = new ByteArrayOutputStream();
+        try (var deflate = new DeflaterOutputStream(jdk)) {
             deflate.write(nbtBytes(tag));
         }
-        var parsed = NbtSectionSerializer.parseRawChunk(
-                Optional.of(record(out.toByteArray(), VERSION_DEFLATE)), 3, -4);
-        assertEquals(tag, parsed, "DEFLATE (the on-disk default) must round-trip");
+        assertEquals(tag, NbtSectionSerializer.parseRawChunk(
+                Optional.of(record(jdk.toByteArray(), VERSION_DEFLATE)), 3, -4));
     }
 
     @Test
     void gzipRecordRoundTrips() throws Exception {
         var tag = chunkTag();
-        var out = new ByteArrayOutputStream();
-        try (var gzip = new GZIPOutputStream(out)) {
+        var parsed = NbtSectionSerializer.parseRawChunk(
+                Optional.of(record(vanillaCompressed(tag, VERSION_GZIP), VERSION_GZIP)), 0, 0);
+        assertEquals(tag, parsed);
+        var jdk = new ByteArrayOutputStream();
+        try (var gzip = new GZIPOutputStream(jdk)) {
             gzip.write(nbtBytes(tag));
         }
-        var parsed = NbtSectionSerializer.parseRawChunk(
-                Optional.of(record(out.toByteArray(), VERSION_GZIP)), 0, 0);
-        assertEquals(tag, parsed);
+        assertEquals(tag, NbtSectionSerializer.parseRawChunk(
+                Optional.of(record(jdk.toByteArray(), VERSION_GZIP)), 0, 0));
     }
 
     @Test
@@ -84,6 +102,16 @@ class RawChunkParseTest {
         var tag = chunkTag();
         var parsed = NbtSectionSerializer.parseRawChunk(
                 Optional.of(record(nbtBytes(tag), VERSION_NONE)), 0, 0);
+        assertEquals(tag, parsed);
+    }
+
+    @Test
+    void lz4RecordRoundTrips() throws Exception {
+        // 26.2 registers VERSION_LZ4 (id 4), selectable via region-file-compression —
+        // a real server can hold lz4 records the split must inflate (review F8).
+        var tag = chunkTag();
+        var parsed = NbtSectionSerializer.parseRawChunk(
+                Optional.of(record(vanillaCompressed(tag, VERSION_LZ4), VERSION_LZ4)), 0, 0);
         assertEquals(tag, parsed);
     }
 

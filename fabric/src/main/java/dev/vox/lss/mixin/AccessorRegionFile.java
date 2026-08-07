@@ -36,6 +36,11 @@ public interface AccessorRegionFile {
         throw new AssertionError("mixin not applied");
     }
 
+    @Accessor("CHUNK_HEADER_SIZE")
+    static int lss$chunkHeaderSize() {
+        throw new AssertionError("mixin not applied");
+    }
+
     @Invoker("getSectorNumber")
     static int lss$getSectorNumber(int offset) {
         throw new AssertionError("mixin not applied");

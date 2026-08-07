@@ -185,8 +185,15 @@ final class NbtSectionSerializer {
         }
     }
 
+    // Dedicated throttle (review C3): sharing PARSE_WARN_THROTTLE with the section
+    // block_states warns would let an upgraded world's continuous rename warns hold the
+    // window and completely silence version-corruption warns — unrelated conditions,
+    // separate windows.
+    private static final dev.vox.lss.common.LogThrottle RAW_PARSE_WARN_THROTTLE =
+            new dev.vox.lss.common.LogThrottle(60_000);
+
     private static void warnRawParse(String detail) {
-        long released = PARSE_WARN_THROTTLE.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+        long released = RAW_PARSE_WARN_THROTTLE.recordAndTryAcquire(System.nanoTime() / 1_000_000);
         if (released > 0) {
             dev.vox.lss.common.LSSLogger.warn("Raw chunk parse: " + detail
                     + " — resolved as not-found"
