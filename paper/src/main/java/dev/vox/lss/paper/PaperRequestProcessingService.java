@@ -977,7 +977,10 @@ public class PaperRequestProcessingService {
                 continue;
             long[] dropped = state.flushSendQueue(perPlayerCap, this.bandwidthLimiter, this.diag,
                     data -> this.columnPayloadSender.send(state, data),
-                    (long) this.config.outboundBufferCeilingKB * 1024L);
+                    (long) this.config.outboundBufferCeilingKB * 1024L,
+                    this.config.lodYieldsToVanillaTransport,
+                    this.config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
+                            + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS);
             if (dropped.length > 0) {
                 // A send failure discarded resolved-but-undelivered columns: clear their
                 // done-bits so the client's re-requests re-resolve instead of being

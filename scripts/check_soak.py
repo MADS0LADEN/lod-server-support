@@ -161,7 +161,13 @@ SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBac
                                      # v18 compat rung kill switch (v0.9.1) — listed at
                                      # introduction so an A/B scenario CAN pin it, unlike
                                      # the two R4 holes above.
-                                     "enableV18Compat"})
+                                     "enableV18Compat",
+                                     # Transport yield (v0.10.0 A2, default false): the
+                                     # writability gate is provably inert on loopback, so
+                                     # an armed soak is expected-identical — the S-8
+                                     # same-commit allowlist rule (the twice-shipped
+                                     # R4-class defect).
+                                     "lodYieldsToVanillaTransport"})
 SERVER_CONFIG_INT_KEYS = frozenset({
     "lodDistanceChunks", "bytesPerSecondLimitPerPlayer", "diskReaderThreads",
     "sendQueueLimitPerPlayer", "bytesPerSecondLimitGlobal",

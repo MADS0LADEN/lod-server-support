@@ -37,7 +37,10 @@ ENVELOPE_KEYS = ["v", "type", "bootId", "wallMs", "tick", "player", "name", "dim
                  "obuf", "latency_ms", "mspt", "online", "dropped", "lss"]
 BOOT_KEYS = ["v", "type", "bootId", "wallMs", "tz_offset_min", "lss_version",
              "mc_version", "moonrise", "c2me", "chunky", "rung", "config"]
-LSS_KEYS = ["registered", "since_s", "caps", "proto", "send_queue", "bw_total"]
+LSS_KEYS = ["registered", "since_s", "caps", "proto", "send_queue", "bw_total", "yielded"]
+# boot config "lodYieldsToVanillaTransport" is deliberately OPTIONAL: A1-era jars
+# predate the yield and their boot rows are legal; analysis treats absent as false
+# (which is exactly what those jars ran).
 
 EVENT_COMMON_KEYS = ["origin", "claimed", "fall_flying", "speed",
                      "move_gap_ms", "move_gap_max_5s_ms"]

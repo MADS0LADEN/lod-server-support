@@ -114,6 +114,12 @@ class PaperConfigValidationTest {
     /** Paper inherits the shared transcode default: disk serves transcode NBT straight to
      *  wire bytes; false is the documented rollback to the object path (round 2, 2026-07-29). */
     @Test
+    void transportYieldDefaultsOff() {
+        assertFalse(new PaperConfig().lodYieldsToVanillaTransport,
+                "lodYieldsToVanillaTransport must default FALSE (Fabric parity)");
+    }
+
+    @Test
     void nbtTranscodeDefaultsOn() {
         assertTrue(new PaperConfig().useNbtTranscode,
                 "NBT transcode must default on (Paper)");

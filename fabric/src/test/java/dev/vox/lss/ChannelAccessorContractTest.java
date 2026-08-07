@@ -114,4 +114,20 @@ class ChannelAccessorContractTest {
         assertTrue(src.contains("getDeclaredField(\"channel\")"),
                 "Paper twin must resolve the same 'channel' field Fabric's accessor targets");
     }
+
+    @Test
+    void bothPlatformFlushCallSitesPassTheYieldConfig() throws Exception {
+        // S-9b (yield plan §6): the gate exists only if the services ARM it from live
+        // config — a dropped argument leaves lodYieldsToVanillaTransport silently inert
+        // on one platform, which no Tier 1 state test can see.
+        String fabric = Files.readString(
+                Path.of("src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
+        assertTrue(fabric.contains("config.lodYieldsToVanillaTransport"),
+                "the Fabric flush wiring must pass config.lodYieldsToVanillaTransport");
+        Path paperPath = Path.of("../paper/src/main/java/dev/vox/lss/paper/PaperRequestProcessingService.java");
+        assertTrue(Files.exists(paperPath), "paper service source not found: " + paperPath.toAbsolutePath());
+        String paper = Files.readString(paperPath);
+        assertTrue(paper.contains("config.lodYieldsToVanillaTransport"),
+                "the Paper flush wiring must pass config.lodYieldsToVanillaTransport");
+    }
 }

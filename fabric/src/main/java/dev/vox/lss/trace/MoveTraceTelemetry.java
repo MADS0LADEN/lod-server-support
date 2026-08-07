@@ -211,7 +211,7 @@ final class MoveTraceTelemetry {
         }
         long sinceS = Math.max(0, (System.currentTimeMillis() - state.getCreatedAtMillis()) / 1000);
         return new MoveRow.LssBlock(sinceS, state.getCapabilities(), proto, dialect,
-                state.getSendQueueSize(), state.getTotalBytesSent());
+                state.getSendQueueSize(), state.getTotalBytesSent(), state.getYieldedTicks());
     }
 
     static double speedBlocksPerSecond(ServerPlayer player) {

@@ -93,6 +93,9 @@ public final class MoveTraceBootstrap {
         config.put("lodDistanceChunks", cfg.lodDistanceChunks);
         config.put("lodStore", cfg.lodStore);
         config.put("outboundBufferCeilingKB", cfg.outboundBufferCeilingKB);
+        // The §4.5 partition key: an armed-yield collection period shifts the envelope
+        // obuf distribution by design — analysis must never mix armed and unarmed boots.
+        config.put("lodYieldsToVanillaTransport", cfg.lodYieldsToVanillaTransport);
         var loader = FabricLoader.getInstance();
         tracer.emit(MoveRow.boot(tracer.bootId(), System.currentTimeMillis(),
                 ZonedDateTime.now().getOffset().getTotalSeconds() / 60,

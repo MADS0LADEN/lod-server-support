@@ -465,6 +465,14 @@ class ConfigValidationTest {
     /** Disk serves transcode NBT straight to wire bytes out of the box; false is the
      *  documented rollback to the per-section object path (round 2, 2026-07-29). */
     @Test
+    void transportYieldDefaultsOff() {
+        // The yield plan's recorded evidence discipline (§4): the mechanism ships
+        // UNARMED; the default flips only in a later release citing the live E3 A/B.
+        assertFalse(serverConfig().lodYieldsToVanillaTransport,
+                "lodYieldsToVanillaTransport must default FALSE");
+    }
+
+    @Test
     void nbtTranscodeDefaultsOn() {
         assertTrue(serverConfig().useNbtTranscode,
                 "NBT transcode must default on");

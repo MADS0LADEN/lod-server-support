@@ -695,6 +695,7 @@ public abstract class AbstractPlayerRequestState<T> {
                 queuedBytes += entry.estimatedBytes();
             }
             this.yieldBytesWithheld += queuedBytes;
+            diag.recordYieldedTick(queuedBytes);
             if (++this.yieldNoSendTicks >= YIELD_FLOOR_TICKS) {
                 this.yieldNoSendTicks = 0;
                 floorSendThisTick = true;
@@ -792,6 +793,12 @@ public abstract class AbstractPlayerRequestState<T> {
             pruned.add(packed);
         }
         return pruned == null ? NO_DROPPED_POSITIONS : pruned.toLongArray();
+    }
+
+    /** Test seam: position the prune cadence counter (the interval is 1200 flushes —
+     *  driving it for real would floor-send the queue empty long before the prune). */
+    void setFlushTickCounterForTest(int value) {
+        this.flushTickCounter = value;
     }
 
     /** Cumulative ticks the transport yield withheld this player's column flush. */

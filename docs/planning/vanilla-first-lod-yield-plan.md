@@ -228,7 +228,13 @@ Support lines: 26.2/main only; backport on demand.
 - Service-level cumulative pair (A-7): `yield.ticks_total` +
   `yield.bytes_withheld_total` in the service diag block, plus a one-shot INFO the
   first time any player crosses N consecutive fully-yielded ticks — the log archive
-  carries the signal for after-the-fact complaints.
+  carries the signal for after-the-fact complaints. (Shipped shape, v0.10.0 A2: a
+  conditional `Yield: armed=…, ticks_total=…, bytes_withheld=…` diag line — armed
+  shows immediately as the arming receipt; counters live in `TickDiagnostics` so
+  they survive per-player teardown (the R2-9 lesson); the one-shot INFO fires at the
+  first FLOOR send, i.e. `YIELD_FLOOR_TICKS` consecutive withheld ticks;
+  `bytes_withheld_total` is a per-tick byte-tick pressure INTEGRAL of held queue
+  bytes, never a delivered-bytes count — v0.10.0-progress.md 2026-08-07.)
 - `check_soak.py`'s `SERVER_CONFIG_BOOL_KEYS` gains `lodYieldsToVanillaTransport` in
   the same commit (S-8 — the twice-shipped R4-class allowlist defect).
 - Tracer integration is a dependency, not a present surface (S-10): when the tracer

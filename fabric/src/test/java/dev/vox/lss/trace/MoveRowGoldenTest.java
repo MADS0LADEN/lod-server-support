@@ -41,13 +41,14 @@ class MoveRowGoldenTest {
         config.put("lodDistanceChunks", 256);
         config.put("lodStore", "full");
         config.put("outboundBufferCeilingKB", 0);
+        config.put("lodYieldsToVanillaTransport", false);
         rows.add(MoveRow.boot("b0a1", 1754400000000L, 120, "0.10.0", "26.2",
                 true, false, true, MoveRow.RUNG_MOONRISE, config));
 
         var env = new MoveRow.Envelope("b0a1", 1754400001000L, 200,
                 "11111111-2222-3333-4444-555555555555", "Steve", "minecraft:overworld",
                 65536, 48, 12.5, 3, 0);
-        var lssNative = new MoveRow.LssBlock(75, 1, 19, null, 40, 123456789L);
+        var lssNative = new MoveRow.LssBlock(75, 1, 19, null, 40, 123456789L, 0L);
 
         // flight: moonrise send state, registered native session, awaiting_tp captured.
         rows.add(MoveRow.flight(env, true, lssNative, 100.5, 65.0, -200.25, 21.7, false,
@@ -65,7 +66,7 @@ class MoveRowGoldenTest {
 
         // too_quickly: v16-dialect session; claimed chunk on the vanilla rung; NO
         // simulated/residual keys exist for this type (and no awaiting_tp — flight-only).
-        var lssV16 = new MoveRow.LssBlock(12, 1, 16, "v16", 0, 999L);
+        var lssV16 = new MoveRow.LssBlock(12, 1, 16, "v16", 0, 999L, 7L);
         rows.add(MoveRow.tooQuickly(env, true, lssV16,
                 new double[] {100.0, 64.0, -200.0}, new double[] {118.5, 64.0, -200.0},
                 true, 30.2, 40, 90, 7, 1, 0.09,
@@ -83,7 +84,7 @@ class MoveRowGoldenTest {
 
         // rejected: the SILENT path (logged_wrongly false), stop_block/entity_collide
         // uncapturable (absent), rung none, v18-dialect session.
-        var lssV18 = new MoveRow.LssBlock(300, 1, 18, "v18", 5, 42L);
+        var lssV18 = new MoveRow.LssBlock(300, 1, 18, "v18", 5, 42L, 0L);
         rows.add(MoveRow.collisionEvent(MoveRow.TYPE_REJECTED, env, true, lssV18,
                 new double[] {0.0, 70.0, 0.0}, new double[] {0.0, 66.0, 0.0},
                 false, 2.0, 60, 60,
