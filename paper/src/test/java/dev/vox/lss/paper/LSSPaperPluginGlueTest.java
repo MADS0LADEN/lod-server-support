@@ -271,6 +271,49 @@ class LSSPaperPluginGlueTest {
         assertEquals(List.of(), registrar.caps);
     }
 
+    @Test
+    void v19HandshakeGetsTheV19DialectReplyAndRegistration() {
+        // A protocol-19 client (v0.9.x) under enableV19Compat (default true) takes the
+        // SAME ladder with the V19 dialect, driving the PRODUCTION handleHandshake — the
+        // 7-arg gate call site — so a silent fall-back to the 6-arg overload (which
+        // would drop v19 clients to the v16 discovery fallback) fails HERE (the C1
+        // recon's named drift hazard).
+        var config = config(true);
+        config.lodDistanceChunks = 103;
+        config.generationConcurrencyLimitPerPlayer = 9;
+        var sender = new RecordingSender();
+        var registrar = new RecordingRegistrar();
+        LSSPaperPlugin.handleHandshake(handshakeFrame(19, VOXEL_CAPS),
+                "vx9m", config, true, sender, registrar);
+
+        assertEquals(List.of(), sender.replies, "v19 registration defers its reply too");
+        registrar.runDeferredReplies();
+        assertEquals(List.of(new Reply(HandshakeGate.WireDialect.V19, true, 103,
+                        LSSConstants.SYNC_ON_LOAD_SLOT_CAP, 9, true)), sender.replies);
+        assertEquals(List.of(VOXEL_CAPS), registrar.caps);
+        assertEquals(List.of(HandshakeGate.WireDialect.V19), registrar.dialects);
+    }
+
+    @Test
+    void v19HandshakeWithCompatDisabledSendsNothing() {
+        var config = config(true);
+        config.enableV19Compat = false;
+        var sender = new RecordingSender();
+        var registrar = new RecordingRegistrar();
+        LSSPaperPlugin.handleHandshake(handshakeFrame(19, VOXEL_CAPS),
+                "vx9m", config, true, sender, registrar);
+        assertEquals(List.of(), sender.replies,
+                "the v19 kill switch restores the strict silent version gate");
+        assertEquals(List.of(), registrar.caps);
+    }
+
+    @Test
+    void sessionConfigVersionEchoesV19ForTheV19Dialect() {
+        assertEquals(LSSConstants.V19_COMPAT_PROTOCOL_VERSION,
+                LSSPaperPlugin.sessionConfigVersionFor(HandshakeGate.WireDialect.V19),
+                "the v19 client's gate hard-requires its own version echo");
+    }
+
     // ---- the production sender/flip bodies (execution-review finding 1: these sat one
     // seam ABOVE the recording seams, so a silent regression in either compiled clean) ----
 

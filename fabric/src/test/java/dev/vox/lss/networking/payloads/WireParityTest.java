@@ -158,6 +158,42 @@ class WireParityTest {
     }
 
     @Test
+    void frozenHandshakeShape_theV20AnnounceIsExactlyTwoVarInts() {
+        // XVER §2.2 CRITICAL (found independently by two review lenses): every legacy
+        // Fabric server's registered codec reads exactly two VarInts on
+        // lss:handshake_c2s, and TRAILING BYTES ARE A DECODER KICK. The announce shape
+        // is frozen for v20 and forever — new client facts ride lss:client_info. This
+        // pin decodes the v20 announce under a strict legacy-shaped read and requires
+        // full drain.
+        byte[] frame = encode(HandshakeC2SPayload.CODEC,
+                new HandshakeC2SPayload(LSSConstants.PROTOCOL_VERSION, 3));
+        var buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(frame));
+        try {
+            assertEquals(LSSConstants.PROTOCOL_VERSION, buf.readVarInt());
+            assertEquals(3, buf.readVarInt());
+            assertEquals(0, buf.readableBytes(),
+                    "a third byte on the announce hard-kicks the v20 client from every"
+                            + " shipped Fabric server");
+        } finally {
+            buf.release();
+        }
+    }
+
+    @Test
+    void clientInfoEncodesOneVarIntAndDecodeToleratesTrailingBytes() {
+        // The sidecar's own shape (XVER §2.2): one VarInt; the decode drains trailing
+        // bytes so a future append never kicks.
+        byte[] expected = ref(b -> b.writeVarInt(3955));
+        assertArrayEquals(expected, encode(ClientInfoC2SPayload.CODEC,
+                new ClientInfoC2SPayload(3955)));
+        byte[] trailing = ref(b -> {
+            b.writeVarInt(3955);
+            b.writeVarInt(42);
+        });
+        assertEquals(3955, decode(ClientInfoC2SPayload.CODEC, trailing).dataVersion());
+    }
+
+    @Test
     void sessionConfigVarIntBoundaries() {
         // lodDistance crossing the 1->2 byte VarInt boundary (127/128) and the 2048 config
         // max — the one variable-width field left in the 4-field frame.
