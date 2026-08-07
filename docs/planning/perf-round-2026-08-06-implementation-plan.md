@@ -522,6 +522,33 @@ One closing interleaved ref A/B (pre-round base vs final tree, same session, 3 r
 Failure handling: any gate miss reverts or flag-disables the offending phase before
 release; phases are independently shippable.
 
+> **VERDICT (2026-08-07, executed as stage B5): ROUND ACCEPTED — four of five gates
+> PASS; the serve-arm µs/col gate MISSED AS-WRITTEN and is accepted as a documented
+> deviation** (decisions-log entry of the same date; the full session numbers are the
+> B5 measurement-ledger entry in `v0.10.0-progress.md`). Ref-vs-ref base=`834e4d7`
+> (B0 merge, pre-round + tooling) vs final tree, 4+4 reps ABBA per arm.
+> **Backfill (the headline): PASS** — three-thread sum 3938 → 3099 (+21.3% vs ≥15%),
+> µs/col +21.2% [+17.4, +24.8], walk pace flat. **Serve alloc: PASS** — four-class
+> +49.2% (backfill +52.4%) vs ≥30%. **Throughput: PASS** — hibw ceiling 1585.5 →
+> 1755.3 col/s (+10.7%, "or better" arm of ±5%), parity 0.05%/0.03%, backfill col/s
+> flat. **Store gate: PASS outright** (median band cut 79.3% — the pre-agreed
+> metric-2 re-baseline clause was not needed). **Serve µs/col: −4.3% (a rise), n.s.
+> vs zero [−9.1, +0.4] — MISS vs ≥5% cut.** Decomposition: the gate's premise ("R1
+> moves work rather than cutting it" = µs/col-neutral) was falsified by B3's own
+> accepted measurement BEFORE this closing ran (R1 alone: +10.3% rise, b3-serve
+> pair) and R2's clean kill-switch claw-back (−10.5%, b4 pair) composes to ≈net
+> zero within the calibrated noise floor — exactly what the closing measured. At
+> the CPU-bound ceiling, where µs/col binds, the same metric is a **+5.9% cut
+> [+1.4, +10.1]** — passing the ≥5% number on the arm that matters. No phase is
+> reverted: R1's own gates passed with the ceiling improving, and flag-disabling it
+> to win a bandwidth-bound metric would resurrect the A7 IOWorker-starvation
+> mechanism; `useBackgroundReadSplit=false` remains the shipped per-deployment
+> rollback. Analysis note for future sessions: `nbt`/`serialize` BAND splits are
+> not comparable across the R1 boundary (post-split parse nests under the
+> transcoder's frames — pre-split base serialize 859 vs split-tree same-workload
+> serialize 1300); `lss_attributed`, per-thread sums, and any-frame markers are
+> the cross-split quantities.
+
 ## Standing risks
 
 - **WSL2 box variance** — interleaved same-session ratios, pooled counts, A/A control
