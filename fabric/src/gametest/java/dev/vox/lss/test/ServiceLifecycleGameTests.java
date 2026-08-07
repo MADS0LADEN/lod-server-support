@@ -817,6 +817,44 @@ public class ServiceLifecycleGameTests {
         helper.succeed();
     }
 
+    /** The v19 rung through the PRODUCTION receiver (protocol 20, XVER §4.2): a v0.9.x
+     *  client registers natively with the V19 dialect, the reply echoes 19, and the
+     *  session keeps compression OFF-limits only via the C1 egress drop (v19 columns
+     *  await the C2 body translator — this pins registration + echo + membership). */
+    @GameTest(structure = "fabric-gametest-api-v1:empty")
+    public void v19HandshakeRegistersNativelyAndEchoesProtocol19(GameTestHelper helper) {
+        var server = helper.getLevel().getServer();
+        var playerList = server.getPlayerList();
+        var mock = placeMockServerPlayer(helper);
+        var uuid = mock.getUUID();
+        var service = new RequestProcessingService(server);
+        var replies = new ArrayList<SessionConfigS2CPayload>();
+        try {
+            LSSServerNetworking.handleHandshake(
+                    new HandshakeC2SPayload(LSSConstants.V19_COMPAT_PROTOCOL_VERSION,
+                            LSSConstants.CAPABILITY_VOXEL_COLUMNS
+                                    | LSSConstants.CAPABILITY_ZSTD_COLUMNS),
+                    mock, service, replies::add);
+            helper.assertTrue(replies.size() == 1,
+                    "a v19 handshake on default config must be answered, got " + replies.size());
+            helper.assertTrue(replies.get(0).protocolVersion()
+                            == LSSConstants.V19_COMPAT_PROTOCOL_VERSION,
+                    "the reply must echo protocol 19 — the v0.9.x client disables itself on "
+                            + "any other version, got " + replies.get(0).protocolVersion());
+            var state = service.getPlayers().get(uuid);
+            helper.assertTrue(state != null,
+                    "a v19 handshake must register natively (not fall to the v16 shim)");
+            helper.assertTrue(service.getDialectTracker().isV19(uuid),
+                    "the session must carry v19 membership (the egress gates on it)");
+            helper.assertTrue(!service.getV16CompatManager().isV16(uuid),
+                    "a v19 session is NOT a v16 compat session");
+        } finally {
+            service.shutdown();
+            playerList.remove(mock);
+        }
+        helper.succeed();
+    }
+
     /**
      * CG-028: the REGISTER reply's field wiring at the Fabric call site — lodDistance
      * distinct from the protocol version (int transposition) and generationEnabled opposed
