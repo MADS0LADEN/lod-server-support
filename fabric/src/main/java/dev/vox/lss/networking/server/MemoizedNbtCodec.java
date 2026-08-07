@@ -37,6 +37,18 @@ import java.util.function.ToLongFunction;
  * {@code cap} — pathological modded worlds with unbounded distinct palette entries keep
  * decoding through the delegate rather than growing the map (warned once).
  *
+ * <p><b>Raw-tag keying is a MEASURED decision, do not "optimize" it away (B1, 2026-08-07):</b>
+ * the perf-round Phase 1 attempt (R3 — a nested Key wrapper precomputing a one-pass
+ * {@code CompoundTag.forEach} structural hash) was built, review-hardened, and REVERTED
+ * on a failed A/B gate: the forEach walk cost statistically the same as the
+ * {@code AbstractMap.hashCode} recursion it replaced (memo marker 249→286 backfill /
+ * 258→290 serve, the new Key walk itself 278/239 samples), and allocation was a wash
+ * (EntrySet iterators −2.2 KB/col vs Key objects +2.9 KB/col). The walk is the
+ * irreducible cost of structural keying; a flat-string key was rejected for real
+ * collision classes (wrong globalId on the wire). Full numbers:
+ * docs/planning/v0.10.0-progress.md measurement ledger. MemoizedNbtCodecTest pins the
+ * behavior contract, including capacity-history keying independence.
+ *
  * <p>Textual twin of Paper's {@code PaperMemoizedNbtCodec} — keep in lockstep.
  */
 final class MemoizedNbtCodec<A> implements Codec<A> {
@@ -141,5 +153,10 @@ final class MemoizedNbtCodec<A> implements Codec<A> {
     /** Test seam: distinct entries currently memoized. */
     int memoSizeForTest() {
         return this.memo.size();
+    }
+
+    /** Test seam: the over-cap warn latch (pins the once-ness without log capture). */
+    boolean capWarnedForTest() {
+        return this.capWarned.get();
     }
 }

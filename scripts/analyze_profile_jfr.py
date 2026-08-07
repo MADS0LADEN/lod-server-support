@@ -227,6 +227,10 @@ LSS_ATTRIBUTED_BANDS = ("store", "zip", "nbt", "serialize", "serialize-live", "l
 # through Phase 4's band subtraction. Method-level prefixes (LodStoreService.contentHash)
 # work because frames render as class.method(args).
 DEFAULT_MARKERS = (
+    # A nested-class cost term (e.g. the reverted R3 Key's `...MemoizedNbtCodec$Key`)
+    # rides the plain class prefix below AND can be added as its own marker — markers
+    # are independent any-frame gauges, not a partition (that separate term is how the
+    # B1 gate showed the Key walk costing what the walk it replaced cost).
     "dev.vox.lss.networking.server.MemoizedNbtCodec",
     "dev.vox.lss.paper.PaperMemoizedNbtCodec",
     "dev.vox.lss.common.store.LodStoreService.contentHash",
@@ -259,6 +263,16 @@ def band_for_stack(stack):
                         return "serialize" if on_disk_path else "serialize-live"
                     return name
     return "unattributed"
+
+
+def has_walk_window(run_dir):
+    """True when the run's meta.json carries a parsed walk window (a backfill run)."""
+    try:
+        with open(os.path.join(run_dir, "meta.json")) as f:
+            walk = (json.load(f).get("walk") or {})
+        return walk.get("start_tod_s") is not None and walk.get("end_tod_s") is not None
+    except (OSError, ValueError):
+        return False
 
 
 def resolve_window(run_dir, window_spec):
@@ -546,8 +560,10 @@ def main():
         try:
             # `walk` only resolves for backfill runs (meta.json carries the window);
             # a serve run in the same stamp dir falls back to its own wire slope.
+            # Decided by the META CONTENT, not the directory name — ref-vs-ref
+            # backfill arms are named base-/change- (B1 gate-run finding).
             spec = window_spec
-            if spec == "walk" and "backfill-" not in os.path.basename(run_dir):
+            if spec == "walk" and not has_walk_window(run_dir):
                 spec = None
             out.append(render_report(analyze_jfr(run_dir, jfr_tool, spec)))
         except Exception as e:  # noqa: BLE001 — a bad run must not kill the batch

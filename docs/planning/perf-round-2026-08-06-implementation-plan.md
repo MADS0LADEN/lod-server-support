@@ -187,6 +187,24 @@ fuzz, `SerializerParityGameTests`, `:paper:test` twins.
 
 **Rollback:** revert (no persisted state, no wire).
 
+> **VERDICT (2026-08-07, executed as stage B1): GATES FAILED — REVERTED per the
+> rollback line above.** Both arms measured with the Phase 0 tooling (4+4 reps × 150 s
+> ABBA, base=`834e4d7` change=`aa7e657`, all 16 arms valid, column parity ≤0.07%):
+> backfill-thread memo marker 249→286 (cut −14.9% [−36.1, +3.1]), serve twin 258→290
+> (−12.4% [−32.9, +5.0]) — the new Key walk itself measured 278/239 samples, i.e. the
+> one-pass `forEach` walk costs statistically the SAME as the `AbstractMap.hashCode`
+> recursion it replaced; the allocation trade was a wash (−2.2 KB/col EntrySet
+> iterators vs +2.9 KB/col Key objects); deposits/s and µs/col flat. The problem
+> statement's premise — that the memo's cost lived in the iterator/indirection
+> machinery rather than the walk itself — is falsified; the walk is the irreducible
+> cost of structural keying, and the review round's pre-gate recount (progress doc,
+> B1 review entry) said exactly where the ceiling was. What SURVIVES on main: the
+> behavior test suites (capacity-history keying independence, cap/warn latch,
+> defensive copy — `MemoizedNbtCodecTest` + Paper twin), the `capWarnedForTest`
+> seam, and a measured-decision note in the class javadoc so nobody re-attempts this
+> without new evidence. **B5's closing A/B drops R3 from the round's composition.**
+> Full numbers: v0.10.0-progress.md measurement ledger.
+
 ---
 
 ## Phase 2 — R4: `contentHash` FNV-1a → CRC32C (store schema v4)
