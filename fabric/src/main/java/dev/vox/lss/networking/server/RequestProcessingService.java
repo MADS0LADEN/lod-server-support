@@ -134,7 +134,11 @@ public class RequestProcessingService {
         // 8 FOREGROUND readers where the historic default was 5. (v0.9.0 review.)
         boolean prioritizedReads = config.useBackgroundReadPriority
                 && dev.vox.lss.compat.MoonriseReadCompat.resolveOrNull() != null;
-        this.diskReader = new ChunkDiskReader(config.effectiveDiskReaderThreads(prioritizedReads),
+        int readerThreads = config.effectiveDiskReaderThreads(prioritizedReads);
+        // Script-consumed contract: the measurement harnesses assert their staged knobs
+        // against this line (see ServerConfigBase.effectiveConfigEcho).
+        LSSLogger.info(config.effectiveConfigEcho(readerThreads));
+        this.diskReader = new ChunkDiskReader(readerThreads,
                 config.useBackgroundReadPriority, config.useNbtTranscode);
         if (config.enableChunkGeneration) {
             this.generationService = new ChunkGenerationService(config);

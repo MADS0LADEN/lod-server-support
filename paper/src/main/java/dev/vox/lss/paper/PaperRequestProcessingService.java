@@ -352,8 +352,12 @@ public class PaperRequestProcessingService {
         // AUTO tier applies whenever background priority is on (unlike Fabric, which must
         // also probe for Moonrise). With the flag off the reads run FOREGROUND, so the pool
         // must be sized by the unprioritized tier — see the Fabric twin. (v0.9.0 review.)
+        int readerThreads = config.effectiveDiskReaderThreads(config.useBackgroundReadPriority);
+        // Script-consumed contract: the measurement harnesses assert their staged knobs
+        // against this line (see ServerConfigBase.effectiveConfigEcho).
+        LSSLogger.info(config.effectiveConfigEcho(readerThreads));
         var diskReader = new PaperChunkDiskReader(
-                config.effectiveDiskReaderThreads(config.useBackgroundReadPriority),
+                readerThreads,
                 config.useBackgroundReadPriority,
                 config.useNbtTranscode);
         PaperChunkGenerationService generationService = config.enableChunkGeneration

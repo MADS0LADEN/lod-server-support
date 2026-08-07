@@ -232,4 +232,19 @@ class PaperConfigValidationTest {
                     "default for " + f.getName() + " is outside its clamp range");
         }
     }
+
+    /**
+     * Twin of the Fabric pin (ConfigValidationTest): the effective-config echo is a
+     * script-consumed contract (PERF Phase 0 item 1) and must render identically on
+     * Paper — the harnesses grep the same "Effective config: " line on both platforms.
+     */
+    @Test
+    void effectiveConfigEchoIsAScriptConsumedContract() {
+        PaperConfig c = new PaperConfig();
+        c.useNbtTranscode = false;
+        c.useCompressedColumns = true;
+        assertEquals("Effective config: useNbtTranscode=false, diskReaderThreads=7,"
+                        + " useCompressedColumns=true",
+                c.effectiveConfigEcho(7));
+    }
 }

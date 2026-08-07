@@ -13,8 +13,17 @@ window (wire-slope detection reused from analyze_benchmark_compare.py) and repor
 Also writes <run>/flame.collapsed (root;...;leaf count) for flamegraph tooling.
 
 Usage:
-  analyze_profile_jfr.py run <run-dir>          # one run, prints report
-  analyze_profile_jfr.py compare <stamp-dir>    # all runs, per-run reports + jfr-report.md
+  analyze_profile_jfr.py run <run-dir> [--window MODE]        # one run, prints report
+  analyze_profile_jfr.py compare <stamp-dir> [--window MODE]  # all runs + jfr-report.md
+
+--window (PERF Phase 0 item 4a — client-less runs have no wire slope to detect):
+  (absent)   wire-slope active window from cpu.jsonl (the historic default)
+  full       no time filter (window_s = span of sampled events)
+  walk       the backfill walk window from the run's meta.json (backfill_profile.sh)
+  T0:T1      explicit TIME-OF-DAY seconds (the domain JFR startTime parses to)
+
+PROFILE_MARKERS: comma-separated frame-prefix overrides for the per-marker counters
+(default list in DEFAULT_MARKERS — the Phase 1/2/4 gate identifiers).
 
 Stdlib only; shells out to `jfr` (JDK 21+ for `print`; found via PATH or JAVA_HOME).
 """
@@ -189,12 +198,48 @@ DISK_PATH_MARKERS = ("dev.vox.lss.networking.server.NbtSectionSerializer",
                      "dev.vox.lss.networking.server.ChunkDiskReader",
                      "dev.vox.lss.paper.PaperNbtSectionSerializer",
                      "dev.vox.lss.paper.PaperMemoizedNbtCodec",
-                     "dev.vox.lss.paper.PaperChunkDiskReader")
+                     "dev.vox.lss.paper.PaperChunkDiskReader",
+                     # Phase 0 item 4e: the shared reader base (pool lambdas/methods declared
+                     # there render under this name, not the platform subclass) and the
+                     # PROSPECTIVE Phase 3/4 classes — the moved/selective parse must keep
+                     # classifying as disk-path work, or the Phase 3/4 gates break silently.
+                     # Phase 3's raw-read site must land in one of these classes (or be
+                     # added here in the same PR).
+                     "dev.vox.lss.common.processing.AbstractChunkDiskReader",
+                     "dev.vox.lss.networking.server.SelectiveChunkNbtLoader",
+                     "dev.vox.lss.paper.PaperSelectiveChunkNbtLoader")
 DERIVED_BANDS = ("nbt-other", "serialize-live")
 # Bands summed into the "LSS-attributable" aggregate for §0 metric 2 (per-column CPU).
 # serialize-live IS LSS code (probe serves / save-hook) and stays attributed;
 # nbt-other is VANILLA save-pipeline work misattributed before the split — excluded.
 LSS_ATTRIBUTED_BANDS = ("store", "zip", "nbt", "serialize", "serialize-live", "lss-other")
+
+# ---- Per-marker × thread counters (Phase 0 item 4c) ------------------------------------
+#
+# A sample counts under marker M when ANY frame startswith M (whole-stack, so a sample can
+# count under several markers — these are independent "samples under X" gauges, not a
+# partition like the bands). This is exactly the number the Phase 1/2/4 gates read
+# ("samples under MemoizedNbtCodec on the backfill thread"); this round's 76/80/~60 were
+# ad-hoc scripts, the practice this counter ends. MemoizedNbtCodec's Key must stay a
+# NESTED class (frames render as MemoizedNbtCodec$Key...) so the prefix keeps matching
+# through Phase 4's band subtraction. Method-level prefixes (LodStoreService.contentHash)
+# work because frames render as class.method(args).
+DEFAULT_MARKERS = (
+    "dev.vox.lss.networking.server.MemoizedNbtCodec",
+    "dev.vox.lss.paper.PaperMemoizedNbtCodec",
+    "dev.vox.lss.common.store.LodStoreService.contentHash",
+    "dev.vox.lss.networking.server.SelectiveChunkNbtLoader",
+    "dev.vox.lss.paper.PaperSelectiveChunkNbtLoader",
+    "dev.vox.lss.networking.server.ChunkDiskReader",
+    "dev.vox.lss.common.processing.AbstractChunkDiskReader",
+)
+
+
+def marker_list():
+    env = os.environ.get("PROFILE_MARKERS", "").strip()
+    if env:
+        return tuple(m.strip() for m in env.split(",") if m.strip())
+    return DEFAULT_MARKERS
 
 
 def band_for_stack(stack):
@@ -214,13 +259,44 @@ def band_for_stack(stack):
     return "unattributed"
 
 
-def analyze_jfr(run_dir, jfr_tool):
-    jfr_file = os.path.join(run_dir, "server-benchmark.jfr")
+def resolve_window(run_dir, window_spec):
+    """(mode, w0, w1) in TIME-OF-DAY seconds; w0/w1 None = no time filter.
+
+    Phase 0 item 4a: client-less runs (the backfill arm) have no wire slope for the
+    default detection, so `full` disables filtering and `walk` reads the walk window
+    backfill_profile.sh parsed into meta.json. Caveat (pre-existing in the tod domain):
+    a run crossing midnight breaks the comparison — don't profile across midnight.
+    """
+    if window_spec == "full":
+        return "full", None, None
+    if window_spec == "walk":
+        with open(os.path.join(run_dir, "meta.json")) as f:
+            walk = (json.load(f).get("walk") or {})
+        t0, t1 = walk.get("start_tod_s"), walk.get("end_tod_s")
+        if t0 is None or t1 is None:
+            raise RuntimeError("--window walk: meta.json carries no walk window")
+        return "walk", float(t0), float(t1)
+    if window_spec:
+        t0, _, t1 = window_spec.partition(":")
+        return "explicit", float(t0), float(t1)
     t_first, t_last = active_window(run_dir)
-    w0, w1 = epoch_to_timeofday(t_first), epoch_to_timeofday(t_last)
+    return "wire-slope", epoch_to_timeofday(t_first), epoch_to_timeofday(t_last)
+
+
+def analyze_jfr(run_dir, jfr_tool, window_spec=None):
+    jfr_file = os.path.join(run_dir, "server-benchmark.jfr")
+    window_mode, w0, w1 = resolve_window(run_dir, window_spec)
+    seen_tod = [None, None]  # min/max sampled-event tod (window_s for `full` mode)
 
     def in_window(fields):
         t = parse_timeofday(fields.get("startTime", ""))
+        if t is not None:
+            if seen_tod[0] is None or t < seen_tod[0]:
+                seen_tod[0] = t
+            if seen_tod[1] is None or t > seen_tod[1]:
+                seen_tod[1] = t
+        if w0 is None:
+            return True
         return t is not None and w0 <= t <= w1
 
     exec_by_thread = Counter()
@@ -235,6 +311,9 @@ def analyze_jfr(run_dir, jfr_tool):
     file_reads = defaultdict(lambda: [0, 0.0, 0.0])  # path_group -> [count, total_s, max_s]
     thread_cpu = defaultdict(lambda: [0.0, 0])       # group -> [sum user+system, n]
     total_exec = 0
+    markers = marker_list()
+    marker_by_thread = {m: Counter() for m in markers}      # Phase 0 item 4c
+    thread_band_lss = defaultdict(lambda: defaultdict(lambda: [0, 0]))  # item 4b: th->band->[lss, other]
 
     # jdk.NativeMethodSample (compressed-columns plan §5.2, review B2): time inside
     # native methods — Deflater.deflateBytes, zstd-jni — is NOT in jdk.ExecutionSample,
@@ -261,7 +340,13 @@ def analyze_jfr(run_dir, jfr_tool):
             if stack:
                 leaf = shorten(stack[0])
                 self_methods[leaf] += 1
-                bands[band_for_stack(stack)] += 1
+                band = band_for_stack(stack)
+                bands[band] += 1
+                has_lss = any(f.startswith("dev.vox.lss") for f in stack)
+                thread_band_lss[th][band][0 if has_lss else 1] += 1
+                for m in markers:
+                    if any(f.startswith(m) for f in stack):
+                        marker_by_thread[m][th] += 1
                 for fr in stack:
                     if fr.startswith("dev.vox.lss"):
                         self_methods_lss[shorten(fr)] += 1
@@ -299,21 +384,43 @@ def analyze_jfr(run_dir, jfr_tool):
         for stackline, n in collapsed.most_common():
             f.write(f"{stackline} {n}\n")
 
+    if w0 is not None:
+        window_s = round(w1 - w0, 1)
+    elif seen_tod[0] is not None:
+        window_s = round(seen_tod[1] - seen_tod[0], 1)
+    else:
+        window_s = 0.0
+
     # Machine-readable band attribution for the store gates (§0 metric 2 reads
     # lss_attributed_samples × idle-corrected CPU ÷ columns from this file).
+    # Phase 0 additions: thread_band_lss (item 4b — "IO-Worker samples carrying an LSS
+    # frame" is what the Phase 3 gate reads), markers (item 4c — the Phase 1/2/4 gate
+    # counters), alloc_by_class_mb (item 4d — was printed, never persisted; the Phase 4
+    # allocation gate divides these by columns_received).
     band_summary = {
-        "window_s": round(t_last - t_first, 1),
+        "window_mode": window_mode,
+        "window_tod": None if w0 is None else [round(w0, 1), round(w1, 1)],
+        "window_s": window_s,
         "total_exec_samples": total_exec,
         "bands": {name: bands.get(name, 0)
                   for name in [b[0] for b in BANDS] + list(DERIVED_BANDS) + ["unattributed"]},
         "lss_attributed_samples": sum(bands.get(b, 0) for b in LSS_ATTRIBUTED_BANDS),
+        "thread_band_lss": {th: {band: {"lss": v[0], "other": v[1]}
+                                 for band, v in sorted(by_band.items())}
+                            for th, by_band in sorted(thread_band_lss.items())},
+        "markers": {m: {"total": sum(cnt.values()),
+                        "by_thread": dict(cnt.most_common())}
+                    for m, cnt in marker_by_thread.items()},
+        "alloc_total_mb": round(alloc_total / 1e6, 1),
+        "alloc_by_class_mb": {c: round(wt / 1e6, 2)
+                              for c, wt in alloc_by_class.most_common(60)},
     }
     with open(os.path.join(run_dir, "bands.json"), "w") as f:
         json.dump(band_summary, f, indent=1)
 
     return {
         "run": os.path.basename(run_dir),
-        "window_s": round(t_last - t_first, 1),
+        "window_s": window_s,
         "total_exec_samples": total_exec,
         "bands": band_summary,
         "exec_by_thread": exec_by_thread.most_common(14),
@@ -334,8 +441,8 @@ def analyze_jfr(run_dir, jfr_tool):
 
 
 def render_report(r):
-    lines = [f"## {r['run']} — active window {r['window_s']}s, "
-             f"{r['total_exec_samples']} exec samples", ""]
+    lines = [f"## {r['run']} — {r['bands'].get('window_mode', 'wire-slope')} window "
+             f"{r['window_s']}s, {r['total_exec_samples']} exec samples", ""]
 
     lines.append("### CPU share by thread (exec samples)")
     tot = r["total_exec_samples"] or 1
@@ -349,6 +456,14 @@ def render_report(r):
     lines.append(f"- lss_attributed (store+zip+nbt+serialize+serialize-live+lss-other): "
                  f"{r['bands']['lss_attributed_samples']} "
                  f"({100 * r['bands']['lss_attributed_samples'] / tot:.1f}%)")
+    lines.append("")
+
+    lines.append("### Per-marker samples (any-frame prefix match; phase-gate counters)")
+    for m, rec in r["bands"]["markers"].items():
+        if rec["total"] == 0:
+            continue
+        top = ", ".join(f"{th}={n}" for th, n in list(rec["by_thread"].items())[:4])
+        lines.append(f"- {m}: {rec['total']} ({top})")
     lines.append("")
 
     lines.append("### Top self methods (leaf frames)")
@@ -388,13 +503,19 @@ def render_report(r):
 
 
 def main():
-    if len(sys.argv) < 3 or sys.argv[1] not in ("run", "compare"):
+    args = sys.argv[1:]
+    window_spec = None
+    if "--window" in args:
+        i = args.index("--window")
+        window_spec = args[i + 1]
+        del args[i:i + 2]
+    if len(args) < 2 or args[0] not in ("run", "compare"):
         sys.exit(__doc__)
     jfr_tool = find_jfr_tool()
-    if sys.argv[1] == "run":
-        print(render_report(analyze_jfr(sys.argv[2], jfr_tool)))
+    if args[0] == "run":
+        print(render_report(analyze_jfr(args[1], jfr_tool, window_spec)))
         return
-    stamp_dir = sys.argv[2]
+    stamp_dir = args[1]
     out = ["# Disk-read profile — JFR report", ""]
     for run_dir in sorted(glob.glob(os.path.join(stamp_dir, "*-rep*"))):
         if not os.path.isdir(run_dir):
@@ -404,7 +525,12 @@ def main():
             continue
         print(f"[jfr] analyzing {run_dir} ...", file=sys.stderr)
         try:
-            out.append(render_report(analyze_jfr(run_dir, jfr_tool)))
+            # `walk` only resolves for backfill runs (meta.json carries the window);
+            # a serve run in the same stamp dir falls back to its own wire slope.
+            spec = window_spec
+            if spec == "walk" and "backfill-" not in os.path.basename(run_dir):
+                spec = None
+            out.append(render_report(analyze_jfr(run_dir, jfr_tool, spec)))
         except Exception as e:  # noqa: BLE001 — a bad run must not kill the batch
             out.append(f"## {os.path.basename(run_dir)} — ERROR {e!r}")
     report = os.path.join(stamp_dir, "jfr-report.md")

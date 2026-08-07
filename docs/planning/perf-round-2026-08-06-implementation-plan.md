@@ -70,7 +70,10 @@ None of the phase gates are runnable with the tooling as committed. Build, in on
    confirmed live in the JFR).** Remaining: the same one-liner in `compress_gate.sh`,
    and the effective-config assertion in both. **The echo line is NEW production code**
    (today nothing echoes config at service start): add one INFO line echoing
-   `useNbtTranscode`/`diskReaderThreads`/(later `useSelectiveNbtParse`), treat its
+   `useNbtTranscode`/`diskReaderThreads`/(later `useSelectiveNbtParse`) — *(B0 as
+   shipped: also `useCompressedColumns`, which IS compress_gate's arm variable, so its
+   effective-config assertion has something to match; keys append per the format
+   contract)* — treat its
    format as a script-consumed contract (small format pin), and the run scripts grep it
    into `meta.json` as part of `arm_valid` — an ignored config key must fail the arm,
    not silently compare two identical arms. Note the `profile_disk_read.sh` fix is
@@ -87,7 +90,9 @@ None of the phase gates are runnable with the tooling as committed. Build, in on
    deposits/s = deposits ÷ walk seconds. No committed export carries walk timing today
    (`server.json`'s store block is a cumulative end-of-run dump).
 4. **`analyze_profile_jfr.py`**: (a) a windowing mode for client-less runs
-   (`--window full|t0:t1`) so backfill runs emit `bands.json` + `flame.collapsed`
+   (`--window full|t0:t1` — *B0 as shipped adds `walk`, which reads the walk window
+   backfill_profile.sh parses into meta.json, so the backfill gate needs no manual
+   timestamp plumbing*) so backfill runs emit `bands.json` + `flame.collapsed`
    (wire-slope detection has nothing to detect without a client); (b) per-thread ×
    band × has-LSS-frame counters in `bands.json` — the Phase 3 gate needs
    "IO-Worker samples carrying an LSS frame", which no committed artifact can express;
