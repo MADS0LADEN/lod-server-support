@@ -17,6 +17,15 @@ public class LSSClientConfig extends JsonConfig {
 
     public boolean receiveServerLods = true;
     public int lodDistanceChunks = 0;
+    // The §3 unknown-identity fallback ladder's TERMINAL default (protocol 20,
+    // cross-version-identity-encoding-plan.md): a v20 identity this client's registries
+    // don't know renders as this block. Never air — air punches holes in distant
+    // terrain, so an air-resolving value is coerced to stone at resolve time.
+    public String unknownBlockFallback = "minecraft:stone";
+    // The ladder's CURATED rung: removed/renamed block NAMES mapped to visually-similar
+    // local ones (ViaBackwards-diff style, e.g. "minecraft:sulfur" -> "minecraft:sandstone").
+    // Ships EMPTY; user-extendable as real cross-version gaps are reported.
+    public java.util.Map<String, String> crossVersionBlockFallbacks = new java.util.HashMap<>();
     // Backward compat with pre-v0.7.0 (protocol 16, v0.4.x–v0.6.2) SERVERS: if a server does
     // not answer the v18 handshake, re-handshake announcing version 16 and decode the legacy
     // wire. Default true (mirrors the server's enableV16Compat). Set false for a strict-v18
@@ -73,6 +82,14 @@ public class LSSClientConfig extends JsonConfig {
     @Override
     public void validate() {
         lodDistanceChunks = Math.clamp(lodDistanceChunks, 0, LSSConstants.MAX_LOD_DISTANCE); // 0 = use server default
+        // GSON can null these from a malformed/hand-edited file — restore the defaults
+        // (the resolver validates the fallback's RESOLUTION itself, config only carries it).
+        if (unknownBlockFallback == null || unknownBlockFallback.isBlank()) {
+            unknownBlockFallback = "minecraft:stone";
+        }
+        if (crossVersionBlockFallbacks == null) {
+            crossVersionBlockFallbacks = new java.util.HashMap<>();
+        }
         // <= 0 normalizes to 0 (off) — a negative hand-edit means "off", and clamping it to the
         // floor would silently ARM a cap the user meant to disable. Positive values clamp to
         // [50, 100000]: below 50 the scanner still functions but starves the frontier to a
