@@ -28,7 +28,7 @@ RUNG_VANILLA = "vanilla"
 RUNG_NONE = "none"
 RUNGS = {RUNG_MOONRISE, RUNG_VANILLA, RUNG_NONE}
 
-DIALECTS = {"v16", "v18"}
+DIALECTS = {"v16", "v18", "v19"}
 
 # Rows emitted mid-boot after a rotation lose their boot row to the .1 file, so a
 # bootId without a boot row is legal; a boot row that is not its bootId's FIRST row
@@ -351,9 +351,17 @@ def selftest():
             f"{label}: expected a violation mentioning '{needle}', got {v.items}"
 
     rows = _fixture_rows()
-    assert len(rows) == 6, f"fixture must carry the six row types, got {len(rows)}"
-    by_type = {r["type"]: r for r in rows}
+    # 7 rows since C1: the six row types plus a second too_quickly carrying the
+    # v19 dialect (the writer's golden and this reader widen in the same commit).
+    assert len(rows) == 7, f"fixture must carry the seven pinned rows, got {len(rows)}"
+    by_type = {}
+    for r in rows:
+        by_type.setdefault(r["type"], r)  # FIRST of each type: doctored cases pin those
     assert set(by_type) == TYPES, f"fixture types drifted: {sorted(by_type)}"
+    fixture_dialects = {r["lss"]["dialect"] for r in rows
+                        if r.get("lss") and r["lss"].get("dialect")}
+    assert fixture_dialects == DIALECTS, \
+        f"fixture dialect coverage drifted: {sorted(fixture_dialects)}"
 
     # The shared fixture — the writer's own output — passes whole-file validation.
     v = Violations()
