@@ -52,6 +52,8 @@ jobs:
           python3 scripts/check_soak.py --selftest
           python3 scripts/soak_report.py --selftest
           python3 scripts/release_check.py --selftest
+          python3 scripts/check_move_trace.py --selftest
+          python3 scripts/compare_profile.py --selftest
 
       - name: Release-jar safety gate
         run: python3 scripts/release_check.py

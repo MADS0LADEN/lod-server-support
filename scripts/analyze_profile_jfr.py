@@ -199,12 +199,14 @@ DISK_PATH_MARKERS = ("dev.vox.lss.networking.server.NbtSectionSerializer",
                      "dev.vox.lss.paper.PaperNbtSectionSerializer",
                      "dev.vox.lss.paper.PaperMemoizedNbtCodec",
                      "dev.vox.lss.paper.PaperChunkDiskReader",
-                     # Phase 0 item 4e: the shared reader base (pool lambdas/methods declared
-                     # there render under this name, not the platform subclass) and the
-                     # PROSPECTIVE Phase 3/4 classes — the moved/selective parse must keep
-                     # classifying as disk-path work, or the Phase 3/4 gates break silently.
-                     # Phase 3's raw-read site must land in one of these classes (or be
-                     # added here in the same PR).
+                     # Phase 0 item 4e: the shared reader base and the PROSPECTIVE Phase 3/4
+                     # classes — the moved/selective parse must keep classifying as disk-path
+                     # work, or the Phase 3/4 gates break silently. VERIFIED NO-OP on current
+                     # profiles (B0 review): every stack carrying an AbstractChunkDiskReader
+                     # frame in the 2026-08-06 artifacts also carries ChunkDiskReader
+                     # (311/319/1 samples checked across three runs), so the frozen band
+                     # numbers stay comparable. Phase 3's raw-read site must land in one of
+                     # these classes (or be added here in the same PR).
                      "dev.vox.lss.common.processing.AbstractChunkDiskReader",
                      "dev.vox.lss.networking.server.SelectiveChunkNbtLoader",
                      "dev.vox.lss.paper.PaperSelectiveChunkNbtLoader")
@@ -277,14 +279,29 @@ def resolve_window(run_dir, window_spec):
             raise RuntimeError("--window walk: meta.json carries no walk window")
         return "walk", float(t0), float(t1)
     if window_spec:
-        t0, _, t1 = window_spec.partition(":")
-        return "explicit", float(t0), float(t1)
+        t0, sep, t1 = window_spec.partition(":")
+        try:
+            if not sep:
+                raise ValueError
+            return "explicit", float(t0), float(t1)
+        except ValueError:
+            raise RuntimeError(
+                f"bad --window '{window_spec}' — legal: full | walk | T0:T1 "
+                f"(time-of-day seconds)") from None
     t_first, t_last = active_window(run_dir)
     return "wire-slope", epoch_to_timeofday(t_first), epoch_to_timeofday(t_last)
 
 
 def analyze_jfr(run_dir, jfr_tool, window_spec=None):
     jfr_file = os.path.join(run_dir, "server-benchmark.jfr")
+    # Stale-artifact guard (the discipline the shell harnesses follow): a failed
+    # re-analysis must leave MISSING outputs, never a previous pass's bands.json for
+    # compare_profile to pool unknowingly.
+    for stale in ("bands.json", "flame.collapsed"):
+        try:
+            os.unlink(os.path.join(run_dir, stale))
+        except FileNotFoundError:
+            pass
     window_mode, w0, w1 = resolve_window(run_dir, window_spec)
     seen_tod = [None, None]  # min/max sampled-event tod (window_s for `full` mode)
 
@@ -507,6 +524,8 @@ def main():
     window_spec = None
     if "--window" in args:
         i = args.index("--window")
+        if i + 1 >= len(args):
+            sys.exit("--window needs a value: full | walk | T0:T1")
         window_spec = args[i + 1]
         del args[i:i + 2]
     if len(args) < 2 or args[0] not in ("run", "compare"):

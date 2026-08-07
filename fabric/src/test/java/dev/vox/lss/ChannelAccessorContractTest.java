@@ -132,6 +132,27 @@ class ChannelAccessorContractTest {
     }
 
     @Test
+    void bothPlatformsEchoTheEffectiveConfigWithResolvedArguments() throws Exception {
+        // B0 review N5 (PERF Phase 0 item 1): the echo's FORMAT is exact-pinned in the
+        // config suites, but deleting the call — or passing raw config fields where the
+        // javadoc demands resolved values — reds nothing while every measurement arm
+        // starts failing its arm_valid check (or worse: two identical arms compare as
+        // a valid A/B). Pin the call sites: resolved thread count + the LIVE post-probe
+        // compression state, on both platforms.
+        var echoCall = java.util.regex.Pattern.compile(
+                "LSSLogger\\.info\\(config\\.effectiveConfigEcho\\(readerThreads,\\s*"
+                        + "wireCompressionLive\\)\\)");
+        String fabric = Files.readString(
+                Path.of("src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
+        assertTrue(echoCall.matcher(fabric).find(),
+                "Fabric must echo effectiveConfigEcho(readerThreads, wireCompressionLive)");
+        String paper = Files.readString(
+                Path.of("../paper/src/main/java/dev/vox/lss/paper/PaperRequestProcessingService.java"));
+        assertTrue(echoCall.matcher(paper).find(),
+                "Paper twin must echo effectiveConfigEcho(readerThreads, wireCompressionLive)");
+    }
+
+    @Test
     void bothDiagCallSitesPassTheLiveArmedFlag() throws Exception {
         // Review C-4: a literal `true` (or the wrong field) as yieldDiagLineOrNull's
         // armed argument renders `Yield: armed=true` on every DEFAULT install — the

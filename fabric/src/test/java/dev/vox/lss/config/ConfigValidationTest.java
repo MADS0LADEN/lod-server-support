@@ -609,18 +609,21 @@ class ConfigValidationTest {
     void effectiveConfigEchoIsAScriptConsumedContract() {
         var c = serverConfig();
         c.useNbtTranscode = false;
-        c.useCompressedColumns = true;
+        // The compression value echoed is the EFFECTIVE post-probe state the caller
+        // passes, NOT this field — set the field to the opposite to pin that (a
+        // probe-failed server must echo false so compress_gate reds the arm, B0 M1).
+        c.useCompressedColumns = false;
         assertEquals("Effective config: useNbtTranscode=false, diskReaderThreads=7,"
                         + " useCompressedColumns=true",
-                c.effectiveConfigEcho(7),
+                c.effectiveConfigEcho(7, true),
                 "key order and key=value spelling are what the harnesses grep");
         // The thread count echoed is the RESOLVED one the caller passes (0=AUTO already
         // applied) — the scripts assert the staged explicit value appears verbatim.
         c.useNbtTranscode = true;
-        c.useCompressedColumns = false;
+        c.useCompressedColumns = true;
         assertEquals("Effective config: useNbtTranscode=true, diskReaderThreads=5,"
                         + " useCompressedColumns=false",
-                c.effectiveConfigEcho(5));
+                c.effectiveConfigEcho(5, false));
     }
 
 }

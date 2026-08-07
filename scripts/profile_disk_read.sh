@@ -122,7 +122,10 @@ cmd_run() {
         base|change)
             [[ -n "$BASE_REF" ]] || die "arm '$arm' needs PROFILE_BASE_REF (ref-vs-ref mode)"
             root="$(root_for_arm "$arm")"
-            [[ "$arm" == "change" || -d "$root" ]] || die "worktree $root missing — run setup first"
+            # ensure_base_worktree is idempotent and REPOINTS a leftover worktree from a
+            # previous session's ref — without this a standalone `run base` measures
+            # whatever the stale worktree happens to hold (B0 review N7).
+            [[ "$arm" == "change" ]] || ensure_base_worktree
             ;;
         *) die "unknown arm '$arm' (want vanilla | c2me | base | change)" ;;
     esac
@@ -245,6 +248,9 @@ cmd_matrix() {
         cmd_setup
     fi
     log "Matrix: ${reps} reps x {$arm_a, $arm_b} ABBA, duration=${duration}s, R=$lod_r -> $OUT_ROOT/$RUN_STAMP"
+    if (( reps % 2 != 0 )); then
+        log "NOTE: odd rep count leaves residual first-position bias after ABBA — prefer even reps"
+    fi
     for rep in $(seq 1 "$reps"); do
         # ABBA: odd reps run A,B; even reps run B,A — cancels first-position bias.
         local first="$arm_a" second="$arm_b"

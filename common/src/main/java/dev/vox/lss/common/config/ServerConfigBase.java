@@ -355,16 +355,23 @@ public abstract class ServerConfigBase extends JsonConfig {
      * identical arms (the exact failure mode the 2026-08-06 findings erratum recorded).
      * Comma-separated {@code key=value} pairs in this fixed order; new perf-sensitive
      * knobs APPEND (scripts match per-key substrings, so appending is compatible).
-     * Pinned by ConfigValidationTest + the Paper twin.
+     * Every echoed value is the RESOLVED one — echoing a raw key would hide exactly
+     * the resolution the scripts need to see. Pinned by ConfigValidationTest + the
+     * Paper twin; the call-site wiring (resolved arguments, once per service start)
+     * is source-regex-pinned in ChannelAccessorContractTest.
      *
      * @param effectiveReaderThreads the RESOLVED pool size — 0=AUTO already applied via
-     *        {@link #effectiveDiskReaderThreads(boolean)}; echoing the raw key would hide
-     *        exactly the resolution the scripts need to see
+     *        {@link #effectiveDiskReaderThreads(boolean)}
+     * @param effectiveCompressedColumns the LIVE wire-compression state AFTER the zstd
+     *        native probe, not the config request — a probe-failed server ships raw for
+     *        every session, and echoing the request would let compress_gate.sh compare
+     *        two identical raw arms with both marked valid (B0 review M1)
      */
-    public String effectiveConfigEcho(int effectiveReaderThreads) {
+    public String effectiveConfigEcho(int effectiveReaderThreads,
+                                      boolean effectiveCompressedColumns) {
         return "Effective config: useNbtTranscode=" + useNbtTranscode
                 + ", diskReaderThreads=" + effectiveReaderThreads
-                + ", useCompressedColumns=" + useCompressedColumns;
+                + ", useCompressedColumns=" + effectiveCompressedColumns;
     }
     /**
      * LOD x-ray masking (docs/planning/antixray-compat-design.md §3). "auto" (default)
