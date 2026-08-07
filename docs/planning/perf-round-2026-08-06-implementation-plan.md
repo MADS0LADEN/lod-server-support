@@ -465,6 +465,18 @@ per the `PROFILE_NBT_TRANSCODE` precedent, **valid only after Phase 0's
 
 **Rollback:** the config flag; then revert.
 
+> **VERDICT (2026-08-07, executed as stage B4): ALL GATES PASS.** Kill-switch A/B on
+> the review-fixed commit `bae0952`, 4+4 reps × 150 s ABBA per arm, serve + backfill.
+> Gate 1: four-class alloc/col 80172 → 40058 B (+50.0% serve), 78523 → 40742 B
+> (+48.1% backfill) vs ≥30%. Gate 2: nbt-minus-memo 1097 → 546 (+50.2% serve),
+> 903 → 374 (+58.6% backfill) vs ≥25%; memo marker flat both arms. Gate 3: parity
+> 0.03% / exact. Gate 4: walk pace unchanged (848 vs 844 deposits/s), tripwires
+> quiet (nbt-other/serialize-live live only in the serve arm — both n.s. there;
+> 0-in-both on backfill, noted). Headline: serve lss µs/col 232.8 → 208.3
+> (+10.5%), backfill 199.5 → 170.1 (+14.7%); `SelectiveChunkNbtLoader` marker
+> appeared (825/1193), fallback warns 0 across all change reps. Full numbers:
+> the B4 measurement-ledger entry in `v0.10.0-progress.md`.
+
 ---
 
 ## Phase 5 — R5 ops note + documentation corrections
