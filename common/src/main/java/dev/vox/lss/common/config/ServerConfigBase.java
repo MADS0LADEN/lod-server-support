@@ -89,6 +89,21 @@ public abstract class ServerConfigBase extends JsonConfig {
      * was "LOD silently stops during fast travel"), not the gate doing its job.
      */
     public int outboundBufferCeilingKB = 0;
+    /**
+     * Transport yield (vanilla-first-lod-yield-plan.md v2.1, v0.10.0 stage A2): while the
+     * player's netty channel reports NOT WRITABLE, the per-tick column flush is skipped
+     * and the queue retained — LSS never piles more LOD bytes into a channel that is
+     * already backed up ahead of vanilla's chunk packets. A starvation floor sends one
+     * payload per 5 s so a hard-yielding player is distinguishable from a dead one, and a
+     * once-a-minute relevance prune drops queue entries the player has long left behind.
+     * <b>Default FALSE</b> — the mechanism ships unarmed (the project's recorded evidence
+     * discipline: the default flips only in a later release citing the live E3 A/B, whose
+     * metric is moved-wrongly/rejection EVENT RATES). Behind a buffering proxy
+     * (Velocity/Bungee) the gate sees the server→proxy hop and is best-effort: it can
+     * under-yield, never over-yield. While armed, expect flying players to ride the floor
+     * during sustained vanilla chunk bursts — that IS "vanilla first". No clamp (boolean).
+     */
+    public boolean lodYieldsToVanillaTransport = false;
     /** Fleet-wide bandwidth ceiling. Raised 100 -> 256 MiB 2026-08-02 (config review
      *  section 3.2 — at 20 MiB/player the old value bound at FIVE concurrent LOD players),
      *  then lowered 256 -> 60 MiB on 2026-08-05 (user decision, v0.9.1, alongside the
