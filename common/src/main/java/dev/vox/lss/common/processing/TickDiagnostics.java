@@ -112,8 +112,10 @@ public class TickDiagnostics {
     // ---- Transport yield (lodYieldsToVanillaTransport; yield plan §5, A-7) ----
     // SERVICE-scoped so the log-archive signal survives per-player state teardown
     // (the R2-9 lesson: live-state sums collapse on every rejoin/dimension change).
-    private long yieldTicksTotal = 0;
-    private long yieldBytesWithheldTotal = 0;
+    // Volatile per the H3 pin the totals above carry: /lsslod diag renders on the
+    // invoking player's REGION thread on Folia while the pump writes.
+    private volatile long yieldTicksTotal = 0;
+    private volatile long yieldBytesWithheldTotal = 0;
 
     /** One withheld flush tick; {@code queuedBytes} is that tick's held queue bytes
      *  (a byte-tick pressure integral, never a delivered-bytes count). */

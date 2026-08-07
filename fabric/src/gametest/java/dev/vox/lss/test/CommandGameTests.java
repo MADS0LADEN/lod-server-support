@@ -232,6 +232,10 @@ public class CommandGameTests {
         helper.assertTrue(anyLineContains(lines, "Xray: active="),
                 "the diag ladder must carry the always-present xray masking line "
                         + "(pins LSSServerCommands' withXrayLine attach), got: " + lines);
+        helper.assertTrue(!anyLineContains(lines, "Yield:"),
+                "the Yield line must be ABSENT on the unarmed default config (review C-4:"
+                        + " a wrong armed argument would render a false arming receipt on"
+                        + " every default install), got: " + lines);
         helper.succeed();
     }
 

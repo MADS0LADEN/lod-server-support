@@ -1,5 +1,6 @@
 package dev.vox.lss.common.processing;
 
+import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.PositionUtil;
 import dev.vox.lss.common.SharedBandwidthLimiter;
 
@@ -55,13 +56,21 @@ class TransportYieldFlushTest {
 
     @Test
     void writableNeverYields() throws Exception {
-        // The CI-inertness pin: while the channel is writable the limiter is the ONLY
-        // constraint — armed-on-loopback behaves byte-identically to unarmed.
+        // The CI-inertness pin, DIFFERENTIAL (review C-1 — the F2-1 blocker's regression
+        // pin): an armed WRITABLE flush must drain to the limiter exactly like an
+        // unarmed one — three payloads leave in ONE tick. A hidden per-tick throttle on
+        // the armed arm (the v3 "smoothing cap" lever applied early) fails this and
+        // would silently confound the E3 A/B.
         state.setChannelPressureProbe(probe(50_000, ChannelPressureProbe.Writability.WRITABLE));
         state.addReadyPayload(new QueuedPayload<>("a", 10, 0, POS_1));
+        state.addReadyPayload(new QueuedPayload<>("b", 10, 1, POS_2));
+        state.addReadyPayload(new QueuedPayload<>("c", 10, 2, POS_FAR));
         Thread.sleep(50);
         flush(true, 0);
-        assertEquals(List.of("a"), sent);
+        assertEquals(List.of("a", "b", "c"), sent,
+                "one armed writable flush drains the whole queue, in order");
+        assertEquals(0, state.getSendQueueSize());
+        assertEquals(3, diag.getTotalSectionsSent());
         assertEquals(0, state.getYieldedTicks());
         assertEquals(0, diag.getYieldTicksTotal());
     }
@@ -92,6 +101,9 @@ class TransportYieldFlushTest {
                 "the byte-tick integral counts this tick's held bytes");
         assertEquals(0, state.departedColumnCountForTest(),
                 "the departed sweep must still run on the yield path");
+        assertFalse(state.isProbeSuppressed(POS_1),
+                "a yielded tick must not suppress-stamp the held head (S-11's sibling —"
+                        + " review C-9): the position was never sent");
         assertEquals(120_000, state.getOutboundPendingBytes(),
                 "the ONE probe read still feeds the diag gauge");
         assertEquals(0, state.getSendDeferrals(),
@@ -117,7 +129,7 @@ class TransportYieldFlushTest {
         // The retargeted A-1/S-3 pin: a maximum-size payload is only ever written to a
         // WRITABLE channel — it cannot be blocked by a threshold, only waited (and the
         // floor guarantees eventual progress).
-        int maxSize = 2 * 1024 * 1024;
+        int maxSize = LSSConstants.MAX_SEND_SECTIONS_SIZE;
         state.setChannelPressureProbe(probe(0, ChannelPressureProbe.Writability.WRITABLE));
         state.addReadyPayload(new QueuedPayload<>("big", maxSize, 0, POS_1));
         Thread.sleep(60);
@@ -151,6 +163,15 @@ class TransportYieldFlushTest {
         flush(true, 0);
         assertEquals(List.of("a"), sent, "the floor sends EXACTLY ONE payload — b stays queued");
         assertEquals(1, state.getSendQueueSize());
+        // §1.4 "charges the limiter normally" = the FULL send path (review C-2): the
+        // enqueued mark released (a miss here is a permanent per-position LOD hole via
+        // skipProbe/resolvedAsDuplicate), the departure stamped, the diag counted.
+        assertFalse(state.hasEnqueuedColumn(POS_1),
+                "the floor payload must release its enqueued mark");
+        assertEquals(1, state.departedColumnCountForTest(),
+                "the floor payload departs like any send — the grace stamp fires");
+        assertEquals(1, diag.getTotalSectionsSent(),
+                "the floor payload is counted like any send");
         // The counter reset: another full window before the next floor send.
         for (int i = 0; i < AbstractPlayerRequestState.YIELD_FLOOR_TICKS - 1; i++) {
             flush(true, 0);
@@ -193,6 +214,22 @@ class TransportYieldFlushTest {
     }
 
     @Test
+    void armedThrowingSnapshotProbeNeverYields() throws Exception {
+        // The class javadoc's third degrade claim (review C-3): a probe that THROWS from
+        // snapshot() reads UNKNOWN — an armed server with a broken probe must run at
+        // full speed, never pinned to the floor.
+        state.setChannelPressureProbe(new ChannelPressureProbe() {
+            @Override public long pendingOutboundBytes() { return -1; }
+            @Override public Snapshot snapshot() { throw new IllegalStateException("probe blew up"); }
+        });
+        state.addReadyPayload(new QueuedPayload<>("a", 10, 0, POS_1));
+        Thread.sleep(50);
+        flush(true, 0);
+        assertEquals(List.of("a"), sent, "a throwing snapshot degrades to UNKNOWN = no yield");
+        assertEquals(0, state.getYieldedTicks());
+    }
+
+    @Test
     void noSignalProbeNeverYields() throws Exception {
         state.setChannelPressureProbe(ChannelPressureProbe.NO_SIGNAL);
         state.addReadyPayload(new QueuedPayload<>("a", 10, 0, POS_1));
@@ -211,6 +248,14 @@ class TransportYieldFlushTest {
         Thread.sleep(50);
         state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add);
         assertEquals(List.of("a"), sent, "the short overload never yields");
+
+        // The 5-arg ceiling overload — the pre-yield production shape — is equally
+        // yield-off (review B-7).
+        sent.clear();
+        state.addReadyPayload(new QueuedPayload<>("b", 10, 1, POS_2));
+        Thread.sleep(50);
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 0L);
+        assertEquals(List.of("b"), sent, "the ceiling overload never yields either");
     }
 
     @Test
@@ -250,6 +295,28 @@ class TransportYieldFlushTest {
         Thread.sleep(50);
         flush(true, 300);
         assertEquals(List.of("near"), sent);
+    }
+
+    @Test
+    void floorSendDrawsFromThePostPruneHead() throws Exception {
+        // §1.4's claim as an ACTUAL floor send (reviews C-5/B-7/A-4): the far entry is
+        // the queue HEAD (older submission order), the player is near POS_1, and the
+        // floor tick itself prunes — its one payload must go to terrain the player can
+        // still see, never to the entry the prune was about to discard.
+        state.updatePlayerChunk(10, 0);
+        state.setChannelPressureProbe(probe(500_000, ChannelPressureProbe.Writability.NOT_WRITABLE));
+        state.addReadyPayload(new QueuedPayload<>("far", 10, 0, POS_FAR));
+        state.addReadyPayload(new QueuedPayload<>("near", 10, 1, POS_1));
+        Thread.sleep(50);
+        for (int i = 0; i < AbstractPlayerRequestState.YIELD_FLOOR_TICKS - 1; i++) {
+            flush(true, 300);
+        }
+        assertTrue(sent.isEmpty(), "still yielding");
+        long[] dropped = flush(true, 300);
+        assertEquals(List.of("near"), sent,
+                "the floor's one payload goes to the post-prune head, not the pruned far entry");
+        assertArrayEquals(new long[] {POS_FAR}, dropped,
+                "the floor tick's own prune reports the far position for done-bit clearing");
     }
 
     @Test

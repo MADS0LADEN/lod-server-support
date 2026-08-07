@@ -111,14 +111,15 @@ class PaperConfigValidationTest {
                 "backfill stays on so ONE key enables the whole feature; it is inert while off");
     }
 
-    /** Paper inherits the shared transcode default: disk serves transcode NBT straight to
-     *  wire bytes; false is the documented rollback to the object path (round 2, 2026-07-29). */
+    /** Paper inherits the shared yield default: unarmed until the live E3 A/B (§4). */
     @Test
     void transportYieldDefaultsOff() {
         assertFalse(new PaperConfig().lodYieldsToVanillaTransport,
                 "lodYieldsToVanillaTransport must default FALSE (Fabric parity)");
     }
 
+    /** Paper inherits the shared transcode default: disk serves transcode NBT straight to
+     *  wire bytes; false is the documented rollback to the object path (round 2, 2026-07-29). */
     @Test
     void nbtTranscodeDefaultsOn() {
         assertTrue(new PaperConfig().useNbtTranscode,

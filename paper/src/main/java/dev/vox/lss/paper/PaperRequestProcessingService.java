@@ -979,12 +979,15 @@ public class PaperRequestProcessingService {
                     data -> this.columnPayloadSender.send(state, data),
                     (long) this.config.outboundBufferCeilingKB * 1024L,
                     this.config.lodYieldsToVanillaTransport,
-                    this.config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
-                            + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS);
+                    // Prune gated on the yield (review B-2) — the Fabric twin's comment.
+                    this.config.lodYieldsToVanillaTransport
+                            ? this.config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
+                                    + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS
+                            : 0);
             if (dropped.length > 0) {
-                // A send failure discarded resolved-but-undelivered columns: clear their
-                // done-bits so the client's re-requests re-resolve instead of being
-                // answered up-to-date for data that never arrived.
+                // A send failure or the relevance prune discarded resolved-but-undelivered
+                // columns: clear their done-bits so the client's re-requests re-resolve
+                // instead of being answered up-to-date for data that never arrived.
                 this.offThreadProcessor.clearDiskReadDone(state.getPlayerUUID(), dropped);
             }
         }

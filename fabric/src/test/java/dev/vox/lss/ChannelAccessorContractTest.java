@@ -130,4 +130,23 @@ class ChannelAccessorContractTest {
         assertTrue(paper.contains("config.lodYieldsToVanillaTransport"),
                 "the Paper flush wiring must pass config.lodYieldsToVanillaTransport");
     }
+
+    @Test
+    void bothDiagCallSitesPassTheLiveArmedFlag() throws Exception {
+        // Review C-4: a literal `true` (or the wrong field) as yieldDiagLineOrNull's
+        // armed argument renders `Yield: armed=true` on every DEFAULT install — the
+        // operator's arming receipt inverted. Pin that both command surfaces read the
+        // live config field in the withYieldLine attach.
+        var yieldAttach = java.util.regex.Pattern.compile(
+                "withYieldLine\\(DiagnosticsFormatter\\.yieldDiagLineOrNull\\(\\s*"
+                        + "config\\.lodYieldsToVanillaTransport", java.util.regex.Pattern.DOTALL);
+        String fabric = Files.readString(
+                Path.of("src/main/java/dev/vox/lss/networking/server/LSSServerCommands.java"));
+        assertTrue(yieldAttach.matcher(fabric).find(),
+                "LSSServerCommands must feed the LIVE config flag to yieldDiagLineOrNull");
+        String paper = Files.readString(
+                Path.of("../paper/src/main/java/dev/vox/lss/paper/PaperCommands.java"));
+        assertTrue(yieldAttach.matcher(paper).find(),
+                "PaperCommands must feed the LIVE config flag to yieldDiagLineOrNull");
+    }
 }

@@ -98,7 +98,6 @@ public abstract class AbstractPlayerRequestState<T> {
      *  ≤1024-entry queue at this cadence is noise). */
     static final int PRUNE_INTERVAL_TICKS = 1200;
     private volatile long yieldedTicks = 0;
-    private volatile long yieldBytesWithheld = 0;
     private int yieldNoSendTicks = 0;
     private int flushTickCounter = 0;
     /** One INFO per JVM the first time any player rides the floor — the log archive's
@@ -580,8 +579,10 @@ public abstract class AbstractPlayerRequestState<T> {
      * re-requests re-resolve instead of being answered up-to-date for data that was never
      * delivered. Called by the main thread each tick.
      *
-     * @return packed positions of column payloads dropped by a send failure (empty when
-     *         everything sent or remains queued)
+     * @return packed positions whose resolved-but-undelivered payloads were discarded —
+     *         by a send failure OR by the relevance prune — for the caller to route to
+     *         {@code OffThreadProcessor.clearDiskReadDone} (empty when everything sent
+     *         or remains queued)
      */
     public long[] flushSendQueue(long allocationBytes, SharedBandwidthLimiter globalLimiter,
                                   TickDiagnostics diag, PayloadSender<T> sender) {
@@ -689,22 +690,36 @@ public abstract class AbstractPlayerRequestState<T> {
             this.yieldedTicks++;
             // A byte-tick pressure integral, not a distinct-bytes count: each withheld
             // tick adds the bytes that were ready and held. Useful as a magnitude gauge;
-            // never a delivered-bytes term.
+            // never a delivered-bytes term. Service-scoped only (TickDiagnostics) —
+            // the per-player twin was dead API and dropped (review C-7/A-7).
             long queuedBytes = 0;
             for (var entry : this.sendQueue) {
                 queuedBytes += entry.estimatedBytes();
             }
-            this.yieldBytesWithheld += queuedBytes;
             diag.recordYieldedTick(queuedBytes);
+            // The counter is NOT reset here: it resets only when a floor payload actually
+            // leaves (review A-1/B-5 — a floor tick whose send the limiter refuses must
+            // stay armed, not silently spend its window). §1.4's contract is "send
+            // exactly one payload", not "attempt one".
             if (++this.yieldNoSendTicks >= YIELD_FLOOR_TICKS) {
-                this.yieldNoSendTicks = 0;
                 floorSendThisTick = true;
-                if (!sustainedYieldWarned) {
-                    sustainedYieldWarned = true;
-                    LSSLogger.info("Transport yield sustained for " + YIELD_FLOOR_TICKS
-                            + " ticks on " + getPlayerName() + " — LOD is running at the"
-                            + " starvation floor (~1 column/5 s) while vanilla traffic"
-                            + " drains; this is lodYieldsToVanillaTransport working");
+                // The floor draws from the POST-PRUNE head on EVERY floor tick, not just
+                // the 1-in-12 where the minute cadence lines up (review A-4): a bounded
+                // extra prune (≤ once per 5 s) keeps §1.4's "never spends its one payload
+                // on terrain the prune was about to discard" true always.
+                if (pruneRadiusChunks > 0) {
+                    long[] floorPruned = pruneSendQueueOutsideRange(pruneRadiusChunks);
+                    if (floorPruned.length > 0) {
+                        var merged = new LongArrayList(dropped.length + floorPruned.length);
+                        merged.addElements(0, dropped);
+                        merged.addElements(merged.size(), floorPruned);
+                        dropped = merged.toLongArray();
+                        this.sendQueueSizeSnapshot = this.sendQueue.size();
+                        if (this.sendQueue.isEmpty()) {
+                            sweepDepartedColumns();
+                            return dropped;
+                        }
+                    }
                 }
             } else {
                 sweepDepartedColumns();
@@ -738,7 +753,17 @@ public abstract class AbstractPlayerRequestState<T> {
                 diag.recordWireSent(queued.wireBytes());
                 if (floorSendThisTick) {
                     // The starvation floor sends EXACTLY ONE payload (§1.4) — the yield
-                    // is still holding; this send only proves liveness.
+                    // is still holding; this send only proves liveness. The counter and
+                    // the one-shot INFO fire only HERE, on a send that actually left
+                    // (review A-1/B-5).
+                    this.yieldNoSendTicks = 0;
+                    if (!sustainedYieldWarned) {
+                        sustainedYieldWarned = true;
+                        LSSLogger.info("Transport yield sustained for " + YIELD_FLOOR_TICKS
+                                + " ticks on " + getPlayerName() + " — LOD is running at the"
+                                + " starvation floor (~1 column/5 s) while vanilla traffic"
+                                + " drains; this is lodYieldsToVanillaTransport working");
+                    }
                     break;
                 }
             } catch (Exception e) {
@@ -771,6 +796,12 @@ public abstract class AbstractPlayerRequestState<T> {
      * In-departure-grace entries are kept (their done-bit semantics are pinned); no
      * proximity re-ordering (edit convergence depends on submission order — the v3
      * lever). Owning (main) thread only.
+     *
+     * <p>Unstated-elsewhere invariant (review N1): this radius (ingress + margin) is
+     * strictly LARGER than the client's own movement-prune distance, so the client
+     * always forgets a position before the server may prune its payload — a ts&gt;0
+     * re-ask that was answered up_to_date can therefore never be stranded stale by a
+     * prune. A future change to either radius must preserve that ordering.
      */
     private long[] pruneSendQueueOutsideRange(int radiusChunks) {
         long playerPacked = this.playerChunkPacked;
@@ -806,11 +837,6 @@ public abstract class AbstractPlayerRequestState<T> {
         return this.yieldedTicks;
     }
 
-    /** Byte-tick integral of withheld queue bytes (see the flush javadoc) — a pressure
-     *  magnitude gauge, never a delivered-bytes term. */
-    public long getYieldBytesWithheld() {
-        return this.yieldBytesWithheld;
-    }
 
     // ---- Probe suppression (2026-08-05 review P1) ----
 

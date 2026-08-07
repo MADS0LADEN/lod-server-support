@@ -365,20 +365,20 @@ public final class DiagnosticsFormatter {
 
     /** Outbound-buffer depth for the diag line: {@code n/a} when the probe has no signal,
      *  so an unresolvable channel never renders as a plausible-looking "0 B". */
+    private static String formatOutbound(long bytes) {
+        return bytes < 0 ? "n/a" : formatBytes(bytes);
+    }
+
     /** The transport yield's one-line summary, or null while the gate is unarmed AND has
      *  never withheld a tick this service lifetime (yield plan §5 A-7 — armed-then-
      *  disarmed sessions keep their evidence). Counters are service-scoped
      *  (TickDiagnostics) so the log-archive signal survives player-state teardown. */
     public static String yieldDiagLineOrNull(boolean armed,
-                                             dev.vox.lss.common.processing.TickDiagnostics diag) {
+                                             TickDiagnostics diag) {
         long ticks = diag.getYieldTicksTotal();
         if (!armed && ticks == 0) return null;
         return String.format("Yield: armed=%s, ticks_total=%d, bytes_withheld=%s",
                 armed, ticks, formatBytes(diag.getYieldBytesWithheldTotal()));
-    }
-
-    private static String formatOutbound(long bytes) {
-        return bytes < 0 ? "n/a" : formatBytes(bytes);
     }
 
     public static String formatBytes(long bytes) {
