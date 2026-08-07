@@ -23,14 +23,16 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * First direct suite for the palette decode memo (R3, perf-round plan Phase 1 — the
- * {@code memoSizeForTest} seam had zero callers before this). The headline pin is the
- * collision-adjacent case: equal-content tags with DIFFERENT backing-map capacity
- * histories must hit one memo entry — the {@link PaperMemoizedNbtCodec.Key} structural hash
- * is order-independent per compound level, where a sequential combine would hash them
- * apart and silently degrade to duplicate entries. The byte-level proof that the memo
- * changes nothing stays with the nbt-corpus goldens + transcode-vs-object fuzz +
- * {@code SerializerParityGameTests}.
+ * First direct suite for the palette decode memo (the {@code memoSizeForTest} seam had
+ * zero callers before B1). The headline pin is CAPACITY-HISTORY KEYING INDEPENDENCE:
+ * equal-content tags whose backing HashMaps iterate in different orders (capacity-
+ * history dependent) must hit ONE memo entry. Raw-tag keying satisfies it because
+ * {@code Map.hashCode} is an order-independent sum by interface contract — but any
+ * future re-keying (B1's reverted Key wrapper was one; see the class javadoc's
+ * measured-decision note) that combined entries sequentially would silently split
+ * logical entries into duplicates, and THIS suite is what reds. The byte-level proof
+ * that the memo changes nothing stays with the nbt-corpus goldens + transcode-vs-object
+ * fuzz + {@code SerializerParityGameTests}.
  *
  * <p>Textual twin of Fabric's {@code MemoizedNbtCodecTest} — keep in lockstep.
  */
@@ -86,7 +88,7 @@ class PaperMemoizedNbtCodecTest {
     }
 
     /** A realistic palette entry: Name + a Properties sub-compound (the nested shape
-     *  whose iterator churn R3 exists to eliminate). */
+     *  the memo sees from real region NBT). */
     private static CompoundTag paletteEntry(String name, String axis) {
         var props = new CompoundTag();
         props.putString("axis", axis);
@@ -112,13 +114,13 @@ class PaperMemoizedNbtCodecTest {
     }
 
     /**
-     * THE R3 collision-adjacent pin (plan constraint, quoted): the test must FORCE
-     * different backing-map capacities, since same-capacity maps usually iterate
-     * identically and the test passes vacuously otherwise. Tag B inserts 20 keys
-     * (HashMap resizes past A's table size) and removes the extras — equal content,
-     * different capacity history. The key set is chosen so the orders provably differ:
-     * "open" spreads to bucket 14 of 16 but 30 of 32 (String.hashCode is spec-fixed,
-     * so this is deterministic on every JVM), and the fixture guard asserts it.
+     * The keying-independence pin: equal-content tags with FORCED different backing-map
+     * capacities (hence different iteration orders) must hit one entry. Holds today
+     * because Map.hashCode/equals are order-independent interface contracts; any future
+     * re-keying with a sequential combine would red here (the B1 Key review found the
+     * naive fixture VACUOUS — same-capacity maps usually iterate identically, and even
+     * most differing-capacity key sets don't diverge under HashMap's spread; hence the
+     * verified DIVERGING_KEYS set and the vacuity guard).
      */
     @Test
     void equalContentDifferentCapacityHistoryHitsOneEntry() {
@@ -127,10 +129,9 @@ class PaperMemoizedNbtCodecTest {
         var b = pair[1];
         assertEquals(a, b, "fixture: content must be equal");
         assertNotEquals(List.copyOf(a.keySet()), List.copyOf(b.keySet()), VACUITY_RECIPE);
-        assertEquals(PaperMemoizedNbtCodec.Key.structuralHash(a),
-                PaperMemoizedNbtCodec.Key.structuralHash(b),
-                "order-independent structural hash: equal content must hash equal"
-                        + " regardless of iteration order");
+        assertEquals(a.hashCode(), b.hashCode(),
+                "order-independent hashing: equal content must hash equal regardless"
+                        + " of iteration order (Map.hashCode contract)");
 
         var m = memo(16);
         assertSame(m.resolve(a), m.resolve(b),
@@ -140,11 +141,9 @@ class PaperMemoizedNbtCodecTest {
     }
 
     @Test
-    void nestedCompoundOrderIsAlsoIndependentAndListOrderIsSemantic() {
-        // The recursion pin, one level down (review F1: the original fixture here was
-        // VACUOUS — its two-key sub-compounds iterated identically at both capacities;
-        // computed, not assumed. Same verified diverging key set as the flagship test,
-        // nested under Properties, with the same vacuity guard).
+    void nestedCompoundOrderIsAlsoIndependentThroughTheMemo() {
+        // The recursion pin, one level down: the same verified diverging key set
+        // nested under Properties, with the same vacuity guard.
         var pair = divergingPair();
         assertNotEquals(List.copyOf(pair[0].keySet()), List.copyOf(pair[1].keySet()),
                 VACUITY_RECIPE);
@@ -152,69 +151,31 @@ class PaperMemoizedNbtCodecTest {
         t1.put("Properties", pair[0]);
         var t2 = new CompoundTag();
         t2.put("Properties", pair[1]);
-        assertEquals(PaperMemoizedNbtCodec.Key.structuralHash(t1),
-                PaperMemoizedNbtCodec.Key.structuralHash(t2),
-                "the recursion must be order-independent one level down too");
         var m = memo(16);
-        assertSame(m.resolve(t1), m.resolve(t2), "…and pinned through the memo");
+        assertSame(m.resolve(t1), m.resolve(t2),
+                "nested iteration order must not split one logical entry either");
         assertEquals(1, m.memoSizeForTest());
 
-        // ListTag order IS semantic — sequential combine (canary: not a collision
-        // guarantee, but these fixtures must not hash equal).
+        // A list nested INSIDE a compound (the codec is generic; palette Properties
+        // never carry lists, but the keying must not care) — and list ORDER is
+        // semantic, so reordered lists are distinct entries.
         var l1 = new ListTag();
         l1.add(StringTag.valueOf("a"));
         l1.add(StringTag.valueOf("b"));
         var l2 = new ListTag();
         l2.add(StringTag.valueOf("b"));
         l2.add(StringTag.valueOf("a"));
-        assertNotEquals(PaperMemoizedNbtCodec.Key.structuralHash(l1),
-                PaperMemoizedNbtCodec.Key.structuralHash(l2));
-
-        // A list nested INSIDE a compound drives the recursion's list branch through
-        // the memo itself (review C4c — the class is generic; palette Properties never
-        // carry lists, but the recursion must not care).
         var withList1 = new CompoundTag();
         withList1.put("list", l1);
+        var withList1Copy = new CompoundTag();
+        withList1Copy.put("list", l1.copy());
         var withList2 = new CompoundTag();
-        withList2.put("list", l1.copy());
+        withList2.put("list", l2);
         var m2 = memo(16);
-        assertSame(m2.resolve(withList1), m2.resolve(withList2));
-        assertEquals(1, m2.memoSizeForTest());
-    }
-
-    /**
-     * B1 review C4a/C4b: the structural hash is BIT-IDENTICAL to {@code Tag.hashCode()}
-     * ({@code Map.hashCode}/{@code List.hashCode} are interface contracts) — the
-     * invariant proving the key distribution is unchanged from pre-R3 raw-tag keying.
-     * A future "optimization" of the combine must red here. Copy-equality is the
-     * premise the stored key's copy re-walk relies on.
-     */
-    @Test
-    void structuralHashMatchesTagHashCodeAndSurvivesCopy() {
-        var tag = paletteEntry("minecraft:stone", "y");
-        var list = new ListTag();
-        list.add(StringTag.valueOf("a"));
-        list.add(paletteEntry("minecraft:granite", "x"));
-        tag.put("mixed", list);
-        assertEquals(tag.hashCode(), PaperMemoizedNbtCodec.Key.structuralHash(tag),
-                "structuralHash must equal Tag.hashCode for every vanilla tag shape");
-        assertEquals(PaperMemoizedNbtCodec.Key.structuralHash(tag),
-                PaperMemoizedNbtCodec.Key.structuralHash(tag.copy()),
-                "a deep copy preserves content, hence hash");
-        assertEquals(new CompoundTag().hashCode(),
-                PaperMemoizedNbtCodec.Key.structuralHash(new CompoundTag()));
-    }
-
-    /**
-     * B1 review F2: Key must stay NESTED — analyze_profile_jfr.py's DEFAULT_MARKERS
-     * count "samples under PaperMemoizedNbtCodec" by class-name prefix (the $Key frames
-     * ride the same prefix, plus their own separate new-key-cost marker), and Phase 4's
-     * band subtraction depends on the identifier staying stable.
-     */
-    @Test
-    void keyStaysNestedForTheProfileMarkerContract() {
-        assertEquals("dev.vox.lss.paper.PaperMemoizedNbtCodec$Key",
-                PaperMemoizedNbtCodec.Key.class.getName());
+        assertSame(m2.resolve(withList1), m2.resolve(withList1Copy));
+        assertNotSame(m2.resolve(withList1), m2.resolve(withList2),
+                "list order is semantic — reordered lists are different entries");
+        assertEquals(2, m2.memoSizeForTest());
     }
 
     @Test
