@@ -352,8 +352,9 @@ public class PaperRequestProcessingService {
         // AUTO tier applies whenever background priority is on (unlike Fabric, which must
         // also probe for Moonrise). With the flag off the reads run FOREGROUND, so the pool
         // must be sized by the unprioritized tier — see the Fabric twin. (v0.9.0 review.)
+        int readerThreads = config.effectiveDiskReaderThreads(config.useBackgroundReadPriority);
         var diskReader = new PaperChunkDiskReader(
-                config.effectiveDiskReaderThreads(config.useBackgroundReadPriority),
+                readerThreads,
                 config.useBackgroundReadPriority,
                 config.useNbtTranscode);
         PaperChunkGenerationService generationService = config.enableChunkGeneration
@@ -385,6 +386,11 @@ public class PaperRequestProcessingService {
                 wireCompressionLive = true;
             }
         }
+        // Script-consumed contract: the measurement harnesses assert their staged knobs
+        // against this line (ServerConfigBase.effectiveConfigEcho). Deliberately AFTER
+        // the zstd probe so the compression value echoed is the LIVE state, not the
+        // request (B0 review M1).
+        LSSLogger.info(config.effectiveConfigEcho(readerThreads, wireCompressionLive));
 
         // LOD store: memory tier for "memory", memory + SQLite for "full" — attached to
         // both consumers BEFORE the processor starts / any submit. Environment resolved

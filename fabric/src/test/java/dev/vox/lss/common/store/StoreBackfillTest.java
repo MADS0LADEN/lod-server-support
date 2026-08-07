@@ -90,6 +90,29 @@ class StoreBackfillTest {
         store.shutdown();
     }
 
+    /** The terminal statusLine is a SCRIPT-CONSUMED CONTRACT (PERF Phase 0 item 3):
+     *  backfill_profile.sh parses "complete|stopped: R regions, D deposited, S skipped,
+     *  E errors, P pauses" out of the "Store backfill " INFO line into meta.json — walk
+     *  seconds + these counters define the Phase 2 deposits/s gate. A rewording fails
+     *  SILENT on the harness side (its sed yields nothing and the run reds as
+     *  parse_ok=false), so it must red HERE first (B0 review N6). */
+    @Test
+    void terminalStatusLineIsAScriptConsumedContract() throws Exception {
+        writeRegion(0, 0, 5, 6);
+        SqliteLodStore store = openStore();
+        var bf = backfill(store, (dim, cx, cz) -> new byte[]{1},
+                new AtomicBoolean(true), new AtomicBoolean(true));
+        assertTrue(bf.start());
+        awaitDone(bf);
+        String status = bf.statusLine();
+        assertTrue(status.matches(
+                "complete: \\d+ regions, \\d+ deposited, \\d+ skipped, \\d+ errors, \\d+ pauses"),
+                "backfill_profile.sh parses this exact shape, got: " + status);
+        assertTrue(status.startsWith("complete: 1 regions, 2 deposited, 0 skipped, 0 errors"),
+                status);
+        store.shutdown();
+    }
+
     @Test
     void skipsColumnsTheStoreAlreadyHas() throws Exception {
         writeRegion(0, 0, 5, 6);
@@ -257,7 +280,10 @@ class StoreBackfillTest {
         String expectedSize = StoreBackfill.formatSize(StoreBackfill.estimateLodBytes(8192));
 
         String uncapped = bf.describePlan(plan, Long.MAX_VALUE);
-        assertTrue(uncapped.contains("2 region(s)"), uncapped);
+        // "region(s) to process" is script-consumed: backfill_profile.sh greps this
+        // wording for the walk-START timestamp (B0 review N6 — the terminal-line pin's
+        // start-side sibling).
+        assertTrue(uncapped.contains("2 region(s) to process"), uncapped);
         assertTrue(uncapped.contains("~" + expectedSize), uncapped);
         assertTrue(uncapped.contains("(uncapped)"), uncapped);
         assertTrue(!uncapped.contains("STOP"), "no stop warning without a cap: " + uncapped);

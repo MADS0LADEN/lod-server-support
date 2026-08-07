@@ -343,6 +343,36 @@ public abstract class ServerConfigBase extends JsonConfig {
     public long lodStoreMaxBytes() {
         return lodStoreMaxMB <= 0 ? Long.MAX_VALUE : lodStoreMaxMB * 1024L * 1024L;
     }
+
+    /**
+     * One-line effective-config echo, INFO-logged once at service start on both platforms.
+     *
+     * <p>The format is a SCRIPT-CONSUMED CONTRACT (PERF round Phase 0 item 1): the
+     * measurement harnesses ({@code profile_disk_read.sh}, {@code compress_gate.sh},
+     * {@code backfill_profile.sh}) grep {@code "Effective config: "} out of server.log
+     * into each run's meta.json and FAIL the arm when a staged knob does not appear
+     * here — an ignored config key must invalidate the arm, not silently compare two
+     * identical arms (the exact failure mode the 2026-08-06 findings erratum recorded).
+     * Comma-separated {@code key=value} pairs in this fixed order; new perf-sensitive
+     * knobs APPEND (scripts match per-key substrings, so appending is compatible).
+     * Every echoed value is the RESOLVED one — echoing a raw key would hide exactly
+     * the resolution the scripts need to see. Pinned by ConfigValidationTest + the
+     * Paper twin; the call-site wiring (resolved arguments, once per service start)
+     * is source-regex-pinned in ChannelAccessorContractTest.
+     *
+     * @param effectiveReaderThreads the RESOLVED pool size — 0=AUTO already applied via
+     *        {@link #effectiveDiskReaderThreads(boolean)}
+     * @param effectiveCompressedColumns the LIVE wire-compression state AFTER the zstd
+     *        native probe, not the config request — a probe-failed server ships raw for
+     *        every session, and echoing the request would let compress_gate.sh compare
+     *        two identical raw arms with both marked valid (B0 review M1)
+     */
+    public String effectiveConfigEcho(int effectiveReaderThreads,
+                                      boolean effectiveCompressedColumns) {
+        return "Effective config: useNbtTranscode=" + useNbtTranscode
+                + ", diskReaderThreads=" + effectiveReaderThreads
+                + ", useCompressedColumns=" + effectiveCompressedColumns;
+    }
     /**
      * LOD x-ray masking (docs/planning/antixray-compat-design.md §3). "auto" (default)
      * masks iff an anti-xray engine is detected — Paper's built-in anti-xray config, or the

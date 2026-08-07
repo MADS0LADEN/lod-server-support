@@ -81,16 +81,35 @@ run_arm() { # <arm-label> <useCompressedColumns-value> <rep>
     rm -f "$RESULTS"/server*.json "$RESULTS"/client*.json "$RESULTS"/cpu*.jsonl \
           "$RESULTS"/*.jfr "$RESULTS"/warm-join-meta.json
     local rc=0
-    (cd "$PROJECT_ROOT" && ./scripts/benchmark.sh "$SCENARIO" "$DURATION") \
+    # BENCHMARK_CONFIG_STAGED: without it benchmark.sh's neutral-staging block (6856bcb,
+    # 2026-08-02) silently replaces the config staged above and the useCompressedColumns
+    # arm variable is INERT — PERF Phase 0 item 1 (found by the post-review blast-radius
+    # audit; this script's archived runs predate the block, so the recorded protocol-19
+    # evidence is clean).
+    (export BENCHMARK_CONFIG_STAGED=1; cd "$PROJECT_ROOT" && ./scripts/benchmark.sh "$SCENARIO" "$DURATION") \
         > "$OUT_ROOT/$STAMP/${arm}-rep${rep}.orchestrator.log" 2>&1 || rc=$?
     collect "$out"
+    # Effective-config assertion (Phase 0 item 1): the server ECHOES its effective knobs
+    # at service start (ServerConfigBase.effectiveConfigEcho, format-pinned). An ignored
+    # config key must FAIL the arm, not silently compare two identical arms. server.log
+    # is the MEASURED cycle's console (warm-join cycle A logs to server-populate.log);
+    # tail -1 keeps the latest echo if a log ever carries two boots.
+    local echo_line
+    echo_line="$(grep -o 'Effective config: .*' "$out/server.log" 2>/dev/null | tail -1 || true)"
+    local arm_valid=true
+    [[ "$echo_line" == *"useCompressedColumns=$value"* ]] || arm_valid=false
     cat > "$out/meta.json" <<EOF
 {"mode":"$MODE","arm":"$arm","useCompressedColumns":$value,"lodStore":"$STORE_MODE",
  "rep":$rep,"duration_s":$DURATION,
+ "config_echo":"$echo_line","arm_valid":$arm_valid,
  "ref":"$(git -C "$PROJECT_ROOT" rev-parse --short HEAD)","rc":$rc,"finished":"$(date -Is)"}
 EOF
     if [[ $rc -ne 0 ]]; then
         log "arm $arm rep$rep FAILED (rc=$rc)"
+        return 1
+    fi
+    if [[ "$arm_valid" != "true" ]]; then
+        log "arm $arm rep$rep INVALID: config echo '${echo_line:-<missing>}' does not carry useCompressedColumns=$value"
         return 1
     fi
 }

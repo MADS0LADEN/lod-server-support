@@ -134,7 +134,8 @@ public class RequestProcessingService {
         // 8 FOREGROUND readers where the historic default was 5. (v0.9.0 review.)
         boolean prioritizedReads = config.useBackgroundReadPriority
                 && dev.vox.lss.compat.MoonriseReadCompat.resolveOrNull() != null;
-        this.diskReader = new ChunkDiskReader(config.effectiveDiskReaderThreads(prioritizedReads),
+        int readerThreads = config.effectiveDiskReaderThreads(prioritizedReads);
+        this.diskReader = new ChunkDiskReader(readerThreads,
                 config.useBackgroundReadPriority, config.useNbtTranscode);
         if (config.enableChunkGeneration) {
             this.generationService = new ChunkGenerationService(config);
@@ -176,6 +177,11 @@ public class RequestProcessingService {
             }
         }
         this.wireCompressionLive = wireCompressionLive;
+        // Script-consumed contract: the measurement harnesses assert their staged knobs
+        // against this line (ServerConfigBase.effectiveConfigEcho). Deliberately AFTER
+        // the zstd probe so the compression value echoed is the LIVE state, not the
+        // request (B0 review M1).
+        LSSLogger.info(config.effectiveConfigEcho(readerThreads, wireCompressionLive));
 
         // LOD store (docs/planning/lod-store-implementation-plan.md): memory tier for
         // "memory", memory + SQLite for "full". Attached to BOTH consumers before any

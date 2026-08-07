@@ -598,4 +598,32 @@ class ConfigValidationTest {
         assertEquals(400, loaded.lodColumnsPerSecondLimit, "a saved cap must bind back");
     }
 
+    /**
+     * The effective-config echo is a SCRIPT-CONSUMED CONTRACT (PERF Phase 0 item 1):
+     * profile_disk_read.sh / compress_gate.sh / backfill_profile.sh grep
+     * "Effective config: " from server.log and match per-key substrings into each
+     * run's arm_valid. Exact-string pin — a format drift here silently invalidates
+     * every measurement arm, so this must red before any script does.
+     */
+    @Test
+    void effectiveConfigEchoIsAScriptConsumedContract() {
+        var c = serverConfig();
+        c.useNbtTranscode = false;
+        // The compression value echoed is the EFFECTIVE post-probe state the caller
+        // passes, NOT this field — set the field to the opposite to pin that (a
+        // probe-failed server must echo false so compress_gate reds the arm, B0 M1).
+        c.useCompressedColumns = false;
+        assertEquals("Effective config: useNbtTranscode=false, diskReaderThreads=7,"
+                        + " useCompressedColumns=true",
+                c.effectiveConfigEcho(7, true),
+                "key order and key=value spelling are what the harnesses grep");
+        // The thread count echoed is the RESOLVED one the caller passes (0=AUTO already
+        // applied) — the scripts assert the staged explicit value appears verbatim.
+        c.useNbtTranscode = true;
+        c.useCompressedColumns = true;
+        assertEquals("Effective config: useNbtTranscode=true, diskReaderThreads=5,"
+                        + " useCompressedColumns=false",
+                c.effectiveConfigEcho(5, false));
+    }
+
 }
