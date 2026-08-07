@@ -133,9 +133,20 @@ final class NbtSectionSerializer {
                                             XrayMaskManager.MaskEntry maskEntry,
                                             int minSectionY, int maxSectionY,
                                             boolean useNbtTranscode) throws Exception {
+        return readAndSerializeSections(rawRead, registryAccess, cx, cz, maskEntry,
+                minSectionY, maxSectionY, useNbtTranscode, true);
+    }
+
+    /** Full split flavor incl. the Phase 4 selective-parse flag. */
+    static byte[] readAndSerializeSections(ChunkRawRead rawRead, RegistryAccess registryAccess,
+                                            int cx, int cz,
+                                            XrayMaskManager.MaskEntry maskEntry,
+                                            int minSectionY, int maxSectionY,
+                                            boolean useNbtTranscode,
+                                            boolean useSelectiveNbtParse) throws Exception {
         var future = rawRead.read(cx, cz);
         var optionalRecord = future.get(LSSConstants.DISK_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-        var chunkNbt = parseRawChunk(optionalRecord, cx, cz);
+        var chunkNbt = parseRawChunk(optionalRecord, cx, cz, useSelectiveNbtParse);
         if (chunkNbt == null) return null;
         // Pool-side NbtIo.read stays OUTSIDE the AntiXray shim, exactly like the blocking
         // read in the ChunkNbtRead flavor above: the shim covers the codec parse and the
@@ -161,6 +172,11 @@ final class NbtSectionSerializer {
      */
     static CompoundTag parseRawChunk(Optional<RawChunkRecord> record, int cx, int cz)
             throws java.io.IOException {
+        return parseRawChunk(record, cx, cz, true);
+    }
+
+    static CompoundTag parseRawChunk(Optional<RawChunkRecord> record, int cx, int cz,
+                                     boolean useSelectiveNbtParse) throws java.io.IOException {
         if (record.isEmpty()) return null;
         var rec = record.get();
         var version = net.minecraft.world.level.chunk.storage.RegionFileVersion.fromId(rec.version());
@@ -178,6 +194,19 @@ final class NbtSectionSerializer {
             warnRawParse("unknown region stream version " + rec.version()
                     + " at [" + cx + "," + cz + "]");
             return null;
+        }
+        // Phase 4 (R2): selective root-whitelist parse first; ANY throw falls back to
+        // the full parse over a FRESH wrap of the same compressed buffer — free under
+        // the raw-record design (a byte[] re-wraps at zero IO cost), and the fallback
+        // keeps the documented leniency divergence one-directional.
+        if (useSelectiveNbtParse) {
+            try (var in = new java.io.DataInputStream(
+                    version.wrap(new java.io.ByteArrayInputStream(rec.payload())))) {
+                return SelectiveChunkNbtLoader.load(in);
+            } catch (Exception e) {
+                warnRawParse("selective parse failed at [" + cx + "," + cz
+                        + "] (" + e + ") — falling back to full parse");
+            }
         }
         try (var in = new java.io.DataInputStream(
                 version.wrap(new java.io.ByteArrayInputStream(rec.payload())))) {

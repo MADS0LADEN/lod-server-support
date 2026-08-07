@@ -486,6 +486,14 @@ class ConfigValidationTest {
                 "useBackgroundReadSplit must default on");
     }
 
+    /** Phase 4 (R2): the selective root-whitelist parse ships ON; false restores the
+     *  full root parse as the rollback. */
+    @Test
+    void selectiveNbtParseDefaultsOn() {
+        assertTrue(serverConfig().useSelectiveNbtParse,
+                "useSelectiveNbtParse must default on");
+    }
+
     // --- LSSClientConfig ---
 
     private LSSClientConfig clientConfig() {
@@ -622,7 +630,8 @@ class ConfigValidationTest {
         // probe-failed server must echo false so compress_gate reds the arm, B0 M1).
         c.useCompressedColumns = false;
         assertEquals("Effective config: useNbtTranscode=false, diskReaderThreads=7,"
-                        + " useCompressedColumns=true, useBackgroundReadSplit=true",
+                        + " useCompressedColumns=true, useBackgroundReadSplit=true,"
+                        + " useSelectiveNbtParse=true",
                 c.effectiveConfigEcho(7, true),
                 "key order and key=value spelling are what the harnesses grep");
         // The thread count echoed is the RESOLVED one the caller passes (0=AUTO already
@@ -630,8 +639,10 @@ class ConfigValidationTest {
         c.useNbtTranscode = true;
         c.useCompressedColumns = true;
         c.useBackgroundReadSplit = false;
+        c.useSelectiveNbtParse = false;
         assertEquals("Effective config: useNbtTranscode=true, diskReaderThreads=5,"
-                        + " useCompressedColumns=false, useBackgroundReadSplit=false",
+                        + " useCompressedColumns=false, useBackgroundReadSplit=false,"
+                        + " useSelectiveNbtParse=false",
                 c.effectiveConfigEcho(5, false));
     }
 

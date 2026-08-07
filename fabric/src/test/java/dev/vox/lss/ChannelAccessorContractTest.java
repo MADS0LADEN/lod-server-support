@@ -8,6 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -195,9 +196,11 @@ class ChannelAccessorContractTest {
                 "src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
         assertTrue(fabric.contains("config.useBackgroundReadSplit"),
                 "the ChunkDiskReader construction must pass config.useBackgroundReadSplit");
+        assertTrue(fabric.contains("config.useSelectiveNbtParse"),
+                "…and config.useSelectiveNbtParse (Phase 4)");
     }
 
-    @Test
+        @Test
     void bothDiagCallSitesPassTheLiveArmedFlag() throws Exception {
         // Review C-4: a literal `true` (or the wrong field) as yieldDiagLineOrNull's
         // armed argument renders `Yield: armed=true` on every DEFAULT install — the

@@ -169,6 +169,21 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public boolean useBackgroundReadSplit = true;
     /**
+     * When true (default), the Phase 3 split's pool-side NBT parse is SELECTIVE (perf
+     * round Phase 4 / R2): only the root keys the serializer actually reads ({@code
+     * Status}, {@code sections} — the whitelist is build-pinned against the serializer
+     * source) are materialized; every other root subtree is skipped without building
+     * Strings/HashMaps/tags. The win is allocation churn, not inflate (skipped bytes
+     * still move through the inflater). One documented leniency divergence: a corrupt
+     * NON-section root subtree that full parse would throw on can now skip cleanly —
+     * more lenient, and any selective-parse throw falls back to a full parse of the
+     * same buffer. Fabric-only in effect (it lives at the split's parse site; the
+     * {@code lodStoreBackfillColumnsPerSecond} shared-key idiom). Set false to
+     * restore the full root parse as a rollback. No clamp: a boolean has no
+     * out-of-range value.
+     */
+    public boolean useSelectiveNbtParse = true;
+    /**
      * When true (default), disk-read column serving transcodes region NBT straight into
      * wire bytes — palette ids and bit-storage longs copied verbatim off the NBT — instead
      * of decoding every section into PalettedContainer objects and re-serializing them
@@ -386,7 +401,8 @@ public abstract class ServerConfigBase extends JsonConfig {
         return "Effective config: useNbtTranscode=" + useNbtTranscode
                 + ", diskReaderThreads=" + effectiveReaderThreads
                 + ", useCompressedColumns=" + effectiveCompressedColumns
-                + ", useBackgroundReadSplit=" + useBackgroundReadSplit;
+                + ", useBackgroundReadSplit=" + useBackgroundReadSplit
+                + ", useSelectiveNbtParse=" + useSelectiveNbtParse;
     }
     /**
      * LOD x-ray masking (docs/planning/antixray-compat-design.md §3). "auto" (default)

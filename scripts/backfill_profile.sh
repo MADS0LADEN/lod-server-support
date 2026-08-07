@@ -35,6 +35,7 @@ set -euo pipefail
 #   PROFILE_BACKFILL_CPS   lodStoreBackfillColumnsPerSecond (default 1000 = clamp max, the
 #                          F3 setting — the walk should be tooling-bound, not pace-bound)
 #   PROFILE_NBT_TRANSCODE  useNbtTranscode (default true)
+#   PROFILE_SELECTIVE_PARSE useSelectiveNbtParse (default true — the Phase 4 arm knob)
 #   PROFILE_LOD_R          lodDistanceChunks (default 256; irrelevant to the walk itself)
 #   PROFILE_BASE_REF/_WT   ref-vs-ref base ref + worktree path (see profile_disk_read.sh)
 #   OUT_ROOT, RUN_STAMP    results root / stamp dir (default profile-results/<stamp>)
@@ -66,6 +67,7 @@ stage_server_config() { # <path>
   "missMemoTtlSeconds": 30,
   "useBackgroundReadPriority": true,
   "useNbtTranscode": ${PROFILE_NBT_TRANSCODE:-true},
+  "useSelectiveNbtParse": ${PROFILE_SELECTIVE_PARSE:-true},
   "lodStore": "full",
   "lodStoreBackfill": true,
   "lodStoreBackfillColumnsPerSecond": ${PROFILE_BACKFILL_CPS:-1000}
@@ -243,6 +245,9 @@ PROPS
     local arm_valid=true
     [[ "$echo_line" == *"useNbtTranscode=${PROFILE_NBT_TRANSCODE:-true}"* ]] || arm_valid=false
     [[ "$echo_line" == *"diskReaderThreads=5"* ]] || arm_valid=false
+    if [[ "$echo_line" == *"useSelectiveNbtParse="* ]]; then
+        [[ "$echo_line" == *"useSelectiveNbtParse=${PROFILE_SELECTIVE_PARSE:-true}"* ]] || arm_valid=false
+    fi
     # A walk that never STARTED is a vacuous run (leftover store marks, staging bug),
     # and an INCOMPLETE walk has no defined deposits/s (M2) — both invalidate the arm.
     [[ -n "$start_line" ]] || arm_valid=false
@@ -261,6 +266,7 @@ PROPS
   "duration_s": $duration,
   "backfill_cps": ${PROFILE_BACKFILL_CPS:-1000},
   "nbt_transcode": ${PROFILE_NBT_TRANSCODE:-true},
+  "selective_parse": ${PROFILE_SELECTIVE_PARSE:-true},
   "config_echo": "$echo_line",
   "walk": {
     "complete": $walk_complete,
