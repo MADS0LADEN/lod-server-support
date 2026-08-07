@@ -223,13 +223,26 @@ negligible next to zstd + serialization.
   `Block.BLOCK_STATE_REGISTRY` iteration order — the same enumeration
   `RegistryFingerprint` already uses). DIRECT sections re-palettize here.
 - **NBT transcode path** (`NbtSectionSerializer.transcodeSection:408` + Paper twin):
-  the disk palette ALREADY stores name+properties NBT — canonicalize straight to
-  identity strings, **no registry resolution needed for the wire**. The
-  `MemoizedNbtCodec` id resolve survives only for what still needs ids: the two
-  shorts (air/fluid classification) and the x-ray mask pre-gate
-  (`mask.containsId`, `:497-508`). The >256-palette object-path fallback can be
-  RETIRED for encoding (v20 has no DIRECT limit; a >256 disk palette transcodes
-  fine) but stays for malformed shapes.
+  **AMENDED at C0 (2026-08-07 review MAJOR 6 — the original "canonicalize straight
+  from the disk NBT, no registry resolution needed" is RETRACTED).** The pinned
+  rule: **identities on the wire are always the identity of a state that RESOLVED
+  in the emitting server's registry** — the transcode path canonicalizes from the
+  `MemoizedNbtCodec`-resolved state (via its global id through the identity
+  table, one array index per palette entry — the memo already resolves every
+  entry for the two shorts and the mask pre-gate, so this costs nothing new;
+  R-5's "memo stays hot" holds). Canonicalizing raw disk spellings instead would
+  (a) break disk/live byte parity the moment the codec's leniency fires (a
+  hard-error entry substitutes AIR in place, a partial property set fills
+  defaults — the raw spelling and the resolved state's canonical form are then
+  different strings, different dictionaries, different bytes: red
+  `SerializerParityGameTests`, per-path `DirtyContentFilter` hashes), and
+  (b) void §4.2's "exact and lossless on the same MC version" egress premise
+  (a raw spelling absent from the registry has no id for the v19 translator).
+  The `MemoizedNbtCodec` id resolve therefore survives for the wire identity as
+  well as the two shorts and the x-ray mask pre-gate (`mask.containsId`,
+  `:497-508`). The >256-palette object-path fallback can be RETIRED for encoding
+  (v20 has no DIRECT limit; a >256 disk palette transcodes fine) but stays for
+  malformed shapes.
 - **X-ray masking** stays upstream of encoding, in the object/descriptor domain
   (`XrayMaskFilter.mask` on `LevelChunkSection` before `write`; transcode pre-gate
   unchanged) — every serve path and the `DirtyContentFilter` hash keep seeing
