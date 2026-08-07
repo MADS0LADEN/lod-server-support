@@ -264,7 +264,8 @@ class WireParityTest {
         // Bump the literal only with a deliberate wire change reviewed on both platforms.
         // 16 -> 17: the declarative want-set model retires the rate-limited bounce (byte 0).
         // 18: serve-source byte; 19: codec byte (zstd column frames).
-        assertEquals(19, LSSConstants.PROTOCOL_VERSION);
+        // 20: identity-dictionary section bodies (cross-version-identity-encoding-plan.md).
+        assertEquals(20, LSSConstants.PROTOCOL_VERSION);
     }
 
     @Test

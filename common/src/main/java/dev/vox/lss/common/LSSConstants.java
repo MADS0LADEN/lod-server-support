@@ -17,7 +17,13 @@ public final class LSSConstants {
     // sessions ship the section bytes as a zstd-1 frame end-to-end instead of raw bytes
     // under netty deflate. Same fail-safe rationale as 17->18: the layout must be
     // version-agreed, the capability bit only carries ABILITY.
-    public static final int PROTOCOL_VERSION = 19;
+    // 20: cross-version identity encoding (docs/planning/cross-version-identity-encoding-plan.md):
+    // the section-array body replaces global-registry-id palettes with a per-column
+    // identity DICTIONARY (canonical name+properties strings, first-seen indices) and
+    // has NO DIRECT mode — the bytes stop depending on the emitting server's registry
+    // ids/sizes, so stored/served columns survive MC versions, mods, and datapacks.
+    // Column header, framing, codec byte, and every C2S shape are UNCHANGED.
+    public static final int PROTOCOL_VERSION = 20;
 
     // VoxelColumn serve-source tag values (one wire byte; unknown values are kept verbatim
     // client-side — same forward-safety stance as the retired response byte 0)
@@ -274,6 +280,13 @@ public final class LSSConstants {
      *  legacy. Membership only ({@code V18CompatTracker}) — no v16-style synthetic
      *  want-set. */
     public static final int V18_COMPAT_PROTOCOL_VERSION = 18;
+
+    /** The protocol-19 compat rung (v0.9.x–v0.10.x-pre clients, {@code enableV19Compat}):
+     *  a NATIVE session at the current header/framing — SessionConfig echoes 19, C2S is
+     *  byte-identical — but the section-array BODY must be the legacy global-id layout,
+     *  which is a per-serve TRANSLATION (v20 dictionary body → native palettes), not a
+     *  header splice like v18/v16. Membership rides {@code WireDialectTracker}. */
+    public static final int V19_COMPAT_PROTOCOL_VERSION = 19;
 
     // Capabilities bitmask
     public static final int CAPABILITY_VOXEL_COLUMNS = 1;

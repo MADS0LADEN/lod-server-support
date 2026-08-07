@@ -346,9 +346,11 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
      *  seam above every test, and a silent V18->PROTOCOL_VERSION regression compiled
      *  clean). V16 never reaches this — it takes the 6-field legacy sender. */
     static int sessionConfigVersionFor(HandshakeGate.WireDialect dialect) {
-        return dialect == HandshakeGate.WireDialect.V18
-                ? LSSConstants.V18_COMPAT_PROTOCOL_VERSION
-                : LSSConstants.PROTOCOL_VERSION;
+        return switch (dialect) {
+            case V18 -> LSSConstants.V18_COMPAT_PROTOCOL_VERSION;
+            case V19 -> LSSConstants.V19_COMPAT_PROTOCOL_VERSION;
+            case V16, CURRENT -> LSSConstants.PROTOCOL_VERSION;
+        };
     }
 
     /** The pump-deferred dialect flip per dialect: mark own identity, shed the other's
@@ -369,7 +371,12 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                 v18.onHandshake(uuid);
                 v16.onNonV16Handshake(uuid);
             };
-            case CURRENT -> () -> {
+            // C1 INTERMEDIATE (WireDialectTracker replaces this switch): V19 sheds the
+            // legacy memberships like CURRENT; its own membership mark arrives with the
+            // tracker, together with the v19 egress drop-latch — until then a v19
+            // session is mis-served v20 bodies, acceptable only because no real v19
+            // client runs in CI and the tracker lands before the C1 PR.
+            case V19, CURRENT -> () -> {
                 v16.onNonV16Handshake(uuid);
                 v18.onNonV18Handshake(uuid);
             };
