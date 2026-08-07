@@ -20,8 +20,12 @@ import java.lang.reflect.Field;
  * {@code MoonriseReadCompat} shape); any failure — a renamed field on a future NMS, a
  * module/access restriction — yields no-signal forever after one warning, which leaves the
  * gauge blank and the deference gate inert rather than misreporting.
+ *
+ * <p>Public since the probe-snapshot refactor (mega plan R-2), matching the Fabric twin's
+ * factory widening — the combined shape is owned by the tracer PR even though only the
+ * transport yield consumes {@code snapshot()} on Paper.
  */
-final class PaperChannelPressure {
+public final class PaperChannelPressure {
 
     private PaperChannelPressure() {}
 
@@ -49,26 +53,58 @@ final class PaperChannelPressure {
         }
     }
 
-    static ChannelPressureProbe forPlayer(ServerPlayer player) {
+    public static ChannelPressureProbe forPlayer(ServerPlayer player) {
         if (Holder.CONNECTION == null || Holder.CHANNEL == null) {
             return ChannelPressureProbe.NO_SIGNAL;
         }
-        return () -> {
-            try {
-                var listener = player.connection;
-                if (listener == null) return OutboundBufferMath.NO_SIGNAL;
-                var connection = (Connection) Holder.CONNECTION.get(listener);
-                if (connection == null) return OutboundBufferMath.NO_SIGNAL;
-                var channel = (Channel) Holder.CHANNEL.get(connection);
+        return new ChannelPressureProbe() {
+            @Override
+            public long pendingOutboundBytes() {
+                var channel = channelOf(player);
                 if (channel == null) return OutboundBufferMath.NO_SIGNAL;
                 var config = channel.config();
                 return OutboundBufferMath.pendingBytes(
                         channel.isActive(), channel.isWritable(),
                         channel.bytesBeforeUnwritable(), channel.bytesBeforeWritable(),
                         config.getWriteBufferHighWaterMark(), config.getWriteBufferLowWaterMark());
-            } catch (Throwable t) {
-                return OutboundBufferMath.NO_SIGNAL;
+            }
+
+            @Override
+            public Snapshot snapshot() {
+                var channel = channelOf(player);
+                if (channel == null) {
+                    return new Snapshot(OutboundBufferMath.NO_SIGNAL, Snapshot.UNKNOWN_MARK,
+                            Writability.UNKNOWN);
+                }
+                var config = channel.config();
+                // One coherent read — depth, mark, and writability off the same channel
+                // instant, matching the Fabric twin.
+                boolean writable = channel.isWritable();
+                long pending = OutboundBufferMath.pendingBytes(
+                        channel.isActive(), writable,
+                        channel.bytesBeforeUnwritable(), channel.bytesBeforeWritable(),
+                        config.getWriteBufferHighWaterMark(), config.getWriteBufferLowWaterMark());
+                if (!channel.isActive()) {
+                    // A closed channel has no meaningful writability — yielding to a
+                    // corpse would strand the queue until disconnect sweeps it.
+                    return new Snapshot(pending, Snapshot.UNKNOWN_MARK, Writability.UNKNOWN);
+                }
+                return new Snapshot(pending, config.getWriteBufferHighWaterMark(),
+                        writable ? Writability.WRITABLE : Writability.NOT_WRITABLE);
             }
         };
+    }
+
+    /** Channel resolution shared by both reads; null on any failure shape. */
+    private static Channel channelOf(ServerPlayer player) {
+        try {
+            var listener = player.connection;
+            if (listener == null) return null;
+            var connection = (Connection) Holder.CONNECTION.get(listener);
+            if (connection == null) return null;
+            return (Channel) Holder.CHANNEL.get(connection);
+        } catch (Throwable t) {
+            return null;
+        }
     }
 }

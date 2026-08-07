@@ -22,6 +22,34 @@ public interface ChannelPressureProbe {
     /** Bytes queued in the outbound buffer, or {@code -1} when unmeasurable. */
     long pendingOutboundBytes();
 
+    /**
+     * One coherent read of the channel's outbound state, for consumers that need more
+     * than the depth gauge (the transport yield's writability gate, the move-desync
+     * tracer's envelope). The default keeps every lambda-shaped probe (including
+     * {@link #NO_SIGNAL} and test rigs) compiling — and degrades them to
+     * "writability unknown", which every consumer must treat as "do not yield":
+     * the same fail-safe direction as the {@code -1} depth contract.
+     */
+    default Snapshot snapshot() {
+        return new Snapshot(pendingOutboundBytes(), Snapshot.UNKNOWN_MARK, Writability.UNKNOWN);
+    }
+
+    /** Tri-state channel writability. {@link #UNKNOWN} must never trigger a yield. */
+    enum Writability {
+        WRITABLE, NOT_WRITABLE, UNKNOWN
+    }
+
+    /**
+     * @param pendingBytes  queued outbound bytes, or {@code -1} for no signal
+     * @param highWaterMark the channel's write-buffer high-water mark, or
+     *                      {@link #UNKNOWN_MARK} when unreadable
+     * @param writable      netty's own writability flag, {@link Writability#UNKNOWN}
+     *                      when the channel could not be read
+     */
+    record Snapshot(long pendingBytes, long highWaterMark, Writability writable) {
+        public static final long UNKNOWN_MARK = -1L;
+    }
+
     /** The default for every state until a platform wires a real probe. */
     ChannelPressureProbe NO_SIGNAL = () -> -1L;
 }

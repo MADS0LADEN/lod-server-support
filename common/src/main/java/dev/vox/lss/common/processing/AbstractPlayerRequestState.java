@@ -145,6 +145,10 @@ public abstract class AbstractPlayerRequestState<T> {
     private volatile int heldSyncSlots = 0;
     private volatile int heldGenSlots = 0;
 
+    /** Wall-clock state creation == registration instant (the move-desync tracer's
+     *  {@code since_s}; diagnostics-only, never load-bearing). */
+    private final long createdAtMillis;
+
     protected AbstractPlayerRequestState(UUID playerUuid, int syncConcurrency, int genConcurrency) {
         this(playerUuid, syncConcurrency, genConcurrency, System::nanoTime);
     }
@@ -157,6 +161,7 @@ public abstract class AbstractPlayerRequestState<T> {
         this.syncSlotCap = syncConcurrency;
         this.genSlotCap = genConcurrency;
         this.bandwidth = new PlayerBandwidthTracker(nanoClock);
+        this.createdAtMillis = System.currentTimeMillis();
     }
 
     // ---- Handshake / Capability ----
@@ -916,6 +921,8 @@ public abstract class AbstractPlayerRequestState<T> {
     // ---- Getters ----
 
     public UUID getPlayerUUID() { return this.playerUuid; }
+    /** Wall-clock instant this state was created (== registration). Diagnostics-only. */
+    public long getCreatedAtMillis() { return this.createdAtMillis; }
     /** Returns a volatile snapshot of the send queue size, safe for cross-thread reads. */
     public int getSendQueueSize() { return this.sendQueueSizeSnapshot; }
 

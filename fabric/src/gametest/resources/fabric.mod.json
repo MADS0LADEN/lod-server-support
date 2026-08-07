@@ -9,6 +9,7 @@
             "dev.vox.lss.test.CommandGameTests",
             "dev.vox.lss.test.GenerationLifecycleGameTests",
             "dev.vox.lss.test.LSSGameTests",
+            "dev.vox.lss.test.MoveTraceGameTests",
             "dev.vox.lss.test.RegionFaultGameTests",
             "dev.vox.lss.test.SerializerParityGameTests",
             "dev.vox.lss.test.ServiceLifecycleGameTests",

@@ -175,8 +175,12 @@ baseline that sizes the sent-staleness allowance, NOT a stall detector — revie
 `lss` block (null when unregistered/disabled — and that null is itself the A/B label):
 `registered`, `since_s`, `caps`, `proto`, `dialect` (v18/v16 rung if any — review
 U-16: "modded v19 client" is central to the census and must be machine-readable),
-`send_queue`, `bw_window`, and `yielded` **when the transport-yield feature exists**
-(phrased as a dependency; it is unimplemented today).
+`send_queue`, `bw_total` (shipped name — the sketch said `bw_window`, but no per-player
+rolling window exists server-side, so the CUMULATIVE per-player bytes ship under a
+different name per the U-12 discipline; `proto` is derived from the dialect rung and
+`since_s` from a new `AbstractPlayerRequestState.getCreatedAtMillis()` — see the
+v0.10.0-progress.md decisions log, 2026-08-06), and `yielded` **when the
+transport-yield feature exists** (phrased as a dependency; it is unimplemented today).
 
 **Boot row** (review U-7 — without it E4's bandwidth sweep is unanalyzable):
 `{"type":"boot"}` carrying schema version, `tz_offset_min` (log correlation needs the

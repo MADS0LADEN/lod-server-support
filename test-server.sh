@@ -72,6 +72,23 @@ case "$LSS_ADMISSION_TRACE" in
     *)              ADMISSION_TRACE_FLAG="-Dlss.admissionTrace=true" ;;
 esac
 
+# Move-desync tracer (docs/planning/move-desync-tracer-plan.md): LSS_MOVE_TRACE=1 stages
+# the marker file config/lss-move-trace.enable on the Fabric dev server — this rig IS the
+# tracer's vanilla-rung environment (the plan's E6 rig), and a manual flight here is how
+# the row schema gets eyeballed before a live deploy. Default off (the marker is REMOVED
+# when unset, so a previous session's tracer never lingers). Output:
+# test-server/fabric/logs/lss-move-trace.jsonl; validate with scripts/check_move_trace.py.
+LSS_MOVE_TRACE="${LSS_MOVE_TRACE:-0}"
+stage_move_trace_marker() {
+    # Called just before each Fabric launch; the tracer reads the marker once at
+    # SERVER_STARTING, so staging at launch time is race-free by operation.
+    mkdir -p "$FABRIC_DIR/config"
+    case "$LSS_MOVE_TRACE" in
+        0|false|no|off) rm -f "$FABRIC_DIR/config/lss-move-trace.enable" ;;
+        *)              touch "$FABRIC_DIR/config/lss-move-trace.enable" ;;
+    esac
+}
+
 # LOD store for manual play: LSS_LODSTORE=off|full (default full — the shipped default) is written into
 # the staged lss-server-config.json on EVERY run — the staging rewrites that file, so a
 # hand-edit does not survive a re-run; this variable is the supported way to flip it.
@@ -318,6 +335,7 @@ setup_fabric() {
 }
 
 run_fabric() {
+    stage_move_trace_marker
     cd "$FABRIC_DIR"
     # admissionTrace: dev-only [lss-adm] lines (candidate ring vs frontier stamp per
     # generation-admission decision) — the instrument for far-arc/inversion reports.
@@ -532,6 +550,7 @@ run_all() {
     SERVER_PIDS=()
     trap 'echo ""; echo "Stopping servers..."; kill "${SERVER_PIDS[@]}" 2>/dev/null; wait "${SERVER_PIDS[@]}" 2>/dev/null; echo "Done."' INT TERM EXIT
 
+    stage_move_trace_marker
     cd "$FABRIC_DIR"
     java -Xmx${SERVER_RAM} -Xms${SERVER_RAM} "$ADMISSION_TRACE_FLAG" -jar fabric-server-launch.jar nogui &
     SERVER_PIDS+=($!)
@@ -744,6 +763,10 @@ case "${1:-run}" in
         echo "  SERVER_RAM  - Server memory allocation per server (default: 2G)"
         echo "  LSS_ADMISSION_TRACE - Fabric [lss-adm] generation-admission trace (default: 1)."
         echo "                        Set to 0 to silence it — it is verbose during backfill."
+        echo "  LSS_MOVE_TRACE - Move-desync tracer on the Fabric server (default: 0). Set 1"
+        echo "                   to stage config/lss-move-trace.enable; rows land in"
+        echo "                   test-server/fabric/logs/lss-move-trace.jsonl (this rig is"
+        echo "                   the tracer's vanilla-rung environment)."
         echo "  LSS_LODSTORE - lodStore mode written into EVERY staged lss-server-config.json"
         echo "                 (off|full, default: off — the shipped default; the store is"
         echo "                 opt-in). Hand-edits to the config do NOT survive a re-run"
