@@ -14,6 +14,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -100,6 +101,10 @@ class ChunkDiskReaderTest {
 
         MoonriseRigReader(boolean useBackgroundReadPriority) {
             super(1, useBackgroundReadPriority);
+        }
+
+        MoonriseRigReader(boolean useBackgroundReadPriority, boolean useBackgroundReadSplit) {
+            super(1, useBackgroundReadPriority, true, useBackgroundReadSplit);
         }
 
         /** Install bridge behavior wrapped in the read counter — {@code bridgeReads} is the
@@ -321,6 +326,90 @@ class ChunkDiskReaderTest {
             assertFalse(reader.isMoonriseIncompatibleForTest(),
                     "an exceptional future must NOT latch — only synchronous invoke throws are typed");
             assertEquals(0, reader.moonriseWarns.get());
+        } finally {
+            reader.shutdown();
+        }
+    }
+
+    // ---- Phase 3 (R1) split-dispatcher ladder agreement -------------------------------
+    //
+    // chooseRawReadOrNull must be non-null EXACTLY when chooseReadPath would select the
+    // vanilla-IOWorker BACKGROUND rung and the split is on. The two ladders share their
+    // rung conditions by construction; these pins red a drift. The handle-resolution
+    // half is exercised by the null-handle case (raw returns null WITHOUT latching —
+    // one latch site, owned by backgroundReaderOrFallback).
+
+    /** Rig with resolvable-looking dispatch: rawBackgroundReaderOrNull returns a sentinel
+     *  so the DISPATCHER's own conditions are the thing under test (real handles need a
+     *  live IOWorker no test environment has). */
+    private static final class SplitRigReader extends MoonriseRigReader {
+        static final NbtSectionSerializer.ChunkRawRead SENTINEL =
+                (cx, cz) -> CompletableFuture.completedFuture(Optional.empty());
+
+        SplitRigReader(boolean bgPriority, boolean split) {
+            super(bgPriority, split);
+        }
+
+        @Override
+        NbtSectionSerializer.ChunkRawRead rawBackgroundReaderOrNull(ChunkMap chunkMap) {
+            return SENTINEL;
+        }
+    }
+
+    @Test
+    void rawDispatcherAgreesWithTheNbtLadderOnEveryRung() {
+        // Background rung + split on -> raw path chosen.
+        var reader = new SplitRigReader(true, true);
+        try {
+            assertSame(SplitRigReader.SENTINEL, reader.chooseRawReadOrNull(null, null),
+                    "the vanilla BACKGROUND rung must take the split path");
+        } finally {
+            reader.shutdown();
+        }
+
+        // Split kill switch -> null (the ChunkNbtRead ladder serves, pre-split shape).
+        var off = new SplitRigReader(true, false);
+        try {
+            assertNull(off.chooseRawReadOrNull(null, null),
+                    "useBackgroundReadSplit=false must fully disable the raw path");
+        } finally {
+            off.shutdown();
+        }
+
+        // Foreground rollback -> null (mirrors chooseReadPath's first rung).
+        var fg = new SplitRigReader(false, true);
+        try {
+            assertNull(fg.chooseRawReadOrNull(null, null),
+                    "useBackgroundReadPriority=false must keep the raw path off");
+        } finally {
+            fg.shutdown();
+        }
+
+        // Moonrise rung available -> null (its bridge returns PARSED NBT by contract).
+        var moonrise = new SplitRigReader(true, true);
+        moonrise.setBridge((level, cx, cz) ->
+                CompletableFuture.completedFuture(Optional.empty()));
+        try {
+            assertNull(moonrise.chooseRawReadOrNull(null, null),
+                    "the Moonrise rung wins over the raw split, mirroring chooseReadPath");
+        } finally {
+            moonrise.shutdown();
+        }
+    }
+
+    @Test
+    void unresolvableHandlesReturnNullRawPathWithoutLatchingOrWarning() {
+        // The REAL rawBackgroundReaderOrNull with null handles (a Moonrise/C2ME-shaped
+        // server): raw must step aside silently — the ChunkNbtRead ladder owns the
+        // one-shot latch + throttle + warn, so nothing here may fire it.
+        var reader = new MoonriseRigReader(true); // resolveBackgroundHandles -> (null, null)
+        try {
+            assertNull(reader.rawBackgroundReaderOrNull(null),
+                    "null handles must yield no raw path");
+            assertFalse(reader.isBackgroundIncompatibleForTest(),
+                    "the raw probe must NOT latch — backgroundReaderOrFallback owns the latch");
+            assertEquals(-1, reader.adaptiveThrottleLimitOrDisabled(),
+                    "…nor engage the throttle");
         } finally {
             reader.shutdown();
         }

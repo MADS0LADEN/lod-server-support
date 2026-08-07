@@ -478,6 +478,14 @@ class ConfigValidationTest {
                 "NBT transcode must default on");
     }
 
+    /** Phase 3 (R1): the background-read split ships ON; false is the narrow rollback
+     *  that keeps read protection (unlike useBackgroundReadPriority=false). */
+    @Test
+    void backgroundReadSplitDefaultsOn() {
+        assertTrue(serverConfig().useBackgroundReadSplit,
+                "useBackgroundReadSplit must default on");
+    }
+
     // --- LSSClientConfig ---
 
     private LSSClientConfig clientConfig() {

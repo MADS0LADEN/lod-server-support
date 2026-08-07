@@ -153,6 +153,38 @@ class ChannelAccessorContractTest {
     }
 
     @Test
+    void regionRawReadAccessorsTargetRealMembersAndAreRegistered() throws Exception {
+        // Phase 3 (R1) split: the raw fetch goes through two accessor mixins whose
+        // targets are vanilla PRIVATE members — a rename at an MC bump must red HERE,
+        // not silently misread region records (the whole reason the raw read shadows
+        // vanilla's helpers instead of re-deriving the format).
+        String config = Files.readString(Path.of("src/main/resources/lss.mixins.json"));
+        assertTrue(config.contains("\"AccessorRegionFileStorage\""),
+                "AccessorRegionFileStorage missing from lss.mixins.json");
+        assertTrue(config.contains("\"AccessorRegionFile\""),
+                "AccessorRegionFile missing from lss.mixins.json");
+
+        var storage = net.minecraft.world.level.chunk.storage.RegionFileStorage.class;
+        storage.getDeclaredMethod("getRegionFile", net.minecraft.world.level.ChunkPos.class);
+        var rf = net.minecraft.world.level.chunk.storage.RegionFile.class;
+        rf.getDeclaredField("file");
+        rf.getDeclaredField("SECTOR_BYTES");
+        rf.getDeclaredMethod("getOffset", net.minecraft.world.level.ChunkPos.class);
+        rf.getDeclaredMethod("getExternalChunkPath", net.minecraft.world.level.ChunkPos.class);
+        rf.getDeclaredMethod("getSectorNumber", int.class);
+        rf.getDeclaredMethod("getNumSectors", int.class);
+        rf.getDeclaredMethod("isExternalStreamChunk", byte.class);
+        rf.getDeclaredMethod("getExternalChunkVersion", byte.class);
+        // RegionFileRawRead synchronizes on the RegionFile instance to interoperate with
+        // vanilla's own synchronized reader — that premise must hold.
+        assertTrue(java.lang.reflect.Modifier.isSynchronized(
+                        rf.getDeclaredMethod("getChunkDataInputStream",
+                                net.minecraft.world.level.ChunkPos.class).getModifiers()),
+                "vanilla's reader is no longer synchronized — the raw read's instance-monitor"
+                        + " serialization premise broke");
+    }
+
+    @Test
     void bothDiagCallSitesPassTheLiveArmedFlag() throws Exception {
         // Review C-4: a literal `true` (or the wrong field) as yieldDiagLineOrNull's
         // armed argument renders `Yield: armed=true` on every DEFAULT install — the

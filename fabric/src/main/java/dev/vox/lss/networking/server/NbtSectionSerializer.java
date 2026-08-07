@@ -80,6 +80,27 @@ final class NbtSectionSerializer {
     }
 
     /**
+     * A chunk's raw region record (Phase 3 split, perf-round plan R1): the still-
+     * compressed record payload + its {@code RegionFileVersion} id byte. "payload", not
+     * "compressed" — {@code VERSION_NONE} (id 3) payloads are uncompressed. A plain
+     * value object by design: no fd, no stream ownership, no close protocol — nothing
+     * for a timed-out {@code future.get} to leak (a {@code byte[]} is just garbage).
+     */
+    record RawChunkRecord(byte[] payload, byte version) {}
+
+    /**
+     * Seam for the SPLIT background read (Phase 3): the executor fetches the raw record
+     * ({@code RegionFileRawRead}); inflate + NBT parse happen on the CALLING pool thread
+     * in {@link #parseRawChunk}. Used only by the vanilla-IOWorker background rung —
+     * {@link ChunkNbtRead} is deliberately unchanged (the Moonrise rung returns its
+     * bridge future directly, and the ladder pins assert tag identity through it).
+     */
+    @FunctionalInterface
+    interface ChunkRawRead {
+        CompletableFuture<Optional<RawChunkRecord>> read(int cx, int cz);
+    }
+
+    /**
      * Read chunk NBT from disk, verify FULL status, and serialize sections
      * into MC-native wire format. {@code maskEntry} (nullable) is the dimension's x-ray
      * mask, captured by the caller at submit time.
@@ -99,6 +120,78 @@ final class NbtSectionSerializer {
         return AntiXrayCompat.callSerializing(
                 () -> serializeChunkNbt(chunkNbt, registryAccess, maskEntry, minSectionY,
                         maxSectionY, useNbtTranscode));
+    }
+
+    /**
+     * Split-read flavor (Phase 3): the timeout bounds the EXECUTOR fetch only; the
+     * inflate + parse below run on THIS pool thread as bounded CPU work over a private
+     * in-memory buffer — which is the whole point of the split (the IOWorker used to
+     * carry pread + inflate + full NBT parse for every LOD read).
+     */
+    static byte[] readAndSerializeSections(ChunkRawRead rawRead, RegistryAccess registryAccess,
+                                            int cx, int cz,
+                                            XrayMaskManager.MaskEntry maskEntry,
+                                            int minSectionY, int maxSectionY,
+                                            boolean useNbtTranscode) throws Exception {
+        var future = rawRead.read(cx, cz);
+        var optionalRecord = future.get(LSSConstants.DISK_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        var chunkNbt = parseRawChunk(optionalRecord, cx, cz);
+        if (chunkNbt == null) return null;
+        // Pool-side NbtIo.read stays OUTSIDE the AntiXray shim, exactly like the blocking
+        // read in the ChunkNbtRead flavor above: the shim covers the codec parse and the
+        // section writes (the AntiXray injection points); the raw inflate/parse has none.
+        return AntiXrayCompat.callSerializing(
+                () -> serializeChunkNbt(chunkNbt, registryAccess, maskEntry, minSectionY,
+                        maxSectionY, useNbtTranscode));
+    }
+
+    /**
+     * Pool-side reconstruction of vanilla's {@code createChunkInputStream} — ALL THREE
+     * branches (26.2 bytecode, decompiled shape in the B3 recon entry), not just the
+     * happy path: (a) {@code RegionFileVersion.fromId} returns NULL for unknown ids —
+     * a naive {@code wrap} would NPE; unknown resolves authoritative not-found,
+     * matching vanilla; (b) {@code VERSION_CUSTOM} (id 127) logs and resolves
+     * not-found (vanilla reads the UTF id for its message — mirrored); (c) a valid id
+     * wraps — and {@code wrap} includes vanilla's {@code FastBufferedInputStream}
+     * layer, so valid-branch equivalence holds by construction. Then the same
+     * {@code NbtIo.read} vanilla's {@code RegionFileStorage.read} calls.
+     *
+     * <p>Null = not servable (authoritative not-found). Package-private for the
+     * injected-value unit pins (the raw FETCH itself is gametest-covered).
+     */
+    static CompoundTag parseRawChunk(Optional<RawChunkRecord> record, int cx, int cz)
+            throws java.io.IOException {
+        if (record.isEmpty()) return null;
+        var rec = record.get();
+        var version = net.minecraft.world.level.chunk.storage.RegionFileVersion.fromId(rec.version());
+        if (version == net.minecraft.world.level.chunk.storage.RegionFileVersion.VERSION_CUSTOM) {
+            String id = "<unreadable>";
+            try (var in = new java.io.DataInputStream(new java.io.ByteArrayInputStream(rec.payload()))) {
+                id = in.readUTF();
+            } catch (Exception ignored) {
+                // the id is for the log only; an unreadable one changes nothing
+            }
+            warnRawParse("custom-compression chunk (id " + id + ") at [" + cx + "," + cz + "]");
+            return null;
+        }
+        if (version == null) {
+            warnRawParse("unknown region stream version " + rec.version()
+                    + " at [" + cx + "," + cz + "]");
+            return null;
+        }
+        try (var in = new java.io.DataInputStream(
+                version.wrap(new java.io.ByteArrayInputStream(rec.payload())))) {
+            return net.minecraft.nbt.NbtIo.read(in);
+        }
+    }
+
+    private static void warnRawParse(String detail) {
+        long released = PARSE_WARN_THROTTLE.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+        if (released > 0) {
+            dev.vox.lss.common.LSSLogger.warn("Raw chunk parse: " + detail
+                    + " — resolved as not-found"
+                    + (released > 1 ? " (+" + (released - 1) + " more)" : ""));
+        }
     }
 
     /** Unmasked flavor — the shape the pre-masking tests and corpus pin. */

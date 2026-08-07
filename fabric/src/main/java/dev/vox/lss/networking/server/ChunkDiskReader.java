@@ -65,6 +65,11 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
     private final AtomicBoolean moonriseIncompatibleWarned = new AtomicBoolean();
 
     private final boolean useNbtTranscode;
+    // Phase 3 (R1) split kill switch: raw-bytes fetch on the IOWorker, inflate+parse on
+    // the pool. False restores the pre-split full-read-on-executor closure — the round's
+    // riskiest change gets a config rollback narrower than useBackgroundReadPriority
+    // (which would also drop the Moonrise rung and all read protection).
+    private final boolean useBackgroundReadSplit;
 
     /** Convenience for tests/gametests: production defaults for the serialize path
      *  (transcode ON — the {@code useNbtTranscode} default). */
@@ -72,22 +77,38 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
         this(threadCount, useBackgroundReadPriority, true);
     }
 
+    /** Convenience: split ON (the {@code useBackgroundReadSplit} default). */
     public ChunkDiskReader(int threadCount, boolean useBackgroundReadPriority, boolean useNbtTranscode) {
+        this(threadCount, useBackgroundReadPriority, useNbtTranscode, true);
+    }
+
+    public ChunkDiskReader(int threadCount, boolean useBackgroundReadPriority,
+                           boolean useNbtTranscode, boolean useBackgroundReadSplit) {
         super(threadCount);
         this.useBackgroundReadPriority = useBackgroundReadPriority;
         this.useNbtTranscode = useNbtTranscode;
+        this.useBackgroundReadSplit = useBackgroundReadSplit;
     }
 
     public void submitReadDirect(UUID playerUuid, String dimension, ServerLevel level,
                                   int chunkX, int chunkZ, long submissionOrder) {
         var registryAccess = level.registryAccess();
         var chunkMap = ((AccessorServerChunkCache) level.getChunkSource()).getChunkMap();
-        NbtSectionSerializer.ChunkNbtRead read = chooseReadPath(level, chunkMap);
         // The mask entry is captured at submit time (the level is in hand here); the read
         // itself runs on the reader pool where only the dimension string survives.
         var maskEntry = XrayMaskManager.entryForActive(level);
         int minSectionY = level.getMinSectionY();
         int maxSectionY = level.getMaxSectionY();
+        // Phase 3 split dispatch: raw fetch + pool parse when the vanilla BACKGROUND rung
+        // would serve this read; every other rung keeps the ChunkNbtRead ladder unchanged.
+        var raw = chooseRawReadOrNull(level, chunkMap);
+        if (raw != null) {
+            submitRead(playerUuid, chunkX, chunkZ, dimension, submissionOrder,
+                    () -> NbtSectionSerializer.readAndSerializeSections(raw, registryAccess, chunkX, chunkZ,
+                            maskEntry, minSectionY, maxSectionY, this.useNbtTranscode));
+            return;
+        }
+        NbtSectionSerializer.ChunkNbtRead read = chooseReadPath(level, chunkMap);
         submitRead(playerUuid, chunkX, chunkZ, dimension, submissionOrder,
                 () -> NbtSectionSerializer.readAndSerializeSections(read, registryAccess, chunkX, chunkZ,
                         maskEntry, minSectionY, maxSectionY, this.useNbtTranscode));
@@ -118,6 +139,14 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
     public byte[] readColumnBytesSyncForBackfill(ServerLevel level, int chunkX, int chunkZ)
             throws Exception {
         var chunkMap = ((AccessorServerChunkCache) level.getChunkSource()).getChunkMap();
+        // Backfill reads split too (Phase 3): the moved inflate+parse lands on the
+        // backfill's own MIN_PRIORITY thread — the gate's conservation check expects it.
+        var raw = chooseRawReadOrNull(level, chunkMap);
+        if (raw != null) {
+            return NbtSectionSerializer.readAndSerializeSections(raw,
+                    level.registryAccess(), chunkX, chunkZ, XrayMaskManager.entryForActive(level),
+                    level.getMinSectionY(), level.getMaxSectionY(), this.useNbtTranscode);
+        }
         NbtSectionSerializer.ChunkNbtRead read = chooseReadPath(level, chunkMap);
         return NbtSectionSerializer.readAndSerializeSections(read,
                 level.registryAccess(), chunkX, chunkZ, XrayMaskManager.entryForActive(level),
@@ -135,6 +164,65 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
             }
         }
         return backgroundReaderOrFallback(chunkMap);
+    }
+
+    /**
+     * Phase 3 (R1) split dispatcher: non-null exactly when {@link #chooseReadPath} would
+     * select the vanilla-IOWorker BACKGROUND rung (the only rung that carried inflate +
+     * parse on the executor) AND the split is enabled. Foreground rollback, a latched
+     * incompatible, and the Moonrise rung (whose bridge returns PARSED NBT by contract)
+     * all return null — the caller then takes the unchanged {@code ChunkNbtRead} ladder.
+     * The rung conditions here MUST mirror chooseReadPath's; the ladder-agreement pins
+     * in {@code ChunkDiskReaderTest} red a drift.
+     */
+    NbtSectionSerializer.ChunkRawRead chooseRawReadOrNull(ServerLevel level, ChunkMap chunkMap) {
+        if (!this.useBackgroundReadSplit) return null;
+        if (!this.useBackgroundReadPriority || this.backgroundIncompatible) return null;
+        if (!this.moonriseIncompatible && moonriseBridgeOrNull() != null) return null;
+        return rawBackgroundReaderOrNull(chunkMap);
+    }
+
+    /**
+     * Raw-split twin of {@link #backgroundReaderOrFallback}: same handle resolution.
+     * Returns null when the vanilla path is unavailable — WITHOUT latching or warning:
+     * the caller falls back to the {@code ChunkNbtRead} ladder, whose
+     * {@code backgroundReaderOrFallback} resolves the same handles and owns the
+     * one-shot latch + throttle + warn (one latch site, no drift).
+     */
+    NbtSectionSerializer.ChunkRawRead rawBackgroundReaderOrNull(ChunkMap chunkMap) {
+        PriorityConsecutiveExecutor executor = null;
+        RegionFileStorage storage = null;
+        try {
+            var handles = resolveBackgroundHandles(chunkMap);
+            executor = handles.executor();
+            storage = handles.storage();
+        } catch (Throwable t) {
+            // fall through with nulls — the ChunkNbtRead ladder latches and warns
+        }
+        if (backgroundReadUnavailable(executor, storage)) {
+            return null;
+        }
+        return rawBackgroundRead(executor, storage);
+    }
+
+    private NbtSectionSerializer.ChunkRawRead rawBackgroundRead(PriorityConsecutiveExecutor executor,
+                                                                RegionFileStorage storage) {
+        return (cx, cz) -> {
+            var pos = new ChunkPos(cx, cz);
+            return executor.scheduleWithResult(IOWORKER_PRIORITY_BACKGROUND,
+                    (CompletableFuture<Optional<NbtSectionSerializer.RawChunkRecord>> f) -> {
+                        try {
+                            var region = ((dev.vox.lss.mixin.AccessorRegionFileStorage) (Object) storage)
+                                    .lss$getRegionFile(pos);
+                            f.complete(RegionFileRawRead.read(region, pos));
+                        } catch (Exception e) {
+                            // Same breadth as the full-read task above (vanilla's own read
+                            // task catches Exception): an escape leaves the future
+                            // uncompleted and stalls a reader thread to the timeout.
+                            f.completeExceptionally(e);
+                        }
+                    });
+        };
     }
 
     /** The plain foreground read. Package-private seam so ladder tests can observe which rung
@@ -303,6 +391,10 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
         return moonriseBridgeOrNull() != null ? base + ", read_path=moonrise-low" : base;
     }
 
+    /** The PRE-SPLIT full read: pread + inflate + full NBT parse all on the IOWorker
+     *  executor via {@code storage.read}. Since Phase 3 this is the
+     *  {@code useBackgroundReadSplit=false} rollback shape only — the default path is
+     *  {@link #rawBackgroundRead} (fetch-only on the executor, parse on the pool). */
     private NbtSectionSerializer.ChunkNbtRead backgroundRead(PriorityConsecutiveExecutor executor,
                                                              RegionFileStorage storage) {
         return (cx, cz) -> {
