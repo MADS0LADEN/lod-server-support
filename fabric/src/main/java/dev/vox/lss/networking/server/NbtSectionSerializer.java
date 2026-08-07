@@ -126,18 +126,11 @@ final class NbtSectionSerializer {
      * Split-read flavor (Phase 3): the timeout bounds the EXECUTOR fetch only; the
      * inflate + parse below run on THIS pool thread as bounded CPU work over a private
      * in-memory buffer — which is the whole point of the split (the IOWorker used to
-     * carry pread + inflate + full NBT parse for every LOD read).
+     * carry pread + inflate + full NBT parse for every LOD read). Carries the Phase 4
+     * selective-parse flag with NO default-true convenience overload BY DESIGN (review
+     * B4-8: a defaulted flag at a future call site would silently pin selective ON and
+     * kill the rollback).
      */
-    static byte[] readAndSerializeSections(ChunkRawRead rawRead, RegistryAccess registryAccess,
-                                            int cx, int cz,
-                                            XrayMaskManager.MaskEntry maskEntry,
-                                            int minSectionY, int maxSectionY,
-                                            boolean useNbtTranscode) throws Exception {
-        return readAndSerializeSections(rawRead, registryAccess, cx, cz, maskEntry,
-                minSectionY, maxSectionY, useNbtTranscode, true);
-    }
-
-    /** Full split flavor incl. the Phase 4 selective-parse flag. */
     static byte[] readAndSerializeSections(ChunkRawRead rawRead, RegistryAccess registryAccess,
                                             int cx, int cz,
                                             XrayMaskManager.MaskEntry maskEntry,
@@ -170,11 +163,6 @@ final class NbtSectionSerializer {
      * <p>Null = not servable (authoritative not-found). Package-private for the
      * injected-value unit pins (the raw FETCH itself is gametest-covered).
      */
-    static CompoundTag parseRawChunk(Optional<RawChunkRecord> record, int cx, int cz)
-            throws java.io.IOException {
-        return parseRawChunk(record, cx, cz, true);
-    }
-
     static CompoundTag parseRawChunk(Optional<RawChunkRecord> record, int cx, int cz,
                                      boolean useSelectiveNbtParse) throws java.io.IOException {
         if (record.isEmpty()) return null;
@@ -204,8 +192,18 @@ final class NbtSectionSerializer {
                     version.wrap(new java.io.ByteArrayInputStream(rec.payload())))) {
                 return SelectiveChunkNbtLoader.load(in);
             } catch (Exception e) {
-                warnRawParse("selective parse failed at [" + cx + "," + cz
-                        + "] (" + e + ") — falling back to full parse");
+                // NOT a not-found resolution — its own throttle and counter (reviews
+                // B4-3/B4-4: sharing the raw-parse throttle would let a steady fallback
+                // stream silence version-corruption warns, and the counter is the
+                // divergence-rate instrument the diag line surfaces as sel_fallbacks=).
+                SELECTIVE_FALLBACKS.incrementAndGet();
+                long released = SELECTIVE_FALLBACK_WARN_THROTTLE
+                        .recordAndTryAcquire(System.nanoTime() / 1_000_000);
+                if (released > 0) {
+                    dev.vox.lss.common.LSSLogger.warn("Selective chunk parse failed at ["
+                            + cx + "," + cz + "] (" + e + ") — retried with full parse"
+                            + (released > 1 ? " (+" + (released - 1) + " more)" : ""));
+                }
             }
         }
         try (var in = new java.io.DataInputStream(
@@ -213,6 +211,14 @@ final class NbtSectionSerializer {
             return net.minecraft.nbt.NbtIo.read(in);
         }
     }
+
+    /** Selective-parse fallback occurrences (review B4-3 — surfaced on the reader's
+     *  read_path diag line as {@code sel_fallbacks=}; static is fine, one production
+     *  reader per server and the count is a rate instrument, not per-reader state). */
+    static final java.util.concurrent.atomic.AtomicLong SELECTIVE_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static final dev.vox.lss.common.LogThrottle SELECTIVE_FALLBACK_WARN_THROTTLE =
+            new dev.vox.lss.common.LogThrottle(60_000);
 
     // Dedicated throttle (review C3): sharing PARSE_WARN_THROTTLE with the section
     // block_states warns would let an upgraded world's continuous rename warns hold the

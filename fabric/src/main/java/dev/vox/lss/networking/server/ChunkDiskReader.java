@@ -409,7 +409,9 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
         // serves, so a silently-inert split (dispatcher drift, wiring slip) is visible
         // as a missing token / frozen counter — the gametest asserts it after a serve.
         if (this.useBackgroundReadSplit) {
-            return base + ", read_path=bg-split, raw_serves=" + this.rawServes.get();
+            return base + ", read_path=bg-split, raw_serves=" + this.rawServes.get()
+                    + ", sel=" + (this.useSelectiveNbtParse ? "on" : "off")
+                    + ", sel_fallbacks=" + NbtSectionSerializer.SELECTIVE_FALLBACKS.get();
         }
         return base;
     }

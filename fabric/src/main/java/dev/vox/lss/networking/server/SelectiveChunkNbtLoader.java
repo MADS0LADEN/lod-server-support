@@ -59,16 +59,35 @@ final class SelectiveChunkNbtLoader {
         StringTag.skipString(input);
         accounter.pushDepth();
         try {
+            // Byte accounting mirrored from CompoundTag$1.loadCompound (48 root, 28 +
+            // 2/char per key, 36 per new entry) — inert under unlimitedHeap, kept so a
+            // future bounded accounter behaves identically on both paths (review B4-5).
+            accounter.accountBytes(48L);
             var result = new CompoundTag();
             byte tagType;
             while ((tagType = input.readByte()) != 0) {
                 String key = input.readUTF();
+                accounter.accountBytes(28L);
+                accounter.accountBytes(2L, key.length());
                 var type = TagTypes.getType(tagType);
                 if (ROOT_KEY_WHITELIST.contains(key)) {
-                    result.put(key, type.load(input, accounter));
+                    if (result.put(key, type.load(input, accounter)) == null) {
+                        accounter.accountBytes(36L);
+                    }
                 } else {
                     type.skip(input, accounter);
                 }
+            }
+            // EXHAUSTION CHECK (review B4-1 — this is what makes the one-directional
+            // leniency claim TRUE BY CONSTRUCTION): the raw record's payload is
+            // exact-length, so a well-formed parse ends at EOF. The array-type skips
+            // (skipBytes(readInt() * width)) silently skip ZERO bytes on a negative or
+            // int-overflowing corrupt length where load would throw — a desynced loop
+            // can then hit a stray 0 and return a garbage-shaped sparse tag with NO
+            // throw. Trailing bytes prove the desync; throwing here routes every such
+            // shape into the caller's full-parse fallback.
+            if (input instanceof java.io.InputStream stream && stream.read() != -1) {
+                throw new IOException("trailing bytes after root compound (skip desync)");
             }
             return result;
         } finally {

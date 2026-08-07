@@ -105,26 +105,55 @@ class SelectiveChunkNbtLoaderTest {
         // corpus suite's job; re-proving them here would duplicate its registry rig.
     }
 
+    /** Emit root entries MANUALLY in an exact order — CompoundTag.write iterates its
+     *  HashMap, so re-inserting shuffled barely reorders the bytes (review B4-2: the
+     *  original fuzz produced 4 layouts with Status always first — vacuous on the axis
+     *  that matters). */
+    private static byte[] bytesInOrder(CompoundTag base, List<String> order) throws IOException {
+        var out = new ByteArrayOutputStream();
+        try (var data = new DataOutputStream(out)) {
+            data.writeByte(10);
+            data.writeUTF("");
+            for (String k : order) {
+                var t = base.get(k);
+                data.writeByte(t.getId());
+                data.writeUTF(k);
+                t.write(data);   // payload only — the vanilla per-entry layout
+            }
+            data.writeByte(0);
+        }
+        return out.toByteArray();
+    }
+
     @Test
     void rootKeyOrderingNeverChangesTheOutcome() throws Exception {
-        // Fuzz axis 1 (plan): shuffled root-key orderings. NBT bytes are written in map
-        // iteration order; re-inserting shuffled forces different byte orders.
         var base = chunkNbt();
         var keys = new ArrayList<>(base.keySet());
         var rng = new Random(42);
+        var expectedStatus = base.get("Status");
+        var expectedSections = base.get("sections");
         for (int round = 0; round < 24; round++) {
             Collections.shuffle(keys, rng);
-            var reordered = new CompoundTag();
-            for (String k : keys) {
-                reordered.put(k, base.get(k).copy());
-            }
-            byte[] bytes = nbtBytes(reordered);
+            byte[] bytes = bytesInOrder(base, keys);
             var s = selective(bytes);
             var f = full(bytes);
-            assertEquals(f.get("Status"), s.get("Status"), "round " + round);
-            assertEquals(f.get("sections"), s.get("sections"), "round " + round);
+            assertEquals(expectedStatus, s.get("Status"), "round " + round + " order " + keys);
+            assertEquals(expectedSections, s.get("sections"), "round " + round);
+            assertEquals(f.get("Status"), s.get("Status"));
+            assertEquals(f.get("sections"), s.get("sections"));
             assertEquals(SelectiveChunkNbtLoader.ROOT_KEY_WHITELIST, s.keySet());
         }
+        // Directed extremes the shuffle may not hit: sections FIRST / Status LAST, and
+        // both whitelisted keys adjacent after a skipped array-carrying subtree.
+        var directed = new ArrayList<>(keys);
+        directed.remove("sections");
+        directed.remove("Status");
+        directed.add(0, "sections");
+        directed.add("Status");
+        byte[] bytes = bytesInOrder(base, directed);
+        var s = selective(bytes);
+        assertEquals(expectedStatus, s.get("Status"));
+        assertEquals(expectedSections, s.get("sections"));
     }
 
     /**
@@ -173,7 +202,7 @@ class SelectiveChunkNbtLoaderTest {
     }
 
     @Test
-    void parseRawChunkServesTheDivergentColumnThroughTheFallbackLadder() throws Exception {
+    void parseRawChunkParsesTheDivergentPayloadToAnEmptySparseTagWithTheFlagOffPin() throws Exception {
         // The corrupt-junk payload through the production entry point with the flag ON:
         // the selective parse serves it (no fallback needed). With the flag OFF the full
         // parse throws — the exact pre-Phase-4 behavior, preserved behind the rollback.
@@ -196,6 +225,75 @@ class SelectiveChunkNbtLoaderTest {
         assertThrows(Exception.class, () -> NbtSectionSerializer.parseRawChunk(
                 Optional.of(new NbtSectionSerializer.RawChunkRecord(bytes, (byte) 3)), 0, 0, false),
                 "flag OFF restores the full parse's strictness (the rollback)");
+    }
+
+    /** B4-9: the selective path over a COMPRESSED wrap (the wrap-ladder round-trips
+     *  moved to full parse; Tier 1 must still drive selective through DEFLATE), with
+     *  corrupt junk present — the whole Phase 4 shape in one compressed record. */
+    @Test
+    void selectiveParsesCorruptJunkOverDeflateThroughParseRawChunk() throws Exception {
+        var out = new ByteArrayOutputStream();
+        try (var data = new DataOutputStream(out)) {
+            data.writeByte(10);
+            data.writeUTF("");
+            data.writeByte(8);
+            data.writeUTF("junk");
+            data.writeShort(2);
+            data.write(0xC0);
+            data.write(0x00);
+            data.writeByte(8);
+            data.writeUTF("Status");
+            data.writeUTF("minecraft:full");
+            data.writeByte(0);
+        }
+        var deflated = new ByteArrayOutputStream();
+        try (var wrapped = net.minecraft.world.level.chunk.storage.RegionFileVersion
+                .fromId(2).wrap((java.io.OutputStream) deflated)) {
+            wrapped.write(out.toByteArray());
+        }
+        var parsed = NbtSectionSerializer.parseRawChunk(Optional.of(
+                new NbtSectionSerializer.RawChunkRecord(deflated.toByteArray(), (byte) 2)),
+                0, 0, true);
+        assertEquals(StringTag.valueOf("minecraft:full"), parsed.get("Status"));
+    }
+
+    /** B4-1's exhaustion check makes trailing bytes a selective THROW while full parse
+     *  ignores them — the one payload family where the fallback SUCCEEDS, pinned
+     *  positively (the fallback path returns the full tag). */
+    @Test
+    void trailingBytesRouteThroughTheFallbackWhichSucceeds() throws Exception {
+        byte[] valid = nbtBytes(chunkNbt());
+        byte[] withTrailing = java.util.Arrays.copyOf(valid, valid.length + 4);
+        withTrailing[valid.length] = 42;
+        assertThrows(IOException.class, () -> selective(withTrailing),
+                "trailing bytes must throw (the B4-1 desync guard)");
+        var viaParseRawChunk = NbtSectionSerializer.parseRawChunk(Optional.of(
+                new NbtSectionSerializer.RawChunkRecord(withTrailing, (byte) 3)), 0, 0, true);
+        assertEquals(full(valid), viaParseRawChunk,
+                "the fallback full parse serves the tag (vanilla ignores trailing bytes)");
+    }
+
+    /** B4-1 directly: a negative array length that skipBytes silently ignores — the
+     *  desynced loop must END IN A THROW (exhaustion or invalid id), never return a
+     *  garbage-shaped sparse tag without throwing. */
+    @Test
+    void corruptArrayLengthNeverYieldsASilentGarbageTag() throws Exception {
+        var out = new ByteArrayOutputStream();
+        try (var data = new DataOutputStream(out)) {
+            data.writeByte(10);
+            data.writeUTF("");
+            data.writeByte(7);            // TAG_Byte_Array (skipped key)
+            data.writeUTF("junkArr");
+            data.writeInt(-8);            // negative length: skip consumes NOTHING
+            data.write(new byte[]{1, 2, 3, 4, 5, 6, 7, 8});  // the "array" bytes
+            data.writeByte(8);
+            data.writeUTF("Status");
+            data.writeUTF("minecraft:full");
+            data.writeByte(0);
+        }
+        byte[] bytes = out.toByteArray();
+        assertThrows(Exception.class, () -> selective(bytes),
+                "a skip-desynced stream must throw, never silently mis-shape the tag");
     }
 
     @Test
@@ -237,6 +335,10 @@ class SelectiveChunkNbtLoaderTest {
         assertFalse(found.isEmpty(), "the regex must find the serializer's root accessors");
         assertTrue(SelectiveChunkNbtLoader.ROOT_KEY_WHITELIST.containsAll(found),
                 "serializer root keys " + found + " must all be whitelisted");
+        // Hardening (review B4-6): the regex only sees `chunkNbt.<accessor>("...")` —
+        // an alias (`var c = chunkNbt`) would evade it entirely. Pin the evasion shape.
+        assertFalse(Pattern.compile("=\\s*chunkNbt\\s*;").matcher(serializer).find(),
+                "chunkNbt must never be re-bound to an alias (whitelist-pin evasion)");
     }
 
     @Test
