@@ -296,6 +296,72 @@ class SqliteLodStoreTest {
         shifted.shutdown();
     }
 
+    /** The v3->v4 bump (R4: chash/fhash FNV-1a -> CRC32C): a store stamped with the
+     *  PREVIOUS schema version must drop-and-rebuild exactly once — old rows' hashes
+     *  would fail every validation under the new function. metaMatches is an equality
+     *  compare, so this out-of-band downgrade is byte-for-byte the "old store under a
+     *  new jar" upgrade case (and pins rollback symmetry: any mismatch rebuilds). */
+    @Test
+    void schemaVersionDriftDropsAndRebuildsTheStore() throws Exception {
+        long p = PositionUtil.packPosition(0, 2);
+        writeRegion(OW, 0, 0, Map.of(p, (int) (nowSec() - 1000)));
+        SqliteLodStore store = open(defaultEnv());
+        store.deposit(OW, p, bytes(7, 400), 100);
+        assertNotNull(awaitHit(store, OW, p));
+        store.shutdown();
+
+        var ds = new org.sqlite.SQLiteDataSource();
+        ds.setUrl("jdbc:sqlite:" + storeDir().resolve("store.db"));
+        try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
+            st.execute("PRAGMA busy_timeout=3000");
+            st.execute("UPDATE meta SET v='" + (SqliteLodStore.SCHEMA_VERSION - 1)
+                    + "' WHERE k='schema_version'");
+        }
+
+        SqliteLodStore reopened = open(defaultEnv());
+        assertNull(reopened.get(OW, p),
+                "rows hashed under the old schema must not survive the version bump");
+        assertEquals(0, reopened.diagnostics().getErrors(), "drop-and-rebuild is not an error");
+        // ...and the rebuilt store is fully functional under the new hash.
+        reopened.deposit(OW, p, bytes(8, 400), 200);
+        assertNotNull(awaitHit(reopened, OW, p), "rebuilt store must accept deposits");
+        reopened.shutdown();
+
+        // Fires ONCE (review F4): a third clean open must keep the v4 deposit — a bug
+        // that rebuilds on every open would pass everything above. (The freshness
+        // sweep keeps the row: the region header stamp is older than its src_stamp.)
+        SqliteLodStore third = open(defaultEnv());
+        assertNotNull(third.get(OW, p),
+                "the v4 deposit must survive a clean reopen — the rebuild fires exactly once");
+        third.shutdown();
+    }
+
+    /**
+     * Known-answer vectors (review F5 — RFC 3720 B.4 + the Castagnoli check value):
+     * nothing else pins that the function IS CRC32C — every other hash assertion is
+     * self-referential, so a silent revert to FNV that kept SCHEMA_VERSION = 4 would
+     * red zero tests while arming the C4 landmine (schema-4 rows stamped with FNV
+     * hashes, which C4's per-row dispatch would then purge row by row — the lazy
+     * migration silently degrading to a slow drop). The 0xC1D04330 vector has bit 31
+     * set, pinning ZERO-extension over sign-extension.
+     */
+    @Test
+    void contentHashIsCrc32cZeroExtended() {
+        assertEquals(0xE3069283L, LodStoreService.contentHash(
+                "123456789".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+        assertEquals(0x8A9136AAL, LodStoreService.contentHash(new byte[32]));
+        byte[] ff = new byte[32];
+        java.util.Arrays.fill(ff, (byte) 0xFF);
+        assertEquals(0x62A8AB43L, LodStoreService.contentHash(ff));
+        assertEquals(0xC1D04330L, LodStoreService.contentHash(new byte[]{'a'}));
+        // Degenerate empty value — stored for all-air raw deposits, never consulted
+        // (usize == 0 short-circuits both read rungs before any hash compare).
+        assertEquals(0L, LodStoreService.contentHash(new byte[0]));
+        // The kept legacy validator (C4's wirefmt=19 dispatch) stays FNV-1a 64:
+        // FNV of empty input is the 64-bit offset basis.
+        assertEquals(0xcbf29ce484222325L, LodStoreService.legacyContentHashFnv(new byte[0]));
+    }
+
     @Test
     void corruptDbFileIsDroppedAndRecreated() throws Exception {
         Files.createDirectories(storeDir());

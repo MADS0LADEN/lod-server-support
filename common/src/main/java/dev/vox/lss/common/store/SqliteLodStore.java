@@ -78,10 +78,18 @@ public final class SqliteLodStore implements LodStoreService {
 
     // v2: auto_vacuum=INCREMENTAL (must be set before table creation; the bump
     // rebuilds every v1 store once — the legal migration for derived data).
-    // 3: the fhash column (FNV-1a of the compressed blob — frame-level integrity for
-    // protocol-19 verbatim frame serving, compressed-columns plan §0.1/§3). Derived
-    // data: the bump drops-and-rebuilds; the warm store re-warms from serves/backfill.
-    static final int SCHEMA_VERSION = 3;
+    // 3: the fhash column (frame-level integrity for protocol-19 verbatim frame
+    // serving, compressed-columns plan §0.1/§3). Derived data: the bump
+    // drops-and-rebuilds; the warm store re-warms from serves/backfill.
+    // 4: chash/fhash switch FNV-1a 64 -> CRC32C zero-extended (perf round Phase 2/R4 —
+    // the byte loop was ~28% of the batcher thread; see LodStoreService.contentHash).
+    // Old rows would fail every validation under the new function, so the bump
+    // drops-and-rebuilds; rollback is symmetric (metaMatches is an equality compare,
+    // an old jar against a v4 store also rebuilds).
+    // Interim (mega plan R-1): C4 re-specifies schema 4 (wirefmt column + per-row hash
+    // dispatch against legacyContentHashFnv); a Phase-2-era store drops there via
+    // metaMatches (meta wire 19 != 20) — no shipped v0.9.x store ever sees this shape.
+    static final int SCHEMA_VERSION = 4;
     private static final String DB_FILE = "store.db";
     private static final int PAGE_SIZE = 16384;
     private static final int WRITE_TXN_ROWS = 64;
@@ -473,7 +481,7 @@ public final class SqliteLodStore implements LodStoreService {
                 }
                 byte[] blob = rs.getBytes(4);
                 byte[] raw = this.codec.decompress(blob, usize);
-                if (raw.length != usize || fnv1a(raw) != chash) {
+                if (raw.length != usize || contentHash(raw) != chash) {
                     throw new IllegalStateException("row integrity failure at " + packed
                             + " (usize/chash mismatch)");
                 }
@@ -532,7 +540,7 @@ public final class SqliteLodStore implements LodStoreService {
                             + " (usize " + usize + " out of bounds)");
                 }
                 byte[] blob = rs.getBytes(4);
-                if (fnv1a(blob) != fhash
+                if (contentHash(blob) != fhash
                         || this.codec.declaredContentSize(blob) != usize) {
                     throw new IllegalStateException("row integrity failure at " + packed
                             + " (fhash/declared-size mismatch)");
@@ -1158,8 +1166,8 @@ public final class SqliteLodStore implements LodStoreService {
         } else {
             blob = dep.bytes().length == 0 ? EMPTY : this.codec.compress(dep.bytes());
             usize = dep.bytes().length;
-            chash = fnv1a(dep.bytes());
-            fhash = fnv1a(blob);
+            chash = contentHash(dep.bytes());
+            fhash = contentHash(blob);
         }
         // Latest-wins by STORED ts in ONE statement: the conditional upsert replaces the
         // old SELECT-then-INSERT pair (the cold-path gate measured per-deposit cost —
@@ -2044,7 +2052,7 @@ public final class SqliteLodStore implements LodStoreService {
 
     /** Delegates to the ONE canonical hash (LodStoreService.contentHash) — the
      *  frame-reuse deposit computes chash/fhash on the processing thread against it. */
-    private static long fnv1a(byte[] data) {
+    private static long contentHash(byte[] data) {
         return LodStoreService.contentHash(data);
     }
 }
