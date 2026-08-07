@@ -86,6 +86,9 @@ public final class SqliteLodStore implements LodStoreService {
     // Old rows would fail every validation under the new function, so the bump
     // drops-and-rebuilds; rollback is symmetric (metaMatches is an equality compare,
     // an old jar against a v4 store also rebuilds).
+    // Interim (mega plan R-1): C4 re-specifies schema 4 (wirefmt column + per-row hash
+    // dispatch against legacyContentHashFnv); a Phase-2-era store drops there via
+    // metaMatches (meta wire 19 != 20) — no shipped v0.9.x store ever sees this shape.
     static final int SCHEMA_VERSION = 4;
     private static final String DB_FILE = "store.db";
     private static final int PAGE_SIZE = 16384;

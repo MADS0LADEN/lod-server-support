@@ -75,6 +75,20 @@ public interface LodStoreService {
         return crc.getValue();
     }
 
+    /** FNV-1a 64 — the schema-3 / {@code wirefmt = 19} row validator, RENAMED AND KEPT
+     *  (mega plan R-1) rather than deleted: C4's lazy migration dispatches per-row hash
+     *  validation on the {@code wirefmt} column, and legacy rows validate against THIS
+     *  function. Not called between B2 and C4 (dev-window builds drop-and-rebuild via
+     *  the schema bump instead); deleting it "as dead" re-introduces it wrong at C4. */
+    static long legacyContentHashFnv(byte[] data) {
+        long hash = 0xcbf29ce484222325L;
+        for (byte b : data) {
+            hash ^= (b & 0xFF);
+            hash *= 0x100000001b3L;
+        }
+        return hash;
+    }
+
     /** The mode this store was built for (memory tier only vs memory+disk). */
     LodStoreMode mode();
 
