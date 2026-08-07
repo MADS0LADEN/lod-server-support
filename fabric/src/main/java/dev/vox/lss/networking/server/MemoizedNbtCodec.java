@@ -71,17 +71,20 @@ final class MemoizedNbtCodec<A> implements Codec<A> {
 
     /**
      * Memo key (R3, perf-round plan Phase 1): the entry tag plus a PRECOMPUTED one-pass
-     * structural hash. Raw-{@link Tag} keying paid {@code AbstractMap.hashCode} — an
-     * EntryIterator allocation per nested compound per LOOKUP (328 MB/75 s of iterator
-     * churn during backfill) — and full {@code AbstractMap.equals} on every hit. The
-     * walk here is allocation-free through nested compounds ({@code CompoundTag.forEach},
-     * no entrySet iterators; one {@code int[1]} lambda capture per LEVEL is the whole
-     * cost) and the result is cached in the key, so a lookup pays one wrapper + the walk
-     * and a hit pays an int compare + {@code Tag.equals}. Structural identity is retained
-     * exactly ({@link #equals} delegates to {@code Tag.equals}) — the class javadoc's
-     * "the entry tag itself is the cache key" contract is unchanged, and the rejected
-     * flat-string alternative's separator-injection/type-collapse collisions (a wrong
-     * globalId straight onto the wire) cannot occur.
+     * structural hash, bit-identical to {@code Tag.hashCode()} for every vanilla tag
+     * type ({@code Map.hashCode}/{@code List.hashCode} are interface contracts — the
+     * key distribution is provably unchanged from raw-tag keying). What changes is the
+     * walk's SHAPE: {@code CompoundTag.forEach} instead of {@code AbstractMap.hashCode}'s
+     * entrySet chain — no {@code Map.Entry} indirection, no megamorphic
+     * {@code Node.hashCode} dispatch, which is where the profiled cost lived (76
+     * backfill-thread samples, 328 MB/75 s of EntryIterator churn). Allocation count is
+     * roughly a WASH, not a win: one {@code int[1]} + one capturing {@code BiConsumer}
+     * per compound level replaces one EntryIterator per level, plus one probe Key per
+     * lookup (B1 review C3 — read the Phase 1 allocation gate accordingly). Structural
+     * identity is retained exactly ({@link #equals} delegates to {@code Tag.equals}) —
+     * the class javadoc's "the entry tag itself is the cache key" contract is unchanged,
+     * and the rejected flat-string alternative's separator-injection/type-collapse
+     * collisions (a wrong globalId straight onto the wire) cannot occur.
      *
      * <p>The per-compound combine is a SUM of {@code name.hashCode() ^ hash(value)}
      * terms (matching {@code AbstractMap.hashCode} semantics), never sequential:
@@ -108,11 +111,6 @@ final class MemoizedNbtCodec<A> implements Codec<A> {
             this.hash = hash;
         }
 
-        /** Re-wraps a defensive copy without re-walking (equal content, equal hash). */
-        Key withTag(Tag copy) {
-            return new Key(copy, this.hash);
-        }
-
         static int structuralHash(Tag tag) {
             if (tag instanceof net.minecraft.nbt.CompoundTag compound) {
                 int[] sum = {0};
@@ -127,7 +125,10 @@ final class MemoizedNbtCodec<A> implements Codec<A> {
                 return h;
             }
             // Primitive/string leaves: their own hashCode is cheap and iterator-free.
-            return tag.hashCode();
+            // Null-safe like the Objects.hashCode the replaced AbstractMap walk used
+            // (unreachable from parsed NBT; transcodeSection has no exception fallback,
+            // so an NPE here would escape the serializer — B1 review C2).
+            return tag == null ? 0 : tag.hashCode();
         }
 
         @Override
@@ -178,10 +179,14 @@ final class MemoizedNbtCodec<A> implements Codec<A> {
             // constraint): the cached result's remainder must not pin the first
             // caller's whole chunk NBT alive (map() applies to partials too). It
             // doubles as the stored key's aliasing guard against the caller's mutable
-            // tag; withTag reuses the probe's hash — equal content, equal hash.
+            // tag. The stored Key re-walks the COPY rather than reusing the probe's
+            // hash: the probe hashed the caller's live tag BEFORE delegate.decode ran,
+            // and a caller mutation inside that window would poison the map with an
+            // unreachable entry (hash of old content, tag of new) — re-walking on the
+            // miss path costs nothing next to the codec decode it rides (B1 review C1).
             Tag key = probe.tag.copy();
             var cached = toCached(fresh.map(pair -> Pair.of(pair.getFirst(), key)));
-            this.memo.put(probe.withTag(key), cached);
+            this.memo.put(new Key(key), cached);
             return cached;
         }
         if (this.capWarned.compareAndSet(false, true)) {

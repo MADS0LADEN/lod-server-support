@@ -229,6 +229,12 @@ LSS_ATTRIBUTED_BANDS = ("store", "zip", "nbt", "serialize", "serialize-live", "l
 DEFAULT_MARKERS = (
     "dev.vox.lss.networking.server.MemoizedNbtCodec",
     "dev.vox.lss.paper.PaperMemoizedNbtCodec",
+    # The R3 key-construction cost as its OWN named term (perf plan Phase 1: "report
+    # the new key-construction cost as samples under the Key constructor/hash walk").
+    # These frames also count under the plain MemoizedNbtCodec markers above (nested
+    # class, prefix match) — markers are independent gauges, not a partition.
+    "dev.vox.lss.networking.server.MemoizedNbtCodec$Key",
+    "dev.vox.lss.paper.PaperMemoizedNbtCodec$Key",
     "dev.vox.lss.common.store.LodStoreService.contentHash",
     "dev.vox.lss.networking.server.SelectiveChunkNbtLoader",
     "dev.vox.lss.paper.PaperSelectiveChunkNbtLoader",
