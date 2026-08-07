@@ -61,7 +61,7 @@ public final class HandshakeGate {
          * client's gate hard-requires its own version), the session is forced codec-RAW,
          * and column frames ship without the codec byte. Everything else — the whole C2S
          * direction included — is the current dialect; membership is tracked by
-         * {@code V18CompatTracker}, no v16-style synthetic want-set.
+         * {@code WireDialectTracker}, no v16-style synthetic want-set.
          */
         V18,
         /**

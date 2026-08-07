@@ -395,7 +395,7 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
 
         var decision = HandshakeGate.evaluate(handshake.protocolVersion(),
                 handshake.capabilities(), config.enabled, servicePresent,
-                config.enableV16Compat, config.enableV18Compat);
+                config.enableV16Compat, config.enableV18Compat, config.enableV19Compat);
 
         if (!decision.sendSessionConfig()) {
             // See HandshakeGate.Outcome.VERSION_MISMATCH: replying would kick the player.

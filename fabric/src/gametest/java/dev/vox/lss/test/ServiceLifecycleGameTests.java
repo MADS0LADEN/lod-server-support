@@ -803,7 +803,7 @@ public class ServiceLifecycleGameTests {
             var state = service.getPlayers().get(uuid);
             helper.assertTrue(state != null,
                     "a v18 handshake must register natively (not fall to the v16 shim)");
-            helper.assertTrue(service.getV18CompatTracker().isV18(uuid),
+            helper.assertTrue(service.getDialectTracker().isV18(uuid),
                     "the session must carry v18 membership (the egress strips the codec byte off it)");
             helper.assertTrue(!service.getV16CompatManager().isV16(uuid),
                     "a v18 session is NOT a v16 compat session");

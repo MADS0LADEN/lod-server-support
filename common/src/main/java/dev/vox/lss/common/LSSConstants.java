@@ -277,7 +277,7 @@ public final class LSSConstants {
      *  gate hard-requires it), columns are forced codec-RAW and ship WITHOUT the codec tag
      *  (the v18 decode would consume it as the section-array length VarInt — hard kick),
      *  and C2S is byte-identical, so the want-set pipeline never learns the session is
-     *  legacy. Membership only ({@code V18CompatTracker}) — no v16-style synthetic
+     *  legacy. Membership only ({@code WireDialectTracker}) — no v16-style synthetic
      *  want-set. */
     public static final int V18_COMPAT_PROTOCOL_VERSION = 18;
 

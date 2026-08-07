@@ -195,7 +195,7 @@ public class LSSServerNetworking {
         var config = LSSServerConfig.CONFIG;
         var decision = HandshakeGate.evaluate(payload.protocolVersion(),
                 payload.capabilities(), config.enabled, service != null,
-                config.enableV16Compat, config.enableV18Compat);
+                config.enableV16Compat, config.enableV18Compat, config.enableV19Compat);
 
         if (!decision.sendSessionConfig()) {
             // See HandshakeGate.Outcome.VERSION_MISMATCH: replying would kick the player.
