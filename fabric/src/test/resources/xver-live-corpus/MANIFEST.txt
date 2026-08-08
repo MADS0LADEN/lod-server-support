@@ -1,0 +1,14 @@
+# xver-live-corpus manifest — captured from /home/vox/projects/voxel-server-support/test-server/paper/world/dimensions/minecraft/overworld/region
+# column | bytes | dictionary entries | sections
+col-00.bin | 37958 | 51 | 11
+col-01.bin | 37208 | 42 | 11
+col-02.bin | 35021 | 52 | 11
+col-03.bin | 41620 | 59 | 12
+col-04.bin | 37186 | 40 | 12
+col-05.bin | 41375 | 44 | 12
+col-06.bin | 41533 | 54 | 12
+col-07.bin | 48007 | 60 | 12
+col-08.bin | 33066 | 40 | 11
+col-09.bin | 33643 | 51 | 11
+col-10.bin | 29900 | 51 | 9
+col-11.bin | 27963 | 47 | 9

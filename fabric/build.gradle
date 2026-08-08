@@ -92,7 +92,9 @@ test {
     // LOD-store Phase 0 experiment pass-through (inert unless -Plss.store.experiment.regionDir
     // is given; the tool test skips itself without it). Extra heap only when engaged.
     ['lss.store.experiment.regionDir', 'lss.store.experiment.out',
-     'lss.store.experiment.maxColumns', 'lss.store.experiment.warmup'].each { p ->
+     'lss.store.experiment.maxColumns', 'lss.store.experiment.warmup',
+     // C6 cross-line corpus capture (XverLiveCorpusCaptureTool; self-skipping without it)
+     'lss.xver.captureRegionDir'].each { p ->
         if (findProperty(p) != null) systemProperty p, findProperty(p).toString()
     }
     if (findProperty('lss.store.experiment.regionDir') != null) {
