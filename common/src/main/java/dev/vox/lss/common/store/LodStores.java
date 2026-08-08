@@ -65,10 +65,10 @@ public final class LodStores {
 
     /**
      * One-line startup recommendation, emitted by both platforms when the store is OFF and
-     * LSS itself is enabled. The store is ON BY DEFAULT since the 2026-08-08 rework, so
-     * this line now reaches only admins who explicitly opted out (or whose file predates
-     * the rework and says "off") — it stays because the recommendation is still true for
-     * them, and it documents the disk tradeoff at the moment it matters. Returns the
+     * LSS itself is enabled. Under the 2026-08-08 split default (fresh installs generate
+     * "on"; a key absent from an existing file means "off") this line reaches explicit
+     * opt-outs AND every upgraded install whose file lacks the key — for the latter it is
+     * the one place the feature and its disk tradeoff reach the admin at all. Returns the
      * message rather than logging so the decision is pinnable; callers log INFO. Null when
      * LSS is disabled (nothing to recommend into) and on Folia — the store is unvalidated
      * there and {@code PaperConfig.validate()} WARNS on an armed store; recommending what

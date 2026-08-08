@@ -92,6 +92,25 @@ class JsonConfigLoadTest {
             assertTrue(saved.has(key), "defaults file missing field " + key);
         }
         assertEquals(512, saved.get("lodDistanceChunks").getAsInt());
+        // The lodStore SPLIT default: a brand-new install generates "on" (onFreshCreate),
+        // while the compiled default stays "off" for keys absent from existing files.
+        assertEquals("on", c.lodStore, "a fresh install must arm the store");
+        assertEquals("on", saved.get("lodStore").getAsString());
+    }
+
+    /** The other half of the lodStore split default: an EXISTING file without the key
+     *  binds the compiled "off" — an upgrade must never silently arm the store — and
+     *  the migration re-save writes that "off" explicitly. */
+    @Test
+    void existingFileWithoutLodStoreKeyKeepsTheStoreOff(@TempDir Path configDir) throws Exception {
+        Files.writeString(configDir.resolve(FILE), "{\"lodDistanceChunks\": 64}");
+
+        TestServerConfig c = TestServerConfig.load(configDir);
+
+        assertEquals("off", c.lodStore,
+                "absent lodStore key in an existing file must mean OFF, not the fresh-install on");
+        assertEquals("off", savedJson(configDir).get("lodStore").getAsString(),
+                "the migration makes the absent-key semantics explicit on disk");
     }
 
     @Test
@@ -102,6 +121,8 @@ class JsonConfigLoadTest {
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
         assertEquals(512, c.lodDistanceChunks); // defaults, not the half-written value
+        assertEquals("off", c.lodStore,
+                "a corrupt EXISTING file is not a fresh install — onFreshCreate must not arm the store");
         assertEquals(broken, Files.readString(configDir.resolve(FILE)));
     }
 
@@ -644,6 +665,7 @@ class JsonConfigLoadTest {
         TestServerConfig c = TestServerConfig.load(VSS_FIRST, configDir);
 
         assertEquals(512, c.lodDistanceChunks); // defaults
+        assertEquals("on", c.lodStore, "the candidate-create path is a fresh install: onFreshCreate applies");
         // This is the assertion that distinguishes activeFileName (candidates[0]) from getFileName()
         // (which is "lss-..." here): a genuinely fresh install creates the brand-PRIMARY, not getFileName.
         assertTrue(Files.isRegularFile(configDir.resolve("vss-server-config.json")),

@@ -64,17 +64,16 @@ public class PaperConfig extends ServerConfigBase {
     public void validate() {
         super.validate();
         if (updateEvents == null) updateEvents = List.of();
-        // Since the 2026-08-08 rework the store is ON BY DEFAULT on every platform, so
-        // an armed store on Folia is the normal state, not an explicit opt-in — the old
-        // "this was explicitly enabled" framing no longer holds. It stays a warning
+        // Under the 2026-08-08 split default an armed store on Folia is either a fresh
+        // install's generated "on" or an explicit choice — either way it stays a warning
         // rather than a gate (Folia support is experimental wholesale; the store adds
         // one more unvalidated surface, not the first), but it must not be silent.
         if (FoliaSupport.IS_FOLIA
                 && dev.vox.lss.common.store.LodStoreMode.normalize(lodStore)
                         != dev.vox.lss.common.store.LodStoreMode.OFF) {
             LSSLogger.warn("The LOD store is armed on FOLIA (lodStore=" + lodStore
-                    + ", the shipped default), where it is NOT validated (single-player"
-                    + " soaks only; concurrent multi-region ingress is untested). Set"
+                    + "), where it is NOT validated (single-player soaks only;"
+                    + " concurrent multi-region ingress is untested). Set"
                     + " lodStore=off to disable it if you see store-related issues.");
         }
     }

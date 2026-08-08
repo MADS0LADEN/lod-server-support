@@ -95,20 +95,22 @@ class PaperConfigValidationTest {
         assertEquals(0, c.outboundBufferCeilingKB, "0 stays 0 — it is the off switch");
     }
 
-    /** The store is ON BY DEFAULT on every platform (user decision, 2026-08-08 config
-     *  rework, superseding the 2026-08-03 opt-in decision; "on" is canonical, "full" a
-     *  permanent read alias). Paper inherits the shared default with no Folia-specific
-     *  override — on Folia validate() WARNS about the armed store instead (the pin
-     *  below), since Folia support is experimental wholesale.
+    /** The lodStore SPLIT default (user decision, 2026-08-08 second round), through the
+     *  Paper subclass: compiled default "off" — a key absent from an existing file must
+     *  never arm the store on upgrade — while fresh installs generate "on" via
+     *  onFreshCreate (pinned through the real load path in PaperConfigLoadTest). Paper
+     *  adds no Folia-specific override — on Folia validate() WARNS whenever the store
+     *  is armed, since Folia support is experimental wholesale.
      *
-     *  <p>lodStoreBackfill stays ON, and that pairing is the point: the default
-     *  experience is the whole feature, and lodStore=off still disables both. */
+     *  <p>lodStoreBackfill stays ON, and that pairing is the point: an armed store is
+     *  the whole feature, and lodStore=off still disables both. */
     @Test
-    void lodStoreDefaultsOnWithBackfillArmed() {
+    void lodStoreCompiledDefaultIsOffForAbsentKeysWithBackfillArmed() {
         var c = new PaperConfig();
-        assertEquals("on", c.lodStore, "the store ships on-by-default (2026-08-08 user decision)");
+        assertEquals("off", c.lodStore,
+                "compiled default off: an absent key must never arm the store on upgrade");
         assertTrue(c.lodStoreBackfill,
-                "backfill stays on so the default experience is the whole feature");
+                "backfill stays on so an armed store is the whole feature");
     }
 
     /** Paper inherits the shared yield default: unarmed until the live E3 A/B (§4). */

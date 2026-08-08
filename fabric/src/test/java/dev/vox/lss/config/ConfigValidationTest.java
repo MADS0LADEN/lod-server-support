@@ -305,21 +305,22 @@ class ConfigValidationTest {
         assertEquals(77, c.effectiveTimestampCacheMB(), "an explicit value always wins");
     }
 
-    /** The LOD store is ON BY DEFAULT (user decision, 2026-08-08 config rework — it
-     *  supersedes the 2026-08-03 opt-in decision now that the store has a released
-     *  record; "on" is the canonical spelling, "full" a permanent read alias). The
-     *  disk cost is documented in the README instead of gated behind an opt-in;
-     *  lodStore=off remains the one-key opt-out.
+    /** The lodStore SPLIT default (user decision, 2026-08-08 second round): the
+     *  COMPILED default is "off", which is what a key ABSENT from an existing config
+     *  file binds to — an upgrade must never silently double an operator's world
+     *  folder. Fresh installs generate "on" instead via onFreshCreate (pinned through
+     *  the real load path in JsonConfigLoadTest). "on" is the canonical spelling,
+     *  "full" a permanent read alias.
      *
-     *  <p>lodStoreBackfill stays ON so the DEFAULT experience is the whole feature —
-     *  warm serves from the first join, not only after organic traffic — and turning
-     *  the store off still disables both with the one key. */
+     *  <p>lodStoreBackfill stays ON so an ARMED store is the whole feature — warm
+     *  serves from the first join — and turning the store off still disables both
+     *  with the one key. */
     @Test
-    void lodStoreDefaultsOnWithBackfillArmed() {
-        assertEquals("on", serverConfig().lodStore,
-                "the store ships on-by-default (2026-08-08 user decision)");
+    void lodStoreCompiledDefaultIsOffForAbsentKeysWithBackfillArmed() {
+        assertEquals("off", serverConfig().lodStore,
+                "compiled default off: an absent key must never arm the store on upgrade");
         assertTrue(serverConfig().lodStoreBackfill,
-                "backfill stays on so the default experience is the whole feature");
+                "backfill stays on so an armed store is the whole feature");
     }
 
     /** "on" is canonical on disk; "full" (the pre-rework spelling) must stay accepted

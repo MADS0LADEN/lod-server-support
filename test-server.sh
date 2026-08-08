@@ -104,7 +104,7 @@ stage_move_trace_marker() {
     esac
 }
 
-# LOD store for manual play: LSS_LODSTORE=off|on|full (default on — the shipped default; on==full) is written into
+# LOD store for manual play: LSS_LODSTORE=off|on|full (default on — matching a fresh install; on==full) is written into
 # the staged lss-server-config.json on EVERY run — the staging rewrites that file, so a
 # hand-edit does not survive a re-run; this variable is the supported way to flip it.
 # `run-fabric-store` / `run-paper-store` below force "full". The store DB lives at
