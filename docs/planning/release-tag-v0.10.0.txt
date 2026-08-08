@@ -1,0 +1,79 @@
+### New Features
+
+- **Cross-version LOD serving (protocol 20)** — A client and server on different
+  supported Minecraft versions can now exchange LODs: columns travel as
+  version-independent block identities and translate to whatever your client
+  runs. Supported pairs: any two of 26.2, 26.1, and 1.21.11 running v0.10.0.
+  Blocks that don't exist on your version render via a configurable fallback
+  (`unknownBlockFallback`, default stone). Older LSS clients (v0.7.x–v0.9.x) keep
+  working through the existing compatibility rungs.
+- **Via-proxy mismatch guard** — When ViaVersion/ViaBackwards lets a
+  different-MC-version vanilla client join, LSS now detects the mismatch and
+  declines the LOD session cleanly instead of serving columns the client would
+  decode as garbage. **Known hole:** when Via runs on a proxy (Velocity/Bungee)
+  in front of the server, the server cannot see the client's real version — such
+  setups should not rely on the guard.
+- **Vanilla-first transport yield** (`lodYieldsToVanillaTransport`, default
+  `false`) — When enabled, LOD sending pauses while a player's connection is
+  backed up, so LSS never deepens the queue ahead of vanilla's own chunk
+  packets. Ships off pending live validation; behind a buffering proxy the gate
+  is best-effort (it under-yields, never over-yields).
+
+### Performance
+
+- **LOD disk reads leave Minecraft's chunk-IO thread almost entirely** — On
+  Fabric's vanilla read path, LSS now only fetches raw bytes on the shared IO
+  thread; decompression and parsing run on LSS's own reader pool
+  (`useBackgroundReadSplit`, default on). This removes the main historic cause
+  of LOD serving slowing vanilla chunk loads under pressure.
+- **The background store warm-up costs ~21% less CPU** — the backfill's
+  parse/hash/dedup work was measured across the round at a >21% cut with
+  deposit throughput unchanged.
+- **Serving allocates ~30% less memory per column** (selective NBT parsing +
+  buffer reuse), which lowers GC pressure on busy servers.
+- **The freshness cache tracks ~13× more terrain per MB** — its default (auto)
+  sizing now uses ~2.5× less RAM while remembering ~5× more columns, so large
+  view distances and roaming players stop thrashing it. Existing cache files
+  migrate automatically at first boot.
+- **The cost of cross-version columns, honestly**: encoding version-independent
+  identities makes serving a cold column cost ~12–15% more CPU than v0.9.x
+  (measured; it was ~18% before a follow-up optimization) and the wire/store
+  bytes grow ~10%. Warm store serves and backfill throughput are unaffected.
+  This buys the entire cross-version feature.
+- **Store rows are integrity-hashed with CRC32C** (hardware-accelerated),
+  replacing a slower software hash on the warm-serve path.
+
+### Configuration
+
+- **`lodYieldsToVanillaTransport`** (server, default `false`) — the transport
+  yield above.
+- **`useBackgroundReadSplit`** (server, default `true`) — the Fabric read split
+  above; `false` restores the old single-thread read.
+- **`useSelectiveNbtParse`** (server, default `true`) — parse only the chunk
+  data LOD serving needs; `false` restores the full parse.
+- **`enableV19Compat`** (server, default `true`) — serve v0.9.x clients natively
+  on their own wire format.
+- **`enableViaMismatchGuard`** (server, default `true`) — the Via guard above.
+- **`unknownBlockFallback`** (client, default `"minecraft:stone"`) and
+  **`crossVersionBlockFallbacks`** (client, default empty) — what a
+  cross-version column renders when a block has no local equivalent, globally
+  and per-block.
+- **`perDimensionTimestampCacheSizeMB`** keeps its `0` = auto default, but auto
+  now derives from the new tile layout (~2.5× less RAM for ~5× the coverage at
+  the same setting).
+
+### Store
+
+- **One-time background migration** — On first boot, existing LOD store rows
+  migrate to the cross-version format in a paced background walk (this is a
+  migration, NOT a rebuild: nothing is re-read from region files, and serving
+  continues meanwhile). Store rows grow ~10% with the new format; if you run a
+  `lodStoreMaxMB` cap, the same cap now holds ~10% fewer columns (evicted
+  columns re-warm on demand, as always).
+- A modded block/biome registry change still drops and rebuilds the store (the
+  fingerprint guard) — migration never runs on drifted registries.
+
+### Notes
+
+- Folia support remains **experimental** (single-player soak validated;
+  concurrent multi-region ingress untested).
