@@ -38,15 +38,33 @@ package dev.vox.lss.common.store;
  */
 public interface LodStoreService {
 
+    /** Row body layout tags ({@code wirefmt} column, C4/XVER §5): {@code 19} = the
+     *  pre-v0.10.0 native section layout, {@code 20} = the canonical v20 dictionary
+     *  form every post-C2 row deposits as. */
+    int WIREFMT_NATIVE_19 = 19;
+    int WIREFMT_V20 = 20;
+
     /** A store hit: wire-format section bytes ({@code length == 0} = all-air) plus the
-     *  stored column timestamp. */
-    record StoreHit(byte[] sectionBytes, long columnTimestamp) {}
+     *  stored column timestamp. {@code wirefmt} (C4, XVER §5): the row's body format —
+     *  20 = the canonical v20 dictionary layout; 19 = a pre-migration native-layout row
+     *  (the lazy-upgraded v0.9.x store), which the serve rung must translate to v20
+     *  before it enters the pipeline (raw() == v20 is a C2 invariant). */
+    record StoreHit(byte[] sectionBytes, long columnTimestamp, int wirefmt) {
+        public StoreHit(byte[] sectionBytes, long columnTimestamp) {
+            this(sectionBytes, columnTimestamp, 20);
+        }
+    }
 
     /** A frame-form store hit (protocol 19 verbatim serving —
      *  compressed-columns-implementation-plan.md §3): the stored zstd frame, its
      *  validated uncompressed size, and the stored column timestamp.
-     *  {@code usize == 0} = all-air ({@code frame} is empty). */
-    record FrameHit(byte[] frame, int usize, long columnTimestamp) {}
+     *  {@code usize == 0} = all-air ({@code frame} is empty). {@code wirefmt}: see
+     *  {@link StoreHit} — a 19 row's decompressed body is NATIVE layout. */
+    record FrameHit(byte[] frame, int usize, long columnTimestamp, int wirefmt) {
+        public FrameHit(byte[] frame, int usize, long columnTimestamp) {
+            this(frame, usize, columnTimestamp, 20);
+        }
+    }
 
     /** The store's content hash (CRC32C since schema v4, zero-extended into the 64-bit
      *  hash columns): {@code chash} over raw bytes, {@code fhash} over the compressed
@@ -87,6 +105,18 @@ public interface LodStoreService {
             hash *= 0x100000001b3L;
         }
         return hash;
+    }
+
+    /** C4: wire the native→v20 body translator the background migration walk uses
+     *  (the same platform function the serve rung gets). Default: ignored — only the
+     *  SQLite tier migrates; an unwired translator leaves the walk waiting while
+     *  serves still translate via the reader rung. */
+    default void setLegacyMigrationTranslator(java.util.function.UnaryOperator<byte[]> t) {}
+
+    /** C4: the background-migration status token for `/lsslod store status` — empty
+     *  when no walk is pending, else e.g. {@code " migrating=1234/98765"}. */
+    default String migrationStatusToken() {
+        return "";
     }
 
     /** The mode this store was built for (memory tier only vs memory+disk). */

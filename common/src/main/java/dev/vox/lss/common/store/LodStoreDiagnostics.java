@@ -37,6 +37,9 @@ public final class LodStoreDiagnostics {
     // mask drift / unresolvable dim). The ONLY live observable that a sweep actually
     // culled something — the Paper unfired-event soak gates on it moving.
     private final AtomicLong sweepDrops = new AtomicLong();
+    // C4 background-migration walk: rows rewritten to v20 / rows deleted as anomalies.
+    private final AtomicLong migratedRows = new AtomicLong();
+    private final AtomicLong migrateAnomalies = new AtomicLong();
     // Backfill (Phase 4, opt-in): columns read / deposited / skipped-already-present.
     private final AtomicLong backfillReads = new AtomicLong();
     private final AtomicLong backfillDeposits = new AtomicLong();
@@ -70,6 +73,16 @@ public final class LodStoreDiagnostics {
     public void recordDepositDrop() { this.depositDrops.incrementAndGet(); }
     public void recordDepositSkip() { this.depositSkips.incrementAndGet(); }
     public void recordError() { this.errors.incrementAndGet(); }
+
+    /** C4 walk accounting: {@code rewritten} rows migrated to v20, {@code anomalies}
+     *  rows deleted as unparseable (derived data). */
+    public void recordMigrated(int rewritten, int anomalies) {
+        this.migratedRows.addAndGet(rewritten);
+        this.migrateAnomalies.addAndGet(anomalies);
+    }
+
+    public long getMigratedRows() { return this.migratedRows.get(); }
+    public long getMigrateAnomalies() { return this.migrateAnomalies.get(); }
     public void recordMemHit() { this.memHits.incrementAndGet(); }
     public void recordMemEviction() { this.memEvictions.incrementAndGet(); }
     /** Size-cap SQL rows evicted (total; the one-shot cap log points here — the

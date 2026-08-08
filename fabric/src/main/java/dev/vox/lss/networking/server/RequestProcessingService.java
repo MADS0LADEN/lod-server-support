@@ -261,6 +261,12 @@ public class RequestProcessingService {
                         + "load on this platform — running WITHOUT the LOD store");
             } else {
                 this.diskReader.attachStore(this.lodStore);
+                // C4: pre-migration wirefmt=19 store rows translate to the canonical
+                // v20 form at the serve rung, against this server's own registries.
+                this.diskReader.setStoreLegacyTranslator(nativeRaw ->
+                        NbtSectionSerializer.toV20(nativeRaw, this.server.registryAccess()));
+                this.lodStore.setLegacyMigrationTranslator(nativeRaw ->
+                        NbtSectionSerializer.toV20(nativeRaw, this.server.registryAccess()));
                 this.offThreadProcessor.attachStore(this.lodStore);
             }
             // Opt-in background backfill (Phase 4): built only over the SQLite store

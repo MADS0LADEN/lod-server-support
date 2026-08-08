@@ -462,6 +462,12 @@ public class PaperRequestProcessingService {
                         + "load on this platform — running WITHOUT the LOD store");
             } else {
                 diskReader.attachStore(lodStore);
+                // C4: pre-migration wirefmt=19 store rows translate to the canonical
+                // v20 form at the serve rung, against this server's own registries.
+                diskReader.setStoreLegacyTranslator(nativeRaw ->
+                        PaperNbtSectionSerializer.toV20(nativeRaw, server.registryAccess()));
+                lodStore.setLegacyMigrationTranslator(nativeRaw ->
+                        PaperNbtSectionSerializer.toV20(nativeRaw, server.registryAccess()));
                 offThreadProcessor.attachStore(lodStore);
             }
         }
