@@ -95,11 +95,13 @@ public final class SqliteLodStore implements LodStoreService {
     static final String STORE_LAYOUT = "wirefmt";
     /** The row body format constants (C4, XVER §5): 19 = native-layout (pre-migration
      *  v0.9.x rows), 20 = the canonical v20 dictionary layout. */
-    static final int WIREFMT_NATIVE_19 = 19;
-    static final int WIREFMT_V20 = 20;
+    static final int WIREFMT_NATIVE_19 = LodStoreService.WIREFMT_NATIVE_19;
+    static final int WIREFMT_V20 = LodStoreService.WIREFMT_V20;
     /** Rows per background-migration batch (C4 §5.4). One batch runs per IDLE batcher
-     *  iteration only (the 200 ms queue-poll timeout), so the walk structurally yields
-     *  to ALL live store traffic — deposits, deletes, sweeps — and tops out around
+     *  iteration (the 200 ms queue-poll timeout) plus a busy FLOOR of one batch per 32
+     *  applied ops (review #3 — strict idle-gating starved the walk to zero under any
+     *  steady deposit traffic), so the walk yields hard to live store traffic
+     *  — deposits, deletes, sweeps — and on an idle store tops out around
      *  ~320 rows/s on a quiet server (a multi-GB store migrates in under an hour;
      *  restraint-first, the spec's pacing intent, with idle-gating standing in for the
      *  backfill's MSPT gate — the batcher is an off-main MIN_PRIORITY+1 thread, so its
@@ -113,21 +115,14 @@ public final class SqliteLodStore implements LodStoreService {
             new java.util.concurrent.atomic.AtomicLong();
     /** Dims not yet exhausted by the walk; rebuilt at boot from dimIds when pending. */
     private final java.util.ArrayDeque<Integer> migrateDims = new java.util.ArrayDeque<>();
+    /** Applied ops since the last walk batch — the busy floor's counter (batcher only). */
+    private int opsSinceMigrateBatch;
+    /** Armed by {@link #failNextMigrationBatchesForTest} (review #8's fault seam). */
+    private volatile int failNextMigrationBatches;
     /** The native→v20 body translator for the walk (platform-wired, same function the
      *  serve rung uses). Null = walk waits (serves still translate via the reader). */
     private volatile java.util.function.UnaryOperator<byte[]> legacyMigrationTranslator;
 
-    @Override
-    public void setLegacyMigrationTranslator(java.util.function.UnaryOperator<byte[]> t) {
-        this.legacyMigrationTranslator = t;
-    }
-
-    @Override
-    public String migrationStatusToken() {
-        if (!this.migratePending) return "";
-        return " migrating=" + Math.max(0, this.migrateRemaining.get())
-                + "/" + this.migrateTotal;
-    }
     private static final String DB_FILE = "store.db";
     private static final int PAGE_SIZE = 16384;
     private static final int WRITE_TXN_ROWS = 64;
@@ -1072,14 +1067,17 @@ public final class SqliteLodStore implements LodStoreService {
      * re-deposit (latest-wins already retagged the row). SQL throws propagate to the
      * batcher's shared failure handling (rollback + WRITE_FAILURE_LATCH).
      */
-    private void maybeMigrateBatch() throws Exception {
-        if (!this.migratePending) return;
+    /** @return true when a batch did real committed work (the caller resets the
+     *  writer-failure streak on it — a committed migration batch IS successful writer
+     *  work, unlike a vacuous idle iteration). */
+    private boolean maybeMigrateBatch() throws Exception {
+        if (!this.migratePending) return false;
         var translator = this.legacyMigrationTranslator;
-        if (translator == null) return;
+        if (translator == null) return false;
         Integer dimId = this.migrateDims.peekFirst();
         if (dimId == null) {
             finishMigration();
-            return;
+            return false;
         }
         long watermark = parseLongOr(readMetaMap().get("migrate_progress_" + dimId),
                 Long.MIN_VALUE);
@@ -1105,9 +1103,10 @@ public final class SqliteLodStore implements LodStoreService {
                 ps.executeUpdate();
             }
             bumpTxn(1);
-            return;
+            return false;
         }
         int migrated = 0;
+        int anomalies = 0;
         try (PreparedStatement up = this.writer.prepareStatement(
                 "UPDATE lods_" + dimId + " SET chash=?, usize=?, fhash=?, wirefmt="
                         + WIREFMT_V20 + ", blob=? WHERE pos=? AND wirefmt="
@@ -1116,6 +1115,16 @@ public final class SqliteLodStore implements LodStoreService {
                      "DELETE FROM lods_" + dimId + " WHERE pos=?")) {
             for (Row row : rows) {
                 try {
+                    // The R1 bound, HERE too (C4 review CRITICAL-1): decompress
+                    // allocates byte[usize] from the row's own size field — a
+                    // bit-rotted usize otherwise attempts a multi-GB allocation on the
+                    // batcher, and the resulting Error escaped the old catch(Exception)
+                    // into a rollback → same-batch retry every 200 ms → the failure
+                    // latch → a restart-surviving dead store.
+                    if (row.usize() <= 0 || row.usize() > MAX_ROW_USIZE) {
+                        throw new IllegalStateException("usize " + row.usize()
+                                + " out of bounds");
+                    }
                     byte[] raw = this.codec.decompress(row.blob(), row.usize());
                     byte[] v20 = translator.apply(raw);
                     byte[] frame = this.codec.compress(v20);
@@ -1126,11 +1135,21 @@ public final class SqliteLodStore implements LodStoreService {
                     up.setLong(5, row.pos());
                     up.executeUpdate();
                     migrated++;
-                } catch (Exception rowFailure) {
-                    // Derived data: an unparseable/untranslatable row is deleted, never
-                    // retried forever — the next serve re-warms it from region truth.
-                    del.setLong(1, row.pos());
-                    del.executeUpdate();
+                } catch (Throwable rowFailure) {
+                    // Throwable, not Exception (review CRITICAL-1): an OOM from a
+                    // hostile row or an Error out of the translator must resolve THIS
+                    // row, never escape into the batch-retry loop. Derived data: the
+                    // row is deleted; the next serve re-warms it from region truth.
+                    anomalies++;
+                    try {
+                        del.setLong(1, row.pos());
+                        del.executeUpdate();
+                    } catch (Throwable deleteFailure) {
+                        // Forward progress is absolute: a row whose DELETE also fails
+                        // stays tagged 19 BEHIND the watermark — served translated
+                        // forever, never revisited by the walk. Bounded and correct,
+                        // strictly better than a batch that can never advance.
+                    }
                 }
             }
         }
@@ -1147,9 +1166,27 @@ public final class SqliteLodStore implements LodStoreService {
         }
         // Rows + watermark + done-count commit as ONE transaction.
         this.txnRows += rows.size() + 2;
+        if (this.failNextMigrationBatches > 0) {
+            // Test seam (review #8): fault the batch AFTER its UPDATEs, BEFORE the
+            // commit — the rollback must retract rows AND watermark together.
+            this.failNextMigrationBatches--;
+            throw new SQLException("injected migration-batch failure (test seam)");
+        }
         commitTxn();
         this.migrateRemaining.addAndGet(-rows.size());
-        this.diag.recordMigrated(migrated, rows.size() - migrated);
+        this.diag.recordMigrated(migrated, anomalies);
+        return true;
+    }
+
+    /** Test seam (review #8): fail the next N migration batches between their row
+     *  UPDATEs and the commit, driving the watermark-rides-the-batch-txn invariant. */
+    void failNextMigrationBatchesForTest(int n) {
+        this.failNextMigrationBatches = n;
+    }
+
+    /** 0 once every armed fault has fired (the test's proof the fault path ran). */
+    int pendingInjectedMigrationFaultsForTest() {
+        return this.failNextMigrationBatches;
     }
 
     private void finishMigration() throws SQLException {
@@ -1158,11 +1195,36 @@ public final class SqliteLodStore implements LodStoreService {
                     + " 'migrate_total', 'migrate_done')"
                     + " OR k LIKE 'migrate_progress_%'");
         }
-        this.writer.commit();
+        // commitTxn, not a raw commit (review m15): keep the txn bookkeeping
+        // (txnRows / sweepReopened pruning) consistent with every other commit site.
+        this.txnRows++;
+        commitTxn();
         this.migratePending = false;
         this.migrateRemaining.set(0);
-        LSSLogger.info("LOD store: background migration complete — every row is v20"
-                + " (" + this.migrateTotal + " rows walked)");
+        long anomalies = this.diag.getMigrateAnomalies();
+        LSSLogger.info("LOD store: background migration complete — "
+                + this.diag.getMigratedRows() + " rows rewritten to v20"
+                + (anomalies > 0
+                        ? ", " + anomalies + " unreadable rows DELETED (re-warm from"
+                                + " serves/backfill — investigate if large)"
+                        : "") + " of " + this.migrateTotal + " walked");
+    }
+
+    @Override
+    public void setLegacyMigrationTranslator(java.util.function.UnaryOperator<byte[]> t) {
+        this.legacyMigrationTranslator = t;
+    }
+
+    @Override
+    public String migrationStatusToken() {
+        // A latched store must LOOK dead (review B1) — no healthy-looking progress.
+        if (!this.migratePending || this.latchedOff) return "";
+        long anomalies = this.diag.getMigrateAnomalies();
+        return " migrating=" + Math.max(0, this.migrateRemaining.get())
+                + "/" + this.migrateTotal
+                // Row DELETION is irreversible data loss on a production store — it
+                // must be visible, not write-only (review #4).
+                + (anomalies > 0 ? " migrate_anomalies=" + anomalies : "");
     }
 
     private void batcherLoop() {
@@ -1206,11 +1268,22 @@ public final class SqliteLodStore implements LodStoreService {
             }
             long now = System.nanoTime();
             try {
+                boolean migrationWorked = false;
                 if (op == null) {
                     commitTxn(); // idle flush: never hold a sub-batch across the snapshot cadence
-                    maybeMigrateBatch();
+                    migrationWorked = maybeMigrateBatch();
+                    this.opsSinceMigrateBatch = 0;
                 } else {
                     apply(op);
+                    // The busy floor (review #3): strict idle-gating starved the walk
+                    // to ZERO under any steady deposit traffic (a 500 cps backfill
+                    // never leaves a 200 ms idle window), inverting §5.5's
+                    // migration-before-backfill intent. One batch per 32 applied ops
+                    // keeps the walk at ~deposit pace while still yielding hard.
+                    if (this.migratePending && ++this.opsSinceMigrateBatch >= 32) {
+                        this.opsSinceMigrateBatch = 0;
+                        migrationWorked = maybeMigrateBatch();
+                    }
                 }
                 // Every iteration, not idle-only (R1 review: a continuously-busy batcher
                 // — sustained backfill, edit storms — never saw an idle iteration and the
@@ -1226,7 +1299,10 @@ public final class SqliteLodStore implements LodStoreService {
                 // Reset the failure streak only when an op actually applied: idle
                 // iterations are vacuous no-ops and must not launder a broken writer
                 // below the latch under sparse traffic (review finding).
-                if (op != null) this.writerFailures = 0;
+                // A committed migration batch is real writer work too (review #2:
+                // without it the latch became a LIFETIME budget of 20 for the walk —
+                // it only ran on idle iterations, which never reset the streak).
+                if (op != null || migrationWorked) this.writerFailures = 0;
             } catch (Throwable t) {
                 // Shutdown-abort of a periodic resweep is a clean exit, not a writer
                 // failure (review B5): runSweep signals it with InterruptedException,
@@ -1365,9 +1441,21 @@ public final class SqliteLodStore implements LodStoreService {
                 // up front too, so a mark racing the drop cannot survive in it.
                 try (Statement st = this.writer.createStatement()) {
                     st.executeUpdate("DELETE FROM backfill");
-                    // C4: the migration walk's subject rows are being dropped — reset
-                    // its bookkeeping with them (§5.4: DropAll mid-walk resets
-                    // migrate_progress_*).
+                }
+                this.writer.commit();
+                for (var e : List.copyOf(this.dimIds.entrySet())) {
+                    if (this.shutdown.get()) break; // same reason as inside the drop loop
+                    // dropDimensionRows publishes each batch to the sweep-drop
+                    // listener and installs the O(1) drop barrier itself; it no
+                    // longer needs a tombstone per position.
+                    dropDimensionRows(e.getKey(), e.getValue());
+                }
+                // C4 (review m16): the walk bookkeeping resets AFTER the drop loop —
+                // clearing it up front + a shutdown mid-drop left surviving 19-rows
+                // with no walk state (translated on every serve forever). If shutdown
+                // breaks the loop above, the surviving meta re-arms the walk next boot
+                // and it simply finds fewer rows.
+                try (Statement st = this.writer.createStatement()) {
                     st.executeUpdate("DELETE FROM meta WHERE k IN ('migrate_pending',"
                             + " 'migrate_total', 'migrate_done')"
                             + " OR k LIKE 'migrate_progress_%'");
@@ -1376,13 +1464,6 @@ public final class SqliteLodStore implements LodStoreService {
                 this.migratePending = false;
                 this.migrateRemaining.set(0);
                 this.migrateDims.clear();
-                for (var e : List.copyOf(this.dimIds.entrySet())) {
-                    if (this.shutdown.get()) break; // same reason as inside the drop loop
-                    // dropDimensionRows publishes each batch to the sweep-drop
-                    // listener and installs the O(1) drop barrier itself; it no
-                    // longer needs a tombstone per position.
-                    dropDimensionRows(e.getKey(), e.getValue());
-                }
                 LSSLogger.info("LOD store: dropped all rows + backfill progress"
                         + " (admin invalidate)");
             }

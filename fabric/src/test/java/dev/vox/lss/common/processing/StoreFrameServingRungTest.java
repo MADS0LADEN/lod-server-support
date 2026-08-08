@@ -156,6 +156,60 @@ class StoreFrameServingRungTest {
         assertFalse(result.fromStore(), "the 19-row must not serve untranslated");
         assertArrayEquals(new byte[]{9}, result.sectionBytes(), "the NBT ladder serves truth");
         assertTrue(store.diag.getErrors() > 0, "counted store.errors");
+        assertEquals(0, store.diag.getHits(),
+                "a failed translation is an errored miss, never ALSO a hit (review m17)");
+        r.shutdown();
+    }
+
+    @Test
+    void nineteenRowRawHitDeliversTheTranslatedBody() {
+        // The raw rung (serveStoreFrames=false) has the same translation contract as
+        // the frame rung — it shipped review-untested (C4 review #6).
+        var r = reader(false);
+        var store = new StubStore();
+        byte[] nativeRaw = new byte[1024];
+        for (int i = 0; i < nativeRaw.length; i++) nativeRaw[i] = (byte) (i * 7);
+        store.rawAnswer = new LodStoreService.StoreHit(nativeRaw, 321L, 19);
+        r.setStoreLegacyTranslator(raw -> {
+            byte[] out = new byte[raw.length + 2];
+            out[0] = 0x42;
+            System.arraycopy(raw, 0, out, 2, raw.length);
+            return out;
+        });
+        r.attachStore(store);
+
+        r.submitRead(PLAYER, 5, 6, DIM, 1L, () -> {
+            throw new AssertionError("the NBT operation must not run on a 19-row hit");
+        });
+        var result = awaitResult(r);
+
+        assertTrue(result.fromStore());
+        assertEquals(nativeRaw.length + 2, result.sectionBytes().length);
+        assertEquals(0x42, result.sectionBytes()[0], "the translated body, not the native one");
+        assertEquals(321L, result.columnTimestamp());
+        assertEquals(result.sectionBytes().length
+                        + dev.vox.lss.common.LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                result.estimatedBytes(),
+                "the charge re-derives from the TRANSLATED body");
+        assertEquals(1, store.diag.getHits());
+        assertEquals(0, store.getFrameCalls, "raw rung never consults getFrame");
+        r.shutdown();
+    }
+
+    @Test
+    void nineteenRowRawHitWithoutAWiredTranslatorReadsAsAnErroredMiss() {
+        var r = reader(false);
+        var store = new StubStore();
+        store.rawAnswer = new LodStoreService.StoreHit(new byte[256], 5L, 19);
+        r.attachStore(store);
+
+        r.submitRead(PLAYER, 2, 2, DIM, 1L, () -> new byte[]{8});
+        var result = awaitResult(r);
+        assertFalse(result.fromStore(), "the 19-row must not serve untranslated");
+        assertArrayEquals(new byte[]{8}, result.sectionBytes(), "the NBT ladder serves truth");
+        assertTrue(store.diag.getErrors() > 0, "counted store.errors");
+        assertEquals(0, store.diag.getHits(),
+                "a failed translation is an errored miss, never ALSO a hit (review m17)");
         r.shutdown();
     }
 

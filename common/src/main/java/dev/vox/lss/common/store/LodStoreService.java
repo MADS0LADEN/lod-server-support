@@ -38,6 +38,12 @@ package dev.vox.lss.common.store;
  */
 public interface LodStoreService {
 
+    /** Row body layout tags ({@code wirefmt} column, C4/XVER §5): {@code 19} = the
+     *  pre-v0.10.0 native section layout, {@code 20} = the canonical v20 dictionary
+     *  form every post-C2 row deposits as. */
+    int WIREFMT_NATIVE_19 = 19;
+    int WIREFMT_V20 = 20;
+
     /** A store hit: wire-format section bytes ({@code length == 0} = all-air) plus the
      *  stored column timestamp. {@code wirefmt} (C4, XVER §5): the row's body format —
      *  20 = the canonical v20 dictionary layout; 19 = a pre-migration native-layout row

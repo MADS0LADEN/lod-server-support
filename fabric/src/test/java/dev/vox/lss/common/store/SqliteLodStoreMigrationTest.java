@@ -77,6 +77,11 @@ class SqliteLodStoreMigrationTest {
         assertNotNull(codec, "zstd natives required on the test classpath");
         long now = System.currentTimeMillis() / 1000L;
         try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
+            // Match the released store's file shape (review m18): the lazy upgrade
+            // KEEPS this file, so the fixture must carry v0.9.x's page size and
+            // vacuum mode, not sqlite-jdbc defaults.
+            st.execute("PRAGMA page_size=16384");
+            st.execute("PRAGMA auto_vacuum=INCREMENTAL");
             st.execute("PRAGMA journal_mode=WAL");
             st.execute("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
             st.execute("CREATE TABLE dims (id INTEGER PRIMARY KEY, name TEXT UNIQUE,"
@@ -300,8 +305,18 @@ class SqliteLodStoreMigrationTest {
     void walkDeletesAnomalyRowsAndFinishes() throws Exception {
         long good = PositionUtil.packPosition(1, 2);
         long bad = PositionUtil.packPosition(3, 4);
+        long poison = PositionUtil.packPosition(5, 6);
         buildSchema3Store(FP, List.of(new FixtureRow(good, raw(10, 500), false),
-                new FixtureRow(bad, raw(20, 500), true)));
+                new FixtureRow(bad, raw(20, 500), true),
+                new FixtureRow(poison, raw(30, 500), false)));
+        // The CRITICAL-1 shape: a bit-rotted usize would size a multi-GB decompress
+        // allocation on the batcher — the walk must bound-check and resolve the row,
+        // never attempt it (the old shape OOM'd into an endless batch-retry → latch).
+        var ds = new org.sqlite.SQLiteDataSource();
+        ds.setUrl("jdbc:sqlite:" + storeDir().resolve("store.db"));
+        try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
+            st.executeUpdate("UPDATE lods_1 SET usize=" + (1 << 30) + " WHERE pos=" + poison);
+        }
         var store = open();
         try {
             store.setLegacyMigrationTranslator(FAKE_TRANSLATOR);
@@ -309,6 +324,102 @@ class SqliteLodStoreMigrationTest {
             assertNotNull(store.get(OW, good), "the good row migrates");
             assertNull(store.get(OW, bad),
                     "an unparseable row is DELETED (derived data), never retried forever");
+            assertNull(store.get(OW, poison),
+                    "an out-of-bounds usize is resolved WITHOUT attempting the allocation");
+            assertEquals(2, store.diagnostics().getMigrateAnomalies(),
+                    "both anomaly flavors counted (review #4: deletion must be visible)");
+        } finally {
+            store.shutdown();
+        }
+    }
+
+    @Test
+    void depositOverANineteenRowFlipsItToV20AtTheUpsert() throws Exception {
+        // The §3.1 pin (review #7, shipped untested): the ON CONFLICT clause carries
+        // wirefmt=excluded.wirefmt, so a fresh deposit over a pre-migration row retags
+        // it in ONE upsert — without that clause the row keeps wirefmt=19 while its
+        // hashes go CRC, and every subsequent serve FNV-validates a CRC row → the
+        // purge ladder deletes good rows.
+        long p1 = PositionUtil.packPosition(1, 2);
+        buildSchema3Store(FP, List.of(new FixtureRow(p1, raw(10, 800), false)));
+        var store = open(); // translator NOT wired — the walk waits, only the deposit acts
+        try {
+            byte[] fresh = raw(90, 640);
+            long newer = System.currentTimeMillis() / 1000L + 100;
+            assertTrue(store.deposit(OW, p1, fresh, newer, newer));
+            LodStoreService.StoreHit hit = null;
+            for (int i = 0; i < 400; i++) {
+                hit = store.get(OW, p1);
+                if (hit != null && hit.wirefmt() == WIRE_20) break;
+                Thread.sleep(25);
+            }
+            assertNotNull(hit);
+            assertEquals(WIRE_20, hit.wirefmt(),
+                    "the upsert's wirefmt=excluded.wirefmt must retag the row");
+            assertArrayEquals(fresh, hit.sectionBytes(),
+                    "the deposited body serves under CRC validation");
+        } finally {
+            store.shutdown();
+        }
+    }
+
+    @Test
+    void tsLoserDepositOverANineteenRowLeavesItNineteen() throws Exception {
+        // Latest-wins by STORED ts: a losing deposit must change NOTHING — including
+        // the wirefmt tag (a half-applied retag would CRC-validate FNV hashes).
+        long p1 = PositionUtil.packPosition(1, 2);
+        long p2 = PositionUtil.packPosition(5, 6);
+        buildSchema3Store(FP, List.of(new FixtureRow(p1, raw(10, 800), false)));
+        var store = open();
+        try {
+            long older = System.currentTimeMillis() / 1000L - 3600;
+            assertTrue(store.deposit(OW, p1, raw(90, 640), older, older));
+            // Sync barrier: a WINNING deposit at another pos proves the batch drained.
+            long now = System.currentTimeMillis() / 1000L + 100;
+            assertTrue(store.deposit(OW, p2, raw(50, 320), now, now));
+            for (int i = 0; i < 400 && store.get(OW, p2) == null; i++) {
+                Thread.sleep(25);
+            }
+            assertNotNull(store.get(OW, p2), "barrier deposit must land");
+            var hit = store.get(OW, p1);
+            assertNotNull(hit);
+            assertEquals(19, hit.wirefmt(), "a ts-loser deposit leaves the 19-row intact");
+            assertArrayEquals(raw(10, 800), hit.sectionBytes());
+        } finally {
+            store.shutdown();
+        }
+    }
+
+    @Test
+    void aFaultedWalkBatchRetractsRowsAndWatermarkTogetherAndRetries() throws Exception {
+        // Review #8: the watermark and its batch's row UPDATEs commit as ONE txn. A
+        // fault between the UPDATEs and the commit must retract BOTH — a surviving
+        // watermark over rolled-back rows would skip 64 rows forever (still 19, still
+        // FNV, walk "complete"); surviving rows under a rolled-back watermark would
+        // re-translate already-translated bodies.
+        var rows = new java.util.ArrayList<FixtureRow>();
+        for (int i = 0; i < 100; i++) {
+            rows.add(new FixtureRow(PositionUtil.packPosition(i, i + 1), raw(i, 600), false));
+        }
+        buildSchema3Store(FP, rows);
+        var store = open();
+        try {
+            store.failNextMigrationBatchesForTest(1);
+            store.setLegacyMigrationTranslator(FAKE_TRANSLATOR);
+            awaitWalkDone(store);
+            assertEquals(0, store.pendingInjectedMigrationFaultsForTest(),
+                    "the injected fault must actually have fired");
+            for (int i = 0; i < 100; i++) {
+                var hit = store.get(OW, rows.get(i).pos());
+                assertNotNull(hit, "row " + i + " lost to the faulted batch");
+                assertEquals(WIRE_20, hit.wirefmt(), "row " + i + " skipped by a"
+                        + " watermark that outlived its rolled-back batch");
+                assertArrayEquals(FAKE_TRANSLATOR.apply(raw(i, 600)), hit.sectionBytes(),
+                        "row " + i + " must translate EXACTLY once");
+            }
+            assertEquals(100, store.diagnostics().getMigratedRows(),
+                    "the rolled-back batch must not double-count");
+            assertEquals(0, store.diagnostics().getMigrateAnomalies());
         } finally {
             store.shutdown();
         }

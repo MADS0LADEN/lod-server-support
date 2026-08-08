@@ -110,7 +110,6 @@ public abstract class AbstractChunkDiskReader {
         return true;
     }
 
-    /** Attach the LOD store (lodStore != off). Must happen before the first submit. */
     /** The native→v20 body translator for pre-migration {@code wirefmt=19} store rows
      *  (C4, XVER §5.3): platform-wired ({@code NbtSectionSerializer.toV20} against the
      *  server's own registries). REQUIRED for 19-row serves — {@code raw() == v20} is a
@@ -119,11 +118,17 @@ public abstract class AbstractChunkDiskReader {
      *  leaking native bytes downstream. Runs on the reader pool (the emit tables are
      *  memoized and thread-safe). */
     private volatile java.util.function.UnaryOperator<byte[]> storeLegacyTranslator;
+    /** Resolved once on the first 19-row frame serve (review #5 — {@code zstdOrNull()}
+     *  runs a full compress/decompress self-test per call; per-serve probing burned
+     *  that on EVERY legacy hit). A store frame existing at all proves the natives
+     *  loaded, so one probe suffices for the process lifetime. */
+    private volatile dev.vox.lss.common.store.StoreCodec legacyRowCodec;
 
     public final void setStoreLegacyTranslator(java.util.function.UnaryOperator<byte[]> t) {
         this.storeLegacyTranslator = t;
     }
 
+    /** Attach the LOD store (lodStore != off). Must happen before the first submit. */
     public final void attachStore(dev.vox.lss.common.store.LodStoreService store) {
         this.store = store;
     }
@@ -291,8 +296,8 @@ public abstract class AbstractChunkDiskReader {
                 s.diagnostics().recordMiss();
                 return false;
             }
-            s.diagnostics().recordHit(System.nanoTime() - t0);
             if (hit.usize() == 0) {
+                s.diagnostics().recordHit(System.nanoTime() - t0);
                 // All-air: same result shape as the raw rung (null section bytes,
                 // never not-found — a null read as an authoritative miss would seed
                 // the miss memo falsely).
@@ -301,7 +306,7 @@ public abstract class AbstractChunkDiskReader {
                         false, false, false, true, submissionOrder, 0L));
                 return true;
             }
-            if (hit.wirefmt() == 19) {
+            if (hit.wirefmt() == dev.vox.lss.common.store.LodStoreService.WIREFMT_NATIVE_19) {
                 // Pre-migration native-layout row (C4, XVER §5.3): decompress (fhash
                 // already validated in the store) and translate to the canonical v20
                 // form HERE — raw()==v20 is a C2 pipeline invariant, and a verbatim
@@ -313,12 +318,16 @@ public abstract class AbstractChunkDiskReader {
                 if (v20 == null) {
                     return false; // errored miss, counted; the NBT ladder serves truth
                 }
+                // Hit recorded only on translation SUCCESS (review m17): a failed
+                // translation is an errored miss and must not also book a hit.
+                s.diagnostics().recordHit(System.nanoTime() - t0);
                 addResult(playerUuid, new ChunkReadResult(playerUuid, chunkX, chunkZ, v20,
                         dimension, v20.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
                         hit.columnTimestamp(),
                         false, false, false, true, submissionOrder, 0L));
                 return true;
             }
+            s.diagnostics().recordHit(System.nanoTime() - t0);
             int estimatedBytes = hit.usize() + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
             addResult(playerUuid, new ChunkReadResult(playerUuid, chunkX, chunkZ, null,
                     dimension, estimatedBytes, hit.columnTimestamp(),
@@ -348,10 +357,10 @@ public abstract class AbstractChunkDiskReader {
             s.diagnostics().recordMiss();
             return false;
         }
-        s.diagnostics().recordHit(System.nanoTime() - t0);
         boolean allAir = hit.sectionBytes().length == 0;
         byte[] bytes = allAir ? null : hit.sectionBytes();
-        if (!allAir && hit.wirefmt() == 19) {
+        if (!allAir
+                && hit.wirefmt() == dev.vox.lss.common.store.LodStoreService.WIREFMT_NATIVE_19) {
             // Pre-migration native-layout row on the raw rung — same translation
             // contract as the frame rung above.
             bytes = translateLegacyRaw(s, bytes);
@@ -359,6 +368,7 @@ public abstract class AbstractChunkDiskReader {
                 return false;
             }
         }
+        s.diagnostics().recordHit(System.nanoTime() - t0);
         int estimatedBytes = allAir ? 0
                 : bytes.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
         addResult(playerUuid, new ChunkReadResult(playerUuid, chunkX, chunkZ, bytes,
@@ -370,11 +380,17 @@ public abstract class AbstractChunkDiskReader {
     /** Decompress + translate a 19-row frame to v20; null = contained errored miss. */
     private byte[] translateLegacyStoreRow(dev.vox.lss.common.store.LodStoreService s,
                                            byte[] frame, int usize) {
-        var codec = dev.vox.lss.common.store.StoreCodec.zstdOrNull();
+        var codec = this.legacyRowCodec;
         if (codec == null) {
-            s.diagnostics().recordError();
-            s.diagnostics().recordMiss();
-            return null;
+            codec = dev.vox.lss.common.store.StoreCodec.zstdOrNull();
+            if (codec == null) {
+                // No re-probe latch needed: a FrameHit cannot exist unless the store
+                // opened, which required the natives — this arm is belt only.
+                s.diagnostics().recordError();
+                s.diagnostics().recordMiss();
+                return null;
+            }
+            this.legacyRowCodec = codec;
         }
         try {
             return translateLegacyRawOrThrow(codec.decompress(frame, usize));
