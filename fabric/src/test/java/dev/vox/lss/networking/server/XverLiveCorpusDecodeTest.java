@@ -83,6 +83,17 @@ class XverLiveCorpusDecodeTest {
             s.filter(p -> p.getFileName().toString().endsWith(".bin")).sorted().forEach(out::add);
         }
         assertFalse(out.isEmpty(), "xver-live-corpus has no .bin fixtures");
+        // Count pinned against the committed MANIFEST (pre-D3 review L3-22): the
+        // non-empty check alone lets the corpus silently shrink to one fixture.
+        long manifestEntries;
+        try {
+            manifestEntries = Files.readAllLines(dir.resolve("MANIFEST.txt")).stream()
+                    .filter(l -> l.contains(".bin")).count();
+        } catch (java.io.IOException e) {
+            throw new AssertionError("xver-live-corpus MANIFEST.txt unreadable", e);
+        }
+        assertEquals(manifestEntries, out.size(),
+                "fixture count must match MANIFEST.txt — a silently shrunk corpus decodes nothing");
         return out;
     }
 

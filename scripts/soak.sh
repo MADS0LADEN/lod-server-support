@@ -231,7 +231,11 @@ case "$SCENARIO" in
                                 SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
     store-offline-verify)       CLIENT_RUNS=1; EXPECTED_SECONDS=280
                                 SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
-    store-migration-join)       CLIENT_RUNS=1; EXPECTED_SECONDS=280 ;;
+    store-migration-join)       CLIENT_RUNS=1; EXPECTED_SECONDS=280
+                                # Overlap hold (pre-D3 review L3-1): keep the walk
+                                # parked past the join so warm serves provably hit
+                                # 19-rows; 0 disables (SOAK_MIGRATION_HOLD_SECONDS).
+                                SERVER_EXTRA_ARGS=("-Psoak.migrationHoldSeconds=${SOAK_MIGRATION_HOLD_SECONDS:-0}") ;;
     paper-dirty-falling-block)  CLIENT_RUNS=1; EXPECTED_SECONDS=300 ;;
     paper-store-unfired-event)  CLIENT_RUNS=1; EXPECTED_SECONDS=320
                                 # Backfill charges the store; the un-evented setblock +

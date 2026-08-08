@@ -4,6 +4,8 @@ import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.store.StoreCodec;
 import dev.vox.lss.common.wire.WireFormatException;
 import dev.vox.lss.common.wire.WireSectionCursor;
+import io.netty.buffer.Unpooled;
+import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.server.Bootstrap;
@@ -201,22 +203,48 @@ class PaperLegacyEgressTest {
 
     @Test
     void v18AndV16SplicesOverTheTranslatedFrameEqualTheNativeBuiltRewrites() {
+        // Field-by-field decomposition mirroring the Fabric twin (pre-D3 review L3-3:
+        // the old form compared rewrite(nativeFrame) to rewrite(translatedFrame), but
+        // the two input frames are byte-identical by the chain pin above — f(x)==f(x),
+        // which any deterministic rewrite satisfies, wrong-offset splices included).
         byte[] nativeBody = PaperNbtSectionSerializer.fromV20(
                 readCorpus("v20-corpus", "waterlogged.bin"), REGISTRY_ACCESS);
         byte[] nativeGolden = readCorpus("nbt-corpus", "waterlogged.bin");
         byte[] translatedFrame = PaperPayloadHandler.encodeVoxelColumnPreEncoded(7, -3,
                 "minecraft:overworld", 1234567L, LSSConstants.COLUMN_SOURCE_DISK,
                 LSSConstants.COLUMN_CODEC_RAW, nativeBody);
-        byte[] nativeFrame = PaperPayloadHandler.encodeVoxelColumnPreEncoded(7, -3,
-                "minecraft:overworld", 1234567L, LSSConstants.COLUMN_SOURCE_DISK,
-                LSSConstants.COLUMN_CODEC_RAW, nativeGolden);
 
-        assertArrayEquals(PaperPayloadHandler.rewriteColumnToV18(nativeFrame),
-                PaperPayloadHandler.rewriteColumnToV18(translatedFrame),
-                "the v18 splice must compose on the translated frame");
-        assertArrayEquals(PaperPayloadHandler.rewriteColumnToV16(nativeFrame),
-                PaperPayloadHandler.rewriteColumnToV16(translatedFrame),
-                "the v16 splice must compose on the translated frame");
+        var v18 = new FriendlyByteBuf(Unpooled.wrappedBuffer(
+                PaperPayloadHandler.rewriteColumnToV18(translatedFrame)));
+        try {
+            assertEquals(7, v18.readInt());
+            assertEquals(-3, v18.readInt());
+            assertEquals("minecraft:overworld",
+                    v18.readUtf(LSSConstants.MAX_DIMENSION_STRING_LENGTH));
+            assertEquals(1234567L, v18.readLong());
+            assertEquals(LSSConstants.COLUMN_SOURCE_DISK, v18.readByte(),
+                    "v18 keeps the source byte");
+            assertArrayEquals(nativeGolden, v18.readByteArray(LSSConstants.MAX_SECTIONS_SIZE),
+                    "the v18 frame's section array must be the TRANSLATED native body");
+            assertEquals(0, v18.readableBytes(), "no codec byte anywhere in a v18 frame");
+        } finally {
+            v18.release();
+        }
+
+        var v16 = new FriendlyByteBuf(Unpooled.wrappedBuffer(
+                PaperPayloadHandler.rewriteColumnToV16(translatedFrame)));
+        try {
+            assertEquals(7, v16.readInt());
+            assertEquals(-3, v16.readInt());
+            assertEquals("minecraft:overworld",
+                    v16.readUtf(LSSConstants.MAX_DIMENSION_STRING_LENGTH));
+            assertEquals(1234567L, v16.readLong());
+            assertArrayEquals(nativeGolden, v16.readByteArray(LSSConstants.MAX_SECTIONS_SIZE),
+                    "the v16 frame drops source AND codec and carries the translated body");
+            assertEquals(0, v16.readableBytes());
+        } finally {
+            v16.release();
+        }
     }
 
     // ---- review MAJOR-1/2/3 pins (Fabric twins) ----

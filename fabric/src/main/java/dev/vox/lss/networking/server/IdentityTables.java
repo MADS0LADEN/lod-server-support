@@ -56,10 +56,23 @@ public final class IdentityTables {
                 if (map == null) {
                     String[] table = blockIdentities();
                     var built = new HashMap<String, Integer>(table.length * 2);
+                    int live = 0;
                     for (int id = 0; id < table.length; id++) {
                         if (table[id] != null) {
                             built.put(table[id], id);
+                            live++;
                         }
+                    }
+                    // Fail-loud on duplicate canonical identities (pre-D3 review L1-1):
+                    // put() overwrites, so a modded Property whose getName(T) collides
+                    // two values would silently serve state B for state A to every
+                    // legacy session and lossy-migrate store rows. Vanilla cannot hit
+                    // this (per-block property names are unique); a mod that does must
+                    // fail at table build, not corrupt the wire.
+                    if (built.size() != live) {
+                        throw new IllegalStateException("block identity table has "
+                                + (live - built.size()) + " duplicate canonical identities"
+                                + " — a modded block Property collides state names");
                     }
                     blockIdsByIdentity = map = Map.copyOf(built);
                 }

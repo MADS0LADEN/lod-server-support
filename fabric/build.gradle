@@ -145,6 +145,9 @@ loom {
             // Server-side probe hashes (probe_hashes in server.jsonl — the store
             // byte-parity gate): armed per scenario via soak.sh SERVER_EXTRA_ARGS.
             vmArg "-Dlss.soak.probes=${findProperty('soak.probes') ?: ''}"
+            // Store-migration overlap hold (pre-D3 review L3-1): the gate's phase 2
+            // holds the walk so the join provably serves from 19-rows.
+            vmArg "-Dlss.soak.migrationHoldSeconds=${findProperty('soak.migrationHoldSeconds') ?: '0'}"
             programArg "--nogui"
         }
         register("soakClient") {
