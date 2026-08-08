@@ -5,6 +5,11 @@
     {
       "anchor": 1,
       "at": 2,
+      "cmd": "kill @e[type=!minecraft:player]"
+    },
+    {
+      "anchor": 1,
+      "at": 2,
       "cmd": "gamerule randomTickSpeed 0"
     },
     {

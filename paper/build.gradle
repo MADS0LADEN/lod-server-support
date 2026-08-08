@@ -115,6 +115,7 @@ tasks.register('runSoakServer', xyz.jpenilla.runpaper.task.RunServer) {
     runDirectory(file('build/run/soak-server'))
     pluginJars(soakShadowJar.flatMap { it.archiveFile })
     systemProperty 'lss.soak.scenario', findProperty('soak.scenario') ?: ''
+    systemProperty 'lss.soak.dirtyTrace', findProperty('soak.dirtyTrace') ?: 'false'
     // Server-side probe hashes (probe_hashes in server.jsonl — the store byte-parity
     // gate): armed per scenario via soak.sh SERVER_EXTRA_ARGS, twin of the Fabric
     // soakServer vmArg.

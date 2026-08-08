@@ -1073,6 +1073,9 @@ class PaperRequestProcessingServiceTest {
         // the real handshake path; mirror that ordering here.
         var svc = liveCompressionService();
         var uuid = UUID.randomUUID();
+        // The dialect TRACKER is the egress/derivation source of truth now; the real
+        // dialectFlip marks both it and the manager's ingress session before register.
+        svc.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V16);
         svc.getV16CompatManager().onHandshake(uuid);
         var state = svc.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
                 LSSConstants.CAPABILITY_VOXEL_COLUMNS | LSSConstants.CAPABILITY_ZSTD_COLUMNS);
@@ -1089,7 +1092,7 @@ class PaperRequestProcessingServiceTest {
         // in the drain's beforeRegister); mirror that ordering here.
         var svc = liveCompressionService();
         var uuid = UUID.randomUUID();
-        svc.getV18CompatTracker().onHandshake(uuid);
+        svc.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V18);
         var state = svc.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
                 LSSConstants.CAPABILITY_VOXEL_COLUMNS | LSSConstants.CAPABILITY_ZSTD_COLUMNS);
         assertFalse(state.wantsCompressedColumns());
@@ -1104,12 +1107,12 @@ class PaperRequestProcessingServiceTest {
         // hard-kick the client on its next column.
         var svc = liveCompressionService();
         var uuid = UUID.randomUUID();
-        svc.getV18CompatTracker().onHandshake(uuid);
+        svc.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V18);
         svc.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
                 LSSConstants.CAPABILITY_VOXEL_COLUMNS | LSSConstants.CAPABILITY_ZSTD_COLUMNS);
 
         svc.removePlayer(uuid); // the dimension-change half: direct, NOT the mailbox
-        assertTrue(svc.getV18CompatTracker().isV18(uuid),
+        assertTrue(svc.getDialectTracker().isV18(uuid),
                 "removePlayer must not shed the v18 identity (dim changes reuse it)");
 
         var state = svc.registerPlayer(playerIn(uuid, level(Level.END)),
@@ -1129,13 +1132,13 @@ class PaperRequestProcessingServiceTest {
         var uuid = UUID.randomUUID();
         var player = playerIn(uuid, level(Level.OVERWORLD));
         service.enqueueRegister(player, LSSConstants.CAPABILITY_VOXEL_COLUMNS,
-                () -> service.getV18CompatTracker().onHandshake(uuid), () -> {});
-        service.getV18CompatTracker().onDisconnect(uuid); // the quit's direct drop: too early
+                () -> service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V18), () -> {});
+        service.getDialectTracker().onDisconnect(uuid); // the quit's direct drop: too early
         service.enqueueRemove(uuid);
         service.tick(); // drain: Register (marks) then Remove (must drop the mark)
-        assertFalse(service.getV18CompatTracker().isV18(uuid),
+        assertFalse(service.getDialectTracker().isV18(uuid),
                 "the mailbox Remove must drop membership the direct disconnect missed");
-        assertEquals(0, service.getV18CompatTracker().sessionCount());
+        assertEquals(0, service.getDialectTracker().sessionCount(dev.vox.lss.common.HandshakeGate.WireDialect.V18));
     }
 
     /** 2026-08-05 review H2: the lifecycle SWEEP (entity removed, no PlayerList entry —
@@ -1148,16 +1151,134 @@ class PaperRequestProcessingServiceTest {
         var uuid = UUID.randomUUID();
         var player = playerIn(uuid, level(Level.OVERWORLD));
         service.getV16CompatManager().onHandshake(uuid);
-        service.getV18CompatTracker().onHandshake(uuid);
+        service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V18);
         service.registerPlayer(player, LSSConstants.CAPABILITY_VOXEL_COLUMNS);
 
         // The player's entity vanishes with no PlayerList entry and no quit event.
         when(player.isRemoved()).thenReturn(true);
         service.tick(); // the lifecycle pass sweeps the player out
 
-        assertFalse(service.getV18CompatTracker().isV18(uuid),
+        assertFalse(service.getDialectTracker().isV18(uuid),
                 "the sweep drops v18 membership (execution-review finding 2)");
         assertFalse(service.getV16CompatManager().isV16(uuid),
                 "…and the v16 session with it (review H2 — the leaked twin)");
+    }
+
+    // ---- C2 legacy egress routing (routeColumnFrame — XVER §4.2) ----
+    //
+    // The dialect ladder over a capturing sender: which header shape ships per dialect
+    // and how a splice refusal contains. Bodies are translated at the ENQUEUE choke
+    // point (PaperOffThreadProcessor.buildLegacyColumn — pinned with the corpus goldens
+    // in PaperLegacyEgressTest), so this seam sees native-bodied frames and applies
+    // only header shapes.
+
+    private static byte[] ladderFrame(byte codec, byte[] body) {
+        return PaperPayloadHandler.encodeVoxelColumnPreEncoded(3, 4, "minecraft:overworld",
+                99L, LSSConstants.COLUMN_SOURCE_DISK, codec, body);
+    }
+
+    @Test
+    void routeColumnFrameShipsCurrentSessionsVerbatim() {
+        var state = service.registerPlayer(playerIn(UUID.randomUUID(), level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        byte[] frame = ladderFrame(LSSConstants.COLUMN_CODEC_RAW, new byte[] {0, 0});
+        var sent = new ArrayList<byte[]>();
+        service.routeColumnFrame(state, frame, sent::add);
+        assertEquals(1, sent.size());
+        assertSame(frame, sent.get(0), "verbatim — the same array, no re-encode");
+    }
+
+    @Test
+    void routeColumnFrameShipsV19SessionsVerbatimAtTheCurrentHeader() {
+        var uuid = UUID.randomUUID();
+        service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V19);
+        var state = service.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        byte[] frame = ladderFrame(LSSConstants.COLUMN_CODEC_RAW, new byte[] {0});
+        var sent = new ArrayList<byte[]>();
+        service.routeColumnFrame(state, frame, sent::add);
+        assertEquals(1, sent.size());
+        assertSame(frame, sent.get(0),
+                "v19's header IS the current header and the body was translated at "
+                        + "enqueue — nothing to rewrite at the flush seam");
+    }
+
+    @Test
+    void routeColumnFrameComposesTheV18SpliceOnTheQueuedFrame() {
+        var uuid = UUID.randomUUID();
+        service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V18);
+        var state = service.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        byte[] frame = ladderFrame(LSSConstants.COLUMN_CODEC_RAW, new byte[] {0});
+        var sent = new ArrayList<byte[]>();
+        service.routeColumnFrame(state, frame, sent::add);
+        assertEquals(1, sent.size());
+        assertArrayEquals(PaperPayloadHandler.rewriteColumnToV18(frame), sent.get(0),
+                "the v18 egress strips exactly the codec byte");
+    }
+
+    @Test
+    void routeColumnFrameComposesTheV16SpliceOnTheQueuedFrame() {
+        var uuid = UUID.randomUUID();
+        service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V16);
+        service.getV16CompatManager().onHandshake(uuid);
+        var state = service.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        byte[] frame = ladderFrame(LSSConstants.COLUMN_CODEC_RAW, new byte[] {0});
+        var sent = new ArrayList<byte[]>();
+        service.routeColumnFrame(state, frame, sent::add);
+        assertEquals(1, sent.size());
+        assertArrayEquals(PaperPayloadHandler.rewriteColumnToV16(frame), sent.get(0),
+                "the v16 egress strips the source and codec bytes");
+    }
+
+    @Test
+    void enqueueTranslatesLegacySessionBodiesThroughTheRealDialectRead() throws Exception {
+        // Review MAJOR-1's discriminating pin: the REAL enqueue path — the tracker the
+        // service attached, the dialect read on it, the translate branch, the queued
+        // frame — driven end to end. The emitted frame must byte-equal a natively-built
+        // frame (header preserved, body the frozen native golden); shipping the v20
+        // body here is the C1-1 CRITICAL failure mode no other tier can see (the mock
+        // client does not decode, and the soak lever is not in CI).
+        var uuid = UUID.randomUUID();
+        service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V19);
+        var level = level(Level.OVERWORLD);
+        when(level.registryAccess()).thenReturn(CorpusRegistryAccess.build());
+        var state = service.registerPlayer(playerIn(uuid, level), LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        processor.updateDimensionContext("minecraft:overworld", level);
+
+        byte[] v20 = PaperLegacyEgressTest.readCorpus("v20-corpus", "multi-section.bin");
+        byte[] nativeGolden = PaperLegacyEgressTest.readCorpus("nbt-corpus", "multi-section.bin");
+        boolean sent = processor.buildAndEnqueueColumnPayload(state, 3, 4, "minecraft:overworld",
+                99L, 1L, dev.vox.lss.common.processing.ColumnBytes.ofRaw(null, v20),
+                v20.length, LSSConstants.COLUMN_SOURCE_DISK);
+        assertTrue(sent, "the legacy build must enqueue, not refuse");
+
+        var sentFrames = new ArrayList<byte[]>();
+        service.setColumnPayloadSender((s, data) -> sentFrames.add(data));
+        awaitBandwidthWindow();
+        service.tick();
+
+        assertEquals(1, sentFrames.size(), "the queued legacy payload must flush");
+        assertArrayEquals(PaperPayloadHandler.encodeVoxelColumnPreEncoded(3, 4,
+                        "minecraft:overworld", 99L, LSSConstants.COLUMN_SOURCE_DISK,
+                        LSSConstants.COLUMN_CODEC_RAW, nativeGolden), sentFrames.get(0),
+                "the flushed frame must carry the TRANSLATED native body under the "
+                        + "preserved header — a v20 body here is the C1-1 failure mode");
+    }
+
+    @Test
+    void routeColumnFrameDropsWhenTheLegacySpliceRefusesTheFrame() {
+        // The cross-dialect downgrade window: a codec-1 frame reaching a v18 session's
+        // splice throws (nowhere to carry a codec) — contained as a warn-drop, never a
+        // propagated exception (which would make flushSendQueue drop the whole queue).
+        var uuid = UUID.randomUUID();
+        service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V18);
+        var state = service.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        var sent = new ArrayList<byte[]>();
+        service.routeColumnFrame(state, ladderFrame(LSSConstants.COLUMN_CODEC_ZSTD, new byte[] {1, 2, 3}),
+                sent::add);
+        assertTrue(sent.isEmpty());
     }
 }

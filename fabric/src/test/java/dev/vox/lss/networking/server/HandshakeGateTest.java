@@ -224,6 +224,51 @@ class HandshakeGateTest {
     }
 
     @Test
+    void v19WithCompatEnabledTakesTheNormalLadderWithTheV19Dialect() {
+        // The protocol-20 bump's third rung (XVER §4.2): same
+        // dialect-decided-by-the-version-rung-only contract as v16/v18.
+        var register = HandshakeGate.evaluate(19, VOXEL_CAPS, true, true, true, true, true);
+        assertEquals(Outcome.REGISTER, register.outcome());
+        assertEquals(HandshakeGate.WireDialect.V19, register.dialect());
+        assertTrue(register.registerPlayer());
+
+        var noConsumer = HandshakeGate.evaluate(19, 0, true, true, true, true, true);
+        assertEquals(Outcome.NO_CONSUMER, noConsumer.outcome());
+        assertEquals(HandshakeGate.WireDialect.V19, noConsumer.dialect());
+        assertTrue(noConsumer.sendSessionConfig());
+        assertFalse(noConsumer.registerPlayer());
+
+        var disabled = HandshakeGate.evaluate(19, VOXEL_CAPS, false, true, true, true, true);
+        assertEquals(Outcome.DISABLED, disabled.outcome());
+        assertEquals(HandshakeGate.WireDialect.V19, disabled.dialect());
+    }
+
+    @Test
+    void v19WithCompatDisabledStaysTheSilentVersionMismatch() {
+        var d = HandshakeGate.evaluate(19, VOXEL_CAPS, true, true, true, true, false);
+        assertEquals(Outcome.VERSION_MISMATCH, d.outcome());
+        assertFalse(d.sendSessionConfig());
+        // The 6-arg overload (pre-v19-compat call shape) is the v19-disabled ladder —
+        // a production call site left on it silently mismatches every v0.9.x client,
+        // which is why both platforms pin their handshake paths with a v19 frame.
+        assertEquals(Outcome.VERSION_MISMATCH,
+                HandshakeGate.evaluate(19, VOXEL_CAPS, true, true, true, true).outcome());
+    }
+
+    @Test
+    void theThirdCompatFlagIsIndependentToo() {
+        // v19 answers ONLY to its own flag, exactly like the other two rungs.
+        assertEquals(Outcome.VERSION_MISMATCH,
+                HandshakeGate.evaluate(19, VOXEL_CAPS, true, true, true, true, false).outcome());
+        assertEquals(HandshakeGate.WireDialect.V19,
+                HandshakeGate.evaluate(19, VOXEL_CAPS, true, true, false, false, true).dialect());
+        assertEquals(HandshakeGate.WireDialect.V18,
+                HandshakeGate.evaluate(18, VOXEL_CAPS, true, true, false, true, false).dialect());
+        assertEquals(HandshakeGate.WireDialect.V16,
+                HandshakeGate.evaluate(16, VOXEL_CAPS, true, true, true, false, false).dialect());
+    }
+
+    @Test
     void theTwoCompatFlagsAreIndependent() {
         // Each rung answers ONLY to its own flag: 18 with only the v16 flag mismatches,
         // 16 with only the v18 flag mismatches, and each version takes its own dialect
@@ -263,5 +308,69 @@ class HandshakeGateTest {
         assertEquals(HandshakeGate.Outcome.NO_CONSUMER,
                 HandshakeGate.evaluate(LSSConstants.PROTOCOL_VERSION,
                         LSSConstants.CAPABILITY_ZSTD_COLUMNS, true, true).outcome());
+    }
+
+    // ---- C5: the Via cross-MC mismatch rung (XVER §7) ----
+
+    @Test
+    void viaMismatchDeniesEveryLegacyDialectSilently() {
+        // A cross-MC legacy client cannot be served (native-id bytes for another
+        // registry set). Deny BEFORE the register/reply rungs, with NO reply —
+        // silence is each legacy ladder's native "no LSS here" signal.
+        for (int version : new int[]{19, 18, 16}) {
+            var d = HandshakeGate.evaluate(version, VOXEL_CAPS, true, true,
+                    true, true, true, true);
+            assertEquals(Outcome.VIA_MISMATCH, d.outcome(), "protocol " + version);
+            assertFalse(d.sendSessionConfig(), "protocol " + version + " must stay silent");
+            assertFalse(d.registerPlayer());
+            assertFalse(d.effectiveEnabled());
+        }
+    }
+
+    @Test
+    void viaMismatchNeverTouchesACurrentClient() {
+        // A v20 client carries mcDataVersion in its handshake and is servable on any
+        // MC version — the flag must be ignored for CURRENT.
+        var d = HandshakeGate.evaluate(V, VOXEL_CAPS, true, true, true, true, true, true);
+        assertEquals(Outcome.REGISTER, d.outcome());
+        assertTrue(d.registerPlayer());
+    }
+
+    @Test
+    void viaMismatchFalseIsByteIdenticalToTheSevenArgLadder() {
+        // viaMismatch=false IS the guard-off / probe-no-signal behavior; every 7-arg
+        // pin in this file rides the delegation, and this pins the equivalence.
+        for (int version : new int[]{V, 19, 18, 16, 17, V + 1}) {
+            for (int caps : new int[]{VOXEL_CAPS, 0}) {
+                assertEquals(
+                        HandshakeGate.evaluate(version, caps, true, true, true, true, true),
+                        HandshakeGate.evaluate(version, caps, true, true, true, true, true,
+                                false),
+                        "version " + version + " caps " + caps);
+            }
+        }
+    }
+
+    @Test
+    void versionMismatchOutranksTheViaRung() {
+        // A rung-disabled or foreign version never reaches the Via check: the silent
+        // VERSION_MISMATCH classification (and its call-site warn) must not be
+        // re-labeled as a Via denial.
+        var foreign = HandshakeGate.evaluate(17, VOXEL_CAPS, true, true,
+                true, true, true, true);
+        assertEquals(Outcome.VERSION_MISMATCH, foreign.outcome());
+        var rungOff = HandshakeGate.evaluate(19, VOXEL_CAPS, true, true,
+                true, true, false, true);
+        assertEquals(Outcome.VERSION_MISMATCH, rungOff.outcome(),
+                "v19 with the rung disabled is a version mismatch, not a Via denial");
+    }
+
+    @Test
+    void viaMismatchPreservesTheSelectedDialect() {
+        // The decision carries the selected dialect even on the deny — diagnostic
+        // truth about WHICH rung matched (the call sites' early return runs before
+        // any shed logic, same as VERSION_MISMATCH — see the m1 note at both sites).
+        var d = HandshakeGate.evaluate(19, VOXEL_CAPS, true, true, true, true, true, true);
+        assertEquals(HandshakeGate.WireDialect.V19, d.dialect());
     }
 }

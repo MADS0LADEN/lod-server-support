@@ -3,6 +3,7 @@ package dev.vox.lss.networking;
 import dev.vox.lss.networking.payloads.BatchChunkRequestC2SPayload;
 import dev.vox.lss.networking.payloads.BatchResponseS2CPayload;
 import dev.vox.lss.networking.payloads.DirtyColumnsS2CPayload;
+import dev.vox.lss.networking.payloads.ClientInfoC2SPayload;
 import dev.vox.lss.networking.payloads.HandshakeC2SPayload;
 import dev.vox.lss.networking.payloads.SessionConfigS2CPayload;
 import dev.vox.lss.networking.payloads.VoxelColumnS2CPayload;
@@ -19,6 +20,10 @@ public class LSSNetworking {
         PayloadTypeRegistry.serverboundPlay().register(
                 BatchChunkRequestC2SPayload.TYPE,
                 BatchChunkRequestC2SPayload.CODEC
+        );
+        PayloadTypeRegistry.serverboundPlay().register(
+                ClientInfoC2SPayload.TYPE,
+                ClientInfoC2SPayload.CODEC
         );
 
         // Server -> Client

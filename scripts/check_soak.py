@@ -86,6 +86,10 @@ ANOMALY_OPT_INS = {
     "store-offline-populate": frozenset({"saturated"}),
     "store-offline-mutate": frozenset(),
     "store-offline-verify": frozenset({"saturated"}),
+    # C6 store-migration variant: a carried v0.9.x-downgraded store, warm 19-row serves
+    # through the inverse translator while the background walk migrates — same
+    # load-shaped opt-in as the other store rejoin legs.
+    "store-migration-join": frozenset({"saturated"}),
     "store-save-storm": frozenset({"saturated"}),
     "store-save-storm-off": frozenset({"saturated"}),
     "dimension-rejoin-warm": frozenset({"saturated"}),
@@ -126,6 +130,7 @@ MIN_CLIENT_WINDOWS = {
     "store-offline-populate": {(1, 0): 4},
     "store-offline-mutate": {(1, 0): 3},
     "store-offline-verify": {(1, 0): 4},
+    "store-migration-join": {(1, 0): 4},
     "store-save-storm": {(1, 0): 4, (1, 1): 4},
     "store-save-storm-off": {(1, 0): 4},
     "dimension-rejoin-warm": {(1, 0): 2, (1, 1): 5, (2, 0): 3, (2, 1): 3},
@@ -162,12 +167,22 @@ SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBac
                                      # introduction so an A/B scenario CAN pin it, unlike
                                      # the two R4 holes above.
                                      "enableV18Compat",
+                                     # v19 compat rung kill switch (v0.10.0 C1, protocol
+                                     # 20) — listed at introduction per the same-commit
+                                     # allowlist rule so a dialect A/B scenario CAN pin it.
+                                     "enableV19Compat",
                                      # Transport yield (v0.10.0 A2, default false): the
                                      # writability gate is provably inert on loopback, so
                                      # an armed soak is expected-identical — the S-8
                                      # same-commit allowlist rule (the twice-shipped
                                      # R4-class defect).
-                                     "lodYieldsToVanillaTransport"})
+                                     "lodYieldsToVanillaTransport",
+                                     # Via cross-MC mismatch guard (v0.10.0 C5, XVER §7)
+                                     # — listed at introduction per the same-commit
+                                     # allowlist rule. Soaks run without Via, so the
+                                     # probe is no-signal and either value is provably
+                                     # inert (an A/B pins exactly that).
+                                     "enableViaMismatchGuard"})
 SERVER_CONFIG_INT_KEYS = frozenset({
     "lodDistanceChunks", "bytesPerSecondLimitPerPlayer", "diskReaderThreads",
     "sendQueueLimitPerPlayer", "bytesPerSecondLimitGlobal",
@@ -344,11 +359,16 @@ KNOWN_CLIENT_KEYS = {
     # wire_received_bytes: shipped (codec-1 frame) volume next to the raw-denominated
     # received_bytes (compressed columns, protocol 19) — presence-optional like the
     # other late additions.
+    # session_version: the ESTABLISHED session's protocol version (0 pre-config) — the
+    # C6 negotiated-protocol observability (C3 review m8/m11); presence-optional for old
+    # recordings, ASSERTED via --expect-session-version (soak.sh always passes it, so a
+    # dialect-lever run that silently degraded to another rung reds instead of passing
+    # format-blind laws on the wrong dialect).
     "snapshot": {"event", "wallMs", "dimension", "received_columns", "received_bytes",
                  "dropped", "responses", "requested_total", "send_cycles", "columns",
                  "scan", "tracker_in_flight", "queued", "queued_bytes", "server_enabled",
                  "probes", "effective_lod", "rtt", "ingest_failures",
-                 "wire_received_bytes"},
+                 "wire_received_bytes", "session_version"},
     # One scripted client-side action (-Dlss.soak.clientActionAt); resets the request
     # metrics, so the loader treats it as a client segment boundary.
     "action": {"event", "wallMs", "action", "atSeconds"},
@@ -488,6 +508,40 @@ def client_run_completion_violations(run_name, snaps):
         return [Violation("run-completion", run_name,
                           "no disconnect event — client died mid-run (uncontrolled exit)", {})]
     return []
+
+
+def session_version_violations(run_name, snaps, expected):
+    """The negotiated-dialect assertion (C6, C3 review m8/m11): every client row that has
+    ESTABLISHED a session (session_version != 0) must carry the expected version, and at
+    least one row in the run must have established one at all — otherwise a client that
+    never completed its handshake ladder would pass the assertion vacuously. Rows missing
+    the key entirely (a pre-C6 client jar) are a violation too: the caller explicitly
+    asked for the assertion, and an old jar cannot carry it. Shared by run_checker and
+    the selftest."""
+    if expected is None:
+        return []
+    out = []
+    established = 0
+    for i, s in enumerate(snaps):
+        if s.get("event") not in ("snapshot", "disconnect"):
+            continue
+        if "session_version" not in s:
+            return [Violation("session-version", run_name,
+                              "rows lack session_version — the client jar predates the "
+                              "C6 observability field, cannot assert the dialect", {})]
+        v = s["session_version"]
+        if v != 0:
+            established += 1
+            if v != expected:
+                out.append(Violation("session-version", run_name,
+                                     f"row {i}: established session_version {v} != expected "
+                                     f"{expected} — the session degraded to another rung",
+                                     {"row": i, "got": v, "expected": expected}))
+    if not out and established == 0:
+        out.append(Violation("session-version", run_name,
+                             f"no row ever established a session (expected {expected}) — "
+                             "the assertion would be vacuous", {}))
+    return out
 
 
 # ------------------------------------------------------------------------- quiescence
@@ -1965,6 +2019,57 @@ def make_store_second_join(scenario):
 check_store_second_join = make_store_second_join("store-second-join")
 
 
+@named_check("store-migration-join", ["client.received_columns", "server.store.hits",
+                                      "server.store.errors", "server.disk.submitted"])
+def check_store_migration_join(ctx):
+    """The C6 store-migration variant (XVER §9): the staged store was DOWNGRADED to the
+    released v0.9.x shape at SERVER_STARTING (schema 3, FNV hashes, native bodies), the
+    boot ran the REAL lazy 3->4 upgrade, and this cold-cache join must be served warm
+    from 19-rows through the inverse translator WHILE the background walk migrates.
+    store.hits carries the warm serve (a wrong downgrade or a broken rung FNV-fails or
+    errors out -> zero hits); disk stays nearly still; store.errors must be exactly 0
+    (every serve validates the rewritten hashes -- one corrupt row = one error).
+    Migration COMPLETION is asserted by the wrapper (store_migration_gate.sh) from the
+    server log; snapshots carry no walk gauge."""
+    snaps = ctx.runs.get(1)
+    if not snaps:
+        yield Violation("store-migration-join", "run1", "no client snapshots", {})
+        return
+    final_cli = snaps[-1]
+    recv = final_cli.get("received_columns", 0)
+    if recv < 500:
+        yield Violation("store-migration-join", "run1",
+                        "the cold-cache join never downloaded the disc -- nothing for the "
+                        "19-row rung to serve", {"expected": ">= 500", "actual": recv})
+        return
+    srv_final = ctx.server_snaps[-1] if ctx.server_snaps else None
+    if srv_final is None:
+        yield Violation("store-migration-join", "server series", "no server snapshots", {})
+        return
+    hits = get_path(srv_final, "store.hits")
+    if hits < 800:
+        yield Violation("store-migration-join", "warm serve",
+                        "the downgraded store did not serve the join -- the 19-row rung "
+                        "(or the lazy upgrade that precedes it) is broken",
+                        {"expected": ">= 800 store hits", "actual": hits})
+    disk = get_path(srv_final, "disk.submitted")
+    ceiling = max(200, int(0.25 * recv))
+    if disk > ceiling:
+        yield Violation("store-migration-join", "warm serve",
+                        "the join re-read region files -- 19-rows are not intercepting",
+                        {"disk.submitted": disk, "ceiling": ceiling})
+    errors = get_path(srv_final, "store.errors")
+    if errors:
+        yield Violation("store-migration-join", "whole run",
+                        "contained store failures fired -- on this scenario every one is "
+                        "a downgrade/translation/hash defect, never noise",
+                        {"store.errors": errors})
+    if ctx.server_snaps and (len(ctx.server_snaps) - 1) not in ctx.quiescent_server:
+        yield Violation("store-migration-join", "final snapshot",
+                        "last server snapshot is not verified-quiescent",
+                        {"wallMs": ctx.server_snaps[-1]["wallMs"]})
+
+
 @named_check("paper-store-unfired-event", ["server.store.hits", "server.store.errors",
                                            "server.store.deposits", "client.received_columns"])
 def check_paper_store_unfired_event(ctx):
@@ -2010,22 +2115,51 @@ def check_paper_store_unfired_event(ctx):
         yield Violation("paper-store-unfired-event", "server series",
                         "need server snapshots on both sides of the action", {})
         return
-    # Premise guard: the edit must be INVISIBLE to the event-driven dirty pipeline —
-    # that is what makes the resweep the only healer. A neighbor-reaction event firing
-    # on the setblock (seen live: glowstone tripping a configured event racily) marks
-    # the column dirty, the broadcast re-serves it fresh BEFORE the action, and the
-    # pre/final hash comparison then measures the DIRTY pipeline, not the staleness
-    # bound. That run is a premise failure, not a store verdict either way.
-    if get_path(srv_final, "dirty.marked_total") != 0:
-        # Checked at the FINAL snapshot (covers pre- AND post-action): an event firing
-        # at any point means the dirty pipeline participated and the staleness bound
-        # was not what the probes measured.
+    # Premise guard (C6-hardened to the EDIT WINDOW): the edit must be INVISIBLE to
+    # the event-driven dirty pipeline — that is what makes the resweep the only healer.
+    # A neighbor-reaction event firing on the setblock (seen live: glowstone tripping a
+    # configured event racily) marks the column dirty, the broadcast re-serves it fresh
+    # BEFORE the action, and the pre/final hash comparison then measures the DIRTY
+    # pipeline, not the staleness bound. The original bar was whole-run flatness, but a
+    # rerolled base world produces AMBIENT settle marks (gravity blocks firing
+    # EntityChangeBlockEvent minutes away from the edit — first seen 2026-08-08 on the
+    # regenerated base-paper world) that say nothing about whether THIS edit fired.
+    # The window is [last snapshot before the setblock .. first snapshot after
+    # save-all + 10 s] (one 5 s broadcast interval + grace; an edit-fired mark lands
+    # within a second of the command). Position-blind counters cannot rule out an
+    # ambient mark landing exactly on the edited chunk inside the window — accepted
+    # residual, one improbable chunk out of the disc; outside the window ambient marks
+    # are tolerated by design.
+    setblocks = [c for c in ctx.commands if "setblock" in c.get("cmd", "")]
+    saves = [c for c in ctx.commands if "save-all" in c.get("cmd", "")]
+    if len(setblocks) != 1 or not saves:
+        yield Violation("paper-store-unfired-event", "premise",
+                        "timeline shape drifted — need exactly one setblock and a "
+                        "save-all command row to window the premise",
+                        {"setblocks": len(setblocks), "saves": len(saves)})
+        return
+    edit_wall = setblocks[0]["wallMs"]
+    window_end = saves[-1]["wallMs"] + 10_000
+    pre_marked = 0
+    for s in ctx.server_snaps:
+        if s["wallMs"] <= edit_wall:
+            pre_marked = get_path(s, "dirty.marked_total")
+        else:
+            break
+    post_marked = get_path(srv_final, "dirty.marked_total")
+    for s in ctx.server_snaps:
+        if s["wallMs"] >= window_end:
+            post_marked = get_path(s, "dirty.marked_total")
+            break
+    if post_marked - pre_marked != 0:
         yield Violation("paper-store-unfired-event", "premise",
                         "the edit fired a configured Bukkit event (dirty.marked_total "
-                        "moved) — the scenario measured the dirty pipeline, not the "
-                        "unfired-event staleness bound; use an inert edit (in-ground "
-                        "bedrock replace)",
-                        {"dirty.marked_total": get_path(srv_final, "dirty.marked_total")})
+                        "moved inside the edit window) — the scenario measured the "
+                        "dirty pipeline, not the unfired-event staleness bound; use an "
+                        "inert edit (in-ground bedrock replace)",
+                        {"window_delta": post_marked - pre_marked,
+                         "pre": pre_marked, "post": post_marked,
+                         "whole_run": get_path(srv_final, "dirty.marked_total")})
         return
     if get_path(srv_final, "store.sweep_drops") < 1:
         yield Violation("paper-store-unfired-event", "resweep",
@@ -2568,6 +2702,11 @@ CHECKS = {
     "store-second-join": [check_store_second_join,
                           make_handshake_check("store-second-join"),
                           make_disc_completeness("store-second-join")],
+    # C6 store-migration variant (XVER §9): downgraded-store warm join while the
+    # background walk migrates; migration completion asserted by the wrapper.
+    "store-migration-join": [check_store_migration_join,
+                             make_handshake_check("store-migration-join"),
+                             make_disc_completeness("store-migration-join")],
     # store_offline_edit.sh phases: each individually law-checked; the cross-phase
     # probe-hash comparison (edited differs, control identical) lives in the wrapper.
     "store-offline-populate": [check_store_offline_populate,
@@ -2677,8 +2816,22 @@ def validate_scenario(name):
     return errors
 
 
+SCENARIO_TOP_LEVEL_KEYS = frozenset({
+    "snapshotIntervalSeconds", "joinTimeoutSeconds", "steps", "end",
+    # C6 store-migration variant: the SERVER_STARTING downgrade flag. Allowlisted
+    # (review m10) so a typo'd key reds validation instead of silently skipping the
+    # downgrade and measuring an ordinary v20 store — the same hole the config-override
+    # allowlist exists to close (the R4 lesson).
+    "downgradeStoreToV19",
+})
+
+
 def validate_timeline(scen):
     errors = []
+    for key in scen:
+        if key not in SCENARIO_TOP_LEVEL_KEYS:
+            errors.append(f"unknown scenario key '{key}' (allowed: "
+                          f"{sorted(SCENARIO_TOP_LEVEL_KEYS)})")
     for key, lo, hi in (("snapshotIntervalSeconds", 1, 300), ("joinTimeoutSeconds", 1, 3600)):
         v = scen.get(key)
         if not isinstance(v, int) or isinstance(v, bool) or not (lo <= v <= hi):
@@ -2778,7 +2931,7 @@ def check_global_schema(server_snaps, runs, violations):
     return ok
 
 
-def run_checker(results_dir, scenario):
+def run_checker(results_dir, scenario, expect_session_version=None):
     violations, warnings = [], []
     unknown_keys, unknown_events = set(), set()
 
@@ -2803,6 +2956,8 @@ def run_checker(results_dir, scenario):
             violations.append(Violation("input", run_path.name, "zero snapshot rows", {}))
         else:
             violations.extend(client_run_completion_violations(run_path.name, snaps))
+            violations.extend(session_version_violations(run_path.name, snaps,
+                                                         expect_session_version))
         runs[n] = snaps
         run_actions[n] = actions
     for extra in sorted(results_dir.glob("client-run*.jsonl")):
@@ -3733,24 +3888,49 @@ def selftest():
 
     # --- paper-store-unfired-event: resweep culls the un-evented edit ---
     def psu_ctx(edited_final=999, control_final=222, sweep_drops=2, hits_final=2000,
-                errors=0, actions=None):
-        srv_pre = _srv(115_000, over={"store.hits": 0, "store.deposits": 1900})
+                errors=0, actions=None, marked_pre_window=0, marked_in_window=0,
+                marked_ambient_late=0):
+        # Window geometry: setblock at 70 s, save-all at 75 s → window end 85 s.
+        # A 90 s snapshot brackets the window; 115 s / 185 s carry the rest of the
+        # run (185 s may add AMBIENT marks the windowed premise must tolerate).
+        srv_win = _srv(90_000, over={"store.hits": 0, "store.deposits": 1880,
+                                     "dirty.marked_total": marked_pre_window
+                                             + marked_in_window})
+        srv_pre = _srv(115_000, over={"store.hits": 0, "store.deposits": 1900,
+                                      "dirty.marked_total": marked_pre_window
+                                              + marked_in_window})
         srv_pre["probe_hashes"] = {"20:0": 111, "-20:0": 222}
         srv_fin = _srv(185_000, over={"store.hits": hits_final,
                                       "store.sweep_drops": sweep_drops,
                                       "store.errors": errors,
-                                      "store.deposits": 1950})
+                                      "store.deposits": 1950,
+                                      "dirty.marked_total": marked_pre_window
+                                              + marked_in_window + marked_ambient_late})
         srv_fin["probe_hashes"] = {"20:0": edited_final, "-20:0": control_final}
+        srv_first = _srv(60_000, over={"store.deposits": 1800,
+                                       "dirty.marked_total": marked_pre_window})
         return _ctx(
-            server_snaps=[srv_pre, srv_fin],
+            server_snaps=[srv_first, srv_win, srv_pre, srv_fin],
+            commands=[{"event": "command", "wallMs": 70_000,
+                       "cmd": "setblock 328 -64 8 minecraft:stone", "ok": True},
+                      {"event": "command", "wallMs": 75_000,
+                       "cmd": "save-all", "ok": True}],
             runs={1: [_cli(110_000, seg=0, over={"received_columns": 2200}),
                       _cli(185_000, seg=1, over={"received_columns": 4300})]},
             run_actions={1: actions if actions is not None else [
                 {"event": "action", "wallMs": 120_000, "action": "clearcache",
                  "atSeconds": 120}]},
-            quiescent_server={1})
+            quiescent_server={3})
     clean("paper-store-unfired-event clean staleness-bound pass",
           list(check_paper_store_unfired_event(psu_ctx())))
+    clean("paper-store-unfired-event AMBIENT marks outside the edit window are tolerated"
+          " (the rerolled-base-world settle drip, 2026-08-08)",
+          list(check_paper_store_unfired_event(psu_ctx(marked_ambient_late=4))))
+    clean("paper-store-unfired-event pre-existing marks before the edit are tolerated",
+          list(check_paper_store_unfired_event(psu_ctx(marked_pre_window=2))))
+    hits("paper-store-unfired-event a mark INSIDE the edit window is the premise red",
+         list(check_paper_store_unfired_event(psu_ctx(marked_in_window=1))),
+         "paper-store-unfired-event")
     hits("paper-store-unfired-event stale bytes past the bound",
          list(check_paper_store_unfired_event(psu_ctx(edited_final=111))),
          "paper-store-unfired-event")
@@ -3769,10 +3949,13 @@ def selftest():
     hits("paper-store-unfired-event action never fired",
          list(check_paper_store_unfired_event(psu_ctx(actions=[]))),
          "paper-store-unfired-event")
-    premise_ctx = psu_ctx()
-    premise_ctx.server_snaps[-1]["dirty"]["marked_total"] = 1
-    hits("paper-store-unfired-event premise broke (edit fired an event)",
-         list(check_paper_store_unfired_event(premise_ctx)),
+    # (The old whole-run premise case — final-snapshot-only marks — is now the
+    # AMBIENT-tolerated clean case above; the in-window doctored case replaces it.)
+    shape_ctx = psu_ctx()
+    shape_ctx.commands.append({"event": "command", "wallMs": 76_000,
+                               "cmd": "setblock 1 2 3 minecraft:dirt", "ok": True})
+    hits("paper-store-unfired-event timeline shape drift (two setblocks) is a premise red",
+         list(check_paper_store_unfired_event(shape_ctx)),
          "paper-store-unfired-event")
 
     # --- store-save-storm: the delete-only save hook under an autosave storm ---
@@ -3958,6 +4141,28 @@ def selftest():
     assert validate_config_overrides({"xrayHiddenBlocks": [1, 2]}), \
         "config allowlist: non-string list entries must be rejected"
 
+    # ---- session-version assertion (C6 negotiated-protocol observability) ----
+    sv_rows = [{"event": "snapshot", "session_version": 0},
+               {"event": "snapshot", "session_version": 19},
+               {"event": "disconnect", "session_version": 19}]
+    clean("session-version: pre-config 0 rows + established 19 under expect 19",
+          session_version_violations("client-run1.jsonl", sv_rows, 19))
+    clean("session-version: expectation None is a no-op on any rows",
+          session_version_violations("client-run1.jsonl",
+                                     [{"event": "snapshot"}], None))
+    hits("session-version: a 16 row under expect 19 (the silent-degrade shape)",
+         session_version_violations("client-run1.jsonl",
+                                    [{"event": "snapshot", "session_version": 16}], 19),
+         "session-version")
+    hits("session-version: all rows 0 under an expectation is vacuous, must red",
+         session_version_violations("client-run1.jsonl",
+                                    [{"event": "snapshot", "session_version": 0}], 19),
+         "session-version")
+    hits("session-version: rows lacking the key under an expectation (pre-C6 jar)",
+         session_version_violations("client-run1.jsonl",
+                                    [{"event": "snapshot"}], 19),
+         "session-version")
+
     print(f"selftest OK: {cases[0]} cases — every law (A1-A7, B2), the quiescence "
           f"predicate (server pair AND client mirror), disc completeness, window floors, "
           f"the config allowlist, action "
@@ -3973,6 +4178,9 @@ def main(argv=None):
     parser.add_argument("--validate", metavar="SCENARIO",
                         help="pre-flight validation of a scenario (no results needed)")
     parser.add_argument("--selftest", action="store_true", help="run in-memory law selftest")
+    parser.add_argument("--expect-session-version", type=int, default=None,
+                        metavar="N", help="assert every established client session is "
+                        "protocol N (soak.sh passes SOAK_DIALECT or the native version)")
     parser.add_argument("args", nargs="*", metavar="RESULTS_DIR SCENARIO",
                         help="results directory and scenario name")
     opts = parser.parse_args(argv)
@@ -3995,7 +4203,7 @@ def main(argv=None):
     if not results_dir.is_dir():
         print(f"FAIL: results dir not found: {results_dir}")
         return 1
-    return run_checker(results_dir, scenario)
+    return run_checker(results_dir, scenario, opts.expect_session_version)
 
 
 if __name__ == "__main__":

@@ -92,7 +92,9 @@ test {
     // LOD-store Phase 0 experiment pass-through (inert unless -Plss.store.experiment.regionDir
     // is given; the tool test skips itself without it). Extra heap only when engaged.
     ['lss.store.experiment.regionDir', 'lss.store.experiment.out',
-     'lss.store.experiment.maxColumns', 'lss.store.experiment.warmup'].each { p ->
+     'lss.store.experiment.maxColumns', 'lss.store.experiment.warmup',
+     // C6 cross-line corpus capture (XverLiveCorpusCaptureTool; self-skipping without it)
+     'lss.xver.captureRegionDir'].each { p ->
         if (findProperty(p) != null) systemProperty p, findProperty(p).toString()
     }
     if (findProperty('lss.store.experiment.regionDir') != null) {
@@ -125,6 +127,10 @@ loom {
             client()
             runDir "build/run/benchmark-client"
             vmArg "-Dlss.benchmark=true"
+            // C6 legacy-dialect benchmark arm (XVER §12 translation cost): same lever
+            // as the soak client — "19" announces protocol 19, exercising the server's
+            // per-recipient egress translation on every served column.
+            vmArg "-Dlss.soak.dialect=${findProperty('soak.dialect') ?: ''}"
             vmArg "-XX:StartFlightRecording=filename=client-benchmark.jfr,settings=profile,disk=true"
             programArg "--quickPlayMultiplayer"
             programArg "localhost:25565"
@@ -152,9 +158,12 @@ loom {
             programArg "SoakPlayer"
             // Per-scenario client instrumentation (soak.sh passes these as -P properties):
             // probes = per-position timestamp probes "x:z,..."; clientActionAt = one
-            // scripted client-side action "SECONDS:ACTION" (e.g. "60:clearcache")
+            // scripted client-side action "SECONDS:ACTION" (e.g. "60:clearcache");
+            // dialect = legacy-client emulation (C2 — "19" announces protocol 19 and
+            // skips the v20 decode translation, exercising the server's egress rungs)
             vmArg "-Dlss.soak.probes=${findProperty('soak.probes') ?: ''}"
             vmArg "-Dlss.soak.clientActionAt=${findProperty('soak.clientActionAt') ?: ''}"
+            vmArg "-Dlss.soak.dialect=${findProperty('soak.dialect') ?: ''}"
             programArg "--quickPlayMultiplayer"
             programArg "localhost:25565"
         }

@@ -90,6 +90,39 @@ public final class SqliteLodStore implements LodStoreService {
     // dispatch against legacyContentHashFnv); a Phase-2-era store drops there via
     // metaMatches (meta wire 19 != 20) — no shipped v0.9.x store ever sees this shape.
     static final int SCHEMA_VERSION = 4;
+    /** The table-structure generation metaMatches pins (C4): "wirefmt" = every lods_*
+     *  table carries the wirefmt column. */
+    static final String STORE_LAYOUT = "wirefmt";
+    /** The row body format constants (C4, XVER §5): 19 = native-layout (pre-migration
+     *  v0.9.x rows), 20 = the canonical v20 dictionary layout. */
+    static final int WIREFMT_NATIVE_19 = LodStoreService.WIREFMT_NATIVE_19;
+    static final int WIREFMT_V20 = LodStoreService.WIREFMT_V20;
+    /** Rows per background-migration batch (C4 §5.4). One batch runs per IDLE batcher
+     *  iteration (the 200 ms queue-poll timeout) plus a busy FLOOR of one batch per 32
+     *  applied ops (review #3 — strict idle-gating starved the walk to zero under any
+     *  steady deposit traffic), so the walk yields hard to live store traffic
+     *  — deposits, deletes, sweeps — and on an idle store tops out around
+     *  ~320 rows/s on a quiet server (a multi-GB store migrates in under an hour;
+     *  restraint-first, the spec's pacing intent, with idle-gating standing in for the
+     *  backfill's MSPT gate — the batcher is an off-main MIN_PRIORITY+1 thread, so its
+     *  tick impact is IO contention, which idle-gating bounds). */
+    private static final int MIGRATE_ROWS_PER_BATCH = 64;
+
+    // ---- C4 background migration walk state (batcher thread; status reads volatile) ----
+    private volatile boolean migratePending;
+    private volatile long migrateTotal;
+    private final java.util.concurrent.atomic.AtomicLong migrateRemaining =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** Dims not yet exhausted by the walk; rebuilt at boot from dimIds when pending. */
+    private final java.util.ArrayDeque<Integer> migrateDims = new java.util.ArrayDeque<>();
+    /** Applied ops since the last walk batch — the busy floor's counter (batcher only). */
+    private int opsSinceMigrateBatch;
+    /** Armed by {@link #failNextMigrationBatchesForTest} (review #8's fault seam). */
+    private volatile int failNextMigrationBatches;
+    /** The native→v20 body translator for the walk (platform-wired, same function the
+     *  serve rung uses). Null = walk waits (serves still translate via the reader). */
+    private volatile java.util.function.UnaryOperator<byte[]> legacyMigrationTranslator;
+
     private static final String DB_FILE = "store.db";
     private static final int PAGE_SIZE = 16384;
     private static final int WRITE_TXN_ROWS = 64;
@@ -285,6 +318,7 @@ public final class SqliteLodStore implements LodStoreService {
         // Open + validate meta on the CALLER thread (service construction): a mismatch
         // or corruption drops the DB and recreates it fresh — before the batcher exists.
         openOrRecreateWriter();
+        initMigrationState();
         this.batcher = new Thread(this::batcherLoop, Brand.shortName() + " LOD Store SQLite");
         this.batcher.setDaemon(true);
         this.batcher.setPriority(Thread.MIN_PRIORITY + 1);
@@ -296,6 +330,7 @@ public final class SqliteLodStore implements LodStoreService {
     private void openOrRecreateWriter() throws Exception {
         try {
             openWriter();
+            maybeLazyUpgradeFromV19();
             if (!metaMatches()) {
                 LSSLogger.info("LOD store: schema/wire/version drift — dropping and"
                         + " rebuilding the store (derived data, never migrated)");
@@ -352,13 +387,86 @@ public final class SqliteLodStore implements LodStoreService {
         this.writer.commit();
     }
 
-    private boolean metaMatches() throws SQLException {
+    private Map<String, String> readMetaMap() throws SQLException {
         Map<String, String> meta = new HashMap<>();
         try (Statement st = this.writer.createStatement();
              ResultSet rs = st.executeQuery("SELECT k, v FROM meta")) {
             while (rs.next()) meta.put(rs.getString(1), rs.getString(2));
         }
+        return meta;
+    }
+
+    /**
+     * The C4 lazy schema 3→4 upgrade (XVER §5.1): fires ONLY from the exact released
+     * v0.9.x state — {@code schema_version=3 ∧ wire_format_version=19} with matching
+     * mc/codec/fingerprint — and upgrades IN PLACE: ALTER each {@code lods_*} table
+     * {@code ADD COLUMN wirefmt INTEGER NOT NULL DEFAULT 19} (existing rows ARE
+     * native-layout), then stamp meta {@code 4 ∧ 20 ∧ store_layout} in the SAME
+     * writer transaction (autocommit is off; {@code writeMeta}'s commit lands the
+     * ALTERs and the stamp together). Stamping is IMMEDIATE (the §5.1 review MAJOR:
+     * {@code metaMatches} is an equality compare, so a stamp-on-completion scheme
+     * drops the multi-GB store on the first post-upgrade restart) — migration
+     * COMPLETION is tracked by the rows' own {@code wirefmt} values, never the
+     * version keys. Any OTHER from-state (dev-era metas, ≤18, foreign fingerprint)
+     * returns untouched and falls through to {@code metaMatches} → drop-and-rebuild;
+     * any THROW here reaches {@code openOrRecreateWriter}'s catch → drop-and-rebuild
+     * (the {@code pragma table_info} probe makes a half-applied ALTER re-entrant,
+     * but the drop is the simpler contract and the fallback is always legal on
+     * derived data).
+     */
+    private void maybeLazyUpgradeFromV19() throws SQLException {
+        Map<String, String> meta = readMetaMap();
+        if (!"3".equals(meta.get("schema_version"))
+                || !"19".equals(meta.get("wire_format_version"))
+                || !this.env.mcVersion().equals(meta.get("mc_version"))
+                || !StoreCodec.NAME.equals(meta.get("codec"))
+                || !this.env.registryFingerprint().equals(meta.get("registry_fingerprint"))) {
+            return;
+        }
+        LSSLogger.info("LOD store: lazy-upgrading the v0.9.x store in place (schema 3 → 4)"
+                + " — existing rows tagged wirefmt=19, translated on serve, migrated in"
+                + " the background (never a blocking rewrite)");
+        long total = 0;
+        try (Statement st = this.writer.createStatement()) {
+            for (int dimId : this.dimIds.values()) {
+                if (!tableHasColumn("lods_" + dimId, "wirefmt")) {
+                    st.execute("ALTER TABLE lods_" + dimId
+                            + " ADD COLUMN wirefmt INTEGER NOT NULL DEFAULT "
+                            + WIREFMT_NATIVE_19);
+                }
+                try (ResultSet rs = st.executeQuery("SELECT count(*) FROM lods_" + dimId)) {
+                    rs.next();
+                    total += rs.getLong(1);
+                }
+            }
+            // Walk bookkeeping (meta so it survives restarts; the version keys never
+            // track completion — §5.1): pending flag + totals; per-dim watermarks are
+            // written by the walk itself, riding each batch's transaction.
+            st.executeUpdate("INSERT OR REPLACE INTO meta (k, v) VALUES"
+                    + " ('migrate_pending','1'), ('migrate_total','" + total
+                    + "'), ('migrate_done','0')");
+        }
+        writeMeta();
+    }
+
+    /** {@code pragma table_info} presence probe (SQLite has no ADD COLUMN IF NOT
+     *  EXISTS). */
+    private boolean tableHasColumn(String table, String column) throws SQLException {
+        try (Statement st = this.writer.createStatement();
+             ResultSet rs = st.executeQuery("PRAGMA table_info(" + table + ")")) {
+            while (rs.next()) {
+                if (column.equals(rs.getString("name"))) return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean metaMatches() throws SQLException {
+        Map<String, String> meta = readMetaMap();
         return String.valueOf(SCHEMA_VERSION).equals(meta.get("schema_version"))
+                // The structural guard (C4): a dev-window store with this schema+wire
+                // but no wirefmt column carries no store_layout key → drop-and-rebuild.
+                && STORE_LAYOUT.equals(meta.get("store_layout"))
                 && String.valueOf(this.env.wireVersion()).equals(meta.get("wire_format_version"))
                 && this.env.mcVersion().equals(meta.get("mc_version"))
                 && StoreCodec.NAME.equals(meta.get("codec"))
@@ -380,6 +488,11 @@ public final class SqliteLodStore implements LodStoreService {
                     "wire_format_version", String.valueOf(this.env.wireVersion()),
                     "mc_version", this.env.mcVersion(),
                     "codec", StoreCodec.NAME,
+                    // Structural layout key (C4 mega-plan): metaMatches compares meta
+                    // only, never table structure — a C1..C3-era dev store (meta 4∧20,
+                    // NO wirefmt column) would otherwise open "valid" and latch dead at
+                    // WRITE_FAILURE_LATCH on the first wirefmt INSERT.
+                    "store_layout", STORE_LAYOUT,
                     "registry_fingerprint", this.env.registryFingerprint()).entrySet()) {
                 ps.setString(1, e.getKey());
                 ps.setString(2, e.getValue());
@@ -465,27 +578,32 @@ public final class SqliteLodStore implements LodStoreService {
             Connection c = readerConnection();
             if (c == null) return null;
             PreparedStatement ps = readerStatement(c, dimId, READER_STMT_GET,
-                    "SELECT ts, chash, usize, blob FROM lods_" + dimId + " WHERE pos=?");
+                    "SELECT ts, chash, usize, wirefmt, blob FROM lods_" + dimId + " WHERE pos=?");
             ps.setLong(1, packed);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) return null;
                 long ts = rs.getLong(1);
                 long chash = rs.getLong(2);
                 int usize = rs.getInt(3);
-                if (usize == 0) return new StoreHit(EMPTY, ts);
+                int wirefmt = rs.getInt(4);
+                if (usize == 0) return new StoreHit(EMPTY, ts, wirefmt);
                 if (usize < 0 || usize > MAX_ROW_USIZE) {
                     // Bound the alloc BEFORE trusting the row's own size field — a
                     // bit-rotted usize otherwise allocates whatever it says (R1).
                     throw new IllegalStateException("row integrity failure at " + packed
                             + " (usize " + usize + " out of bounds)");
                 }
-                byte[] blob = rs.getBytes(4);
+                byte[] blob = rs.getBytes(5);
                 byte[] raw = this.codec.decompress(blob, usize);
-                if (raw.length != usize || contentHash(raw) != chash) {
+                // Per-row hash dispatch (C4): pre-migration 19-rows were written under
+                // FNV-1a 64 (schema 3); everything else validates under CRC32C.
+                long expect = wirefmt == WIREFMT_NATIVE_19
+                        ? LodStoreService.legacyContentHashFnv(raw) : contentHash(raw);
+                if (raw.length != usize || expect != chash) {
                     throw new IllegalStateException("row integrity failure at " + packed
                             + " (usize/chash mismatch)");
                 }
-                return new StoreHit(raw, ts);
+                return new StoreHit(raw, ts, wirefmt);
             }
         } catch (Throwable t) {
             invalidateReaderStatement(dimId, READER_STMT_GET);
@@ -527,25 +645,29 @@ public final class SqliteLodStore implements LodStoreService {
             Connection c = readerConnection();
             if (c == null) return null;
             PreparedStatement ps = readerStatement(c, dimId, READER_STMT_GET_FRAME,
-                    "SELECT ts, fhash, usize, blob FROM lods_" + dimId + " WHERE pos=?");
+                    "SELECT ts, fhash, usize, wirefmt, blob FROM lods_" + dimId + " WHERE pos=?");
             ps.setLong(1, packed);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) return null;
                 long ts = rs.getLong(1);
                 long fhash = rs.getLong(2);
                 int usize = rs.getInt(3);
-                if (usize == 0) return new FrameHit(EMPTY, 0, ts);
+                int wirefmt = rs.getInt(4);
+                if (usize == 0) return new FrameHit(EMPTY, 0, ts, wirefmt);
                 if (usize < 0 || usize > MAX_ROW_USIZE) {
                     throw new IllegalStateException("row integrity failure at " + packed
                             + " (usize " + usize + " out of bounds)");
                 }
-                byte[] blob = rs.getBytes(4);
-                if (contentHash(blob) != fhash
+                byte[] blob = rs.getBytes(5);
+                // Per-row hash dispatch (C4) — see get().
+                long expect = wirefmt == WIREFMT_NATIVE_19
+                        ? LodStoreService.legacyContentHashFnv(blob) : contentHash(blob);
+                if (expect != fhash
                         || this.codec.declaredContentSize(blob) != usize) {
                     throw new IllegalStateException("row integrity failure at " + packed
                             + " (fhash/declared-size mismatch)");
                 }
-                return new FrameHit(blob, usize, ts);
+                return new FrameHit(blob, usize, ts, wirefmt);
             }
         } catch (Throwable t) {
             invalidateReaderStatement(dimId, READER_STMT_GET_FRAME);
@@ -909,6 +1031,221 @@ public final class SqliteLodStore implements LodStoreService {
 
     // ---- batcher thread ----
 
+    /** Arm the C4 walk from meta (caller thread, before the batcher starts). */
+    private void initMigrationState() throws SQLException {
+        Map<String, String> meta = readMetaMap();
+        if (!"1".equals(meta.get("migrate_pending"))) return;
+        long total = parseLongOr(meta.get("migrate_total"), 0);
+        long done = parseLongOr(meta.get("migrate_done"), 0);
+        this.migrateTotal = total;
+        this.migrateRemaining.set(Math.max(0, total - done));
+        this.migrateDims.addAll(this.dimIds.values());
+        this.migratePending = true;
+        LSSLogger.info("LOD store: background migration pending — "
+                + this.migrateRemaining.get() + "/" + total + " rows to rewrite to the"
+                + " v20 body format (idle-paced; serves translate meanwhile)");
+    }
+
+    private static long parseLongOr(String s, long dflt) {
+        try {
+            return s == null ? dflt : Long.parseLong(s);
+        } catch (NumberFormatException e) {
+            return dflt;
+        }
+    }
+
+    /**
+     * One background-migration batch (C4, XVER §5.4; batcher thread, IDLE iterations
+     * only): up to {@link #MIGRATE_ROWS_PER_BATCH} {@code wirefmt=19} rows of the
+     * current dim — decompress → translate native→v20 → recompress → UPDATE row
+     * (CRC32C hashes, {@code wirefmt=20}, {@code ts}/{@code src_stamp} untouched so
+     * age order and sweep semantics survive) — with the per-dim watermark riding the
+     * SAME transaction as its batch (a rolled-back batch retries because the
+     * watermark rolled back with it; a watermark committed apart from its rows would
+     * silently skip them). A per-row parse/translate anomaly DELETES the row (derived
+     * data). The {@code AND wirefmt=19} guard on the UPDATE yields to a concurrent
+     * re-deposit (latest-wins already retagged the row). SQL throws propagate to the
+     * batcher's shared failure handling (rollback + WRITE_FAILURE_LATCH).
+     */
+    /** @return true when a batch did real committed work (the caller resets the
+     *  writer-failure streak on it — a committed migration batch IS successful writer
+     *  work, unlike a vacuous idle iteration). */
+    private boolean maybeMigrateBatch() throws Exception {
+        if (!this.migratePending) return false;
+        var translator = this.legacyMigrationTranslator;
+        if (translator == null) return false;
+        Integer dimId = this.migrateDims.peekFirst();
+        if (dimId == null) {
+            finishMigration();
+            return false;
+        }
+        long watermark = parseLongOr(readMetaMap().get("migrate_progress_" + dimId),
+                Long.MIN_VALUE);
+        record Row(long pos, int usize, byte[] blob) {}
+        var rows = new java.util.ArrayList<Row>(MIGRATE_ROWS_PER_BATCH);
+        try (PreparedStatement ps = this.writer.prepareStatement(
+                "SELECT pos, usize, blob FROM lods_" + dimId
+                        + " WHERE wirefmt=" + WIREFMT_NATIVE_19 + " AND pos>?"
+                        + " ORDER BY pos LIMIT " + MIGRATE_ROWS_PER_BATCH)) {
+            ps.setLong(1, watermark);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    rows.add(new Row(rs.getLong(1), rs.getInt(2), rs.getBytes(3)));
+                }
+            }
+        }
+        if (rows.isEmpty()) {
+            // Dim exhausted: retire it (and its watermark) inside the shared txn.
+            this.migrateDims.pollFirst();
+            try (PreparedStatement ps = this.writer.prepareStatement(
+                    "DELETE FROM meta WHERE k=?")) {
+                ps.setString(1, "migrate_progress_" + dimId);
+                ps.executeUpdate();
+            }
+            bumpTxn(1);
+            return false;
+        }
+        int migrated = 0;
+        int anomalies = 0;
+        try (PreparedStatement up = this.writer.prepareStatement(
+                "UPDATE lods_" + dimId + " SET chash=?, usize=?, fhash=?, wirefmt="
+                        + WIREFMT_V20 + ", blob=? WHERE pos=? AND wirefmt="
+                        + WIREFMT_NATIVE_19);
+             PreparedStatement del = this.writer.prepareStatement(
+                     "DELETE FROM lods_" + dimId + " WHERE pos=?")) {
+            for (Row row : rows) {
+                if (row.usize() == 0) {
+                    // All-air row (C6 review M-1): usize 0 is the LEGITIMATE all-air
+                    // shape, not corruption — the serve path short-circuits it before
+                    // any hash/body work on both rungs, and the walk must do the same.
+                    // Bare retag; hashes are never consulted at usize 0. The C4 bound
+                    // below deliberately rejects usize <= 0 as poison — all-air must
+                    // be peeled off BEFORE it, or every End/void column of a real
+                    // v0.9.x upgrade is deleted and reported as corruption.
+                    try (PreparedStatement retag = this.writer.prepareStatement(
+                            "UPDATE lods_" + dimId + " SET wirefmt=" + WIREFMT_V20
+                                    + " WHERE pos=? AND wirefmt=" + WIREFMT_NATIVE_19)) {
+                        retag.setLong(1, row.pos());
+                        retag.executeUpdate();
+                        migrated++;
+                    } catch (Throwable rowFailure) {
+                        anomalies++;
+                    }
+                    continue;
+                }
+                try {
+                    // The R1 bound, HERE too (C4 review CRITICAL-1): decompress
+                    // allocates byte[usize] from the row's own size field — a
+                    // bit-rotted usize otherwise attempts a multi-GB allocation on the
+                    // batcher, and the resulting Error escaped the old catch(Exception)
+                    // into a rollback → same-batch retry every 200 ms → the failure
+                    // latch → a restart-surviving dead store.
+                    if (row.usize() <= 0 || row.usize() > MAX_ROW_USIZE) {
+                        throw new IllegalStateException("usize " + row.usize()
+                                + " out of bounds");
+                    }
+                    byte[] raw = this.codec.decompress(row.blob(), row.usize());
+                    byte[] v20 = translator.apply(raw);
+                    byte[] frame = this.codec.compress(v20);
+                    up.setLong(1, contentHash(v20));
+                    up.setInt(2, v20.length);
+                    up.setLong(3, contentHash(frame));
+                    up.setBytes(4, frame);
+                    up.setLong(5, row.pos());
+                    up.executeUpdate();
+                    migrated++;
+                } catch (Throwable rowFailure) {
+                    // Throwable, not Exception (review CRITICAL-1): an OOM from a
+                    // hostile row or an Error out of the translator must resolve THIS
+                    // row, never escape into the batch-retry loop. Derived data: the
+                    // row is deleted; the next serve re-warms it from region truth.
+                    anomalies++;
+                    try {
+                        del.setLong(1, row.pos());
+                        del.executeUpdate();
+                    } catch (Throwable deleteFailure) {
+                        // Forward progress is absolute: a row whose DELETE also fails
+                        // stays tagged 19 BEHIND the watermark — served translated
+                        // forever, never revisited by the walk. Bounded and correct,
+                        // strictly better than a batch that can never advance.
+                    }
+                }
+            }
+        }
+        long newWatermark = rows.get(rows.size() - 1).pos();
+        try (PreparedStatement ps = this.writer.prepareStatement(
+                "INSERT OR REPLACE INTO meta (k, v) VALUES (?,?)")) {
+            ps.setString(1, "migrate_progress_" + dimId);
+            ps.setString(2, String.valueOf(newWatermark));
+            ps.executeUpdate();
+            ps.setString(1, "migrate_done");
+            ps.setString(2, String.valueOf(
+                    this.migrateTotal - Math.max(0, this.migrateRemaining.get() - rows.size())));
+            ps.executeUpdate();
+        }
+        // Rows + watermark + done-count commit as ONE transaction.
+        this.txnRows += rows.size() + 2;
+        if (this.failNextMigrationBatches > 0) {
+            // Test seam (review #8): fault the batch AFTER its UPDATEs, BEFORE the
+            // commit — the rollback must retract rows AND watermark together.
+            this.failNextMigrationBatches--;
+            throw new SQLException("injected migration-batch failure (test seam)");
+        }
+        commitTxn();
+        this.migrateRemaining.addAndGet(-rows.size());
+        this.diag.recordMigrated(migrated, anomalies);
+        return true;
+    }
+
+    /** Test seam (review #8): fail the next N migration batches between their row
+     *  UPDATEs and the commit, driving the watermark-rides-the-batch-txn invariant. */
+    void failNextMigrationBatchesForTest(int n) {
+        this.failNextMigrationBatches = n;
+    }
+
+    /** 0 once every armed fault has fired (the test's proof the fault path ran). */
+    int pendingInjectedMigrationFaultsForTest() {
+        return this.failNextMigrationBatches;
+    }
+
+    private void finishMigration() throws SQLException {
+        try (Statement st = this.writer.createStatement()) {
+            st.executeUpdate("DELETE FROM meta WHERE k IN ('migrate_pending',"
+                    + " 'migrate_total', 'migrate_done')"
+                    + " OR k LIKE 'migrate_progress_%'");
+        }
+        // commitTxn, not a raw commit (review m15): keep the txn bookkeeping
+        // (txnRows / sweepReopened pruning) consistent with every other commit site.
+        this.txnRows++;
+        commitTxn();
+        this.migratePending = false;
+        this.migrateRemaining.set(0);
+        long anomalies = this.diag.getMigrateAnomalies();
+        LSSLogger.info("LOD store: background migration complete — "
+                + this.diag.getMigratedRows() + " rows rewritten to v20"
+                + (anomalies > 0
+                        ? ", " + anomalies + " unreadable rows DELETED (re-warm from"
+                                + " serves/backfill — investigate if large)"
+                        : "") + " of " + this.migrateTotal + " walked");
+    }
+
+    @Override
+    public void setLegacyMigrationTranslator(java.util.function.UnaryOperator<byte[]> t) {
+        this.legacyMigrationTranslator = t;
+    }
+
+    @Override
+    public String migrationStatusToken() {
+        // A latched store must LOOK dead (review B1) — no healthy-looking progress.
+        if (!this.migratePending || this.latchedOff) return "";
+        long anomalies = this.diag.getMigrateAnomalies();
+        return " migrating=" + Math.max(0, this.migrateRemaining.get())
+                + "/" + this.migrateTotal
+                // Row DELETION is irreversible data loss on a production store — it
+                // must be visible, not write-only (review #4).
+                + (anomalies > 0 ? " migrate_anomalies=" + anomalies : "");
+    }
+
     private void batcherLoop() {
         try {
             startupSweep();
@@ -950,10 +1287,22 @@ public final class SqliteLodStore implements LodStoreService {
             }
             long now = System.nanoTime();
             try {
+                boolean migrationWorked = false;
                 if (op == null) {
                     commitTxn(); // idle flush: never hold a sub-batch across the snapshot cadence
+                    migrationWorked = maybeMigrateBatch();
+                    this.opsSinceMigrateBatch = 0;
                 } else {
                     apply(op);
+                    // The busy floor (review #3): strict idle-gating starved the walk
+                    // to ZERO under any steady deposit traffic (a 500 cps backfill
+                    // never leaves a 200 ms idle window), inverting §5.5's
+                    // migration-before-backfill intent. One batch per 32 applied ops
+                    // keeps the walk at ~deposit pace while still yielding hard.
+                    if (this.migratePending && ++this.opsSinceMigrateBatch >= 32) {
+                        this.opsSinceMigrateBatch = 0;
+                        migrationWorked = maybeMigrateBatch();
+                    }
                 }
                 // Every iteration, not idle-only (R1 review: a continuously-busy batcher
                 // — sustained backfill, edit storms — never saw an idle iteration and the
@@ -969,7 +1318,10 @@ public final class SqliteLodStore implements LodStoreService {
                 // Reset the failure streak only when an op actually applied: idle
                 // iterations are vacuous no-ops and must not launder a broken writer
                 // below the latch under sparse traffic (review finding).
-                if (op != null) this.writerFailures = 0;
+                // A committed migration batch is real writer work too (review #2:
+                // without it the latch became a LIFETIME budget of 20 for the walk —
+                // it only ran on idle iterations, which never reset the streak).
+                if (op != null || migrationWorked) this.writerFailures = 0;
             } catch (Throwable t) {
                 // Shutdown-abort of a periodic resweep is a clean exit, not a writer
                 // failure (review B5): runSweep signals it with InterruptedException,
@@ -1117,6 +1469,20 @@ public final class SqliteLodStore implements LodStoreService {
                     // longer needs a tombstone per position.
                     dropDimensionRows(e.getKey(), e.getValue());
                 }
+                // C4 (review m16): the walk bookkeeping resets AFTER the drop loop —
+                // clearing it up front + a shutdown mid-drop left surviving 19-rows
+                // with no walk state (translated on every serve forever). If shutdown
+                // breaks the loop above, the surviving meta re-arms the walk next boot
+                // and it simply finds fewer rows.
+                try (Statement st = this.writer.createStatement()) {
+                    st.executeUpdate("DELETE FROM meta WHERE k IN ('migrate_pending',"
+                            + " 'migrate_total', 'migrate_done')"
+                            + " OR k LIKE 'migrate_progress_%'");
+                }
+                this.writer.commit();
+                this.migratePending = false;
+                this.migrateRemaining.set(0);
+                this.migrateDims.clear();
                 LSSLogger.info("LOD store: dropped all rows + backfill progress"
                         + " (admin invalidate)");
             }
@@ -1177,11 +1543,16 @@ public final class SqliteLodStore implements LodStoreService {
         PreparedStatement insert = this.insertByDim.get(dep.dim());
         if (insert == null) {
             insert = this.writer.prepareStatement("INSERT INTO lods_" + dimId
-                    + " (pos, ts, chash, usize, src_stamp, fhash, blob) VALUES (?,?,?,?,?,?,?)"
+                    + " (pos, ts, chash, usize, src_stamp, fhash, wirefmt, blob)"
+                    + " VALUES (?,?,?,?,?,?,20,?)"
                     + " ON CONFLICT(pos) DO UPDATE SET ts=excluded.ts,"
                     + " chash=excluded.chash, usize=excluded.usize,"
                     + " src_stamp=excluded.src_stamp, fhash=excluded.fhash,"
-                    + " blob=excluded.blob"
+                    // wirefmt flips to 20 WITH the row (C4 mega-plan pin §3.1): a
+                    // re-deposit over an unmigrated 19-row that left the tag would
+                    // carry CRC hashes under an FNV dispatch — purged as corrupt on
+                    // its next hit.
+                    + " wirefmt=excluded.wirefmt, blob=excluded.blob"
                     + " WHERE excluded.ts >= ts");
             this.insertByDim.put(dep.dim(), insert);
         }
@@ -1255,7 +1626,11 @@ public final class SqliteLodStore implements LodStoreService {
             st.execute("CREATE TABLE IF NOT EXISTS lods_" + next + " ("
                     + "pos INTEGER PRIMARY KEY, ts INTEGER NOT NULL, chash INTEGER NOT NULL,"
                     + " usize INTEGER NOT NULL, src_stamp INTEGER NOT NULL,"
-                    + " fhash INTEGER NOT NULL, blob BLOB NOT NULL)");
+                    // wirefmt (C4, XVER §5.1): the row's body format — every fresh
+                    // deposit writes 20; DEFAULT 19 exists only on the lazy-upgrade
+                    // ALTER (existing v0.9.x rows ARE native-layout).
+                    + " fhash INTEGER NOT NULL, wirefmt INTEGER NOT NULL DEFAULT 20,"
+                    + " blob BLOB NOT NULL)");
             // ts index (review A2): eviction's ORDER BY ts and the sweep's index-only
             // key scan both need it — without it each is a full scan of the blob pages.
             st.execute("CREATE INDEX IF NOT EXISTS lods_" + next + "_ts ON lods_"

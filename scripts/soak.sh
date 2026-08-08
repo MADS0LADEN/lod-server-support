@@ -152,6 +152,7 @@ case "$SCENARIO" in
     dirty-during-backfill|dirty-while-offline|clearcache-mid-session|dimension-rejoin-warm) ;;
     store-second-join) ;;
     store-offline-populate|store-offline-mutate|store-offline-verify) ;;
+    store-migration-join) ;;
     store-save-storm|store-save-storm-off) ;;
     paper-dirty-falling-block|paper-store-unfired-event) ;;
     *)
@@ -230,13 +231,15 @@ case "$SCENARIO" in
                                 SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
     store-offline-verify)       CLIENT_RUNS=1; EXPECTED_SECONDS=280
                                 SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
+    store-migration-join)       CLIENT_RUNS=1; EXPECTED_SECONDS=280 ;;
     paper-dirty-falling-block)  CLIENT_RUNS=1; EXPECTED_SECONDS=300 ;;
     paper-store-unfired-event)  CLIENT_RUNS=1; EXPECTED_SECONDS=320
                                 # Backfill charges the store; the un-evented setblock +
                                 # save-all go stale-invisible; two 10 s resweep cycles
                                 # later the clearcache re-declare must get FRESH bytes.
                                 CLIENT_EXTRA_ARGS=("-Psoak.clientActionAt=120:clearcache")
-                                SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
+                                SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0"
+                                                   "-Psoak.dirtyTrace=${SOAK_DIRTY_TRACE:-false}") ;;
 esac
 RUNTIME_BUDGET=$((EXPECTED_SECONDS + 240))
 DEADLINE_EPOCH=0
@@ -365,6 +368,15 @@ printf '%s' "$SOAK_PLATFORM" > "$CACHE_PLATFORM_MARKER"
 # Step 6a: Stage server config override (fabric: config/; paper: the plugin data folder)
 mkdir -p "$SERVER_CONFIG_DIR"
 cp "$SCENARIO_CONFIG" "$SERVER_CONFIG_DIR/lss-server-config.json"
+# C2 legacy-dialect lever: SOAK_DIALECT=19 makes the soak CLIENT emulate a
+# protocol-19 install (announce 19, accept the 19 echo, skip the v20 decode
+# translation) so the run exercises the server's legacy egress translators
+# end-to-end — every conservation law then runs against translated bodies.
+if [[ -n "${SOAK_DIALECT:-}" ]]; then
+    CLIENT_EXTRA_ARGS+=("-Psoak.dialect=${SOAK_DIALECT}")
+    echo "[soak] SOAK_DIALECT=${SOAK_DIALECT}: client emulates a protocol-${SOAK_DIALECT} install"
+fi
+
 # Phase 5 burn-in lever: SOAK_LODSTORE_OVERRIDE=full merges the store into EVERY
 # scenario's staged config (the laws are store-aware; named checks are engine-blind).
 # SOAK_LODSTORE_BACKFILL_OVERRIDE independently forces the backfill, because every
@@ -543,7 +555,20 @@ python3 "$PROJECT_ROOT/scripts/soak_report.py" "$RUN_RESULTS_DIR" > "$RUN_RESULT
 
 # Step 15: Run the checker — its exit code is this script's exit code
 echo "[soak] Running checker..."
-if python3 "$PROJECT_ROOT/scripts/check_soak.py" "$RUN_RESULTS_DIR" "$SCENARIO"; then
+# C6 negotiated-protocol assertion: every soak asserts the session's established
+# dialect — SOAK_DIALECT when the lever is armed, else the native protocol read from
+# LSSConstants. A lever run that silently degraded to another rung (e.g. 19 falling
+# to the v16 fallback) used to PASS on format-blind laws; now it reds session-version.
+NATIVE_PROTOCOL=$(grep -oE 'int PROTOCOL_VERSION = [0-9]+' \
+    "$PROJECT_ROOT/common/src/main/java/dev/vox/lss/common/LSSConstants.java" | grep -oE '[0-9]+' || true)
+if [[ -z "$NATIVE_PROTOCOL" ]]; then
+    # Loud, not a silent fallback (C6 review m1): under set -e a failed grep used to
+    # abort the script AFTER the whole run with an opaque exit and no verdict.
+    echo "[soak] ERROR: cannot read PROTOCOL_VERSION from LSSConstants.java — fix the grep"
+    exit 1
+fi
+if python3 "$PROJECT_ROOT/scripts/check_soak.py" "$RUN_RESULTS_DIR" "$SCENARIO" \
+    --expect-session-version "${SOAK_DIALECT:-$NATIVE_PROTOCOL}"; then
     echo "[soak] PASS: $SCENARIO — results in $RUN_RESULTS_DIR"
 else
     code=$?

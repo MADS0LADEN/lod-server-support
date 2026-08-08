@@ -440,6 +440,12 @@ class PaperXrayMaskFilterTest {
             }
             byte[] wire = new byte[buf.readableBytes()];
             buf.readBytes(wire);
+            // The v20 sibling FIRST (review C1-12): the SAME masked bytes through the
+            // produce-path hook, pinned in v20-corpus — masked serves ship v20 like
+            // everything else. Runs before the native golden because that one's regen
+            // branch fail()s (this one writes without failing under regen).
+            assertMatchesV20Golden("xray-masked",
+                    PaperNbtSectionSerializer.toV20(wire, REGISTRY_ACCESS));
             assertMatchesGolden("xray-masked", wire);
         } finally {
             buf.release();
@@ -468,6 +474,24 @@ class PaperXrayMaskFilterTest {
         }
         throw new IllegalStateException("cannot locate the paper module source tree from "
                 + Path.of("").toAbsolutePath() + " — the golden corpus reads/writes src/test/resources");
+    }
+
+    private static void assertMatchesV20Golden(String name, byte[] wire) throws IOException {
+        Path golden = goldenPath(name).getParent().getParent()
+                .resolve("v20-corpus").resolve(name + ".bin");
+        if (regenGoldens()) {
+            Files.createDirectories(golden.getParent());
+            Files.write(golden, wire);
+            return;  // the NATIVE golden's regen fail() below carries the re-run notice
+        }
+        if (!Files.exists(golden)) {
+            fail("missing v20 golden " + golden + " — regenerate with the goldens flag");
+        }
+        byte[] expected = Files.readAllBytes(golden);
+        if (java.util.Arrays.mismatch(expected, wire) != -1) {
+            fail("v20 masked golden drifted at byte "
+                    + java.util.Arrays.mismatch(expected, wire));
+        }
     }
 
     private static void assertMatchesGolden(String name, byte[] wire) throws IOException {

@@ -188,7 +188,10 @@ class ProtocolConstantsTest {
         // 18: VoxelColumn serve-source byte. 19: VoxelColumn codec byte (zstd column
         // frames — compressed-columns-design.md; layout is version-carried, the
         // capability bit only carries ability).
-        assertEquals(19, LSSConstants.PROTOCOL_VERSION);
+        // 20: cross-version identity encoding — the section-array body's palettes become
+        // per-column identity-dictionary indices, no DIRECT mode
+        // (cross-version-identity-encoding-plan.md); header/framing/C2S unchanged.
+        assertEquals(20, LSSConstants.PROTOCOL_VERSION);
     }
 
     @Test

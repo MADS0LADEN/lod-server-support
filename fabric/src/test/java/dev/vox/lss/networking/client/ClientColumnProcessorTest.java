@@ -816,4 +816,32 @@ class ClientColumnProcessorTest {
             ColumnCacheStore.clearForServer(serverAddr);
         }
     }
+
+    /** Source-regex pin (review C1-6, the dialectFlipFor precedent): the PRODUCTION
+     *  ClientLevel drain must route bodies through the v20 translation (with the v16
+     *  native-body gate) — a refactor onto the 7-arg identity-overload compiles clean
+     *  and silently ships untranslated columns to every consumer. */
+    @org.junit.jupiter.api.Test
+    void productionDrainRoutesThroughTheV20TranslationWithTheV16Gate() throws Exception {
+        java.nio.file.Path src = java.nio.file.Path.of("").toAbsolutePath();
+        for (int depth = 0; depth < 5 && src != null; depth++, src = src.getParent()) {
+            var candidate = src.resolve(
+                    "src/main/java/dev/vox/lss/networking/client/ClientColumnProcessor.java");
+            var nested = src.resolve("fabric").resolve(
+                    "src/main/java/dev/vox/lss/networking/client/ClientColumnProcessor.java");
+            if (java.nio.file.Files.exists(candidate)) { src = candidate; break; }
+            if (java.nio.file.Files.exists(nested)) { src = nested; break; }
+        }
+        assertNotNull(src, "cannot locate ClientColumnProcessor source");
+        String text = java.nio.file.Files.readString(src);
+        int prodDrain = text.indexOf("private void drainColumnQueue(ClientLevel level");
+        assertTrue(prodDrain >= 0, "production drain entry missing");
+        String body = text.substring(prodDrain, text.indexOf("}", text.indexOf("epoch);", prodDrain)));
+        assertTrue(body.contains("resolver::toNative"),
+                "the production drain must translate v20 bodies: " + body);
+        // The gate moved INTO the inner drain as the per-payload decode-time stamp
+        // (review MAJOR-2): the drain thread must never consult the live dialect flag.
+        assertTrue(text.contains("payload.nativeBodyAtDecode()"),
+                "the inner drain must gate translation on the per-payload decode-time stamp");
+    }
 }

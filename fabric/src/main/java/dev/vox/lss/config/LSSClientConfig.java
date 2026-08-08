@@ -17,11 +17,27 @@ public class LSSClientConfig extends JsonConfig {
 
     public boolean receiveServerLods = true;
     public int lodDistanceChunks = 0;
+    // The §3 unknown-identity fallback ladder's TERMINAL default (protocol 20,
+    // cross-version-identity-encoding-plan.md): a v20 identity this client's registries
+    // don't know renders as this block. Never air — air punches holes in distant
+    // terrain, so an air-resolving value is coerced to stone at resolve time.
+    public String unknownBlockFallback = "minecraft:stone";
+    // The ladder's CURATED rung: removed/renamed block NAMES mapped to visually-similar
+    // local ones (ViaBackwards-diff style, e.g. "minecraft:sulfur" -> "minecraft:sandstone").
+    // Ships EMPTY; user-extendable as real cross-version gaps are reported.
+    public java.util.Map<String, String> crossVersionBlockFallbacks = new java.util.HashMap<>();
     // Backward compat with pre-v0.7.0 (protocol 16, v0.4.x–v0.6.2) SERVERS: if a server does
     // not answer the v18 handshake, re-handshake announcing version 16 and decode the legacy
-    // wire. Default true (mirrors the server's enableV16Compat). Set false for a strict-v18
-    // client (no discovery fallback). See docs/planning/v16-client-compat-design.md.
+    // wire. Default true (mirrors the server's enableV16Compat). Post-C3 this gates only the LADDER'S
+    // 16 RUNG — a strict current-version client (no fallback at all) needs this AND
+    // enableV19ServerCompat false. See docs/planning/v16-client-compat-design.md.
     public boolean enableV16ServerCompat = true;
+    // Backward compat with protocol-19 (v0.9.x) SERVERS — the C3 discovery ladder's middle
+    // rung (XVER §6): if a server does not answer the version-20 handshake within 5 s,
+    // re-announce 19 before falling further to 16. A 19 session is today's decode retained
+    // (source + codec bytes, native-id palettes against this client's own registry — same MC
+    // version by construction). Default true; false skips straight to the v16 rung.
+    public boolean enableV19ServerCompat = true;
     // Tier B of the same compat: on a v16 SERVER, drive on-demand GENERATION of cold columns
     // instead of load-only (Tier A). The egress rewrites a first-serve request to v16's generate
     // trigger, so the old server generates terrain the player has not visited. Default TRUE — this
@@ -73,6 +89,24 @@ public class LSSClientConfig extends JsonConfig {
     @Override
     public void validate() {
         lodDistanceChunks = Math.clamp(lodDistanceChunks, 0, LSSConstants.MAX_LOD_DISTANCE); // 0 = use server default
+        // GSON can null these from a malformed/hand-edited file — restore the defaults
+        // (the resolver validates the fallback's RESOLUTION itself, config only carries it).
+        if (unknownBlockFallback == null || unknownBlockFallback.isBlank()) {
+            unknownBlockFallback = "minecraft:stone";
+        }
+        if (crossVersionBlockFallbacks == null) {
+            crossVersionBlockFallbacks = new java.util.HashMap<>();
+        }
+        // A null/blank ENTRY (C6 review C-2): GSON maps {"k": null} to a real null
+        // value in the map, Map.copyOf at resolver construction then NPEs — inside the
+        // decode drain, every tick, with no ingest-failure report: LOD dead for the
+        // session off one hand-edited entry. Drop such entries fail-open, warn once.
+        if (crossVersionBlockFallbacks.entrySet().removeIf(e ->
+                e.getKey() == null || e.getKey().isBlank()
+                        || e.getValue() == null || e.getValue().isBlank())) {
+            dev.vox.lss.common.LSSLogger.warn("crossVersionBlockFallbacks contained"
+                    + " null/blank entries — dropped (fail-open); fix the config file");
+        }
         // <= 0 normalizes to 0 (off) — a negative hand-edit means "off", and clamping it to the
         // floor would silently ARM a cap the user meant to disable. Positive values clamp to
         // [50, 100000]: below 50 the scanner still functions but starves the frontier to a

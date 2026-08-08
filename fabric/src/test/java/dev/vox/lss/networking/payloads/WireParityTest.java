@@ -158,6 +158,42 @@ class WireParityTest {
     }
 
     @Test
+    void frozenHandshakeShape_theV20AnnounceIsExactlyTwoVarInts() {
+        // XVER §2.2 CRITICAL (found independently by two review lenses): every legacy
+        // Fabric server's registered codec reads exactly two VarInts on
+        // lss:handshake_c2s, and TRAILING BYTES ARE A DECODER KICK. The announce shape
+        // is frozen for v20 and forever — new client facts ride lss:client_info. This
+        // pin decodes the v20 announce under a strict legacy-shaped read and requires
+        // full drain.
+        byte[] frame = encode(HandshakeC2SPayload.CODEC,
+                new HandshakeC2SPayload(LSSConstants.PROTOCOL_VERSION, 3));
+        var buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(frame));
+        try {
+            assertEquals(LSSConstants.PROTOCOL_VERSION, buf.readVarInt());
+            assertEquals(3, buf.readVarInt());
+            assertEquals(0, buf.readableBytes(),
+                    "a third byte on the announce hard-kicks the v20 client from every"
+                            + " shipped Fabric server");
+        } finally {
+            buf.release();
+        }
+    }
+
+    @Test
+    void clientInfoEncodesOneVarIntAndDecodeToleratesTrailingBytes() {
+        // The sidecar's own shape (XVER §2.2): one VarInt; the decode drains trailing
+        // bytes so a future append never kicks.
+        byte[] expected = ref(b -> b.writeVarInt(3955));
+        assertArrayEquals(expected, encode(ClientInfoC2SPayload.CODEC,
+                new ClientInfoC2SPayload(3955)));
+        byte[] trailing = ref(b -> {
+            b.writeVarInt(3955);
+            b.writeVarInt(42);
+        });
+        assertEquals(3955, decode(ClientInfoC2SPayload.CODEC, trailing).dataVersion());
+    }
+
+    @Test
     void sessionConfigVarIntBoundaries() {
         // lodDistance crossing the 1->2 byte VarInt boundary (127/128) and the 2048 config
         // max — the one variable-width field left in the 4-field frame.
@@ -168,6 +204,7 @@ class WireParityTest {
                 b.writeBoolean(true);
                 b.writeVarInt(lod);
                 b.writeBoolean(false);
+                b.writeVarInt(0);  // v20 data-version append (0 = unknown on the 4-arg ctor)
             });
             var p = new SessionConfigS2CPayload(LSSConstants.PROTOCOL_VERSION, true,
                     lod, false);
@@ -321,9 +358,21 @@ class WireParityTest {
             b.writeBoolean(true);
             b.writeVarInt(256);
             b.writeBoolean(true);
+            b.writeVarInt(3955);  // the v20-only data-version append (XVER §2.2)
         });
         assertArrayEquals(expected, encode(SessionConfigS2CPayload.CODEC,
-                new SessionConfigS2CPayload(LSSConstants.PROTOCOL_VERSION, true, 256, true)));
+                new SessionConfigS2CPayload(LSSConstants.PROTOCOL_VERSION, true, 256, true, 3955)));
+        // The ECHO versions must stay 4-field — a trailing byte hard-kicks the strict
+        // legacy clients (the reason the append is version-gated at the encoder).
+        byte[] v19Echo = ref(b -> {
+            b.writeVarInt(LSSConstants.V19_COMPAT_PROTOCOL_VERSION);
+            b.writeBoolean(true);
+            b.writeVarInt(256);
+            b.writeBoolean(true);
+        });
+        assertArrayEquals(v19Echo, encode(SessionConfigS2CPayload.CODEC,
+                new SessionConfigS2CPayload(LSSConstants.V19_COMPAT_PROTOCOL_VERSION,
+                        true, 256, true, 3955)));
     }
 
     @Test
@@ -477,6 +526,7 @@ class WireParityTest {
         var covered = Set.of(
                 HandshakeC2SPayload.TYPE.id().toString(),
                 BatchChunkRequestC2SPayload.TYPE.id().toString(),
+                ClientInfoC2SPayload.TYPE.id().toString(),
                 SessionConfigS2CPayload.TYPE.id().toString(),
                 DirtyColumnsS2CPayload.TYPE.id().toString(),
                 VoxelColumnS2CPayload.TYPE.id().toString(),
@@ -484,6 +534,6 @@ class WireParityTest {
         assertEquals(covered, declared,
                 "every LSS channel must map to exactly one payload with a reference frame in "
                 + "this suite — a new payload requires frames in BOTH WireParityTests");
-        assertEquals(6, declared.size());
+        assertEquals(7, declared.size());
     }
 }

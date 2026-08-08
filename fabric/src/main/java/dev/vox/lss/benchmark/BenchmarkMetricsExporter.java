@@ -421,16 +421,23 @@ public final class BenchmarkMetricsExporter {
                 LSSClientNetworking.getWireBytesReceived(),
                 LSSClientNetworking.getColumnsDropped(),
                 LSSClientNetworking.getQueuedColumnCount(),
-                LSSClientNetworking.getQueuedColumnBytes());
+                LSSClientNetworking.getQueuedColumnBytes(),
+                LSSClientNetworking.getSessionVersion());
     }
 
     /** Schema-owning overload (test seam — the public method binds the live static reads). */
     static Map<String, Object> buildClientSnapshot(LodRequestManager manager, boolean serverEnabled,
                                                    long receivedColumns, long receivedBytes,
                                                    long wireReceivedBytes,
-                                                   long dropped, int queued, long queuedBytes) {
+                                                   long dropped, int queued, long queuedBytes,
+                                                   int sessionVersion) {
         var result = new LinkedHashMap<String, Object>();
         result.put("server_enabled", serverEnabled);
+        // C6 (C3's deferred m8/m11): the ESTABLISHED session's protocol version — a
+        // dialect-lever soak that silently degraded to another rung must red the
+        // checker's expect_session_version, not pass format-blind laws on the wrong
+        // dialect. 0 = no SessionConfig accepted yet. Additive key.
+        result.put("session_version", sessionVersion);
         result.put("received_columns", receivedColumns);
         result.put("received_bytes", receivedBytes);
         // Shipped (codec-1 frame) volume next to the raw-denominated received_bytes —

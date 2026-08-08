@@ -113,7 +113,16 @@ class SectionLightDefaultsTest {
                                   boolean hasBlockLight, byte[] blockLight,
                                   boolean hasSkyLight, byte[] skyLight) {}
 
-    private List<DecodedSection> decode(byte[] wire) {
+    private List<DecodedSection> decode(byte[] v20Wire) {
+        // C1: translate the v20 body back with exact inverse resolvers (Fabric twin).
+        // C2 (review C1-15): the exact inverses are production statics now — decode
+        // through the same tables the legacy egress translators use.
+        var blockInverse = PaperIdentityTables.blockIdsByIdentity();
+        byte[] wire = dev.vox.lss.common.wire.V20ToNativeTranslator.translate(v20Wire,
+                ident -> blockInverse.getOrDefault(ident, -1),
+                PaperNbtSectionSerializer.biomeIdLookup(REGISTRY_ACCESS),
+                net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(),
+                PaperNbtSectionSerializer.biomeIdCount(REGISTRY_ACCESS));
         var buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(wire));
         try {
             int count = buf.readVarInt();
@@ -230,6 +239,8 @@ class SectionLightDefaultsTest {
         ServerLevel level = mock(ServerLevel.class);
         when(level.getMinSectionY()).thenReturn(MIN_SECTION_Y);
         when(level.getLightEngine()).thenReturn(lightEngine);
+        // C1: the produce-path v20 hook reads the level's registry access.
+        when(level.registryAccess()).thenReturn(REGISTRY_ACCESS);
         var chunk = mock(LevelChunk.class);
         when(chunk.getSections()).thenReturn(sections);
         return PaperSectionSerializer.serializeColumn(level, chunk, CX, CZ).serializedSections();

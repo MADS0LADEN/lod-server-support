@@ -8,6 +8,12 @@ api-version: '26.2'
 # validated; concurrent multi-region ingress untested. Do NOT treat the flag's presence as a
 # claim that SOAK_PLATFORM=folia has passed on 26.2.
 folia-supported: true
+# C5 (XVER §7): the Via mismatch guard reflectively reads ViaVersion's API when the
+# plugin is present. softdepend keeps Spigot's classloader from logging the one-time
+# "loaded class ... which is not a depend/softdepend" warning on the first handshake —
+# noise that reads like an LSS bug. No hard dependency: without Via the probe is a
+# silent no-signal.
+softdepend: [ViaVersion]
 description: Paper Plugin that provides unofficial multiplayer support for Voxy.
 author: VoX
 website: https://modrinth.com/plugin/lod-server-support

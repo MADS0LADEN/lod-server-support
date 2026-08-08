@@ -179,7 +179,11 @@ run_cycle() {
     "$PROJECT_ROOT/scripts/lib/proc_sampler.sh" "$RESULTS_DIR/cpu$suffix.jsonl" $((DURATION + 300)) &
     local sampler_pid=$!
 
-    mc_start_client "$RESULTS_DIR/client$suffix.log" :fabric:runBenchmarkClient
+    # BENCHMARK_CLIENT_GRADLE_ARGS: extra -P args for the client task (C6: the
+    # legacy-dialect arm passes -Psoak.dialect=19 so the benchmark client emulates a
+    # protocol-19 install and the server pays its egress translation per column).
+    # shellcheck disable=SC2086
+    mc_start_client "$RESULTS_DIR/client$suffix.log" :fabric:runBenchmarkClient ${BENCHMARK_CLIENT_GRADLE_ARGS:-}
 
     # Wait for server to exit (auto-stops after duration). Enforce the deadline: the
     # benchmark server only halts on tick count (max-tick-time=-1 disables the vanilla

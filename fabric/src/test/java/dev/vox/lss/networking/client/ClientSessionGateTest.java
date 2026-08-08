@@ -347,26 +347,44 @@ class ClientSessionGateTest {
     private static final int V16 = LSSConstants.V16_COMPAT_PROTOCOL_VERSION;
 
     private void tickDiscovery(int n) {
-        for (int i = 0; i < n; i++) gate.tickV16Discovery();
+        for (int i = 0; i < n; i++) gate.tickDiscoveryLadder();
     }
 
+    private static final int V19 = LSSConstants.V19_COMPAT_PROTOCOL_VERSION;
+
     @Test
-    void joinAnnouncesV18ThenDiscoveryReHandshakesAsV16ExactlyOnce() {
+    void joinAnnouncesCurrentThenTheLadderWalks19Then16ExactlyOnce() {
+        // The C3 discovery ladder (XVER §6): 20 → 5 s silence → 19 → 5 s silence → 16,
+        // then terminal — never a handshake storm.
         gate.onJoin(true, false, true, true);
         assertEquals(List.of(V), handshakeVersions, "JOIN announces the current protocol first");
 
-        // No SessionConfig arrives: nothing fires until the delay boundary.
         tickDiscovery(ClientSessionGate.V16_DISCOVERY_DELAY_TICKS - 1);
-        assertEquals(List.of(V), handshakeVersions, "no v16 handshake before the delay elapses");
+        assertEquals(List.of(V), handshakeVersions, "no fallback before the delay elapses");
 
-        gate.tickV16Discovery(); // the delay-th tick fires the fallback
-        assertEquals(List.of(V, V16), handshakeVersions,
-                "the v16 fallback handshake fires exactly on the delay boundary");
+        gate.tickDiscoveryLadder(); // the delay-th tick fires the 19 rung
+        assertEquals(List.of(V, V19), handshakeVersions,
+                "the first fallback rung is 19, exactly on the delay boundary");
 
-        // One-shot: never a second v16 handshake however long it idles.
-        tickDiscovery(200);
+        tickDiscovery(ClientSessionGate.V16_DISCOVERY_DELAY_TICKS - 1);
+        assertEquals(List.of(V, V19), handshakeVersions, "the 16 rung waits its own full delay");
+
+        gate.tickDiscoveryLadder();
+        assertEquals(List.of(V, V19, V16), handshakeVersions,
+                "the second fallback rung is 16");
+
+        // Terminal: never a fourth handshake however long it idles.
+        tickDiscovery(400);
+        assertEquals(List.of(V, V19, V16), handshakeVersions,
+                "the ladder is finite — no handshake storm");
+    }
+
+    @Test
+    void v19RungDisabledSkipsStraightTo16() {
+        gate.onJoin(true, false, true, true, false); // enableV19ServerCompat = false
+        tickDiscovery(ClientSessionGate.V16_DISCOVERY_DELAY_TICKS);
         assertEquals(List.of(V, V16), handshakeVersions,
-                "the fallback is one-shot — no v16 handshake storm");
+                "with the 19 rung disabled the ladder is the pre-C3 20→16 shape");
     }
 
     @Test
@@ -383,11 +401,20 @@ class ClientSessionGateTest {
 
     @Test
     void compatDisabledAtJoinNeverArmsTheV16Fallback() {
-        gate.onJoin(true, false, true, false); // enableV16ServerCompat = false
+        gate.onJoin(true, false, true, false); // enableV16ServerCompat = false (19 rung stays)
 
-        tickDiscovery(ClientSessionGate.V16_DISCOVERY_DELAY_TICKS + 50);
+        tickDiscovery(2 * ClientSessionGate.V16_DISCOVERY_DELAY_TICKS + 50);
+        assertEquals(List.of(V, V19), handshakeVersions,
+                "with v16 compat off the ladder stops at the 19 rung — never a v16 handshake");
+    }
+
+    @Test
+    void bothRungsDisabledNeverArmsTheLadderAtAll() {
+        gate.onJoin(true, false, true, false, false); // strict current-version client
+
+        tickDiscovery(3 * ClientSessionGate.V16_DISCOVERY_DELAY_TICKS);
         assertEquals(List.of(V), handshakeVersions,
-                "a strict-v18 client never falls back to a v16 handshake");
+                "a strict client announces once and never falls back");
     }
 
     @Test
@@ -532,10 +559,19 @@ class ClientSessionGateTest {
                         + "prompt) must NOT arm sourceless decode");
 
         for (int i = 0; i < ClientSessionGate.V16_DISCOVERY_DELAY_TICKS; i++) {
-            gate.tickV16Discovery(); // fires the v16 fallback announce on the last tick
+            gate.tickDiscoveryLadder(); // fires the 19 rung on the last tick
         }
-        assertEquals(List.of(V, V16), handshakeVersions,
-                "premise: the discovery fallback announced v16");
+        assertEquals(List.of(V, V19), handshakeVersions,
+                "premise: the ladder's first fallback announced 19");
+        V16ClientWire.observeSessionConfigVersion(V16);
+        assertFalse(V16ClientWire.isColumnSourceless(),
+                "a v16 config mid-ladder (announced 19, not 16) must NOT arm sourceless");
+
+        for (int i = 0; i < ClientSessionGate.V16_DISCOVERY_DELAY_TICKS; i++) {
+            gate.tickDiscoveryLadder(); // fires the 16 rung on the last tick
+        }
+        assertEquals(List.of(V, V19, V16), handshakeVersions,
+                "premise: the ladder reached the v16 rung");
 
         V16ClientWire.observeSessionConfigVersion(V16);
         assertTrue(V16ClientWire.isColumnSourceless(),
@@ -549,7 +585,7 @@ class ClientSessionGateTest {
         // unsolicited v16 frame (a second /reload prompt) cannot arm against the live stream.
         gate.onJoin(true, false, true, true);
         for (int i = 0; i < ClientSessionGate.V16_DISCOVERY_DELAY_TICKS; i++) {
-            gate.tickV16Discovery();
+            gate.tickDiscoveryLadder();
         }
         gate.onSessionConfig(config(V, true), true, true); // slow v18 reply lands first
         handshakeVersions.clear();
@@ -582,11 +618,114 @@ class ClientSessionGateTest {
 
         assertDoesNotThrow(() -> {
             for (int i = 0; i < ClientSessionGate.V16_DISCOVERY_DELAY_TICKS + 5; i++) {
-                throwingGate.tickV16Discovery();
+                throwingGate.tickDiscoveryLadder();
             }
         }, "ticking a disarmed discovery must never crash the client tick");
         assertEquals(1, sends.get(),
                 "a thrown v18 handshake leaves discovery disarmed — no v16 fallback attempt");
+    }
+
+    // ---- C3 ladder: the 19 rung's acceptance, session, and race pins (XVER §6) ----
+
+    @Test
+    void nineteenEchoAfterTheLadderAnnouncedItEstablishesANativeBodySession() {
+        gate.onJoin(true, false, true, true);
+        tickDiscovery(ClientSessionGate.V16_DISCOVERY_DELAY_TICKS); // → announce 19
+        assertEquals(List.of(V, V19), handshakeVersions, "premise: the 19 rung fired");
+
+        V16ClientWire.observeSessionConfigVersion(V19); // the netty half of the echo
+        gate.onSessionConfig(config(V19, true), true, true);
+
+        assertTrue(gate.isServerEnabled(), "the 19 echo must establish a live session");
+        assertNotNull(gate.getRequestManager());
+        assertTrue(V16ClientWire.isNativeBodySession(),
+                "a 19 session's column bodies arrive native — the drain must skip the "
+                        + "v20 translation");
+        assertFalse(V16ClientWire.isColumnSourceless(),
+                "a 19 session keeps the CURRENT frame layout (source + codec bytes)");
+    }
+
+    @Test
+    void unsolicitedNineteenConfigWithoutTheAnnounceStaysForeign() {
+        gate.onJoin(true, false, true, true); // announced 20 only — the ladder never fired
+        gate.onSessionConfig(config(V19, true), true, true);
+        assertFalse(gate.isServerEnabled(),
+                "a 19 config this connection never solicited is a foreign version — a real "
+                        + "v19 server cannot reply 19 to a 20 announce");
+        assertNull(gate.getRequestManager());
+    }
+
+    @Test
+    void slowTwentyEchoAfterTheLadderAdvancedStillEstablishesAndTheRacedNineteenReasserts() {
+        // The load-bearing race (C3 plan): a healthy v20 server whose echo was slow enough
+        // that the ladder already announced 19. The late 20 echo must be ACCEPTED (rejecting
+        // would disable LOD against a healthy server); the server's 19 echo to our raced
+        // announce then hits the downgrade guard, which re-announces the ESTABLISHED 20 —
+        // healing the server-side dialect flip the 19 announce caused.
+        gate.onJoin(true, false, true, true);
+        tickDiscovery(ClientSessionGate.V16_DISCOVERY_DELAY_TICKS); // → announce 19
+        assertEquals(List.of(V, V19), handshakeVersions);
+
+        // Real frame order per config: netty observe FIRST, then the main-thread handling
+        // (review MAJOR-3 — the earlier version inverted this and pinned a property the
+        // production ordering does not have).
+        V16ClientWire.observeSessionConfigVersion(V);
+        gate.onSessionConfig(config(V, true), true, true); // the slow 20 echo lands
+        assertTrue(gate.isServerEnabled(), "the late current-version echo must establish");
+        handshakeVersions.clear();
+
+        V16ClientWire.observeSessionConfigVersion(V19); // the raced 19 echo, netty half
+        assertTrue(V16ClientWire.isNativeBodySession(),
+                "premise: the raced echo transiently arms (announced-19 is sticky)");
+        gate.onSessionConfig(config(V19, true), true, true); // …then the main half
+        assertEquals(List.of(V), handshakeVersions,
+                "the guard re-announces the ESTABLISHED version, healing the server-side flip");
+        assertFalse(V16ClientWire.isNativeBodySession(),
+                "the guard's re-assert disarms the transient window immediately");
+        V16ClientWire.observeSessionConfigVersion(V19);
+        assertFalse(V16ClientWire.isNativeBodySession(),
+                "after the re-assert, a later unsolicited 19 frame must not arm "
+                        + "native-body decode against the live v20 stream");
+    }
+
+    @Test
+    void nineteenConfigOnAnEstablishedNineteenSessionIsTheNormalReconfigPath() {
+        gate.onJoin(true, false, true, true);
+        tickDiscovery(ClientSessionGate.V16_DISCOVERY_DELAY_TICKS);
+        V16ClientWire.observeSessionConfigVersion(V19);
+        gate.onSessionConfig(config(V19, true), true, true);
+        var first = gate.getRequestManager();
+        assertNotNull(first);
+        handshakeVersions.clear();
+
+        gate.onSessionConfig(config(V19, true), true, true); // a re-sent config (e.g. /reload)
+        assertTrue(handshakeVersions.isEmpty(), "same-rung re-config never re-announces");
+        assertNotSame(first, gate.getRequestManager(),
+                "the re-sent config replaces the manager (the established re-config path)");
+    }
+
+    @Test
+    void sixteenConfigOnAnEstablishedNineteenSessionReassertsNineteen() {
+        // The guard's per-rung generalization: 16 < 19 too — an established 19 session
+        // must not degrade to v16 on a late/prompted 16 config.
+        gate.onJoin(true, false, true, true);
+        tickDiscovery(ClientSessionGate.V16_DISCOVERY_DELAY_TICKS);
+        V16ClientWire.observeSessionConfigVersion(V19);
+        gate.onSessionConfig(config(V19, true), true, true);
+        handshakeVersions.clear();
+
+        V16ClientWire.observeSessionConfigVersion(V16);
+        gate.onSessionConfig(SessionConfigS2CPayload.v16Legacy(true, 64, 200, 7, true), true, true);
+        assertEquals(List.of(V19), handshakeVersions,
+                "the guard re-announces the established 19, never the primary constant");
+        assertFalse(V16ClientWire.isColumnSourceless(),
+                "the 16 rung was never announced, so the prompt cannot arm sourceless");
+        // The prompt's own netty observe DISARMS session19 (any other frame disarms) —
+        // the accepted transient window; already-queued columns stay correct via the
+        // decode-time stamp. The heal completes when the re-asserted 19's echo lands:
+        V16ClientWire.observeSessionConfigVersion(V19);
+        assertTrue(V16ClientWire.isNativeBodySession(),
+                "the re-asserted 19's echo re-arms native-body decode (BIT_V19 survived)");
     }
 
     @Test

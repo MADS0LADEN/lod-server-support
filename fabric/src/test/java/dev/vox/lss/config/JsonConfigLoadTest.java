@@ -408,6 +408,91 @@ class JsonConfigLoadTest {
         assertFalse(second.receiveServerLods);
     }
 
+    // ---- the XVER §9 client fallback-config file shapes (LSSClientConfig via the real
+    // load path — the fields ClientIdentityResolver snapshots at construction) ----
+
+    @Test
+    void clientListValuedCuratedTableRevertsWholeFileToDefaults(@TempDir Path configDir) throws Exception {
+        // crossVersionBlockFallbacks hand-edited into a LIST: GSON cannot bind a JSON
+        // array to Map<String,String>, and it binds the whole object or nothing — the
+        // valid receiveServerLods=false customization is discarded with it (the
+        // documented whole-file-fallback semantics, same as the server config's
+        // wrong-typed case). The broken file must survive untouched for fixing; the
+        // client must still boot with a usable resolver config.
+        String broken = "{\"receiveServerLods\": false, "
+                + "\"crossVersionBlockFallbacks\": [\"minecraft:sulfur\", \"minecraft:sandstone\"]}";
+        Files.writeString(configDir.resolve(TestClientConfig.CLIENT_FILE), broken);
+
+        TestClientConfig c = assertDoesNotThrow(() -> TestClientConfig.load(configDir));
+
+        assertTrue(c.receiveServerLods, "whole-file revert: the sibling customization is lost too");
+        assertEquals("minecraft:stone", c.unknownBlockFallback);
+        assertNotNull(c.crossVersionBlockFallbacks);
+        assertTrue(c.crossVersionBlockFallbacks.isEmpty());
+        assertEquals(broken, Files.readString(configDir.resolve(TestClientConfig.CLIENT_FILE)),
+                "the broken file is preserved for the admin, never overwritten");
+    }
+
+    @Test
+    void clientObjectValuedCuratedEntryRevertsWholeFileToDefaults(@TempDir Path configDir) throws Exception {
+        // The other malformation shape: the map itself parses but an ENTRY VALUE is an
+        // object — GSON's String adapter throws mid-bind, so this too is the
+        // whole-file revert, not a per-entry skip.
+        String broken = "{\"receiveServerLods\": false, \"crossVersionBlockFallbacks\": "
+                + "{\"minecraft:sulfur\": {\"target\": \"minecraft:sandstone\"}}}";
+        Files.writeString(configDir.resolve(TestClientConfig.CLIENT_FILE), broken);
+
+        TestClientConfig c = assertDoesNotThrow(() -> TestClientConfig.load(configDir));
+
+        assertTrue(c.receiveServerLods);
+        assertTrue(c.crossVersionBlockFallbacks.isEmpty());
+        assertEquals(broken, Files.readString(configDir.resolve(TestClientConfig.CLIENT_FILE)));
+    }
+
+    @Test
+    void clientNumberValuedCuratedEntryBindsLenientlyAsItsStringForm(@TempDir Path configDir) throws Exception {
+        // GSON's String adapter reads a bare NUMBER token as its string form (the
+        // booleanStringYesSilentlyDisables leniency family): {"a": 5} binds as "5",
+        // the load succeeds, siblings survive. Harmless downstream — the resolver's
+        // curated rung simply fails to resolve "5" and continues down the ladder —
+        // but it is today's contract and the boundary of the whole-file revert above,
+        // so pin it before anyone assumes non-string values also revert.
+        Files.writeString(configDir.resolve(TestClientConfig.CLIENT_FILE),
+                "{\"receiveServerLods\": false, \"crossVersionBlockFallbacks\": {\"ancient:sulfur\": 5}}");
+
+        TestClientConfig c = assertDoesNotThrow(() -> TestClientConfig.load(configDir));
+
+        assertFalse(c.receiveServerLods, "leniency path, not the whole-file revert");
+        assertEquals("5", c.crossVersionBlockFallbacks.get("ancient:sulfur"));
+    }
+
+    @Test
+    void clientNullValuedFallbackFieldsHealThroughLoadAndResave(@TempDir Path configDir) throws Exception {
+        // Explicit JSON nulls on OBJECT fields (unlike primitives) really are ASSIGNED
+        // by GSON — without the validate() heals this would hand a null curated table
+        // to ClientIdentityResolver's Map.copyOf (a crash on the first v20 column) and
+        // a null terminal fallback every session. The parse itself succeeds, so
+        // sibling customizations survive and the load-time re-save heals the nulls
+        // into real values on disk.
+        Files.writeString(configDir.resolve(TestClientConfig.CLIENT_FILE),
+                "{\"receiveServerLods\": false, \"unknownBlockFallback\": null, "
+                        + "\"crossVersionBlockFallbacks\": null}");
+
+        TestClientConfig c = assertDoesNotThrow(() -> TestClientConfig.load(configDir));
+
+        assertFalse(c.receiveServerLods, "parse succeeded: the sibling customization is kept");
+        assertEquals("minecraft:stone", c.unknownBlockFallback);
+        assertNotNull(c.crossVersionBlockFallbacks);
+        assertTrue(c.crossVersionBlockFallbacks.isEmpty());
+
+        JsonObject saved = savedJson(configDir, TestClientConfig.CLIENT_FILE);
+        assertEquals("minecraft:stone", saved.get("unknownBlockFallback").getAsString(),
+                "the re-save must heal the null on disk");
+        assertTrue(saved.get("crossVersionBlockFallbacks").isJsonObject(),
+                "the curated table must be healed to a real (empty) map on disk");
+        assertFalse(saved.get("receiveServerLods").getAsBoolean());
+    }
+
     // ---- brand-fallback candidate resolution: JsonConfig.load(String[], ...) ----
     // A branded config resolves its filename from an ordered candidate list — the running brand's
     // OWN file first, the other brand's file as a fallback — so an LSS<->VSS jar swap keeps the same

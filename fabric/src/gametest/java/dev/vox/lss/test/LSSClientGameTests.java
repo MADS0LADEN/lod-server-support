@@ -201,7 +201,108 @@ public class LSSClientGameTests implements FabricClientGameTest {
             waitForOrFail(context, thrower::sawReDelivery, 600,
                     "thrown-on column was never re-served — dispatchColumn's catch must "
                             + "treat a consumer throw as an ingest failure");
+
+            // C10 (XVER §9 Tier 3, C6): a column carrying a SYNTHETIC UNKNOWN identity
+            // must decode to the fallback state AT THE CONSUMER — the whole §3 ladder
+            // (v20 parse → resolver terminal rung → native re-emit → dispatch) driven
+            // end-to-end through the production receive glue on the live client.
+            runIngestFallbackTest(context, recorder);
         }
+    }
+
+    /** Injects a v20 column whose every block identity is unknown (a real corpus body
+     *  translated under a LYING identity lookup) at an already-served position with a
+     *  newer stamp, then asserts the consumer's delivered sections are wall-to-wall
+     *  {@code minecraft:stone} — the shipped {@code unknownBlockFallback} default. A
+     *  broken terminal rung surfaces as air (coercion path), the original blocks
+     *  (resolver bypassed), or a decode failure (nothing delivered). */
+    private static void runIngestFallbackTest(ClientGameTestContext context,
+                                              RecordingColumnConsumer recorder) {
+        var served = recorder.snapshot().stream()
+                .filter(rec -> rec.dimension().equals(Level.OVERWORLD))
+                .findFirst().orElseThrow(() -> new AssertionError(
+                        "premise: no served overworld column to piggyback on"));
+        int cx = served.chunkX();
+        int cz = served.chunkZ();
+        byte[] nativeBody;
+        try {
+            nativeBody = java.nio.file.Files.readAllBytes(
+                    locateFabricModule().resolve("src/test/resources/nbt-corpus/multi-section.bin"));
+        } catch (java.io.IOException e) {
+            throw new AssertionError("cannot read the nbt-corpus fixture", e);
+        }
+        byte[] v20 = dev.vox.lss.common.wire.NativeToV20Translator.translate(nativeBody,
+                id -> "lss:c6_does_not_exist", id -> "minecraft:plains");
+        var payload = new dev.vox.lss.networking.payloads.VoxelColumnS2CPayload(cx, cz,
+                Level.OVERWORLD, System.currentTimeMillis() / 1000L + 3600,
+                (byte) 2, v20);
+        // A FRESH consumer for this phase: the main recorder's record list caps at
+        // MAX_RECORDED (256) and the full-disc backfill exhausted it long ago — the
+        // first version of this test polled records that could never be added.
+        var fallbackRecorder = new RecordingColumnConsumer();
+        LSSApi.registerColumnConsumer(fallbackRecorder);
+        context.runOnClient(client -> {
+            try {
+                var netClass = LSSClientNetworking.class;
+                var procField = netClass.getDeclaredField("columnProcessor");
+                procField.setAccessible(true);
+                var handle = netClass.getDeclaredMethod("handleVoxelColumn",
+                        dev.vox.lss.networking.client.LodRequestManager.class,
+                        procField.getType(),
+                        dev.vox.lss.networking.payloads.VoxelColumnS2CPayload.class);
+                handle.setAccessible(true);
+                handle.invoke(null, LSSClientNetworking.getRequestManager(),
+                        procField.get(null), payload);
+            } catch (ReflectiveOperationException e) {
+                throw new AssertionError("cannot drive the production receive glue", e);
+            }
+        });
+        waitForOrFail(context, () -> fallbackRecorder.snapshot().stream()
+                        .anyMatch(rec -> rec.chunkX() == cx && rec.chunkZ() == cz), 400,
+                "the unknown-identity column was never dispatched to the consumer — the "
+                        + "fallback ladder is failing the whole column instead of resolving");
+        var delivered = fallbackRecorder.snapshot().stream()
+                .filter(rec -> rec.chunkX() == cx && rec.chunkZ() == cz)
+                .reduce((a, b) -> b).orElseThrow();
+        // The lying lookup turns EVERY payload palette entry (air included) into the
+        // unknown identity, so every payload-carried section decodes wall-to-wall
+        // stone. The resync air-fill legitimately ADDS pure-air sections around them
+        // (this position was served before), so the pin is: every section is all-stone
+        // OR all-air at the sample point, at least one stone. Any OTHER state means
+        // the resolver was bypassed (original blocks) or mis-coerced.
+        int stoneSections = 0;
+        for (var section : delivered.data().sections()) {
+            var state = section.section().getBlockState(7, 7, 7);
+            if (state.is(net.minecraft.world.level.block.Blocks.STONE)) {
+                stoneSections++;
+            } else if (!state.isAir()) {
+                throw new AssertionError("unknown-identity voxel decoded to " + state
+                        + " at sectionY " + section.sectionY() + " — neither the "
+                        + "unknownBlockFallback default (stone) nor a fill-pass air");
+            }
+        }
+        if (stoneSections == 0) {
+            throw new AssertionError("no section decoded to the fallback state — "
+                    + "nothing proved the terminal rung reached the consumer");
+        }
+    }
+
+    /** Walks up from the client gametest working dir to the fabric module root (the
+     *  corpusDir pattern — the fixture lives in the TEST resources, a different source
+     *  set from this gametest). */
+    private static java.nio.file.Path locateFabricModule() {
+        var dir = java.nio.file.Path.of("").toAbsolutePath();
+        for (int depth = 0; depth < 6 && dir != null; depth++, dir = dir.getParent()) {
+            if (java.nio.file.Files.isDirectory(dir.resolve("src/test/java/dev/vox/lss"))) {
+                return dir;
+            }
+            var nested = dir.resolve("fabric");
+            if (java.nio.file.Files.isDirectory(nested.resolve("src/test/java/dev/vox/lss"))) {
+                return nested;
+            }
+        }
+        throw new IllegalStateException("cannot locate the fabric module from "
+                + java.nio.file.Path.of("").toAbsolutePath());
     }
 
     /**

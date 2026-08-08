@@ -359,7 +359,7 @@ final class PaperNbtSectionSerializer {
             }
 
             if (buf.writerIndex() == size && buf.arrayOffset() == 0 && buf.array().length == size) {
-                return buf.array();
+                return toV20(buf.array(), registryAccess);
             }
             SIZE_MISMATCH_FALLBACKS.incrementAndGet();
             if (SIZE_MISMATCH_WARNED.compareAndSet(false, true)) {
@@ -369,7 +369,7 @@ final class PaperNbtSectionSerializer {
             }
             byte[] result = new byte[buf.readableBytes()];
             buf.readBytes(result);
-            return result;
+            return toV20(result, registryAccess);
         } finally {
             buf.release();
         }
@@ -720,7 +720,71 @@ final class PaperNbtSectionSerializer {
 
     /** The registry-scoped pair the single-slot memo holds: the container factory and
      *  the transcoder's biome resolver share one lifetime (both die with their key). */
-    private record RegistryScoped(PalettedContainerFactory factory, BiomeIdResolver biomeResolver) {}
+    private record RegistryScoped(PalettedContainerFactory factory, BiomeIdResolver biomeResolver,
+                                  java.util.function.IntFunction<String> biomeIdentityFor,
+                                  java.util.function.ToIntFunction<String> biomeIdFor,
+                                  int biomeIdCount) {}
+
+    /** The C2 egress inverse: bare biome identity → this registry's holder id, -1 when
+     *  unknown (the translator turns -1 into its pinned loud failure). Built by
+     *  inverting the SAME id→identity table the emit uses, so the pair is bijective
+     *  by construction on one registry. */
+    static java.util.function.ToIntFunction<String> biomeIdLookup(RegistryAccess registryAccess) {
+        return scopedFor(registryAccess).biomeIdFor();
+    }
+
+    /** The biome id-space size for the translator's DIRECT width (the same idMap the
+     *  native containers encode against). */
+    static int biomeIdCount(RegistryAccess registryAccess) {
+        return scopedFor(registryAccess).biomeIdCount();
+    }
+
+    /** The v20 biome identity lookup for this registry access (C1): wire biome ids are
+     *  the factory strategy's {@code globalMap} HOLDER ids — the identity table must be
+     *  built from that same map, never from bare {@code Registry.getId}. Shared by the
+     *  live path ({@code PaperSectionSerializer}) and the transcode path via the memo. */
+    static java.util.function.IntFunction<String> biomeIdentityLookup(RegistryAccess registryAccess) {
+        return scopedFor(registryAccess).biomeIdentityFor();
+    }
+
+    private static java.util.function.IntFunction<String> buildBiomeIdentities(IdMap<Holder<Biome>> idMap) {
+        var table = new String[idMap.size()];
+        for (int id = 0; id < table.length; id++) {
+            var holder = idMap.byId(id);
+            var key = holder == null ? null : holder.unwrapKey().orElse(null);
+            if (key == null) {
+                // C0's fail-loud-at-build posture (review C1-7): a keyless holder would
+                // otherwise surface as a per-serve translation failure much later.
+                throw new IllegalStateException("biome id " + id + " has no registry key");
+            }
+            String identity = key.identifier().toString();
+            dev.vox.lss.common.wire.IdentityCodec.validate(identity);
+            table[id] = identity;
+        }
+        return id -> id >= 0 && id < table.length ? table[id] : null;
+    }
+
+    /** The C1 produce-path v20 hook (progress-doc decision 2026-08-07): every producer
+     *  emits its NATIVE body exactly as before and translates at the return boundary —
+     *  ONE corpus-proven encoder, byte-determinism across paths by construction. */
+    static byte[] toV20(byte[] nativeBody, RegistryAccess registryAccess) {
+        return dev.vox.lss.common.wire.NativeToV20Translator.translate(nativeBody,
+                PaperIdentityTables::blockIdentityFor,
+                biomeIdentityLookup(registryAccess));
+    }
+
+    /** The C2 egress inverse of {@link #toV20} (XVER §4.2) — Fabric's
+     *  {@code NbtSectionSerializer.fromV20} twin: v20 body → native section layout
+     *  against this server's OWN registries, exact and lossless same-version. Throws
+     *  {@code WireFormatException} on any malformed body or unresolvable identity. */
+    static byte[] fromV20(byte[] v20Body, RegistryAccess registryAccess) {
+        var blockIds = PaperIdentityTables.blockIdsByIdentity();
+        return dev.vox.lss.common.wire.V20ToNativeTranslator.translate(v20Body,
+                identity -> blockIds.getOrDefault(identity, -1),
+                biomeIdLookup(registryAccess),
+                net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(),
+                biomeIdCount(registryAccess));
+    }
 
     // PalettedContainerFactory.create builds two strategies + codecs per call — measurable
     // allocation churn when every disk read pays it (review 2026-07-27). The registry access
@@ -739,9 +803,18 @@ final class PaperNbtSectionSerializer {
         if (memo != null && memo.getKey().get() == registryAccess) return memo.getValue();
         var factory = PalettedContainerFactory.create(registryAccess);
         var idMap = factory.biomeStrategy().globalMap();
+        var identityFor = buildBiomeIdentities(idMap);
+        var inverse = new java.util.HashMap<String, Integer>(idMap.size() * 2);
+        for (int id = 0; id < idMap.size(); id++) {
+            inverse.put(identityFor.apply(id), id);
+        }
+        var frozenInverse = java.util.Map.copyOf(inverse);
         var scoped = new RegistryScoped(factory, new BiomeIdResolver(
                 registryAccess.lookupOrThrow(Registries.BIOME), idMap,
-                idMap.getId(factory.defaultBiome()), new ConcurrentHashMap<>()));
+                idMap.getId(factory.defaultBiome()), new ConcurrentHashMap<>()),
+                identityFor,
+                identity -> frozenInverse.getOrDefault(identity, -1),
+                idMap.size());
         factoryMemo = java.util.Map.entry(new java.lang.ref.WeakReference<>(registryAccess), scoped);
         return scoped;
     }

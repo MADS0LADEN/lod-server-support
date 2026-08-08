@@ -27,15 +27,43 @@ class ConfigValidationTest {
         assertEquals(0, serverConfig().lodStoreResweepSeconds);
     }
 
-    /** Both compat rungs ship ON: a fleet of released v0.6.x (protocol 16) and
-     *  v0.7.x–v0.8.x (protocol 18) clients must keep working across a server upgrade
-     *  without any operator action. Neither default existed as a pin before the v18
-     *  rung (plan-review finding); flipping either is a player-facing compat break and
-     *  must be a deliberate release decision, not drift. */
+    /** All compat rungs ship ON: a fleet of released v0.6.x (protocol 16),
+     *  v0.7.x–v0.8.x (protocol 18), and v0.9.x–v0.10.x-pre (protocol 19) clients must
+     *  keep working across a server upgrade without any operator action. Flipping any
+     *  is a player-facing compat break and must be a deliberate release decision, not
+     *  drift. */
     @Test
     void compatRungsDefaultOn() {
         assertTrue(serverConfig().enableV16Compat);
         assertTrue(serverConfig().enableV18Compat);
+        assertTrue(serverConfig().enableV19Compat);
+    }
+
+    /** C6 review C-2: a null/blank ENTRY in the curated table NPEs Map.copyOf at
+     *  resolver construction — inside the decode drain, every tick, no ingest-failure
+     *  report: LOD dead for the session off one hand-edited entry. validate() must
+     *  drop such entries fail-open. */
+    @Test
+    void curatedTableNullOrBlankEntriesAreDroppedFailOpen() {
+        var c = clientConfig();
+        c.crossVersionBlockFallbacks = new java.util.HashMap<>();
+        c.crossVersionBlockFallbacks.put("ancient:sulfur", null);
+        c.crossVersionBlockFallbacks.put("", "minecraft:stone");
+        c.crossVersionBlockFallbacks.put("ok:kept", "minecraft:dirt");
+        c.validate();
+        assertEquals(java.util.Map.of("ok:kept", "minecraft:dirt"),
+                c.crossVersionBlockFallbacks,
+                "null/blank entries dropped, the valid one kept");
+        assertDoesNotThrow(() -> java.util.Map.copyOf(c.crossVersionBlockFallbacks),
+                "the resolver's Map.copyOf must be safe after validate()");
+    }
+
+    /** The Via cross-MC guard ships ON (XVER §7): without it a legacy client behind
+     *  Via silently receives columns it cannot decode. Fail-open by construction (no
+     *  Via / no signal = unchanged), so the on-default is safe without Via installed. */
+    @Test
+    void viaMismatchGuardDefaultsOn() {
+        assertTrue(serverConfig().enableViaMismatchGuard);
     }
 
     @Test
@@ -520,6 +548,9 @@ class ConfigValidationTest {
         var c = clientConfig();
         assertTrue(c.enableV16ServerCompat, "v16 server backward-compat must default ON");
         assertTrue(c.enableV16Generation, "Tier B generation-drive must default ON");
+        assertTrue(c.enableV19ServerCompat,
+                "the C3 ladder's 19 rung must default ON (a v0.10.0 client on a v0.9.x "
+                        + "server gets a native 19 session, not the v16 degrade)");
     }
 
     @Test
@@ -612,6 +643,55 @@ class ConfigValidationTest {
                 "\"lodColumnsPerSecondLimit\":0", "\"lodColumnsPerSecondLimit\":400"),
                 LSSClientConfig.class);
         assertEquals(400, loaded.lodColumnsPerSecondLimit, "a saved cap must bind back");
+    }
+
+    /**
+     * The §3 fallback ladder's TERMINAL config carrier (XVER §9 client-config
+     * validation): GSON can null or blank this from a malformed/hand-edited file, and
+     * a null reaching {@code ClientIdentityResolver.resolveTerminalBlock} is survivable
+     * (it coerces to stone) but a BLANK would resolve as a malformed identity every
+     * session with no heal on disk — validate() owns restoring the default. The
+     * resolver validates the value's RESOLUTION itself; config only carries it, so
+     * an arbitrary non-blank string must survive validate() untouched.
+     */
+    @Test
+    void unknownBlockFallbackHealsNullAndBlankToTheDefault() {
+        var c = clientConfig();
+        c.unknownBlockFallback = null;
+        c.validate();
+        assertEquals("minecraft:stone", c.unknownBlockFallback, "null must heal to the default");
+
+        c.unknownBlockFallback = "   ";
+        c.validate();
+        assertEquals("minecraft:stone", c.unknownBlockFallback, "blank must heal to the default");
+
+        c.unknownBlockFallback = "minecraft:sandstone";
+        c.validate();
+        assertEquals("minecraft:sandstone", c.unknownBlockFallback,
+                "a configured value is carried verbatim — resolution is the resolver's job");
+    }
+
+    /**
+     * The ladder's CURATED rung table: the resolver's constructor does
+     * {@code Map.copyOf(CONFIG.crossVersionBlockFallbacks)}, which throws on null —
+     * so a GSON-nulled table would crash resolver construction on the FIRST v20
+     * column of every session unless validate() heals it to the empty map. A
+     * populated table must pass through untouched (it is user-extended as real
+     * cross-version gaps are reported).
+     */
+    @Test
+    void crossVersionBlockFallbacksHealNullToTheEmptyMap() {
+        var c = clientConfig();
+        c.crossVersionBlockFallbacks = null;
+        c.validate();
+        assertNotNull(c.crossVersionBlockFallbacks, "null must heal to an empty map");
+        assertTrue(c.crossVersionBlockFallbacks.isEmpty());
+
+        c.crossVersionBlockFallbacks = new java.util.HashMap<>(
+                java.util.Map.of("ancient:sulfur", "minecraft:sandstone"));
+        c.validate();
+        assertEquals(java.util.Map.of("ancient:sulfur", "minecraft:sandstone"),
+                c.crossVersionBlockFallbacks, "user entries must survive validate() untouched");
     }
 
     /**

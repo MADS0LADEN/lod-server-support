@@ -1,5 +1,6 @@
 package dev.vox.lss.networking.client;
 
+import dev.vox.lss.networking.payloads.SoakDialectOverride;
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.networking.payloads.ZstdWireSupport;
 import dev.vox.lss.common.LSSLogger;
@@ -27,13 +28,37 @@ public class LSSClientNetworking {
     // and manager construction with live server-address resolution.
     private static final ClientSessionGate sessionGate = new ClientSessionGate(
             columnProcessor,
-            version -> ClientPlayNetworking.send(new HandshakeC2SPayload(
-                    version, LSSConstants.CAPABILITY_VOXEL_COLUMNS
-                            | ZstdWireSupport.capabilityBit())),
+            version -> {
+                ClientPlayNetworking.send(new HandshakeC2SPayload(
+                        version, LSSConstants.CAPABILITY_VOXEL_COLUMNS
+                                | ZstdWireSupport.capabilityBit()));
+                sendClientInfoSidecar();
+            },
             LSSClientNetworking::createRequestManager);
+
+    /** The lss:client_info sidecar rides beside every announce (XVER §2.2): the
+     *  handshake shape is frozen, so the client's data version travels on its own
+     *  channel. Best-effort — legacy servers discard the unregistered channel, and a
+     *  send failure must never take the announce down with it. */
+    private static void sendClientInfoSidecar() {
+        // A real protocol-19 client has no lss:client_info channel — the soak harness's
+        // legacy-dialect emulation must not send one either (C2 lever fidelity).
+        if (SoakDialectOverride.isV19()) return;
+        try {
+            ClientPlayNetworking.send(new dev.vox.lss.networking.payloads.ClientInfoC2SPayload(
+                    net.minecraft.SharedConstants.getCurrentVersion().dataVersion().version()));
+        } catch (Exception e) {
+            LSSLogger.debug("client_info sidecar send failed: " + e.getMessage());
+        }
+    }
 
     public static boolean isServerEnabled() {
         return sessionGate.isServerEnabled();
+    }
+
+    /** C6 observability: the established session's protocol version (0 pre-config). */
+    public static int getSessionVersion() {
+        return sessionGate.getSessionVersion();
     }
 
     public static boolean hasReceivedSessionConfig() {
@@ -110,6 +135,7 @@ public class LSSClientNetworking {
                 ClientPlayNetworking.send(new HandshakeC2SPayload(
                         LSSConstants.PROTOCOL_VERSION, LSSConstants.CAPABILITY_VOXEL_COLUMNS
                                 | ZstdWireSupport.capabilityBit()));
+                sendClientInfoSidecar();
             } catch (Exception e) {
                 LSSLogger.debug("LAN host handshake send failed: " + e.getMessage());
             }
@@ -267,7 +293,8 @@ public class LSSClientNetworking {
             boolean localIntegratedServer = Minecraft.getInstance().hasSingleplayerServer()
                     && !Boolean.getBoolean("lss.test.integratedServer");
             sessionGate.onJoin(LSSClientConfig.CONFIG.receiveServerLods, localIntegratedServer,
-                    LSSApi.hasVoxelConsumers(), LSSClientConfig.CONFIG.enableV16ServerCompat);
+                    LSSApi.hasVoxelConsumers(), LSSClientConfig.CONFIG.enableV16ServerCompat,
+                    LSSClientConfig.CONFIG.enableV19ServerCompat);
         });
 
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> sessionGate.onDisconnect());
@@ -277,7 +304,7 @@ public class LSSClientNetworking {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             // Runs even before a session: the v16-server discovery fallback (no-op on the v18
             // happy path, which disarms it before the delay elapses).
-            sessionGate.tickV16Discovery();
+            sessionGate.tickDiscoveryLadder();
             var manager = sessionGate.getRequestManager();
             if (manager != null && sessionGate.isServerEnabled()) {
                 manager.tick();

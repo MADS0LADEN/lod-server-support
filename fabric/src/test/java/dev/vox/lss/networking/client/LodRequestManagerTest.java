@@ -1162,5 +1162,10 @@ class LodRequestManagerTest {
         assertFalse(LSSClientNetworking.shouldDriveV16Generation(v18, true),
                 "a v18 session must NEVER drive the v16 rewrite, even with the opt-in on");
         assertFalse(LSSClientNetworking.shouldDriveV16Generation(v18, false), "v18 + off → off");
+        // C3 (review m9): a ladder-19 session is CURRENT downstream — server-owned
+        // generation, no v16 rewrite. Pinned against a future "|| == 19" edit.
+        assertFalse(LSSClientNetworking.shouldDriveV16Generation(
+                        LSSConstants.V19_COMPAT_PROTOCOL_VERSION, true),
+                "a 19 session must NEVER drive the v16 rewrite (server-owned generation)");
     }
 }

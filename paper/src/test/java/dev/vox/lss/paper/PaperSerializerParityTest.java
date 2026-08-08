@@ -96,6 +96,8 @@ class PaperSerializerParityTest {
         ServerLevel level = mock(ServerLevel.class);
         when(level.getMinSectionY()).thenReturn(MIN_SECTION_Y);
         when(level.getLightEngine()).thenReturn(lightEngine);
+        // C1: the produce-path v20 hook reads the level's registry access.
+        when(level.registryAccess()).thenReturn(REGISTRY_ACCESS);
         var chunk = mock(LevelChunk.class);
         when(chunk.getSections()).thenReturn(sections);
         return PaperSectionSerializer.serializeColumn(level, chunk, CX, CZ);
@@ -185,6 +187,17 @@ class PaperSerializerParityTest {
                                   boolean hasSkyLight, byte[] skyLight) {}
 
     private List<DecodedSection> decode(byte[] wire) {
+        // C1: both paths emit v20 — translate back with exact inverse resolvers before
+        // the native structural decode below (byte-level parity is asserted on the v20
+        // bytes upstream; this decode only feeds content assertions).
+        // C2 (review C1-15): the exact inverses are production statics now — decode
+        // through the same tables the legacy egress translators use.
+        var blockInverse = PaperIdentityTables.blockIdsByIdentity();
+        wire = dev.vox.lss.common.wire.V20ToNativeTranslator.translate(wire,
+                ident -> blockInverse.getOrDefault(ident, -1),
+                PaperNbtSectionSerializer.biomeIdLookup(REGISTRY_ACCESS),
+                net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(),
+                PaperNbtSectionSerializer.biomeIdCount(REGISTRY_ACCESS));
         var buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(wire));
         try {
             int count = buf.readVarInt();

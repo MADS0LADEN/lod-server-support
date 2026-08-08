@@ -3,6 +3,7 @@ package dev.vox.lss.benchmark;
 import com.google.gson.Gson;
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.LSSLogger;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.minecraft.server.MinecraftServer;
@@ -33,6 +34,10 @@ public final class SoakScenarioDriver {
     static final class ScenarioFile {
         int snapshotIntervalSeconds = 5;
         int joinTimeoutSeconds = 240;
+        /** C6 (XVER §9 store-migration variant): downgrade the staged store to the
+         *  released v0.9.x shape at SERVER_STARTING, so the scenario drives the REAL
+         *  lazy 3→4 upgrade + 19-row serves + background walk. */
+        boolean downgradeStoreToV19;
         List<Step> steps = List.of();
         End end;
     }
@@ -74,6 +79,11 @@ public final class SoakScenarioDriver {
         LSSLogger.info("[Soak] Scenario active: " + scenarioPath + " (" + scenario.steps.size()
                 + " steps, end anchor " + scenario.end.anchor + " +" + scenario.end.at + "s)");
 
+        if (scenario.downgradeStoreToV19) {
+            // SERVER_STARTING: registries loaded, store not yet opened (the service
+            // constructs at SERVER_STARTED) — the one window a faithful downgrade fits.
+            ServerLifecycleEvents.SERVER_STARTING.register(SoakStoreDowngrade::run);
+        }
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> driver.onJoin(handler.getPlayer().getName().getString()));
         ServerTickEvents.END_SERVER_TICK.register(driver::onTick);
     }

@@ -199,12 +199,20 @@ final class MoveTraceTelemetry {
         String dialect = null;
         int proto = LSSConstants.PROTOCOL_VERSION;
         try {
-            if (service.getV16CompatManager().isV16(player.getUUID())) {
-                dialect = "v16";
-                proto = LSSConstants.V16_COMPAT_PROTOCOL_VERSION;
-            } else if (service.getV18CompatTracker().isV18(player.getUUID())) {
-                dialect = "v18";
-                proto = LSSConstants.V18_COMPAT_PROTOCOL_VERSION;
+            switch (service.getDialectTracker().dialectOf(player.getUUID())) {
+                case V16 -> {
+                    dialect = "v16";
+                    proto = LSSConstants.V16_COMPAT_PROTOCOL_VERSION;
+                }
+                case V18 -> {
+                    dialect = "v18";
+                    proto = LSSConstants.V18_COMPAT_PROTOCOL_VERSION;
+                }
+                case V19 -> {
+                    dialect = "v19";
+                    proto = LSSConstants.V19_COMPAT_PROTOCOL_VERSION;
+                }
+                case CURRENT -> { }
             }
         } catch (Throwable ignored) {
             // Dialect stays absent; proto stays current — absent, not wrong (§0.5).

@@ -31,6 +31,17 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
     private PaperConfig lssConfig;
     private volatile PaperRequestProcessingService requestService;
 
+    // lss:client_info sidecar facts (XVER §2.2): the client's MC data version, keyed by
+    // UUID, swept at quit. Absence = legacy client (no sidecar channel). Consumed as
+    // diagnostics + the C5 Via-guard input.
+    private static final java.util.concurrent.ConcurrentHashMap<java.util.UUID, Integer>
+            CLIENT_DATA_VERSIONS = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** The client's announced MC data version, or null for a legacy client. */
+    public static Integer clientDataVersion(java.util.UUID uuid) {
+        return CLIENT_DATA_VERSIONS.get(uuid);
+    }
+
     /**
      * The onEnable step set, in the order {@link #runEnablePlan} drives them. The
      * production implementation lives in {@link #onEnable}; the interface is a test
@@ -120,6 +131,8 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                         LSSPaperPlugin.this, LSSConstants.CHANNEL_HANDSHAKE, LSSPaperPlugin.this);
                 getServer().getMessenger().registerIncomingPluginChannel(
                         LSSPaperPlugin.this, LSSConstants.CHANNEL_CHUNK_REQUEST, LSSPaperPlugin.this);
+                getServer().getMessenger().registerIncomingPluginChannel(
+                        LSSPaperPlugin.this, LSSConstants.CHANNEL_CLIENT_INFO, LSSPaperPlugin.this);
             }
 
             @Override
@@ -185,6 +198,9 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
         // (the service's shuttingDown flag covers the one already-in-flight tick).
         var service = this.requestService;
         this.requestService = null;
+        // Static sidecar facts must not survive /reload or a plugin-manager disable —
+        // players who quit while disabled would leak entries forever (review C1-9).
+        CLIENT_DATA_VERSIONS.clear();
         // Unregister the channels BEFORE shutdown (2026-08-05 review H5): a frame already
         // dispatched into onPluginMessageReceived proceeds with its captured service
         // reference (nothing can stop it; everything it touches is individually
@@ -208,7 +224,9 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
         ServerPlayer nmsPlayer = ((CraftPlayer) player).getHandle();
         dispatchPluginMessage(channel, player.getName(), message,
                 data -> handleHandshake(player, nmsPlayer, data),
-                data -> handleBatchChunkRequest(nmsPlayer, data));
+                data -> handleBatchChunkRequest(nmsPlayer, data),
+                data -> CLIENT_DATA_VERSIONS.put(nmsPlayer.getUUID(),
+                        PaperPayloadHandler.decodeClientInfo(data)));
     }
 
     /** Test seam: a per-channel message handler; hostile-frame decodes may throw. */
@@ -234,11 +252,13 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
      */
     static void dispatchPluginMessage(String channel, String playerName, byte[] message,
                                       PluginMessageHandler handshakeHandler,
-                                      PluginMessageHandler chunkRequestHandler) {
+                                      PluginMessageHandler chunkRequestHandler,
+                                      PluginMessageHandler clientInfoHandler) {
         try {
             switch (channel) {
                 case LSSConstants.CHANNEL_HANDSHAKE -> handshakeHandler.handle(message);
                 case LSSConstants.CHANNEL_CHUNK_REQUEST -> chunkRequestHandler.handle(message);
+                case LSSConstants.CHANNEL_CLIENT_INFO -> clientInfoHandler.handle(message);
             }
         } catch (Exception e) {
             long released = hostileFrameLog.recordAndTryAcquire(System.nanoTime() / 1_000_000);
@@ -287,7 +307,13 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
 
     private void handleHandshake(Player bukkitPlayer, ServerPlayer nmsPlayer, byte[] data) {
         var service = this.requestService;
+        // XVER §7: capture Via's answer once per handshake (the && keeps a disabled
+        // guard from ever triggering probe resolution); the pure seam applies the rule.
+        int viaProtocol = this.lssConfig.enableViaMismatchGuard
+                ? dev.vox.lss.common.compat.ViaProbe.playerProtocol(nmsPlayer.getUUID())
+                : dev.vox.lss.common.compat.ViaProbe.NO_SIGNAL;
         handleHandshake(data, nmsPlayer.getName().getString(), this.lssConfig, service != null,
+                viaProtocol, net.minecraft.SharedConstants.getProtocolVersion(),
                 (dialect, enabled, lodDistanceChunks, syncCap, genCap, generationEnabled) -> {
                     // A cross-dialect re-handshake sheds the stale compat identities it is
                     // NOT — otherwise columns keep shipping the old dialect's shape and
@@ -299,9 +325,10 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                         if (dialect != HandshakeGate.WireDialect.V16) {
                             service.getV16CompatManager().onNonV16Handshake(nmsPlayer.getUUID());
                         }
-                        if (dialect != HandshakeGate.WireDialect.V18) {
-                            service.getV18CompatTracker().onNonV18Handshake(nmsPlayer.getUUID());
-                        }
+                        // Reply-only outcomes shed a stale CROSS-dialect membership; a
+                        // REGISTER's mark happens on the pump via dialectFlipFor.
+                        service.getDialectTracker().onNonRegisterHandshake(
+                                nmsPlayer.getUUID(), dialect);
                     }
                     if (dialect == HandshakeGate.WireDialect.V16) {
                         PaperPayloadHandler.sendSessionConfigV16(bukkitPlayer, enabled,
@@ -334,7 +361,7 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                     // v18-compat design §2.3, review F1).
                     service.enqueueRegister(nmsPlayer, capabilities,
                             dialectFlipFor(dialect, service.getV16CompatManager(),
-                                    service.getV18CompatTracker(), nmsPlayer.getUUID()),
+                                    service.getDialectTracker(), nmsPlayer.getUUID()),
                             replyAfterRegister);
                 });
     }
@@ -346,33 +373,31 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
      *  seam above every test, and a silent V18->PROTOCOL_VERSION regression compiled
      *  clean). V16 never reaches this — it takes the 6-field legacy sender. */
     static int sessionConfigVersionFor(HandshakeGate.WireDialect dialect) {
-        return dialect == HandshakeGate.WireDialect.V18
-                ? LSSConstants.V18_COMPAT_PROTOCOL_VERSION
-                : LSSConstants.PROTOCOL_VERSION;
+        return switch (dialect) {
+            case V18 -> LSSConstants.V18_COMPAT_PROTOCOL_VERSION;
+            case V19 -> LSSConstants.V19_COMPAT_PROTOCOL_VERSION;
+            case V16, CURRENT -> LSSConstants.PROTOCOL_VERSION;
+        };
     }
 
-    /** The pump-deferred dialect flip per dialect: mark own identity, shed the other's
-     *  (CURRENT sheds both). Extracted static so the switch BODY is pinnable against
+    /** The pump-deferred dialect flip: mark the session's dialect in the single-map
+     *  tracker (any cross-dialect shed is the overwrite itself) and create/shed the v16
+     *  manager's ingress-shim session. Extracted static so the BODY is pinnable against
      *  real manager/tracker instances (execution-review finding 1: dropping the V18
      *  case's mark — which mis-derives wantsCompressedColumns and leaks the codec byte
      *  to every v0.8.x client — passed the whole suite). */
     static Runnable dialectFlipFor(HandshakeGate.WireDialect dialect,
                                    dev.vox.lss.common.compat.V16CompatManager v16,
-                                   dev.vox.lss.common.compat.V18CompatTracker v18,
+                                   dev.vox.lss.common.compat.WireDialectTracker dialects,
                                    java.util.UUID uuid) {
-        return switch (dialect) {
-            case V16 -> () -> {
+        return () -> {
+            dialects.onHandshake(uuid, dialect);
+            if (dialect == HandshakeGate.WireDialect.V16) {
+                // Session identity first, so drip batches merge from the first frame.
                 v16.onHandshake(uuid);
-                v18.onNonV18Handshake(uuid);
-            };
-            case V18 -> () -> {
-                v18.onHandshake(uuid);
+            } else {
                 v16.onNonV16Handshake(uuid);
-            };
-            case CURRENT -> () -> {
-                v16.onNonV16Handshake(uuid);
-                v18.onNonV18Handshake(uuid);
-            };
+            }
         };
     }
 
@@ -387,6 +412,19 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
     static void handleHandshake(byte[] data, String playerName, PaperConfig config,
                                 boolean servicePresent, SessionConfigSender configSender,
                                 HandshakeRegistrar registrar) {
+        // No-Via-signal overload: every pre-C5 glue pin rides this unchanged. The
+        // native slot gets 0 — a value no real MC protocol can be — never an LSS
+        // protocol number (review m6: pairing NO_SIGNAL with PROTOCOL_VERSION was a
+        // landmine one edit from denying everyone via 20 != <real via protocol>).
+        handleHandshake(data, playerName, config, servicePresent,
+                dev.vox.lss.common.compat.ViaProbe.NO_SIGNAL, 0,
+                configSender, registrar);
+    }
+
+    static void handleHandshake(byte[] data, String playerName, PaperConfig config,
+                                boolean servicePresent, int viaProtocol, int nativeProtocol,
+                                SessionConfigSender configSender,
+                                HandshakeRegistrar registrar) {
         var handshake = PaperPayloadHandler.decodeHandshake(data);
         if (handshake == null) return;
 
@@ -396,8 +434,24 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
 
         var decision = HandshakeGate.evaluate(handshake.protocolVersion(),
                 handshake.capabilities(), config.enabled, servicePresent,
-                config.enableV16Compat, config.enableV18Compat);
+                config.enableV16Compat, config.enableV18Compat, config.enableV19Compat,
+                dev.vox.lss.common.compat.ViaProbe.isMismatch(viaProtocol, nativeProtocol));
 
+        if (decision.outcome() == HandshakeGate.Outcome.VIA_MISMATCH) {
+            // Silent deny — "Minecraft protocol" to keep the number space distinct
+            // from the LSS protocol the handshake INFO above prints (review m5). Like
+            // VERSION_MISMATCH below, an EXISTING registration deliberately survives
+            // (review m1): the reachable window is a no-signal FIRST handshake (Via
+            // mid-init) that registered legacy, then a later denial — bounded to that
+            // race, healed by rejoin (the re-attach prompt loop this can enter is
+            // 1/minute-bounded; see sendReattachPromptPayload).
+            LSSLogger.info("LOD unavailable for " + playerName
+                    + ": Via reports client Minecraft protocol " + viaProtocol
+                    + " vs server " + nativeProtocol + " (cross-MC legacy session"
+                    + " cannot be served) — the client must update "
+                    + Brand.shortName());
+            return;
+        }
         if (!decision.sendSessionConfig()) {
             // See HandshakeGate.Outcome.VERSION_MISMATCH: replying would kick the player.
             // An EXISTING registration deliberately survives this rung (and NO_CONSUMER):
@@ -473,8 +527,11 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
             // ALSO dropped by the mailbox Remove drain (the quit-race leak guard —
             // v18-compat design §2.3).
             service.getV16CompatManager().onDisconnect(event.getPlayer().getUniqueId());
-            service.getV18CompatTracker().onDisconnect(event.getPlayer().getUniqueId());
+            service.getDialectTracker().onDisconnect(event.getPlayer().getUniqueId());
         }
+        // Service-independent: the sidecar fact is recorded at the network level
+        // (possibly before any service exists) and must die with the connection.
+        CLIENT_DATA_VERSIONS.remove(event.getPlayer().getUniqueId());
     }
 
     public PaperRequestProcessingService getRequestService() {

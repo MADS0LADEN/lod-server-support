@@ -68,26 +68,13 @@ class NbtSectionSerializerTest {
     }
 
     /**
-     * Twin of the Fabric builder: the golden corpus bytes embed biome palette ids, so ids must
-     * be platform- and version-independent — register exactly the corpus biomes in this fixed
-     * order (full-vanilla listElements() order differs between the Fabric and Paper test
-     * runtimes and skewed the fixtures). Never reorder; if this list changes, regenerate all
-     * goldens on BOTH modules.
+     * The corpus-fixed biome RegistryAccess — extracted to {@link CorpusRegistryAccess}
+     * at C2 (twin of the Fabric extraction) so the translation-chain suite
+     * ({@code PaperLegacyEgressTest}) provably decodes against the same registry these
+     * fixtures were generated with. The append-only discipline lives on the helper.
      */
     private static RegistryAccess buildRegistryAccess() {
-        HolderLookup.Provider provider = VanillaRegistries.createLookup();
-        HolderLookup.RegistryLookup<Biome> src = provider.lookupOrThrow(Registries.BIOME);
-        MappedRegistry<Biome> biomes = new MappedRegistry<>(Registries.BIOME, Lifecycle.stable());
-        for (var key : List.of(Biomes.PLAINS, Biomes.DESERT, Biomes.JUNGLE, Biomes.SNOWY_TAIGA,
-                // Appended for the round-2 transcode goldens (the biome 3-bit-linear and
-                // global tiers need >4 and >8 distinct biomes). APPEND-ONLY: ids are
-                // assigned in list order and the committed goldens bake them.
-                Biomes.SWAMP, Biomes.TAIGA, Biomes.SAVANNA, Biomes.BADLANDS, Biomes.BEACH,
-                Biomes.RIVER)) {
-            biomes.register(key, src.getOrThrow(key).value(), RegistrationInfo.BUILT_IN);
-        }
-        biomes.freeze();
-        return new RegistryAccess.ImmutableRegistryAccess(List.of(biomes));
+        return CorpusRegistryAccess.build();
     }
 
     private CompoundTag chunkNbt(String status, CompoundTag... sections) {
@@ -123,7 +110,23 @@ class NbtSectionSerializerTest {
                                   boolean hasBlockLight, byte[] blockLight,
                                   boolean hasSkyLight, byte[] skyLight) {}
 
-    private List<DecodedSection> decode(byte[] wire) {
+    /** v20 wire -> the native view every assertion below predates (exact inverse
+     *  resolvers over the SAME registries the emit used). Since C2 this decodes through
+     *  the PRODUCTION inverse statics (review C1-15); independence is anchored by
+     *  {@code PaperLegacyEgressTest}'s chain against the FROZEN committed goldens. */
+    private static byte[] toNativeForTest(byte[] v20Wire) {
+        // C2 (review C1-15): the exact inverses are production statics now — decode
+        // through the same tables the legacy egress translators use.
+        var blockInverse = PaperIdentityTables.blockIdsByIdentity();
+        return dev.vox.lss.common.wire.V20ToNativeTranslator.translate(v20Wire,
+                ident -> blockInverse.getOrDefault(ident, -1),
+                PaperNbtSectionSerializer.biomeIdLookup(REGISTRY_ACCESS),
+                net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(),
+                PaperNbtSectionSerializer.biomeIdCount(REGISTRY_ACCESS));
+    }
+
+    private List<DecodedSection> decode(byte[] v20Wire) {
+        byte[] wire = toNativeForTest(v20Wire);
         var buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(wire));
         try {
             int count = buf.readVarInt();
@@ -567,7 +570,9 @@ class NbtSectionSerializerTest {
     // Gradle use --no-daemon so the env reaches the forked test worker) — the run writes
     // the fixtures and fails with "re-run"; then re-run without the flag and commit.
 
-    private static final String GOLDEN_DIR = "src/test/resources/nbt-corpus";
+    // v20-corpus since C1 (see the Fabric twin); the NATIVE nbt-corpus stays committed
+    // as a frozen fixture (its generator now emits v20) for C2's translation targets.
+    private static final String GOLDEN_DIR = "src/test/resources/v20-corpus";
 
     private static boolean regenGoldens() {
         return Boolean.getBoolean("lss.regenGoldens")
@@ -600,7 +605,7 @@ class NbtSectionSerializerTest {
         // fixture sets and commit the divergence green; Fabric clients would then
         // mis-decode Paper servers' disk-read columns.
         Path paperDir = goldenPath("probe").getParent();
-        Path fabricDir = locateRepoRelative("fabric/src/test/resources/nbt-corpus");
+        Path fabricDir = locateRepoRelative("fabric/src/test/resources/v20-corpus");
         java.util.Map<String, Path> paper = corpusFiles(paperDir);
         java.util.Map<String, Path> fabric = corpusFiles(fabricDir);
         assertEquals(fabric.keySet(), paper.keySet(),
@@ -1030,7 +1035,10 @@ class NbtSectionSerializerTest {
                     // all-air with no light: the headless path serves a CLEAR (empty array)
                     assertEquals(0, actual.length, "round " + round);
                 } else {
-                    assertArrayEquals(expected, actual, "round " + round);
+                    // C1: headless == toV20(real section.write) — pins the native emit
+                    // AND the produce-path hook together (Fabric twin).
+                    assertArrayEquals(PaperNbtSectionSerializer.toV20(expected, REGISTRY_ACCESS),
+                            actual, "round " + round);
                 }
             } finally {
                 expectedBuf.release();

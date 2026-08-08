@@ -13,6 +13,7 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
+import net.minecraft.SharedConstants;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -85,6 +86,17 @@ public class LSSServerNetworking {
     // worlds); bounded by the distinct dimensions a JVM ever loads.
     private static final ConcurrentHashMap<ResourceKey<Level>, String> DIMENSION_STRINGS =
             new ConcurrentHashMap<>();
+
+    // lss:client_info sidecar facts (XVER §2.2): the client's MC data version, keyed by
+    // UUID, swept at disconnect. Absence = legacy client (no sidecar channel). Consumed
+    // as diagnostics + the C5 Via-guard input.
+    private static final ConcurrentHashMap<java.util.UUID, Integer> CLIENT_DATA_VERSIONS =
+            new ConcurrentHashMap<>();
+
+    /** The client's announced MC data version, or null for a legacy client. */
+    public static Integer clientDataVersion(java.util.UUID uuid) {
+        return CLIENT_DATA_VERSIONS.get(uuid);
+    }
 
     /**
      * The dirty-detection hook body ({@code ChunkSaveDataHook}'s copyOf injection — the
@@ -188,6 +200,28 @@ public class LSSServerNetworking {
     public static void handleHandshake(HandshakeC2SPayload payload, ServerPlayer player,
                                        RequestProcessingService service,
                                        SessionConfigResponder responder) {
+        // XVER §7: consult Via for the client's REAL protocol (a legacy LSS handshake
+        // carries no MC version). Captured once so the log line and the gate see the
+        // same number; the ternary keeps a disabled guard from ever triggering
+        // resolution. Deliberately consulted for v20 handshakes too (the gate discards
+        // it there) — the answer is future diagnostics, and the probe is one cached
+        // MethodHandle invoke per join (review m12, kept with rationale).
+        var config = LSSServerConfig.CONFIG;
+        int viaProtocol = config.enableViaMismatchGuard
+                ? dev.vox.lss.common.compat.ViaProbe.playerProtocol(player.getUUID())
+                : dev.vox.lss.common.compat.ViaProbe.NO_SIGNAL;
+        handleHandshake(payload, player, service, responder,
+                viaProtocol, SharedConstants.getProtocolVersion());
+    }
+
+    /** The Via-signal seam (review MAJOR-2, mirroring the Paper overload pair): the
+     *  probe read happens in the caller above, so a gametest can force a mismatch
+     *  through the PRODUCTION ladder — without this seam no test JVM can produce a
+     *  VIA_MISMATCH on Fabric at all (no real Via in any tier). */
+    public static void handleHandshake(HandshakeC2SPayload payload, ServerPlayer player,
+                                       RequestProcessingService service,
+                                       SessionConfigResponder responder,
+                                       int viaProtocol, int nativeProtocol) {
         LSSLogger.info(Brand.shortName() + " handshake received from " + player.getName().getString()
                 + " (protocol v" + payload.protocolVersion()
                 + ", capabilities=" + payload.capabilities() + ")");
@@ -195,8 +229,25 @@ public class LSSServerNetworking {
         var config = LSSServerConfig.CONFIG;
         var decision = HandshakeGate.evaluate(payload.protocolVersion(),
                 payload.capabilities(), config.enabled, service != null,
-                config.enableV16Compat, config.enableV18Compat);
+                config.enableV16Compat, config.enableV18Compat, config.enableV19Compat,
+                dev.vox.lss.common.compat.ViaProbe.isMismatch(viaProtocol, nativeProtocol));
 
+        if (decision.outcome() == HandshakeGate.Outcome.VIA_MISMATCH) {
+            // Silent deny; "Minecraft protocol" because the handshake INFO one line up
+            // prints an LSS protocol number and the two spaces must not be conflated
+            // (review m5). Like VERSION_MISMATCH's early return below, an EXISTING
+            // registration deliberately survives (review m1): the reachable window is
+            // a no-signal FIRST handshake (Via mid-init) that registered legacy, then
+            // a later re-handshake denying — bounded to that race, healed by rejoin;
+            // shedding here would add remove-path surface for a corner Via itself
+            // closes seconds later.
+            LSSLogger.info("LOD unavailable for " + player.getName().getString()
+                    + ": Via reports client Minecraft protocol " + viaProtocol
+                    + " vs server " + nativeProtocol + " (cross-MC legacy session"
+                    + " cannot be served) — the client must update "
+                    + Brand.shortName());
+            return;
+        }
         if (!decision.sendSessionConfig()) {
             // See HandshakeGate.Outcome.VERSION_MISMATCH: replying would kick the player.
             // An EXISTING registration deliberately survives this rung (and NO_CONSUMER
@@ -215,12 +266,20 @@ public class LSSServerNetworking {
 
         boolean v16 = decision.dialect() == HandshakeGate.WireDialect.V16;
         boolean v18 = decision.dialect() == HandshakeGate.WireDialect.V18;
+        boolean v19 = decision.dialect() == HandshakeGate.WireDialect.V19;
         if (service != null) {
-            // A cross-dialect re-handshake must shed the stale compat identity — otherwise
-            // every column keeps shipping the old dialect's shape and hard-kicks the
-            // re-armed decoder. Each reply sheds the dialects it is NOT. No-op normally.
-            if (!v16) service.getV16CompatManager().onNonV16Handshake(player.getUUID());
-            if (!v18) service.getV18CompatTracker().onNonV18Handshake(player.getUUID());
+            if (!v16) {
+                // A cross-dialect re-handshake must shed the stale v16 ingress-shim
+                // session (the dialect TRACKER shed is automatic on REGISTER — the
+                // onHandshake overwrite — but the manager's synthetic want-set session
+                // is separate state).
+                service.getV16CompatManager().onNonV16Handshake(player.getUUID());
+            }
+            if (!decision.registerPlayer()) {
+                // Non-register outcomes still shed a stale CROSS-dialect membership.
+                service.getDialectTracker().onNonRegisterHandshake(
+                        player.getUUID(), decision.dialect());
+            }
         }
         responder.send(v16
                 ? SessionConfigS2CPayload.v16Legacy(
@@ -232,13 +291,18 @@ public class LSSServerNetworking {
                         config.generationConcurrencyLimitPerPlayer,
                         config.enableChunkGeneration)
                 : new SessionConfigS2CPayload(
-                        // v18 compat: the CURRENT 4-field layout, echoing 18 — the old
-                        // client's gate hard-requires its own version (v18-compat §2.4).
+                        // v18/v19 compat: the CURRENT 4-field layout, echoing the legacy
+                        // client's own version — its gate hard-requires it (v18-compat
+                        // §2.4; the v19 rung is the same echo trick).
                         v18 ? LSSConstants.V18_COMPAT_PROTOCOL_VERSION
-                            : LSSConstants.PROTOCOL_VERSION,
+                            : v19 ? LSSConstants.V19_COMPAT_PROTOCOL_VERSION
+                                  : LSSConstants.PROTOCOL_VERSION,
                         decision.effectiveEnabled(),
                         config.lodDistanceChunks,
-                        config.enableChunkGeneration));
+                        config.enableChunkGeneration,
+                        // v20-only append (the encoder omits it for the echo versions).
+                        net.minecraft.SharedConstants.getCurrentVersion()
+                                .dataVersion().version()));
 
         if (decision.outcome() == HandshakeGate.Outcome.NO_CONSUMER) {
             // Visible to admins via this log.
@@ -253,16 +317,16 @@ public class LSSServerNetworking {
                 // Session identity first, so drip batches merge from the first frame.
                 service.getV16CompatManager().onHandshake(player.getUUID());
             }
-            if (v18) {
-                // Membership first: registerPlayer derives wantsCompressedColumns from it
-                // (v18-compat §2.4 — same main-thread mark-before-register as v16).
-                service.getV18CompatTracker().onHandshake(player.getUUID());
-            }
+            // Dialect mark first: registerPlayer derives wantsCompressedColumns from it
+            // (v18-compat §2.4 — the main-thread mark-before-register contract; one map,
+            // so this is also the cross-dialect shed for the tracker).
+            service.getDialectTracker().onHandshake(player.getUUID(), decision.dialect());
             service.registerPlayer(player, payload.capabilities());
             LSSLogger.info("Player " + player.getName().getString()
                     + " registered for " + Brand.shortName() + " LOD request processing (caps="
                     + payload.capabilities()
-                    + (v16 ? ", v16-compat" : "") + (v18 ? ", v18-compat" : "") + ")");
+                    + (v16 ? ", v16-compat" : "") + (v18 ? ", v18-compat" : "")
+                    + (v19 ? ", v19-compat" : "") + ")");
         }
     }
 
@@ -271,6 +335,12 @@ public class LSSServerNetworking {
                 HandshakeC2SPayload.TYPE,
                 (payload, context) -> handleHandshake(payload, context.player(), requestService,
                         reply -> ServerPlayNetworking.send(context.player(), reply))
+        );
+
+        ServerPlayNetworking.registerGlobalReceiver(
+                dev.vox.lss.networking.payloads.ClientInfoC2SPayload.TYPE,
+                (payload, context) -> CLIENT_DATA_VERSIONS.put(
+                        context.player().getUUID(), payload.dataVersion())
         );
 
         ServerPlayNetworking.registerGlobalReceiver(
@@ -299,6 +369,9 @@ public class LSSServerNetworking {
                 service.shutdown();
                 requestService = null;
             }
+            // Sidecar facts die with the server (integrated-server world cycles would
+            // otherwise accrete entries across sessions — review C1-9).
+            CLIENT_DATA_VERSIONS.clear();
         });
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
@@ -318,8 +391,11 @@ public class LSSServerNetworking {
                 // (removePlayer above only reset the v16 want-set and touches neither
                 // membership — dim changes reuse that path and must keep both).
                 service.getV16CompatManager().onDisconnect(handler.getPlayer().getUUID());
-                service.getV18CompatTracker().onDisconnect(handler.getPlayer().getUUID());
+                service.getDialectTracker().onDisconnect(handler.getPlayer().getUUID());
             }
+            // Service-independent: the sidecar fact is recorded at the network level
+            // (possibly before any service exists) and must die with the connection.
+            CLIENT_DATA_VERSIONS.remove(handler.getPlayer().getUUID());
         });
     }
 }

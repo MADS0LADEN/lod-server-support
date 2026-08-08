@@ -176,10 +176,15 @@ class ReleaseWorkflowContractTest {
     void buildWorkflowRunsOnSupportBranches() {
         // build.yml is shared in spirit across lines; keeping the branches filter identical
         // on main makes the recurring main→support merges conflict-free and ensures a
-        // support branch pushed before its own build.yml edit still gets CI.
-        long hits = Pattern.compile(Pattern.quote("branches: [main, 'support/**']"))
+        // support branch pushed before its own build.yml edit still gets CI. (The
+        // v0.10.0 'feat/protocol-20' integration-branch entry was dropped with the C6
+        // merge, together with its pin — the support lines already pin this 2-entry
+        // form, so a D3 re-port taking main's build.yml stays contract-clean.)
+        long hits = Pattern.compile(
+                        Pattern.quote("branches: [main, 'support/**']"))
                 .matcher(buildYml).results().count();
         assertEquals(2, hits,
-                "build.yml must keep branches: [main, 'support/**'] on push AND pull_request");
+                "build.yml must keep branches: [main, 'support/**']"
+                        + " on push AND pull_request");
     }
 }

@@ -271,6 +271,72 @@ class LSSPaperPluginGlueTest {
         assertEquals(List.of(), registrar.caps);
     }
 
+    @Test
+    void v19HandshakeGetsTheV19DialectReplyAndRegistration() {
+        // A protocol-19 client (v0.9.x) under enableV19Compat (default true) takes the
+        // SAME ladder with the V19 dialect, driving the PRODUCTION handleHandshake — the
+        // 7-arg gate call site — so a silent fall-back to the 6-arg overload (which
+        // would drop v19 clients to the v16 discovery fallback) fails HERE (the C1
+        // recon's named drift hazard).
+        var config = config(true);
+        config.lodDistanceChunks = 103;
+        config.generationConcurrencyLimitPerPlayer = 9;
+        var sender = new RecordingSender();
+        var registrar = new RecordingRegistrar();
+        LSSPaperPlugin.handleHandshake(handshakeFrame(19, VOXEL_CAPS),
+                "vx9m", config, true, sender, registrar);
+
+        assertEquals(List.of(), sender.replies, "v19 registration defers its reply too");
+        registrar.runDeferredReplies();
+        assertEquals(List.of(new Reply(HandshakeGate.WireDialect.V19, true, 103,
+                        LSSConstants.SYNC_ON_LOAD_SLOT_CAP, 9, true)), sender.replies);
+        assertEquals(List.of(VOXEL_CAPS), registrar.caps);
+        assertEquals(List.of(HandshakeGate.WireDialect.V19), registrar.dialects);
+    }
+
+    @Test
+    void viaMismatchOnALegacyHandshakeSendsNothingAndRegistersNobody() {
+        // C5 (XVER §7): the seam's 8-arg overload with a POSITIVE foreign Via answer
+        // must stay silent for a legacy client — no reply frame (each legacy ladder
+        // reads silence as "no LSS here"), no registration. The v20 client case and
+        // the no-signal equivalence ride the gate suite; this drives the PRODUCTION
+        // glue path.
+        var config = config(true);
+        var sender = new RecordingSender();
+        var registrar = new RecordingRegistrar();
+        LSSPaperPlugin.handleHandshake(handshakeFrame(19, VOXEL_CAPS),
+                "vx9m", config, true, 763, 774, sender, registrar);
+        assertEquals(List.of(), sender.replies, "a Via-mismatched legacy client gets silence");
+        assertEquals(List.of(), registrar.caps);
+
+        // The no-signal overload is the pre-C5 ladder verbatim: same frame registers.
+        LSSPaperPlugin.handleHandshake(handshakeFrame(19, VOXEL_CAPS),
+                "vx9m", config, true, sender, registrar);
+        registrar.runDeferredReplies();
+        assertEquals(List.of(VOXEL_CAPS), registrar.caps,
+                "no Via signal must leave the ladder untouched (fail-open)");
+    }
+
+    @Test
+    void v19HandshakeWithCompatDisabledSendsNothing() {
+        var config = config(true);
+        config.enableV19Compat = false;
+        var sender = new RecordingSender();
+        var registrar = new RecordingRegistrar();
+        LSSPaperPlugin.handleHandshake(handshakeFrame(19, VOXEL_CAPS),
+                "vx9m", config, true, sender, registrar);
+        assertEquals(List.of(), sender.replies,
+                "the v19 kill switch restores the strict silent version gate");
+        assertEquals(List.of(), registrar.caps);
+    }
+
+    @Test
+    void sessionConfigVersionEchoesV19ForTheV19Dialect() {
+        assertEquals(LSSConstants.V19_COMPAT_PROTOCOL_VERSION,
+                LSSPaperPlugin.sessionConfigVersionFor(HandshakeGate.WireDialect.V19),
+                "the v19 client's gate hard-requires its own version echo");
+    }
+
     // ---- the production sender/flip bodies (execution-review finding 1: these sat one
     // seam ABOVE the recording seams, so a silent regression in either compiled clean) ----
 
@@ -297,20 +363,27 @@ class LSSPaperPluginGlueTest {
         var uuid = java.util.UUID.randomUUID();
 
         var v16 = new dev.vox.lss.common.compat.V16CompatManager();
-        var v18 = new dev.vox.lss.common.compat.V18CompatTracker();
-        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.V18, v16, v18, uuid).run();
-        assertTrue(v18.isV18(uuid), "the V18 flip must mark v18 membership");
+        var dialects = new dev.vox.lss.common.compat.WireDialectTracker();
+        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.V18, v16, dialects, uuid).run();
+        assertTrue(dialects.isV18(uuid), "the V18 flip must mark v18 membership");
         assertFalse(v16.isV16(uuid));
 
         // V16 flip on the same player (a cross-dialect re-handshake): marks v16, sheds v18.
-        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.V16, v16, v18, uuid).run();
+        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.V16, v16, dialects, uuid).run();
         assertTrue(v16.isV16(uuid), "the V16 flip must mark the v16 session");
-        assertFalse(v18.isV18(uuid), "the V16 flip must shed stale v18 membership");
+        assertTrue(dialects.isV16(uuid), "the tracker must carry the v16 dialect");
+        assertFalse(dialects.isV18(uuid), "the V16 flip must shed stale v18 membership");
 
-        // CURRENT flip sheds both.
-        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.CURRENT, v16, v18, uuid).run();
+        // V19 flip on the same player: marks v19, sheds the v16 session.
+        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.V19, v16, dialects, uuid).run();
+        assertTrue(dialects.isV19(uuid), "the V19 flip must mark v19 membership");
+        assertFalse(v16.isV16(uuid), "the V19 flip must shed the v16 session");
+
+        // CURRENT flip sheds everything legacy.
+        LSSPaperPlugin.dialectFlipFor(HandshakeGate.WireDialect.CURRENT, v16, dialects, uuid).run();
         assertFalse(v16.isV16(uuid), "the CURRENT flip must shed the v16 session");
-        assertFalse(v18.isV18(uuid), "the CURRENT flip must shed v18 membership");
+        assertFalse(dialects.isV18(uuid) || dialects.isV19(uuid) || dialects.isV16(uuid),
+                "the CURRENT flip must leave no legacy membership");
     }
 
     @Test
@@ -348,7 +421,8 @@ class LSSPaperPluginGlueTest {
             assertDoesNotThrow(() -> LSSPaperPlugin.dispatchPluginMessage(
                     LSSConstants.CHANNEL_HANDSHAKE, "Steve", garbage,
                     data -> LSSPaperPlugin.handleHandshake(data, "Steve", config(true), true, sender, (caps, dialect, reply) -> reply.run()),
-                    data -> { throw new AssertionError("handshake frame must not reach the chunk-request handler"); }),
+                    data -> { throw new AssertionError("handshake frame must not reach the chunk-request handler"); },
+                    data -> { throw new AssertionError("handshake frame must not reach the client-info handler"); }),
                     "a malformed frame must never propagate into Bukkit's messenger");
             assertEquals(List.of(), sender.replies, "no partial handshake handling");
 
@@ -363,7 +437,8 @@ class LSSPaperPluginGlueTest {
             LSSPaperPlugin.dispatchPluginMessage(
                     LSSConstants.CHANNEL_HANDSHAKE, "Steve", handshakeFrame(V, VOXEL_CAPS),
                     data -> LSSPaperPlugin.handleHandshake(data, "Steve", config(true), true, sender, (caps, dialect, reply) -> reply.run()),
-                    data -> { throw new AssertionError("handshake frame must not reach the chunk-request handler"); });
+                    data -> { throw new AssertionError("handshake frame must not reach the chunk-request handler"); },
+                    data -> { throw new AssertionError("handshake frame must not reach the client-info handler"); });
             assertEquals(1, sender.replies.size(), "subsequent messages still dispatch after a contained failure");
             assertEquals(1, capture.rows().stream().filter(r -> r.level() == Level.ERROR).count());
         }
@@ -387,7 +462,8 @@ class LSSPaperPluginGlueTest {
             assertDoesNotThrow(() -> LSSPaperPlugin.dispatchPluginMessage(
                     LSSConstants.CHANNEL_CHUNK_REQUEST, "Alex", garbage,
                     data -> { throw new AssertionError("chunk-request frame must not reach the handshake handler"); },
-                    chunkHandler));
+                    chunkHandler,
+                    data -> { throw new AssertionError("chunk-request frame must not reach the client-info handler"); }));
             assertEquals(List.of(), decoded, "no partial batch decode survives");
 
             var errors = capture.rows().stream().filter(r -> r.level() == Level.ERROR).toList();
@@ -403,7 +479,8 @@ class LSSPaperPluginGlueTest {
                         b.writeLong(123L);
                     }),
                     data -> { throw new AssertionError("chunk-request frame must not reach the handshake handler"); },
-                    chunkHandler);
+                    chunkHandler,
+                    data -> { throw new AssertionError("chunk-request frame must not reach the client-info handler"); });
             assertEquals(1, decoded.size(), "subsequent messages still dispatch after a contained failure");
             assertEquals(PositionUtil.packPosition(-3, 9), decoded.get(0).packedPositions()[0]);
         }
@@ -420,7 +497,8 @@ class LSSPaperPluginGlueTest {
                 LSSPaperPlugin.dispatchPluginMessage(
                         LSSConstants.CHANNEL_HANDSHAKE, "Griefer", garbage,
                         data -> { throw new IllegalStateException("injected hostile-frame failure"); },
-                        data -> { throw new AssertionError("handshake frame must not reach the chunk-request handler"); });
+                        data -> { throw new AssertionError("handshake frame must not reach the chunk-request handler"); },
+                        data -> { throw new AssertionError("handshake frame must not reach the client-info handler"); });
             }
             var errors = capture.rows().stream().filter(r -> r.level() == Level.ERROR).toList();
             assertEquals(1, errors.size(),
@@ -433,7 +511,8 @@ class LSSPaperPluginGlueTest {
         try (var capture = new LssLogCapture()) {
             LSSPaperPlugin.dispatchPluginMessage("lss:not_a_channel", "Steve", new byte[]{1, 2, 3},
                     data -> { throw new AssertionError("unknown channel must not reach the handshake handler"); },
-                    data -> { throw new AssertionError("unknown channel must not reach the chunk-request handler"); });
+                    data -> { throw new AssertionError("unknown channel must not reach the chunk-request handler"); },
+                    data -> { throw new AssertionError("unknown channel must not reach the client-info handler"); });
             assertEquals(List.of(), capture.rows(), "unknown channels are silently ignored");
         }
     }
