@@ -769,9 +769,11 @@ class ColumnTimestampCacheTest {
     /** The no-empty-tile invariant at every decrement site (design §2/§8): a tile whose
      *  last slot clears must be REMOVED, whichever path cleared it — a leaked empty tile
      *  costs eviction budget forever, and a persisted one is a liveCount-0 record the v2
-     *  loader rejects. Observable without internals: save() writes only live tiles, so a
-     *  cache whose every tile emptied must save NOTHING (the skip-empty belt pin), and a
-     *  dimension keeping one live entry must round-trip exactly that entry. */
+     *  loader rejects. Observable without internals: save() persists only LIVE tiles, so
+     *  an all-emptied cache must save a file that loads back EMPTY (a leaked empty tile
+     *  would write a liveCount-0 record and the load would warn-discard). The file must
+     *  still be WRITTEN — an emptied cache that skipped its save would leave stale
+     *  stamps on disk to resurrect invalidated positions on the next boot. */
     @Test
     void emptyTilesDieAtAllThreeDecrementSitesAndNeverPersist(@TempDir Path tempDir) {
         cache.put(LSSConstants.DIM_STR_OVERWORLD, 10L, ts(1L), now);
@@ -782,8 +784,13 @@ class ColumnTimestampCacheTest {
         cache.invalidateStamps(LSSConstants.DIM_STR_THE_END, new long[]{12L});    // site 3
         assertEquals(0, cache.size());
         cache.save(tempDir);
-        assertFalse(Files.exists(tempDir.resolve("lss-timestamps.bin")),
-                "all tiles emptied — an emitted file means an empty tile survived a decrement");
+        assertTrue(Files.exists(tempDir.resolve("lss-timestamps.bin")),
+                "an emptied (not never-touched) cache must still save — a skipped save "
+                        + "leaves stale stamps on disk to resurrect on the next boot");
+        var emptied = new ColumnTimestampCache(DEFAULT_MAX, 0);
+        emptied.load(tempDir);
+        assertEquals(0, emptied.size(),
+                "no tile persisted — a leaked empty tile would be a liveCount-0 record");
 
         cache.put(LSSConstants.DIM_STR_OVERWORLD, 20L, ts(9L), now);
         cache.save(tempDir);

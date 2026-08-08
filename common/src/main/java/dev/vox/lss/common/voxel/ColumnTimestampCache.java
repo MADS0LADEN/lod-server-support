@@ -318,14 +318,16 @@ public class ColumnTimestampCache {
      * tileCount (int) + per tile: regionKey (long) + liveCount (int) + 1024 slots (int).
      */
     public void save(Path dataDir) {
-        // Empty DIMENSION maps linger after their last tile is removed (put's
-        // computeIfAbsent re-creates them cheaply); skip them so a fully-swept cache
-        // writes nothing at all rather than a header-only file.
+        // NEVER-TOUCHED (no dimension ever cached) skips the save — an idle server
+        // creates no file. An EMPTIED cache must still write: a stale file left on disk
+        // would resurrect invalidated stamps on the next boot (the debounced-save pin's
+        // crash-window poison). Empty DIMENSION maps (lingering after their last tile
+        // was removed) are skipped from the body — only live tiles are ever persisted.
+        if (caches.isEmpty()) return;
         int liveDims = 0;
         for (var tiles : caches.values()) {
             if (!tiles.isEmpty()) liveDims++;
         }
-        if (liveDims == 0) return;
 
         var file = dataDir.resolve(FILE_NAME);
         // Unique tmp name: two writers overlapping across a Paper /reload (old instance's
