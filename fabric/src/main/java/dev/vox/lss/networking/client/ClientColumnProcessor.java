@@ -202,14 +202,13 @@ class ClientColumnProcessor {
         drainColumnQueue(level.dimension(), level.getSectionsCount(), level.getMinSectionY(),
                 level.dimensionType().hasSkyLight(),
                 factory,
-                // v16-compat servers ship NATIVE bodies — translating them would parse
-                // sectionCount as dictCount and fail every column (review C1-2). The
-                // per-application check keeps a session that re-handshakes across
-                // dialects correct without a drain restart. The soak harness's v19
-                // legacy-emulation lever skips translation the same way: a v19
-                // session's bodies arrive native from the server's egress translator.
-                bytes -> dev.vox.lss.networking.payloads.V16ClientWire.isColumnSourceless()
-                                || SoakDialectOverride.isV19()
+                // Legacy-server (v16 OR the C3 ladder's 19 rung) sessions ship NATIVE
+                // bodies — translating them would parse sectionCount as dictCount and
+                // fail every column (review C1-2). The per-application check keeps a
+                // session that re-handshakes across dialects correct without a drain
+                // restart; isNativeBodySession covers both rungs off the real
+                // per-connection state (the soak lever rides the same path now).
+                bytes -> dev.vox.lss.networking.payloads.V16ClientWire.isNativeBodySession()
                         ? bytes : resolver.toNative(bytes),
                 (dimension, chunkX, chunkZ, columnData) ->
                         LSSApi.dispatchColumn(level, dimension, chunkX, chunkZ, columnData),

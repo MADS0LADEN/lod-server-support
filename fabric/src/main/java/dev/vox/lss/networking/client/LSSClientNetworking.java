@@ -288,7 +288,8 @@ public class LSSClientNetworking {
             boolean localIntegratedServer = Minecraft.getInstance().hasSingleplayerServer()
                     && !Boolean.getBoolean("lss.test.integratedServer");
             sessionGate.onJoin(LSSClientConfig.CONFIG.receiveServerLods, localIntegratedServer,
-                    LSSApi.hasVoxelConsumers(), LSSClientConfig.CONFIG.enableV16ServerCompat);
+                    LSSApi.hasVoxelConsumers(), LSSClientConfig.CONFIG.enableV16ServerCompat,
+                    LSSClientConfig.CONFIG.enableV19ServerCompat);
         });
 
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> sessionGate.onDisconnect());
@@ -298,7 +299,7 @@ public class LSSClientNetworking {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             // Runs even before a session: the v16-server discovery fallback (no-op on the v18
             // happy path, which disarms it before the delay elapses).
-            sessionGate.tickV16Discovery();
+            sessionGate.tickDiscoveryLadder();
             var manager = sessionGate.getRequestManager();
             if (manager != null && sessionGate.isServerEnabled()) {
                 manager.tick();

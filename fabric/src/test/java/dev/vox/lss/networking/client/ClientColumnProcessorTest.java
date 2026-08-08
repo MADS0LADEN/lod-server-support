@@ -839,7 +839,8 @@ class ClientColumnProcessorTest {
         String body = text.substring(prodDrain, text.indexOf("}", text.indexOf("epoch);", prodDrain)));
         assertTrue(body.contains("resolver.toNative"),
                 "the production drain must translate v20 bodies: " + body);
-        assertTrue(body.contains("isColumnSourceless"),
-                "the production drain must keep the v16 native-body gate: " + body);
+        assertTrue(body.contains("isNativeBodySession"),
+                "the production drain must keep the legacy-session native-body gate "
+                        + "(v16 AND the C3 ladder's 19 rung): " + body);
     }
 }

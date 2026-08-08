@@ -31,6 +31,12 @@ public class LSSClientConfig extends JsonConfig {
     // wire. Default true (mirrors the server's enableV16Compat). Set false for a strict-v18
     // client (no discovery fallback). See docs/planning/v16-client-compat-design.md.
     public boolean enableV16ServerCompat = true;
+    // Backward compat with protocol-19 (v0.9.x) SERVERS — the C3 discovery ladder's middle
+    // rung (XVER §6): if a server does not answer the version-20 handshake within 5 s,
+    // re-announce 19 before falling further to 16. A 19 session is today's decode retained
+    // (source + codec bytes, native-id palettes against this client's own registry — same MC
+    // version by construction). Default true; false skips straight to the v16 rung.
+    public boolean enableV19ServerCompat = true;
     // Tier B of the same compat: on a v16 SERVER, drive on-demand GENERATION of cold columns
     // instead of load-only (Tier A). The egress rewrites a first-serve request to v16's generate
     // trigger, so the old server generates terrain the player has not visited. Default TRUE — this
