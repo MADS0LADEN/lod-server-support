@@ -190,4 +190,53 @@ class XverLiveCorpusDecodeTest {
         }
         return out;
     }
+
+    // ---- M-3 (C6 follow-up, executed at D3): the drift arm ----
+
+    @Test
+    void driftedDictionaryDecodesViaTheFallbackLadderNotAnError() throws Exception {
+        // The strict arm above proves same-line captures never fall back — but the
+        // corpus exists for CROSS-line decode, where registry drift is the expected
+        // state, and no fixture exercised it (M-3). Derive a drift body from a real
+        // capture deterministically (swap one block identity for a valid-format
+        // name no registry carries) and drive it through the CLIENT resolver ladder:
+        // it must decode cleanly with the drifted voxels on the terminal fallback,
+        // never throw, and count exactly one distinct fallback.
+        Path base = fixtures().get(0);
+        var column = WireSectionCursor.parse(Files.readAllBytes(base),
+                WireSectionCursor.Layout.V20);
+        int swapIdx = -1;
+        for (int i = 0; i < column.dictionary().size(); i++) {
+            if (blockIds.containsKey(column.dictionary().get(i))) {
+                swapIdx = i;
+                break;
+            }
+        }
+        assertTrue(swapIdx >= 0, "premise: the capture has at least one block identity");
+        var drifted = new java.util.ArrayList<>(column.dictionary());
+        drifted.set(swapIdx, "lss_drift:absent_block[facing=north]");
+        byte[] driftBody = WireSectionCursor.emit(
+                new WireSectionCursor.WireColumn(drifted, column.sections()),
+                WireSectionCursor.Layout.V20);
+
+        long[] fallbacks = {0};
+        byte[] nativeBody = V20ToNativeTranslator.translate(driftBody,
+                identity -> {
+                    Integer id = blockIds.get(identity);
+                    if (id == null) {
+                        fallbacks[0]++;
+                        return blockIds.get(
+                                "minecraft:stone"); // the terminal ladder's direction
+                    }
+                    return id;
+                },
+                identity -> biomeIds.getOrDefault(identity, 0),
+                blockRegistrySize, biomeRegistrySize);
+        assertEquals(1, fallbacks[0],
+                "exactly the one drifted identity falls back (memoized per palette entry)");
+        var nativeColumn = WireSectionCursor.parse(nativeBody,
+                WireSectionCursor.Layout.NATIVE);
+        assertEquals(column.sections().size(), nativeColumn.sections().size(),
+                "a drifted dictionary must never cost sections — only substituted voxels");
+    }
 }
