@@ -563,8 +563,8 @@ class ConfigValidationTest {
             assertEquals(f.get(pristine), f.get(validated),
                     "default for " + f.getName() + " is outside its clamp range");
         }
-        assertEquals(15.0, validated.mbPerSecondLimitPerPlayer, "sentinel resolves to the 15 MiB/s default");
-        assertEquals(60.0, validated.mbPerSecondLimitGlobal, "sentinel resolves to the 60 MiB/s default");
+        assertEquals(25.0, validated.mbPerSecondLimitPerPlayer, "sentinel resolves to the 25 MiB/s default");
+        assertEquals(75.0, validated.mbPerSecondLimitGlobal, "sentinel resolves to the 75 MiB/s default");
 
         var again = serverConfig();
         again.validate();

@@ -83,8 +83,8 @@ class JsonConfigLoadTest {
         TestServerConfig c = TestServerConfig.load(configDir);
 
         assertEquals(512, c.lodDistanceChunks);
-        assertEquals(15.0, c.mbPerSecondLimitPerPlayer);
-        assertEquals(15_728_640, c.bytesPerSecondPerPlayer());
+        assertEquals(25.0, c.mbPerSecondLimitPerPlayer);
+        assertEquals(26_214_400, c.bytesPerSecondPerPlayer());
         assertTrue(Files.isRegularFile(configDir.resolve(FILE)));
 
         JsonObject saved = savedJson(configDir);
@@ -172,14 +172,14 @@ class JsonConfigLoadTest {
         // These exact-value assertions are the only guard against that landmine.
         // (The bandwidth pair asserts POST-VALIDATE resolved values: the compiled
         // default is the -1 "not in the file" sentinel, which load()'s validate
-        // resolves to 15/60 MiB/s — the accessor is what every consumer reads.)
+        // resolves to 25/75 MiB/s — the accessor is what every consumer reads.)
         assertTrue(c.enabled);
-        assertEquals(15.0, c.mbPerSecondLimitPerPlayer);
-        assertEquals(15_728_640, c.bytesPerSecondPerPlayer());
+        assertEquals(25.0, c.mbPerSecondLimitPerPlayer);
+        assertEquals(26_214_400, c.bytesPerSecondPerPlayer());
         assertEquals(0, c.diskReaderThreads);           // 0 = AUTO (derived per read path)
         assertEquals(1024, c.sendQueueLimitPerPlayer);
-        assertEquals(60.0, c.mbPerSecondLimitGlobal);
-        assertEquals(62_914_560, c.bytesPerSecondGlobal());
+        assertEquals(75.0, c.mbPerSecondLimitGlobal);
+        assertEquals(78_643_200, c.bytesPerSecondGlobal());
         assertTrue(c.enableChunkGeneration);
         assertEquals(40, c.generationConcurrencyLimitGlobal);
         assertEquals(60, c.generationTimeoutSeconds);
@@ -199,7 +199,7 @@ class JsonConfigLoadTest {
         for (String key : serializedFieldNames()) {
             assertTrue(saved.has(key), "re-saved file missing migrated field " + key);
         }
-        assertEquals(15.0, saved.get("mbPerSecondLimitPerPlayer").getAsDouble());
+        assertEquals(25.0, saved.get("mbPerSecondLimitPerPlayer").getAsDouble());
         // The hidden expert switches and the retired byte-denominated spellings must
         // NOT be migrated in — the whole point of @HiddenFromFile (2026-08-08 rework).
         for (String hidden : List.of("useBackgroundReadPriority", "useBackgroundReadSplit",

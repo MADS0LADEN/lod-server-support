@@ -63,8 +63,9 @@
   **Upgrading never changes your disk footprint:** an existing config file
   without the `lodStore` key keeps the store off (and files that say `"off"`
   stay off) — enable it with `lodStore: "on"`.
-- **Bandwidth caps are now set in MiB/s** — `mbPerSecondLimitPerPlayer`
-  (default `15.0`) and `mbPerSecondLimitGlobal` (default `60.0`) replace the
+- **Bandwidth caps are now set in MiB/s, with raised defaults** —
+  `mbPerSecondLimitPerPlayer` (default `25.0`, was 15 MiB/s) and
+  `mbPerSecondLimitGlobal` (default `75.0`, was 60 MiB/s) replace the
   byte-denominated keys, and decimals like `12.5` work. Old config files keep
   working: the old keys are still honored (the new ones win if both are
   present) and migrate to the new keys on the next start.

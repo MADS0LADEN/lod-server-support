@@ -125,12 +125,12 @@ class PaperConfigLoadTest {
         assertTrue(c.enabled);
         // Post-validate resolved bandwidth (the compiled default is the -1 sentinel —
         // see the Fabric JsonConfigLoadTest twin for the full rationale).
-        assertEquals(15.0, c.mbPerSecondLimitPerPlayer);
-        assertEquals(15_728_640, c.bytesPerSecondPerPlayer());
+        assertEquals(25.0, c.mbPerSecondLimitPerPlayer);
+        assertEquals(26_214_400, c.bytesPerSecondPerPlayer());
         assertEquals(0, c.diskReaderThreads);           // 0 = AUTO (derived per read path)
         assertEquals(1024, c.sendQueueLimitPerPlayer);
-        assertEquals(60.0, c.mbPerSecondLimitGlobal);
-        assertEquals(62_914_560, c.bytesPerSecondGlobal());
+        assertEquals(75.0, c.mbPerSecondLimitGlobal);
+        assertEquals(78_643_200, c.bytesPerSecondGlobal());
         assertTrue(c.enableChunkGeneration);
         assertEquals(40, c.generationConcurrencyLimitGlobal);
         assertEquals(60, c.generationTimeoutSeconds);

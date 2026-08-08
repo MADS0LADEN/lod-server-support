@@ -269,8 +269,8 @@ class PaperConfigValidationTest {
             assertEquals(f.get(pristine), f.get(validated),
                     "default for " + f.getName() + " is outside its clamp range");
         }
-        assertEquals(15.0, validated.mbPerSecondLimitPerPlayer);
-        assertEquals(60.0, validated.mbPerSecondLimitGlobal);
+        assertEquals(25.0, validated.mbPerSecondLimitPerPlayer);
+        assertEquals(75.0, validated.mbPerSecondLimitGlobal);
     }
 
     /**
