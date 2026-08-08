@@ -27,9 +27,9 @@ Each Minecraft version has its own build, versioned `v<x.y.z>+mc<version>`; only
 
 | Minecraft | LSS Version | Fabric | Paper | Folia | Voxy | Java |
 |---|---|---|---|---|---|---|
-| **26.2** | v0.9.0+mc26.2 | ✅ | ✅ | ✅ | 0.2.17-alpha+ | 25+ |
-| **26.1.x** | v0.8.1+mc26.1 | ✅ | ✅ | ✅ | 0.2.14-alpha+ | 25+ |
-| **1.21.11** | v0.8.1+mc1.21.11 | ✅ | ✅ | ✅ | 0.2.15-beta+ | 21+ |
+| **26.2** | v0.10.0+mc26.2 | ✅ | ✅ | ✅ | 0.2.17-alpha+ | 25+ |
+| **26.1.x** | v0.10.0+mc26.1 | ✅ | ✅ | ✅ | 0.2.14-alpha+ | 25+ |
+| **1.21.11** | v0.10.0+mc1.21.11 | ✅ | ✅ | ✅ | 0.2.15-beta+ | 21+ |
 
 > [!IMPORTANT]
 > **Mixed versions are fine back to v0.4.x.** LSS translates between protocol versions in both directions, so old clients keep working against new servers and vice versa. Against anything older — or with the compat layers turned off — you simply get vanilla render distance and no error.
