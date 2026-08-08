@@ -28,8 +28,9 @@ public class LSSClientConfig extends JsonConfig {
     public java.util.Map<String, String> crossVersionBlockFallbacks = new java.util.HashMap<>();
     // Backward compat with pre-v0.7.0 (protocol 16, v0.4.x–v0.6.2) SERVERS: if a server does
     // not answer the v18 handshake, re-handshake announcing version 16 and decode the legacy
-    // wire. Default true (mirrors the server's enableV16Compat). Set false for a strict-v18
-    // client (no discovery fallback). See docs/planning/v16-client-compat-design.md.
+    // wire. Default true (mirrors the server's enableV16Compat). Post-C3 this gates only the LADDER'S
+    // 16 RUNG — a strict current-version client (no fallback at all) needs this AND
+    // enableV19ServerCompat false. See docs/planning/v16-client-compat-design.md.
     public boolean enableV16ServerCompat = true;
     // Backward compat with protocol-19 (v0.9.x) SERVERS — the C3 discovery ladder's middle
     // rung (XVER §6): if a server does not answer the version-20 handshake within 5 s,

@@ -67,6 +67,10 @@ final class ClientSessionGate {
     /** This connection announced 19 at some point — the acceptance gate for a 19 echo
      *  (an unsolicited 19 config on a never-announced-19 connection stays foreign). */
     private boolean announced19ThisConnection = false;
+    /** The version JOIN announced first (the acceptance primary — review m7: a
+     *  per-connection field, not the static lever read; 0 before any join falls back
+     *  to the static, keeping direct-drive test rigs meaningful). */
+    private int primaryAnnounce = 0;
     // Captured at JOIN (the ladder advance needs them at tick time).
     private boolean v19CompatEnabled = true;
     private boolean v16CompatEnabled = true;
@@ -149,6 +153,7 @@ final class ClientSessionGate {
         this.discoveryArmed = false;
         this.ticksSinceHandshake = 0;
         this.currentAnnounce = 0;
+        this.primaryAnnounce = 0;
         this.announced19ThisConnection = false;
         this.sessionVersion = 0;
         this.isV16Server = false;
@@ -170,6 +175,7 @@ final class ClientSessionGate {
             // under the lever the ladder simply STARTS at rung 19).
             int announce = SoakDialectOverride.announceVersion();
             this.currentAnnounce = announce;
+            this.primaryAnnounce = announce;
             this.announced19ThisConnection = announce == LSSConstants.V19_COMPAT_PROTOCOL_VERSION;
             V16ClientWire.markAnnouncedVersion(announce);
             this.handshakeSender.accept(announce);
@@ -216,18 +222,23 @@ final class ClientSessionGate {
         LSSLogger.debug("No session config after " + V16_DISCOVERY_DELAY_TICKS
                 + " ticks at announce v" + this.currentAnnounce
                 + " — retrying handshake as protocol " + next + " (legacy-server discovery)");
-        this.currentAnnounce = next;
-        if (next == LSSConstants.V19_COMPAT_PROTOCOL_VERSION) {
-            this.announced19ThisConnection = true;
-        }
+        int previous = this.currentAnnounce;
         try {
             // Mark-before-send: only this announce enables the wire's per-rung decode
-            // arming for the reply that follows (see V16ClientWire).
+            // arming for the reply that follows (see V16ClientWire). The gate's own rung
+            // state commits only AFTER a successful send (review m4): a thrown send must
+            // not widen the acceptance surface to an announce the server never saw.
             V16ClientWire.markAnnouncedVersion(next);
             this.handshakeSender.accept(next);
         } catch (Exception e) {
             LSSLogger.debug("discovery-ladder handshake send failed: " + e.getMessage());
+            V16ClientWire.retractAnnounce(next, previous);
             this.discoveryArmed = false;
+            return;
+        }
+        this.currentAnnounce = next;
+        if (next == LSSConstants.V19_COMPAT_PROTOCOL_VERSION) {
+            this.announced19ThisConnection = true;
         }
         if (nextRung(this.currentAnnounce) == 0) {
             // Terminal rung announced — nothing further to try; stop ticking.
@@ -257,10 +268,11 @@ final class ClientSessionGate {
         // client it emulates would). The SLOW-ECHO race is load-bearing here: a late
         // primary echo arriving after the ladder advanced must still be ACCEPTED —
         // rejecting would disable LOD against a healthy current server on a slow join.
-        if (version != SoakDialectOverride.announceVersion() && !v19 && !v16) {
+        int primary = this.primaryAnnounce != 0
+                ? this.primaryAnnounce : SoakDialectOverride.announceVersion();
+        if (version != primary && !v19 && !v16) {
             LSSLogger.warn("Server has incompatible " + Brand.shortName() + " protocol version " + version
-                    + " (client: " + SoakDialectOverride.announceVersion()
-                    + "), LOD distribution disabled");
+                    + " (client: " + primary + "), LOD distribution disabled");
             this.serverEnabled = false;
             return;
         }
@@ -396,6 +408,7 @@ final class ClientSessionGate {
         this.discoveryArmed = false;
         this.ticksSinceHandshake = 0;
         this.currentAnnounce = 0;
+        this.primaryAnnounce = 0;
         this.announced19ThisConnection = false;
         this.sessionVersion = 0;
         this.isV16Server = false;

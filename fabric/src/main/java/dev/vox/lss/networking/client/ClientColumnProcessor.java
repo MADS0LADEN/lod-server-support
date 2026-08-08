@@ -1,6 +1,5 @@
 package dev.vox.lss.networking.client;
 
-import dev.vox.lss.networking.payloads.SoakDialectOverride;
 import dev.vox.lss.api.LSSApi;
 import dev.vox.lss.api.VoxelColumnData;
 import dev.vox.lss.common.Brand;
@@ -204,12 +203,12 @@ class ClientColumnProcessor {
                 factory,
                 // Legacy-server (v16 OR the C3 ladder's 19 rung) sessions ship NATIVE
                 // bodies — translating them would parse sectionCount as dictCount and
-                // fail every column (review C1-2). The per-application check keeps a
-                // session that re-handshakes across dialects correct without a drain
-                // restart; isNativeBodySession covers both rungs off the real
-                // per-connection state (the soak lever rides the same path now).
-                bytes -> dev.vox.lss.networking.payloads.V16ClientWire.isNativeBodySession()
-                        ? bytes : resolver.toNative(bytes),
+                // fail every column (review C1-2). The gate is PER PAYLOAD via the
+                // decode-time stamp (payload.nativeBodyAtDecode(), applied in the inner
+                // drain) — the drain thread must never consult the LIVE dialect flag,
+                // which the C3 ladder can flip while old-dialect columns are still
+                // queued (review MAJOR-2).
+                resolver::toNative,
                 (dimension, chunkX, chunkZ, columnData) ->
                         LSSApi.dispatchColumn(level, dimension, chunkX, chunkZ, columnData),
                 epoch);
@@ -285,9 +284,13 @@ class ClientColumnProcessor {
                 byte[] decompressed = decompressForDecode(payload.codec(), shipped);
                 // Protocol 20: translate the identity-dictionary body to THIS client's
                 // native layout (identities resolved through the §3 fallback ladder),
-                // then feed the existing native decode unchanged (§2.3).
-                var sections = decodeSections(v20ToNative.apply(decompressed),
-                        levelSectionCount, factory);
+                // then feed the existing native decode unchanged (§2.3). Gated per
+                // payload on the decode-time dialect stamp — a native body (v16/19
+                // session at the moment this frame decoded) skips translation even if
+                // the ladder has since re-established a different dialect.
+                byte[] nativeBytes = payload.nativeBodyAtDecode()
+                        ? decompressed : v20ToNative.apply(decompressed);
+                var sections = decodeSections(nativeBytes, levelSectionCount, factory);
                 if (ClientTraceLog.enabled()) {
                     // Per-section light presence — the boundary-lighting instrument (black
                     // leaf-face investigation 2026-07-27): [sectionY, hasBlockLight,

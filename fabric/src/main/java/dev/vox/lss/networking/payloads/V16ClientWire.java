@@ -50,42 +50,84 @@ import dev.vox.lss.common.LSSConstants;
  */
 public final class V16ClientWire {
 
+    private static final int BIT_V16 = 1;
+    private static final int BIT_V19 = 1 << 1;
+
+    /** The set of legacy rungs this CONNECTION has announced (C3 review CRITICAL-1):
+     *  the ladder's own next rung must not disarm a pending echo's decode — a slow v19
+     *  reply landing after the 16 rung fired used to fall to the foreign arm (fabricated
+     *  {@code enabled=false}, silent LOD-off) because the single last-announce was
+     *  clobbered. Bits are set sticky by {@link #markAnnouncedVersion} on the way DOWN
+     *  the ladder and RETIRED (with their flags) when a HIGHER version is re-asserted
+     *  (the downgrade guard's heal) or by {@link #retractAnnounce} (a thrown send). */
+    private static volatile int announcedMask = 0;
     private static volatile int announcedVersion = 0;
     private static volatile boolean columnSourceless = false;
     /** Session established at protocol 19 (C3 ladder rung): column BODIES arrive in the
      *  native section layout — the drain skips the v20→native translation — while the
      *  frame layout (source + codec bytes) stays CURRENT. Armed exactly like the v16
-     *  flag: announced-19 × observed-19, so an unsolicited 19 frame is inert. */
+     *  flag: announced-19 (sticky this connection) × observed-19, so an unsolicited 19
+     *  frame is inert. */
     private static volatile boolean session19 = false;
 
     private V16ClientWire() {}
 
     /** Main thread, called by {@code ClientSessionGate} immediately BEFORE each handshake
-     *  send with the version being announced. Arming ({@link #observeSessionConfigVersion})
-     *  requires the last announce to have MATCHED the observed frame — the C3 ladder's
-     *  per-rung generalization of the original 16-only gate — so an unsolicited legacy
-     *  frame (a re-attach prompt, or a hostile server) can never flip column decode out
-     *  from under an established stream. */
+     *  send with the version being announced. A LEGACY announce joins the sticky
+     *  per-connection set; announcing a HIGHER version retires every lower rung's bit
+     *  AND its armed flag — the downgrade guard's re-assert is exactly that retirement,
+     *  so an unsolicited legacy frame after the heal can never flip column decode out
+     *  from under the re-established stream (the original R2-3 prompt-hazard defense,
+     *  per rung). */
     public static void markAnnouncedVersion(int protocolVersion) {
         announcedVersion = protocolVersion;
+        if (protocolVersion > LSSConstants.V16_COMPAT_PROTOCOL_VERSION) {
+            announcedMask &= ~BIT_V16;
+            columnSourceless = false;
+        }
+        if (protocolVersion > LSSConstants.V19_COMPAT_PROTOCOL_VERSION) {
+            announcedMask &= ~BIT_V19;
+            session19 = false;
+        }
+        if (protocolVersion == LSSConstants.V16_COMPAT_PROTOCOL_VERSION) {
+            announcedMask |= BIT_V16;
+        } else if (protocolVersion == LSSConstants.V19_COMPAT_PROTOCOL_VERSION) {
+            announcedMask |= BIT_V19;
+        }
     }
 
-    /** Netty decode thread: the version this client last announced — the SessionConfig
-     *  codec's gate for reading a 19 echo as the CURRENT 4-field layout (visible here by
-     *  the same mark-before-send wire causality the class doc argues for the v16 flag). */
-    public static int lastAnnouncedVersion() {
-        return announcedVersion;
+    /** Main thread: roll back an announce whose SEND THREW (C3 review m4) — the mark
+     *  preceded the send for wire causality, but a never-sent announce must not widen
+     *  the acceptance/arming surface for the rest of the connection. */
+    public static void retractAnnounce(int failedVersion, int previousVersion) {
+        if (failedVersion == LSSConstants.V16_COMPAT_PROTOCOL_VERSION) {
+            announcedMask &= ~BIT_V16;
+            columnSourceless = false;
+        } else if (failedVersion == LSSConstants.V19_COMPAT_PROTOCOL_VERSION) {
+            announcedMask &= ~BIT_V19;
+            session19 = false;
+        }
+        announcedVersion = previousVersion;
+    }
+
+    /** Netty decode thread: has this connection announced protocol 19 (sticky — survives
+     *  the ladder's own later rungs)? The SessionConfig codec's gate for reading a 19
+     *  echo as the CURRENT 4-field layout (visible here by the same mark-before-send
+     *  wire causality the class doc argues for the v16 flag). */
+    public static boolean hasAnnounced19() {
+        return (announcedMask & BIT_V19) != 0;
     }
 
     /** Netty decode thread: called from {@code SessionConfigS2CPayload}'s decoder with the
      *  frame's protocol version, establishing (before any column decodes on the same thread)
      *  the session's decode dialect: v16 = source-less columns; 19 = native bodies at the
-     *  CURRENT frame layout. Arms only when this client itself last announced the matching
-     *  version (see {@link #markAnnouncedVersion}); any other frame disarms both. */
+     *  CURRENT frame layout. Arms only when this connection itself announced the matching
+     *  version and that announce has not been retired (see {@link #markAnnouncedVersion});
+     *  any other frame disarms both. */
     public static void observeSessionConfigVersion(int protocolVersion) {
-        columnSourceless = announcedVersion == LSSConstants.V16_COMPAT_PROTOCOL_VERSION
+        columnSourceless = (announcedMask & BIT_V16) != 0
                 && protocolVersion == LSSConstants.V16_COMPAT_PROTOCOL_VERSION;
-        session19 = announcedVersion == LSSConstants.V19_COMPAT_PROTOCOL_VERSION
+        session19 = (announcedMask & BIT_V19) != 0
                 && protocolVersion == LSSConstants.V19_COMPAT_PROTOCOL_VERSION;
     }
 
@@ -104,6 +146,7 @@ public final class V16ClientWire {
     /** Main thread: clear all state at a connection boundary (JOIN before the handshake, and
      *  DISCONNECT) so no legacy-dialect state survives into a subsequent connection. */
     public static void reset() {
+        announcedMask = 0;
         announcedVersion = 0;
         columnSourceless = false;
         session19 = false;

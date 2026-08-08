@@ -837,10 +837,11 @@ class ClientColumnProcessorTest {
         int prodDrain = text.indexOf("private void drainColumnQueue(ClientLevel level");
         assertTrue(prodDrain >= 0, "production drain entry missing");
         String body = text.substring(prodDrain, text.indexOf("}", text.indexOf("epoch);", prodDrain)));
-        assertTrue(body.contains("resolver.toNative"),
+        assertTrue(body.contains("resolver::toNative"),
                 "the production drain must translate v20 bodies: " + body);
-        assertTrue(body.contains("isNativeBodySession"),
-                "the production drain must keep the legacy-session native-body gate "
-                        + "(v16 AND the C3 ladder's 19 rung): " + body);
+        // The gate moved INTO the inner drain as the per-payload decode-time stamp
+        // (review MAJOR-2): the drain thread must never consult the live dialect flag.
+        assertTrue(text.contains("payload.nativeBodyAtDecode()"),
+                "the inner drain must gate translation on the per-payload decode-time stamp");
     }
 }

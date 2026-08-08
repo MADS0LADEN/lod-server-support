@@ -666,16 +666,25 @@ class ClientSessionGateTest {
         tickDiscovery(ClientSessionGate.V16_DISCOVERY_DELAY_TICKS); // → announce 19
         assertEquals(List.of(V, V19), handshakeVersions);
 
+        // Real frame order per config: netty observe FIRST, then the main-thread handling
+        // (review MAJOR-3 — the earlier version inverted this and pinned a property the
+        // production ordering does not have).
+        V16ClientWire.observeSessionConfigVersion(V);
         gate.onSessionConfig(config(V, true), true, true); // the slow 20 echo lands
         assertTrue(gate.isServerEnabled(), "the late current-version echo must establish");
         handshakeVersions.clear();
 
-        gate.onSessionConfig(config(V19, true), true, true); // the raced 19 echo
+        V16ClientWire.observeSessionConfigVersion(V19); // the raced 19 echo, netty half
+        assertTrue(V16ClientWire.isNativeBodySession(),
+                "premise: the raced echo transiently arms (announced-19 is sticky)");
+        gate.onSessionConfig(config(V19, true), true, true); // …then the main half
         assertEquals(List.of(V), handshakeVersions,
                 "the guard re-announces the ESTABLISHED version, healing the server-side flip");
+        assertFalse(V16ClientWire.isNativeBodySession(),
+                "the guard's re-assert disarms the transient window immediately");
         V16ClientWire.observeSessionConfigVersion(V19);
         assertFalse(V16ClientWire.isNativeBodySession(),
-                "after the guard's re-assert, a later unsolicited 19 frame must not arm "
+                "after the re-assert, a later unsolicited 19 frame must not arm "
                         + "native-body decode against the live v20 stream");
     }
 
@@ -683,6 +692,7 @@ class ClientSessionGateTest {
     void nineteenConfigOnAnEstablishedNineteenSessionIsTheNormalReconfigPath() {
         gate.onJoin(true, false, true, true);
         tickDiscovery(ClientSessionGate.V16_DISCOVERY_DELAY_TICKS);
+        V16ClientWire.observeSessionConfigVersion(V19);
         gate.onSessionConfig(config(V19, true), true, true);
         var first = gate.getRequestManager();
         assertNotNull(first);
@@ -700,12 +710,22 @@ class ClientSessionGateTest {
         // must not degrade to v16 on a late/prompted 16 config.
         gate.onJoin(true, false, true, true);
         tickDiscovery(ClientSessionGate.V16_DISCOVERY_DELAY_TICKS);
+        V16ClientWire.observeSessionConfigVersion(V19);
         gate.onSessionConfig(config(V19, true), true, true);
         handshakeVersions.clear();
 
+        V16ClientWire.observeSessionConfigVersion(V16);
         gate.onSessionConfig(SessionConfigS2CPayload.v16Legacy(true, 64, 200, 7, true), true, true);
         assertEquals(List.of(V19), handshakeVersions,
                 "the guard re-announces the established 19, never the primary constant");
+        assertFalse(V16ClientWire.isColumnSourceless(),
+                "the 16 rung was never announced, so the prompt cannot arm sourceless");
+        // The prompt's own netty observe DISARMS session19 (any other frame disarms) —
+        // the accepted transient window; already-queued columns stay correct via the
+        // decode-time stamp. The heal completes when the re-asserted 19's echo lands:
+        V16ClientWire.observeSessionConfigVersion(V19);
+        assertTrue(V16ClientWire.isNativeBodySession(),
+                "the re-asserted 19's echo re-arms native-body decode (BIT_V19 survived)");
     }
 
     @Test
