@@ -304,4 +304,103 @@ class ClientIdentityResolverTest {
         assertEquals(plains, r.biomeIdFor("hills:unknown_biome"));
         assertEquals(1, r.fallbackCount());
     }
+
+    // ---- M-4/M-5 (C6 follow-ups, executed at D3): toNative whole-body cases ----
+
+    @Test
+    void toNativeTranslatesAWholeBodyThroughTheResolverLadder() {
+        // M-4: the ladder pins above drive blockIdFor directly; nothing drove the
+        // FULL §2.3 translation (dictionary walk -> per-voxel resolve -> native
+        // repack + count/light pass-through). A wiring slip between resolver and
+        // translator (wrong lookup bound, swapped block/biome fns) passes every
+        // per-rung pin and corrupts every real column.
+        LSSClientConfig.CONFIG.unknownBlockFallback = "minecraft:stone";
+        LSSClientConfig.CONFIG.crossVersionBlockFallbacks = new HashMap<>();
+        var r = newResolver();
+        String stoneId = dev.vox.lss.networking.server.IdentityTables.blockIdentityFor(
+                Block.BLOCK_STATE_REGISTRY.getId(Blocks.STONE.defaultBlockState()));
+        int[] voxels = new int[4096];
+        for (int i = 2048; i < 4096; i++) voxels[i] = 1; // half known, half unknown
+        byte[] blockLight = new byte[2048];
+        blockLight[0] = 0x3C;
+        byte[] v20 = dev.vox.lss.common.wire.WireSectionCursor.emit(
+                new dev.vox.lss.common.wire.WireSectionCursor.WireColumn(
+                        List.of(stoneId, "lss_drift:absent_block", "minecraft:plains"),
+                        List.of(new dev.vox.lss.common.wire.WireSectionCursor.WireSection(
+                                0, 4096, 0,
+                                new dev.vox.lss.common.wire.WireSectionCursor.WireContainer(
+                                        4, new int[]{0, 1},
+                                        dev.vox.lss.common.wire.WireSectionCursor.pack(voxels, 4)),
+                                new dev.vox.lss.common.wire.WireSectionCursor.WireContainer(
+                                        0, new int[]{2}, new long[0]),
+                                blockLight, null))),
+                dev.vox.lss.common.wire.WireSectionCursor.Layout.V20);
+
+        byte[] nativeBody = r.toNative(v20);
+
+        var col = dev.vox.lss.common.wire.WireSectionCursor.parse(nativeBody,
+                dev.vox.lss.common.wire.WireSectionCursor.Layout.NATIVE);
+        var s = col.sections().get(0);
+        assertEquals(4096, s.nonEmptyBlockCount(), "count shorts pass through untouched");
+        int stoneNative = Block.BLOCK_STATE_REGISTRY.getId(Blocks.STONE.defaultBlockState());
+        // Known stone AND the unknown->stone fallback resolve to the SAME native id,
+        // so the repack collapses to the single-value tier — itself a strong pin:
+        // both voxel classes provably landed on stone, and duplicate canonicalization
+        // (the translator's content-identity contract) worked through the resolver.
+        assertEquals(0, s.blocks().bits(), "two same-id entries collapse to single-value");
+        assertEquals(stoneNative, s.blocks().palette()[0],
+                "known resolves exactly AND the unknown lands on the terminal fallback");
+        assertEquals(1, r.fallbackCount(), "one distinct unknown identity, one count");
+        org.junit.jupiter.api.Assertions.assertArrayEquals(blockLight, s.blockLight(),
+                "light layers pass through the whole-body translation verbatim");
+    }
+
+    @Test
+    void toNativeDirectWidthDerivesFromTheClientRegistrySize() {
+        // M-5 (registry-size drift): the native DIRECT repack width must come from
+        // THIS client's registry size — a server with a different-size registry
+        // (older/newer line, mods) changes nothing here but the ids resolved into
+        // the words. Pin: a >256-identity dictionary forces the native direct tier
+        // at ceillog2(client Block.BLOCK_STATE_REGISTRY.size()) — if a size drift
+        // ever changed the width derivation, the packed words would desync at parse.
+        LSSClientConfig.CONFIG.unknownBlockFallback = "minecraft:stone";
+        LSSClientConfig.CONFIG.crossVersionBlockFallbacks = new HashMap<>();
+        var r = newResolver();
+        var dict = new java.util.ArrayList<String>();
+        int taken = 0;
+        String[] table = dev.vox.lss.networking.server.IdentityTables.blockIdentities();
+        for (int id = 0; id < table.length && taken < 300; id++) {
+            if (table[id] != null) {
+                dict.add(table[id]);
+                taken++;
+            }
+        }
+        assertEquals(300, taken, "premise: 300 real identities from the client registry");
+        int[] voxels = new int[4096];
+        for (int i = 0; i < 4096; i++) voxels[i] = i % 300;
+        int[] wirePalette = new int[300];
+        for (int i = 0; i < 300; i++) wirePalette[i] = i;
+        byte[] v20 = dev.vox.lss.common.wire.WireSectionCursor.emit(
+                new dev.vox.lss.common.wire.WireSectionCursor.WireColumn(
+                        java.util.stream.Stream.concat(dict.stream(),
+                                java.util.stream.Stream.of("minecraft:plains")).toList(),
+                        List.of(new dev.vox.lss.common.wire.WireSectionCursor.WireSection(
+                                0, 4096, 0,
+                                new dev.vox.lss.common.wire.WireSectionCursor.WireContainer(
+                                        9, wirePalette,
+                                        dev.vox.lss.common.wire.WireSectionCursor.pack(voxels, 9)),
+                                new dev.vox.lss.common.wire.WireSectionCursor.WireContainer(
+                                        0, new int[]{300}, new long[0]),
+                                null, null))),
+                dev.vox.lss.common.wire.WireSectionCursor.Layout.V20);
+
+        var s = dev.vox.lss.common.wire.WireSectionCursor.parse(r.toNative(v20),
+                dev.vox.lss.common.wire.WireSectionCursor.Layout.NATIVE).sections().get(0);
+        assertEquals(true, s.blocks().isDirect(),
+                ">256 distinct states must repack as the native DIRECT tier");
+        int wantBits = 32 - Integer.numberOfLeadingZeros(Block.BLOCK_STATE_REGISTRY.size() - 1);
+        assertEquals(wantBits, s.blocks().bits(),
+                "direct width = ceillog2 of the CLIENT registry size — the drift-safe derivation");
+        assertEquals(0, r.fallbackCount(), "every identity was real — no fallbacks");
+    }
 }
