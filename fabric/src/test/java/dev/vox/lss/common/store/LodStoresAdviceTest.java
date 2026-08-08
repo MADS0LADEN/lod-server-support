@@ -7,9 +7,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Pins the store-off startup recommendation (v0.9.1, user request): shown exactly when
- * an ENABLED, non-Folia server runs without the store — on-by-default since the 2026-08-08
- * rework, so the line reaches only explicit opt-outs and pre-rework "off" files, where the
- * recommendation still holds. The message must name the one key that turns the whole
+ * an ENABLED, non-Folia server runs without the store — under the 2026-08-08 split default
+ * (fresh installs generate "on"; an absent key means "off") the line reaches explicit
+ * opt-outs AND upgraded installs whose file lacks the key, where it is how the feature
+ * reaches the admin at all. The message must name the one key that turns the whole
  * feature on, the disk implication, and the bound.
  */
 class LodStoresAdviceTest {

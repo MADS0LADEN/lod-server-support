@@ -287,26 +287,27 @@ public abstract class ServerConfigBase extends JsonConfig {
      * ~10.6 KB/chunk of region data). It is derived data: deleting the {@code lss-lod/} folder
      * is always safe, and the service logs the expected growth once at startup.
      *
-     * <p>DEFAULT IS "on" (user decision, 2026-08-08 config rework — SUPERSEDES the
-     * 2026-08-03 opt-in decision, which itself reversed a brief v0.9.0-dev default-full).
+     * <p>SPLIT DEFAULT (user decision, 2026-08-08, second round — refines the same-day
+     * on-by-default decision, which superseded the 2026-08-03 opt-in): the COMPILED
+     * default here is "off", so a key ABSENT from an existing config file keeps the
+     * store off — an upgrade must never silently double a world folder (the 2026-08-03
+     * concern, back as the governing rule for upgrades). A BRAND-NEW install — no
+     * config file at all — generates "on" via {@link #onFreshCreate}, so new servers
+     * get the feature from day one with the disk cost stated in README/release notes.
      * "on" ≡ "full" (the old spelling stays a read alias; the file writes back "on").
-     * The 2026-08-03 concern — an upgrade silently doubling a world folder — is now
-     * carried by the release notes + README stating the disk cost and the one-key
-     * opt-out ({@code lodStore: "off"}), plus the standing safety floors (the 2 GiB
-     * free-space backfill stop, {@code lodStoreMaxMB}). {@code lodStoreBackfill}
-     * deliberately stays ON so the default gets the background warm-up — one switch.
+     * {@code lodStoreBackfill} deliberately stays ON so an armed store gets the
+     * background warm-up — one switch.
      *
-     * <p>Unknown values still normalize to "off"; the direction of that safety flipped
-     * with the default (a typo now silently DISABLES a default feature instead of
-     * enabling a storage engine — predictable either way, and the config echo names
-     * the effective mode). "memory" remains one of those unknowns; the in-memory tier
-     * survives only as the SQLite-init degrade (see LodStores).
+     * <p>Unknown values still normalize to "off" (a typo silently DISABLES the feature
+     * instead of enabling a storage engine — predictable either way, and the config
+     * echo names the effective mode). "memory" remains one of those unknowns; the
+     * in-memory tier survives only as the SQLite-init degrade (see LodStores).
      *
      * <p><b>Harness note:</b> the soak/benchmark stagings and gametest run dirs pin
      * this OFF explicitly (store scenarios excepted) — their law baselines and source
      * pins were calibrated store-off, and re-baselining them buys nothing.
      */
-    public String lodStore = "on";
+    public String lodStore = "off";
     // NOTE: lodStoreMemoryMB is RETIRED (2026-08-02) along with the "memory" mode — the
     // in-memory tier survives only as the boot-time degrade when SQLite cannot init, at
     // a fixed budget (LodStores.DEGRADE_MAX_BYTES). GSON ignores the key on load and
@@ -554,6 +555,14 @@ public abstract class ServerConfigBase extends JsonConfig {
                 resolveMb(mbPerSecondLimitGlobal, bytesPerSecondLimitGlobal, DEFAULT_MB_GLOBAL);
         bytesPerSecondLimitPerPlayer = -1;
         bytesPerSecondLimitGlobal = -1;
+    }
+
+    /** Brand-new install (no config file existed): generate the file with the store ON
+     *  — the {@code lodStore} split default. See the field javadoc; the compiled "off"
+     *  governs keys absent from existing files, this "on" governs fresh generation. */
+    @Override
+    protected void onFreshCreate() {
+        lodStore = "on";
     }
 
     @Override

@@ -77,6 +77,17 @@ public abstract class JsonConfig {
     /** Override to clamp or correct field values after deserialization. */
     public void validate() {}
 
+    /**
+     * Called ONLY on the brand-new-install path — no candidate config file existed and
+     * {@link #load} is about to generate one — before validate() and the initial save.
+     * Lets a subclass give a FRESH file a different starting value than the compiled
+     * default that governs a key ABSENT from an existing file (the lodStore split,
+     * 2026-08-08: absent key = off so an upgrade never silently arms the store, fresh
+     * file = "on" so new servers get the feature). Never runs for an existing file —
+     * including a corrupt/empty one, which keeps absent-key semantics in memory.
+     */
+    protected void onFreshCreate() {}
+
     public void save() {
         String name = saveFileName();
         try {
@@ -143,6 +154,11 @@ public abstract class JsonConfig {
             JsonConfig jc = (JsonConfig) config;
             jc.configDir = configDir;
             jc.activeFileName = candidates[0]; // the brand-primary
+            if (chosen == null) {
+                // Genuinely fresh install (no file at all) — a corrupt/empty existing
+                // file reaches here with chosen != null and must keep plain defaults.
+                config.onFreshCreate();
+            }
             config.validate();
             if (chosen == null) { // only create a fresh file when NONE existed (don't clobber a corrupt one)
                 config.save();

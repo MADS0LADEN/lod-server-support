@@ -55,12 +55,14 @@
 - **Bigger defaults out of the box** — the default LOD distance rises from 256
   to 512 chunks, and the default generation concurrency caps rise to 40
   server-wide / 40 per player. Existing config files keep their values.
-- **The LOD store is now ON by default** (`lodStore: "on"`; the old `"full"`
-  spelling still works and means the same). Repeat requests are served from
-  `<world>/lss-lod/` for a fraction of the CPU and disk work — the tradeoff is
-  that a fully warmed store roughly doubles your world folder. Set
-  `lodStore: "off"` to opt out, or bound it with `lodStoreMaxMB`; existing
-  files that say `"off"` stay off.
+- **The LOD store is on for new servers** (`lodStore: "on"` in freshly
+  generated configs; the old `"full"` spelling still works and means the
+  same). Repeat requests are served from `<world>/lss-lod/` for a fraction of
+  the CPU and disk work — the tradeoff is that a fully warmed store roughly
+  doubles your world folder, bounded by `lodStoreMaxMB` if you set one.
+  **Upgrading never changes your disk footprint:** an existing config file
+  without the `lodStore` key keeps the store off (and files that say `"off"`
+  stay off) — enable it with `lodStore: "on"`.
 - **Bandwidth caps are now set in MiB/s** — `mbPerSecondLimitPerPlayer`
   (default `15.0`) and `mbPerSecondLimitGlobal` (default `60.0`) replace the
   byte-denominated keys, and decimals like `12.5` work. Old config files keep

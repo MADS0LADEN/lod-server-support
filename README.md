@@ -57,7 +57,7 @@ Config is generated on first run at the paths in the install table above. The ge
 | `enableChunkGeneration` | `true` | Generate missing chunks on demand, so players see terrain nobody has visited |
 | `generationConcurrencyLimitGlobal` | `40` | Max chunks generating server-wide at once |
 | `generationConcurrencyLimitPerPlayer` | `40` | Max concurrently generating chunks per player |
-| `lodStore` | `"on"` | Keeps a compressed copy of every served LOD column in `<world>/lss-lod/` and serves repeat requests from it — far less CPU and disk work per chunk. The cost: it roughly doubles your world folder. `"off"` disables it. See **Tuning** |
+| `lodStore` | `"on"` (new installs) | Keeps a compressed copy of every served LOD column in `<world>/lss-lod/` and serves repeat requests from it — far less CPU and disk work per chunk. The cost: it roughly doubles your world folder. Generated as `"on"` for brand-new servers; on an upgraded server whose config file doesn't have the key, it stays `"off"` until you enable it. See **Tuning** |
 | `lodStoreBackfill` | `true` | Pre-warms the store with a low-priority background walk of your existing world, so the first player to arrive already gets fast serves. Inert unless `lodStore` is on. Yields to players, pauses under load, resumes across restarts. Fabric only |
 | `lodStoreMaxMB` | `0` | Size cap for the store. `0` = uncapped; set a value to bound it, and the oldest columns are evicted first |
 | `enableV16Compat` | `true` | Serve legacy v0.4.x–v0.6.x clients through a built-in translation layer. `false` requires every client to match the server's protocol |
@@ -68,11 +68,11 @@ Config is generated on first run at the paths in the install table above. The ge
 
 Masking applies to columns served after it activates — columns already cached by clients are not recalled, as with any anti-xray retrofit. Cave shapes and lighting are not hidden, matching packet-level anti-xray.
 
-Older config files keep working unchanged: the byte-denominated `bytesPerSecondLimitPerPlayer` / `bytesPerSecondLimitGlobal` keys are still honored (the `mb*` keys win if both are present) and migrate to the new keys on the next start, and `"lodStore": "full"` means the same as `"on"`.
+Older config files keep working unchanged: the byte-denominated `bytesPerSecondLimitPerPlayer` / `bytesPerSecondLimitGlobal` keys are still honored (the `mb*` keys win if both are present) and migrate to the new keys on the next start, `"lodStore": "full"` means the same as `"on"`, and a file without a `lodStore` key keeps the store off — upgrading never changes your disk footprint without you asking.
 
 ### Tuning
 
-**Disk: the LOD store.** It ships on because it is the biggest performance win available — repeat requests are served from `<world>/lss-lod/` for a fraction of the CPU and disk work. The cost is that a fully warmed store roughly doubles your world folder. If that's too much, `lodStoreMaxMB` bounds it (oldest columns evicted first, re-warmed on demand), or `"lodStore": "off"` disables it. It is derived data — deleting `lss-lod/` while the server is stopped is always safe.
+**Disk: the LOD store.** It is the biggest performance win available — repeat requests are served from `<world>/lss-lod/` for a fraction of the CPU and disk work — so new servers generate with it on. On an upgraded server it stays off until you set `"lodStore": "on"` yourself. The cost is that a fully warmed store roughly doubles your world folder; `lodStoreMaxMB` bounds it (oldest columns evicted first, re-warmed on demand). It is derived data — deleting `lss-lod/` while the server is stopped is always safe.
 
 **CPU: the bandwidth and generation limiters.** LSS's cost is essentially how many columns per second it serves plus how many chunks it generates:
 

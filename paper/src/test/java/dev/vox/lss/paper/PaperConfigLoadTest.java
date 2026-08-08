@@ -71,6 +71,21 @@ class PaperConfigLoadTest {
             assertTrue(saved.has(key), "defaults file missing field " + key);
         }
         assertEquals(DEFAULT_EVENTS.size(), saved.getAsJsonArray("updateEvents").size());
+        // The lodStore SPLIT default through the Paper load path: fresh install -> "on".
+        assertEquals("on", c.lodStore, "a fresh install must arm the store");
+        assertEquals("on", saved.get("lodStore").getAsString());
+    }
+
+    /** The other half of the split default: an existing file without the key stays OFF
+     *  (Paper twin of the Fabric pin — an upgrade never silently arms the store). */
+    @Test
+    void existingFileWithoutLodStoreKeyKeepsTheStoreOff(@TempDir Path dataFolder) throws Exception {
+        Files.writeString(dataFolder.resolve(FILE), "{\"lodDistanceChunks\": 64}");
+
+        PaperConfig c = PaperConfig.load(dataFolder);
+
+        assertEquals("off", c.lodStore, "absent key in an existing file must mean OFF");
+        assertEquals("off", savedJson(dataFolder).get("lodStore").getAsString());
     }
 
     @Test
