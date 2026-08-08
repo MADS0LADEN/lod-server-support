@@ -151,6 +151,80 @@ class StoreLegacyRowCompositionTest {
         }
     }
 
+    @Test
+    void theMigrationWalkPersistsTheFreshV20EncodeByteExactly() throws Exception {
+        // §9's migration golden (C6 — the gap map's item 7): the WALK, driven by the
+        // REAL translator over a REAL native body, must persist a row byte-equal to
+        // the committed v20 corpus golden with CRC hashes recomputed over exactly
+        // those bytes. SqliteLodStoreMigrationTest pins the walk's mechanics against
+        // a marker translator (bodies opaque); this is the one place walk + real
+        // translator + real bytes meet.
+        byte[] nativeGolden = Files.readAllBytes(corpusDir("nbt-corpus").resolve("multi-section.bin"));
+        byte[] v20Golden = Files.readAllBytes(corpusDir("v20-corpus").resolve("multi-section.bin"));
+        long pos = PositionUtil.packPosition(3, 4);
+        Path storeDir = this.tmp.resolve("mstore");
+        Path regionDir = this.tmp.resolve("mregion");
+        var env = new SqliteLodStore.Environment(storeDir, "26.2-test", 20,
+                d -> regionDir, d -> "", 0, Long.MAX_VALUE, "fp-test");
+        long stamp = System.currentTimeMillis() / 1000L;
+        var store = SqliteLodStore.createOrNull(LodStoreMode.FULL, env, new LodStoreDiagnostics());
+        assertNotNull(store);
+        assertTrue(store.awaitSweep(10_000));
+        assertTrue(store.deposit(OW, pos, nativeGolden, stamp, stamp));
+        for (int i = 0; i < 400 && store.get(OW, pos) == null; i++) Thread.sleep(25);
+        assertNotNull(store.get(OW, pos), "deposit must drain");
+        store.shutdown();
+
+        forgeRowToLegacy(storeDir, nativeGolden);
+        armMigrationBookkeeping(storeDir);
+        writeRegionAndSeenMtime(storeDir, regionDir, pos, stamp);
+
+        store = SqliteLodStore.createOrNull(LodStoreMode.FULL, env, new LodStoreDiagnostics());
+        assertNotNull(store);
+        assertTrue(store.awaitSweep(10_000));
+        try {
+            store.setLegacyMigrationTranslator(
+                    raw -> NbtSectionSerializer.toV20(raw, REGISTRY_ACCESS));
+            long deadline = System.currentTimeMillis() + 30_000;
+            while (!store.migrationStatusToken().isEmpty()
+                    && System.currentTimeMillis() < deadline) {
+                Thread.sleep(50);
+            }
+            assertTrue(store.migrationStatusToken().isEmpty(),
+                    "walk did not complete: " + store.migrationStatusToken());
+        } finally {
+            store.shutdown();
+        }
+
+        var ds = new org.sqlite.SQLiteDataSource();
+        ds.setUrl("jdbc:sqlite:" + storeDir.resolve("store.db"));
+        try (Connection c = ds.getConnection(); Statement st = c.createStatement();
+             ResultSet rs = st.executeQuery(
+                     "SELECT wirefmt, usize, chash, fhash, blob FROM lods_1 WHERE pos=" + pos)) {
+            assertTrue(rs.next(), "the migrated row must exist");
+            assertEquals(20, rs.getInt(1), "retagged v20");
+            assertEquals(v20Golden.length, rs.getInt(2), "usize recomputed for the v20 body");
+            byte[] blob = rs.getBytes(5);
+            assertArrayEquals(v20Golden, codec.decompress(blob, v20Golden.length),
+                    "the persisted body must byte-equal the committed v20 corpus golden");
+            assertEquals(LodStoreService.contentHash(v20Golden), rs.getLong(3),
+                    "chash recomputed as CRC over exactly the golden bytes");
+            assertEquals(LodStoreService.contentHash(blob), rs.getLong(4),
+                    "fhash recomputed as CRC over exactly the stored frame");
+        }
+    }
+
+    /** Arm the walk bookkeeping the lazy upgrade would have written — the forged row
+     *  lives in a schema-4 store, so the meta keys must be planted by hand. */
+    private void armMigrationBookkeeping(Path storeDir) throws Exception {
+        var ds = new org.sqlite.SQLiteDataSource();
+        ds.setUrl("jdbc:sqlite:" + storeDir.resolve("store.db"));
+        try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
+            st.executeUpdate("INSERT OR REPLACE INTO meta (k, v) VALUES"
+                    + " ('migrate_pending', '1'), ('migrate_total', '1'), ('migrate_done', '0')");
+        }
+    }
+
     /** Retag the (single) deposited row to the lazy-upgrade legacy shape: wirefmt 19 +
      *  FNV hashes over the SAME body/frame bytes the deposit wrote. */
     private void forgeRowToLegacy(Path storeDir, byte[] nativeBody) throws Exception {

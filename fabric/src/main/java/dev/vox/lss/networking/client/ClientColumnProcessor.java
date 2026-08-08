@@ -208,7 +208,10 @@ class ClientColumnProcessor {
                 // drain) — the drain thread must never consult the LIVE dialect flag,
                 // which the C3 ladder can flip while old-dialect columns are still
                 // queued (review MAJOR-2).
-                resolver::toNative,
+                resolver != null ? resolver::toNative
+                        : bytes -> { throw new IllegalStateException(
+                                "identity resolver unavailable (see the construction"
+                                        + " warn) — column reported as ingest failure"); },
                 (dimension, chunkX, chunkZ, columnData) ->
                         LSSApi.dispatchColumn(level, dimension, chunkX, chunkZ, columnData),
                 epoch);
@@ -224,9 +227,30 @@ class ClientColumnProcessor {
         var key = level.registryAccess();
         var resolver = this.identityResolver;
         if (resolver == null || this.identityResolverKey != key) {
-            resolver = new ClientIdentityResolver(
-                    key.lookupOrThrow(net.minecraft.core.registries.Registries.BIOME),
-                    factory.biomeStrategy().globalMap());
+            try {
+                resolver = new ClientIdentityResolver(
+                        key.lookupOrThrow(net.minecraft.core.registries.Registries.BIOME),
+                        factory.biomeStrategy().globalMap());
+            } catch (Throwable ctor) {
+                // Containment belt (C6 review C-2): a throwing constructor used to
+                // escape the drain's executor task EVERY tick with no ingest-failure
+                // report — columns never dispatched, decode queue fills, backpressure
+                // halts, LOD dead for the session with only stack traces as signal.
+                // Config validation now prevents the known cause (null curated
+                // entries); this belt makes any future variant degrade: null resolver
+                // -> the call site's translator throws PER COLUMN -> the inner drain's
+                // existing decode containment reports each as an ingest failure (the
+                // server re-serves; a fixed config + rejoin heals). Warn once per key.
+                if (this.identityResolverKey != key) {
+                    dev.vox.lss.common.LSSLogger.warn("Identity resolver construction"
+                            + " failed — v20 columns will report as ingest failures"
+                            + " until the cause (likely a malformed client config) is"
+                            + " fixed", ctor);
+                }
+                this.identityResolverKey = key;
+                this.identityResolver = null;
+                return null;
+            }
             this.identityResolver = resolver;
             this.identityResolverKey = key;
         }

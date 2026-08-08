@@ -426,6 +426,31 @@ class SqliteLodStoreMigrationTest {
     }
 
     @Test
+    void walkRetagsAllAirRowsInsteadOfDeletingThem() throws Exception {
+        // C6 review M-1: usize 0 is the LEGITIMATE all-air shape — the C4 poison
+        // bound (usize <= 0 -> anomaly delete) swallowed it, so a real v0.9.x
+        // upgrade deleted every End/void column and reported them as corruption.
+        long allAir = PositionUtil.packPosition(1, 2);
+        long content = PositionUtil.packPosition(3, 4);
+        buildSchema3Store(FP, List.of(new FixtureRow(allAir, new byte[0], false),
+                new FixtureRow(content, raw(10, 500), false)));
+        var store = open();
+        try {
+            store.setLegacyMigrationTranslator(FAKE_TRANSLATOR);
+            awaitWalkDone(store);
+            var hit = store.get(OW, allAir);
+            assertNotNull(hit, "the all-air row must SURVIVE the walk");
+            assertEquals(0, hit.sectionBytes().length, "still all-air");
+            assertEquals(WIRE_20, hit.wirefmt(), "retagged, no body work");
+            assertEquals(0, store.diagnostics().getMigrateAnomalies(),
+                    "an all-air row is never an anomaly");
+            assertNotNull(store.get(OW, content), "the content row migrates beside it");
+        } finally {
+            store.shutdown();
+        }
+    }
+
+    @Test
     void dropAllResetsTheWalkBookkeeping() throws Exception {
         var rows = new java.util.ArrayList<FixtureRow>();
         for (int i = 0; i < 50; i++) {

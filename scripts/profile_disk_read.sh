@@ -122,6 +122,15 @@ cmd_run() {
     case "$arm" in
         vanilla) ;;
         c2me) extra_args="-Pbenchmark.c2me=true" ;;
+        # C6 legacy-dialect arm pair (XVER §12): SAME tree, arm variable = the client's
+        # announced protocol. dialect19 exercises the server's per-recipient egress
+        # translation (v20 -> native + zstd recompress) on every served column.
+        # unset, not bare (C6 review C-1, empirically proven): cmd_run is a FUNCTION,
+        # so an exported var from a prior dialect19 arm survives into native arms —
+        # 7 of 8 runs of the first c6-dialect matrix negotiated v19 and the "A/B" was
+        # an A/A. The arm-validity check below pins the announced protocol per run.
+        native) unset BENCHMARK_CLIENT_GRADLE_ARGS ;;
+        dialect19) export BENCHMARK_CLIENT_GRADLE_ARGS="-Psoak.dialect=19" ;;
         base|change)
             [[ -n "$BASE_REF" ]] || die "arm '$arm' needs PROFILE_BASE_REF (ref-vs-ref mode)"
             root="$(root_for_arm "$arm")"
@@ -130,7 +139,7 @@ cmd_run() {
             # whatever the stale worktree happens to hold (B0 review N7).
             [[ "$arm" == "change" ]] || ensure_base_worktree
             ;;
-        *) die "unknown arm '$arm' (want vanilla | c2me | base | change)" ;;
+        *) die "unknown arm '$arm' (want vanilla | c2me | base | change | native | dialect19)" ;;
     esac
 
     [[ -d "$MAIN_ROOT/benchmark-worlds/base/world" ]] || die "no base world — build one first"
@@ -185,6 +194,19 @@ cmd_run() {
         [[ -f "$root/benchmark-results/$f" ]] && cp "$root/benchmark-results/$f" "$RUN_OUT/"
     done
 
+    # A/B validity 0 (dialect arms): the negotiated protocol IS the arm variable —
+    # assert it from the client log (C6 review C-1; no meta field carries it).
+    local dialect_ok=true
+    if [[ "$arm" == "native" || "$arm" == "dialect19" ]]; then
+        local want_proto="v20"
+        [[ "$arm" == "dialect19" ]] && want_proto="v19"
+        if ! grep -q "Server session config received (protocol ${want_proto}," \
+                "$RUN_OUT/client.log" 2>/dev/null; then
+            dialect_ok=false
+            log "ARM INVALID: $arm rep$rep did not negotiate ${want_proto} (see client.log)"
+        fi
+    fi
+
     # A/B validity 1 (io-path mode): the c2me arm must have latched the incompatible
     # fallback (warn present), every other arm must not. Ref arms run vanilla IO.
     local warn="absent"
@@ -213,7 +235,8 @@ cmd_run() {
     fi
 
     local arm_valid=true
-    { [[ "$warn_ok" == "true" ]] && [[ "$echo_ok" == "true" ]]; } || arm_valid=false
+    { [[ "$warn_ok" == "true" ]] && [[ "$echo_ok" == "true" ]] \
+        && [[ "$dialect_ok" == "true" ]]; } || arm_valid=false
 
     cat > "$RUN_OUT/meta.json" <<EOF
 {
@@ -252,7 +275,10 @@ EOF
 cmd_matrix() {
     local reps="${1:?reps}" duration="${2:?duration}" lod_r="${3:?lod-distance}"
     local arm_a="vanilla" arm_b="c2me"
-    if [[ -n "$BASE_REF" ]]; then
+    if [[ -n "${PROFILE_DIALECT_MATRIX:-}" ]]; then
+        # C6 legacy-dialect matrix: same tree, client dialect is the arm variable.
+        arm_a="native"; arm_b="dialect19"
+    elif [[ -n "$BASE_REF" ]]; then
         arm_a="base"; arm_b="change"
         cmd_setup
     fi

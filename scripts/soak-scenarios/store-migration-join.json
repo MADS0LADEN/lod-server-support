@@ -1,12 +1,8 @@
 {
   "snapshotIntervalSeconds": 5,
   "joinTimeoutSeconds": 240,
+  "downgradeStoreToV19": true,
   "steps": [
-    {
-      "anchor": 1,
-      "at": 2,
-      "cmd": "kill @e[type=!minecraft:player]"
-    },
     {
       "anchor": 1,
       "at": 2,
@@ -36,30 +32,10 @@
       "anchor": 1,
       "at": 4,
       "cmd": "tp @a 0 150 0"
-    },
-    {
-      "anchor": 1,
-      "at": 68,
-      "cmd": "forceload add 328 8"
-    },
-    {
-      "anchor": 1,
-      "at": 70,
-      "cmd": "setblock 328 -64 8 minecraft:stone"
-    },
-    {
-      "anchor": 1,
-      "at": 75,
-      "cmd": "save-all"
-    },
-    {
-      "anchor": 1,
-      "at": 80,
-      "cmd": "forceload remove 328 8"
     }
   ],
   "end": {
     "anchor": 1,
-    "at": 190
+    "at": 180
   }
 }

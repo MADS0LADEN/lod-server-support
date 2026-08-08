@@ -97,6 +97,16 @@ public class LSSClientConfig extends JsonConfig {
         if (crossVersionBlockFallbacks == null) {
             crossVersionBlockFallbacks = new java.util.HashMap<>();
         }
+        // A null/blank ENTRY (C6 review C-2): GSON maps {"k": null} to a real null
+        // value in the map, Map.copyOf at resolver construction then NPEs — inside the
+        // decode drain, every tick, with no ingest-failure report: LOD dead for the
+        // session off one hand-edited entry. Drop such entries fail-open, warn once.
+        if (crossVersionBlockFallbacks.entrySet().removeIf(e ->
+                e.getKey() == null || e.getKey().isBlank()
+                        || e.getValue() == null || e.getValue().isBlank())) {
+            dev.vox.lss.common.LSSLogger.warn("crossVersionBlockFallbacks contained"
+                    + " null/blank entries — dropped (fail-open); fix the config file");
+        }
         // <= 0 normalizes to 0 (off) — a negative hand-edit means "off", and clamping it to the
         // floor would silently ARM a cap the user meant to disable. Positive values clamp to
         // [50, 100000]: below 50 the scanner still functions but starves the frontier to a

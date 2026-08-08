@@ -39,6 +39,25 @@ class ConfigValidationTest {
         assertTrue(serverConfig().enableV19Compat);
     }
 
+    /** C6 review C-2: a null/blank ENTRY in the curated table NPEs Map.copyOf at
+     *  resolver construction — inside the decode drain, every tick, no ingest-failure
+     *  report: LOD dead for the session off one hand-edited entry. validate() must
+     *  drop such entries fail-open. */
+    @Test
+    void curatedTableNullOrBlankEntriesAreDroppedFailOpen() {
+        var c = clientConfig();
+        c.crossVersionBlockFallbacks = new java.util.HashMap<>();
+        c.crossVersionBlockFallbacks.put("ancient:sulfur", null);
+        c.crossVersionBlockFallbacks.put("", "minecraft:stone");
+        c.crossVersionBlockFallbacks.put("ok:kept", "minecraft:dirt");
+        c.validate();
+        assertEquals(java.util.Map.of("ok:kept", "minecraft:dirt"),
+                c.crossVersionBlockFallbacks,
+                "null/blank entries dropped, the valid one kept");
+        assertDoesNotThrow(() -> java.util.Map.copyOf(c.crossVersionBlockFallbacks),
+                "the resolver's Map.copyOf must be safe after validate()");
+    }
+
     /** The Via cross-MC guard ships ON (XVER §7): without it a legacy client behind
      *  Via silently receives columns it cannot decode. Fail-open by construction (no
      *  Via / no signal = unchanged), so the on-default is safe without Via installed. */
@@ -624,6 +643,55 @@ class ConfigValidationTest {
                 "\"lodColumnsPerSecondLimit\":0", "\"lodColumnsPerSecondLimit\":400"),
                 LSSClientConfig.class);
         assertEquals(400, loaded.lodColumnsPerSecondLimit, "a saved cap must bind back");
+    }
+
+    /**
+     * The §3 fallback ladder's TERMINAL config carrier (XVER §9 client-config
+     * validation): GSON can null or blank this from a malformed/hand-edited file, and
+     * a null reaching {@code ClientIdentityResolver.resolveTerminalBlock} is survivable
+     * (it coerces to stone) but a BLANK would resolve as a malformed identity every
+     * session with no heal on disk — validate() owns restoring the default. The
+     * resolver validates the value's RESOLUTION itself; config only carries it, so
+     * an arbitrary non-blank string must survive validate() untouched.
+     */
+    @Test
+    void unknownBlockFallbackHealsNullAndBlankToTheDefault() {
+        var c = clientConfig();
+        c.unknownBlockFallback = null;
+        c.validate();
+        assertEquals("minecraft:stone", c.unknownBlockFallback, "null must heal to the default");
+
+        c.unknownBlockFallback = "   ";
+        c.validate();
+        assertEquals("minecraft:stone", c.unknownBlockFallback, "blank must heal to the default");
+
+        c.unknownBlockFallback = "minecraft:sandstone";
+        c.validate();
+        assertEquals("minecraft:sandstone", c.unknownBlockFallback,
+                "a configured value is carried verbatim — resolution is the resolver's job");
+    }
+
+    /**
+     * The ladder's CURATED rung table: the resolver's constructor does
+     * {@code Map.copyOf(CONFIG.crossVersionBlockFallbacks)}, which throws on null —
+     * so a GSON-nulled table would crash resolver construction on the FIRST v20
+     * column of every session unless validate() heals it to the empty map. A
+     * populated table must pass through untouched (it is user-extended as real
+     * cross-version gaps are reported).
+     */
+    @Test
+    void crossVersionBlockFallbacksHealNullToTheEmptyMap() {
+        var c = clientConfig();
+        c.crossVersionBlockFallbacks = null;
+        c.validate();
+        assertNotNull(c.crossVersionBlockFallbacks, "null must heal to an empty map");
+        assertTrue(c.crossVersionBlockFallbacks.isEmpty());
+
+        c.crossVersionBlockFallbacks = new java.util.HashMap<>(
+                java.util.Map.of("ancient:sulfur", "minecraft:sandstone"));
+        c.validate();
+        assertEquals(java.util.Map.of("ancient:sulfur", "minecraft:sandstone"),
+                c.crossVersionBlockFallbacks, "user entries must survive validate() untouched");
     }
 
     /**
