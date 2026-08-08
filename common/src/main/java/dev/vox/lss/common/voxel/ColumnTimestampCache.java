@@ -66,7 +66,7 @@ public class ColumnTimestampCache {
      *  Tile object + ~29 B map slot at 0.75 load factor ≈ 4.2 KB; 4352 includes slack.
      *  Replaces the per-entry model (64 B × two hash maps) — a dense tile costs
      *  ~4.25 B/column, and the byte cap binds on tiles, not entries. */
-    static final int TILE_HEAP_BYTES = 4352;
+    public static final int TILE_HEAP_BYTES = 4352;
 
     /** One region's stamps: u32 epoch-offsets (0 = absent), a live count so size
      *  queries never scan, and the last-put age the tile-granular eviction ranks by. */
@@ -318,7 +318,14 @@ public class ColumnTimestampCache {
      * tileCount (int) + per tile: regionKey (long) + liveCount (int) + 1024 slots (int).
      */
     public void save(Path dataDir) {
-        if (caches.isEmpty()) return;
+        // Empty DIMENSION maps linger after their last tile is removed (put's
+        // computeIfAbsent re-creates them cheaply); skip them so a fully-swept cache
+        // writes nothing at all rather than a header-only file.
+        int liveDims = 0;
+        for (var tiles : caches.values()) {
+            if (!tiles.isEmpty()) liveDims++;
+        }
+        if (liveDims == 0) return;
 
         var file = dataDir.resolve(FILE_NAME);
         // Unique tmp name: two writers overlapping across a Paper /reload (old instance's
@@ -332,10 +339,11 @@ public class ColumnTimestampCache {
             try (var out = new DataOutputStream(new BufferedOutputStream(
                     Files.newOutputStream(tmpFile), IO_BUFFER_BYTES))) {
                 out.writeInt(FORMAT_VERSION);
-                out.writeInt(caches.size());
+                out.writeInt(liveDims);
                 for (var entry : caches.entrySet()) {
-                    out.writeUTF(entry.getKey());
                     var tiles = entry.getValue();
+                    if (tiles.isEmpty()) continue;
+                    out.writeUTF(entry.getKey());
                     out.writeInt(tiles.size());
                     for (var e : tiles.long2ObjectEntrySet()) {
                         out.writeLong(e.getLongKey());

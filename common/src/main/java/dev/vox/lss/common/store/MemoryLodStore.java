@@ -70,6 +70,13 @@ public final class MemoryLodStore implements LodStoreService {
 
     private final ArrayBlockingQueue<Deposit> queue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private final Thread batcher;
+    // Exact quiesce accounting for awaitQuiesceForTest: offered counts successful
+    // enqueues, retired counts shed drops + batcher-finished deposits. Queue-emptiness
+    // alone cannot see a deposit the batcher has polled but is still applying — the
+    // put→tombstone-recheck window inside applyDeposit is transiently visible to get(),
+    // and a fixed post-empty sleep flaked under full-suite load.
+    private final AtomicLong offeredForTest = new AtomicLong();
+    private final AtomicLong retiredForTest = new AtomicLong();
     private final AtomicBoolean shutdown = new AtomicBoolean();
     private final AtomicBoolean errorWarned = new AtomicBoolean();
 
@@ -183,9 +190,11 @@ public final class MemoryLodStore implements LodStoreService {
             if (this.shutdown.get()) return false;
             if (this.queue.poll() != null) {
                 this.diag.recordDepositDrop();
+                this.retiredForTest.incrementAndGet();
                 // Shed still returns TRUE — see the SQLite twin's depositFrame comment.
             }
         }
+        this.offeredForTest.incrementAndGet();
         return true;
     }
 
@@ -206,9 +215,11 @@ public final class MemoryLodStore implements LodStoreService {
             // re-deposits on the next serve of that column.
             if (this.queue.poll() != null) {
                 this.diag.recordDepositDrop();
+                this.retiredForTest.incrementAndGet();
                 shed = true;
             }
         }
+        this.offeredForTest.incrementAndGet();
         // Deliberately NO gauge write here: store.queue is a DRAIN-SIDE gauge (the
         // SERVER_DRAINS contract — the SQLite twin documents the burn-in red a
         // producer-side write caused; R2 found this twin kept the old shape).
@@ -262,6 +273,9 @@ public final class MemoryLodStore implements LodStoreService {
         this.byDimension.clear();
         this.residentBytes.set(0);
         this.queue.clear();
+        // Cleared entries were offered but never retired — sync the quiesce counters so
+        // a post-shutdown awaitQuiesceForTest cannot spin to its deadline.
+        this.retiredForTest.set(this.offeredForTest.get());
         this.diag.setMemBytes(0);
         this.diag.setQueueDepth(0);
     }
@@ -291,6 +305,8 @@ public final class MemoryLodStore implements LodStoreService {
                     LSSLogger.warn("LOD store deposit failed (counted store.errors;"
                             + " further failures are silent)", t);
                 }
+            } finally {
+                this.retiredForTest.incrementAndGet();
             }
             // Drain-side gauge update (the check_soak SERVER_DRAINS batcher contract).
             this.diag.setQueueDepth(this.queue.size());
@@ -400,14 +416,16 @@ public final class MemoryLodStore implements LodStoreService {
 
     // ---- test seams ----
 
-    /** Blocks until the batcher has drained the queue (test determinism). */
+    /** Blocks until every offered deposit is RETIRED — shed or fully applied (test
+     *  determinism). Queue-emptiness alone misses a polled-but-still-applying deposit,
+     *  whose row is transiently visible between applyDeposit's put and its tombstone
+     *  re-check; the old fixed 20 ms post-empty beat flaked under full-suite load. */
     public void awaitQuiesceForTest(long timeoutMs) throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMs;
-        while ((!this.queue.isEmpty()) && System.currentTimeMillis() < deadline) {
+        while (this.retiredForTest.get() < this.offeredForTest.get()
+                && System.currentTimeMillis() < deadline) {
             Thread.sleep(5);
         }
-        // one more beat: the last taken deposit may still be applying
-        Thread.sleep(20);
     }
 
     /** Live entry count across dimensions (test observability). */

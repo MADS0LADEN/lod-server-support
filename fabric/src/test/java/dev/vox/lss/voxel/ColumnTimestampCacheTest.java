@@ -667,13 +667,20 @@ class ColumnTimestampCacheTest {
         // it — an accidental v1 re-write would warn-discard here).
         long pA = dev.vox.lss.common.PositionUtil.packPosition(5, 7);
         long pB = dev.vox.lss.common.PositionUtil.packPosition(-40, 100);
+        long pZero = dev.vox.lss.common.PositionUtil.packPosition(70, 70);
+        long pNeg = dev.vox.lss.common.PositionUtil.packPosition(71, 71);
         try (var out = cacheFileOut(tempDir)) {
             out.writeInt(1); // released FORMAT_VERSION
             out.writeInt(2);
             out.writeUTF(LSSConstants.DIM_STR_OVERWORLD);
-            out.writeInt(2);
+            out.writeInt(4);
             out.writeLong(pA); out.writeLong(ts(123L));
             out.writeLong(pB); out.writeLong(ts(456L));
+            // §8: v1 files could carry non-positive stamps (the old map stored anything);
+            // migration must DROP them — under tiles a stored 0/negative would either
+            // fabricate a slot or corrupt the liveCount.
+            out.writeLong(pZero); out.writeLong(0L);
+            out.writeLong(pNeg); out.writeLong(-4L);
             out.writeUTF(LSSConstants.DIM_STR_THE_NETHER);
             out.writeInt(1);
             out.writeLong(pA); out.writeLong(ts(789L));
@@ -683,6 +690,10 @@ class ColumnTimestampCacheTest {
         assertEquals(ts(123L), migrated.get(LSSConstants.DIM_STR_OVERWORLD, pA));
         assertEquals(ts(456L), migrated.get(LSSConstants.DIM_STR_OVERWORLD, pB));
         assertEquals(ts(789L), migrated.get(LSSConstants.DIM_STR_THE_NETHER, pA));
+        assertEquals(0L, migrated.get(LSSConstants.DIM_STR_OVERWORLD, pZero),
+                "a v1 zero-stamp record must migrate to ABSENT, not a fabricated slot");
+        assertEquals(0L, migrated.get(LSSConstants.DIM_STR_OVERWORLD, pNeg),
+                "a v1 negative-stamp record must migrate to ABSENT");
         assertEquals(3, migrated.size());
 
         migrated.save(tempDir); // must write v2
@@ -741,5 +752,44 @@ class ColumnTimestampCacheTest {
         var loaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
         assertDoesNotThrow(() -> loaded.load(tempDir));
         assertEquals(0, loaded.size());
+    }
+
+    /** The design-§5 constants coherence pin (WantSetBudgetInvariantTest-style): AUTO
+     *  sizing budgets {@code TIMESTAMP_CACHE_HEAP_BYTES_PER_COLUMN} per column, and that
+     *  claim is honest only while a full tile's real cost per column stays at or under
+     *  it — the drift guard the retired per-entry constant's comment claimed to have. */
+    @Test
+    void autoSizingPerColumnConstantCoversTheRealTileCost() {
+        assertTrue(ColumnTimestampCache.TILE_HEAP_BYTES / 1024.0
+                        <= LSSConstants.TIMESTAMP_CACHE_HEAP_BYTES_PER_COLUMN,
+                "TILE_HEAP_BYTES/1024 columns must not exceed the AUTO per-column budget — "
+                        + "re-derive TIMESTAMP_CACHE_HEAP_BYTES_PER_COLUMN if the Tile grows");
+    }
+
+    /** The no-empty-tile invariant at every decrement site (design §2/§8): a tile whose
+     *  last slot clears must be REMOVED, whichever path cleared it — a leaked empty tile
+     *  costs eviction budget forever, and a persisted one is a liveCount-0 record the v2
+     *  loader rejects. Observable without internals: save() writes only live tiles, so a
+     *  cache whose every tile emptied must save NOTHING (the skip-empty belt pin), and a
+     *  dimension keeping one live entry must round-trip exactly that entry. */
+    @Test
+    void emptyTilesDieAtAllThreeDecrementSitesAndNeverPersist(@TempDir Path tempDir) {
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 10L, ts(1L), now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 10L, 0L, now);          // site 1: put ts<=0
+        cache.put(LSSConstants.DIM_STR_THE_NETHER, 11L, ts(2L), now);
+        cache.invalidate(LSSConstants.DIM_STR_THE_NETHER, new long[]{11L});       // site 2
+        cache.put(LSSConstants.DIM_STR_THE_END, 12L, ts(3L), now);
+        cache.invalidateStamps(LSSConstants.DIM_STR_THE_END, new long[]{12L});    // site 3
+        assertEquals(0, cache.size());
+        cache.save(tempDir);
+        assertFalse(Files.exists(tempDir.resolve("lss-timestamps.bin")),
+                "all tiles emptied — an emitted file means an empty tile survived a decrement");
+
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 20L, ts(9L), now);
+        cache.save(tempDir);
+        var reloaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
+        reloaded.load(tempDir);
+        assertEquals(ts(9L), reloaded.get(LSSConstants.DIM_STR_OVERWORLD, 20L));
+        assertEquals(1, reloaded.size(), "exactly the one live entry persists");
     }
 }

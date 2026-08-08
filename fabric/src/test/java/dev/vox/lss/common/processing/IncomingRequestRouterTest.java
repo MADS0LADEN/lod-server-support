@@ -118,6 +118,12 @@ class IncomingRequestRouterTest {
         return snapshot(Map.of(), 0, states);
     }
 
+    /** In-range base for seeded stamps: the tile cache clamps pre-epoch stamps up to
+     *  {@code TS_EPOCH_SECONDS + 1} (timestamp-cache-tile-redesign.md §2.2), so a literal
+     *  1000L seed no longer equals a 1000L claim — every ladder fixture stamps relative
+     *  to this base to keep its cache-vs-claim relationship intact. */
+    private static final long TS_BASE = ColumnTimestampCache.TS_EPOCH_SECONDS;
+
     /** Pre-populate the processor's timestamp cache through its production load path. */
     private static void seedTimestamps(Path dataDir, long timestamp, long... positions) {
         var seed = new ColumnTimestampCache(1024L * 1024L, 0);
@@ -213,7 +219,7 @@ class IncomingRequestRouterTest {
 
     @Test
     void mixedBatchEveryRequestGetsExactlyOneDisposition(@TempDir Path tempDir) throws Exception {
-        seedTimestamps(tempDir, 1000L, packed(4, 0));
+        seedTimestamps(tempDir, TS_BASE + 1000, packed(4, 0));
         var players = new ConcurrentHashMap<UUID, TestState>();
         var p1 = addPlayer(players, 2, 1);
         var proc = new TestProcessor(players, new StubDiskReader(), true, tempDir);
@@ -234,8 +240,8 @@ class IncomingRequestRouterTest {
                     new IncomingRequest(5, 0, -1),   // in-memory probe payload, no slot
                     new IncomingRequest(6, 0, -1),   // sync slot full -> RETAINED, pass continues
                     new IncomingRequest(7, 0, -1),   // sync slot full -> RETAINED, pass continues
-                    new IncomingRequest(4, 0, 2000), // up-to-date (cached 1000 <= 2000)
-                    new IncomingRequest(4, 0, 3000));// ts>0 duplicate answered — batch marker
+                    new IncomingRequest(4, 0, TS_BASE + 2000), // up-to-date (cached base+1000)
+                    new IncomingRequest(4, 0, TS_BASE + 3000));// ts>0 duplicate answered — batch marker
             var probes = new Long2ObjectOpenHashMap<LoadedColumnData>();
             probes.put(packed(5, 0), new LoadedColumnData(5, 0, new byte[]{1, 2, 3}, 48));
             proc.postSnapshot(snapshot(Map.of(p1.getPlayerUUID(), probes), 0, p1), List.of());
@@ -381,7 +387,7 @@ class IncomingRequestRouterTest {
 
     @Test
     void clientTimestampLadderDecidesUpToDateVsReserve(@TempDir Path tempDir) throws Exception {
-        long cached = 1000L;
+        long cached = TS_BASE + 1000;
         seedTimestamps(tempDir, cached, packed(10, 0), packed(11, 0), packed(12, 0), packed(14, 0));
         var players = new ConcurrentHashMap<UUID, TestState>();
         var p1 = addPlayer(players, 8, 8);
@@ -424,7 +430,7 @@ class IncomingRequestRouterTest {
         // generation on the disk MISS, never on the request shape; the wire pin's twin is
         // the retired byte 0 staying inert client-side). It must also bypass the timestamp
         // ladder: a cached stamp must not answer up_to_date to a no-data declaration.
-        seedTimestamps(tempDir, 1000L, packed(20, 0));
+        seedTimestamps(tempDir, TS_BASE + 1000, packed(20, 0));
         var players = new ConcurrentHashMap<UUID, TestState>();
         var p1 = addPlayer(players, 2, 1);
         var proc = new TestProcessor(players, new StubDiskReader(), true, tempDir);
@@ -632,7 +638,7 @@ class IncomingRequestRouterTest {
 
     @Test
     void freshTimestampBeatsLoadedProbeInTheLadder(@TempDir Path tempDir) throws Exception {
-        seedTimestamps(tempDir, 1000L, packed(90, 0));
+        seedTimestamps(tempDir, TS_BASE + 1000, packed(90, 0));
         var players = new ConcurrentHashMap<UUID, TestState>();
         var p1 = addPlayer(players, 4, 4);
         var proc = new TestProcessor(players, new StubDiskReader(), true, tempDir);
@@ -641,7 +647,7 @@ class IncomingRequestRouterTest {
             // Fresh cache entry AND a loaded probe for the same position: the timestamp
             // step sits BEFORE the probe step, so the request must resolve up-to-date
             // without serializing or shipping the probe's bytes.
-            p1.enqueue(new IncomingRequest(90, 0, 2000));
+            p1.enqueue(new IncomingRequest(90, 0, TS_BASE + 2000));
             var probes = new Long2ObjectOpenHashMap<LoadedColumnData>();
             probes.put(packed(90, 0), new LoadedColumnData(90, 0, new byte[]{1}, 16));
             proc.postSnapshot(snapshot(Map.of(p1.getPlayerUUID(), probes), 0, p1), List.of());
@@ -827,7 +833,7 @@ class IncomingRequestRouterTest {
 
     @Test
     void queueFullGateSitsBetweenDoneBitAnswersAndTheTimestampLadder(@TempDir Path tempDir) throws Exception {
-        seedTimestamps(tempDir, 1000L, packed(95, 0));
+        seedTimestamps(tempDir, TS_BASE + 1000, packed(95, 0));
         var players = new ConcurrentHashMap<UUID, TestState>();
         var p1 = addPlayer(players, 4, 1);
         var p2 = addPlayer(players, 4, 1);
@@ -841,8 +847,8 @@ class IncomingRequestRouterTest {
         try {
             proc.start();
             offer(p1,
-                    new IncomingRequest(94, 0, 500),  // done + ts>0: answered before the gate
-                    new IncomingRequest(95, 0, 2000));// fresh cache hit: the gate retains it first
+                    new IncomingRequest(94, 0, 500),               // done + ts>0: answered before the gate
+                    new IncomingRequest(95, 0, TS_BASE + 2000));   // fresh cache hit: the gate retains it first
             proc.postSnapshot(snapshot(Map.of(), 1, p1), List.of());
             waitFor(() -> proc.getDiagnostics().getTotalQueueFull() == 1, "queue-full break");
 
@@ -925,7 +931,7 @@ class IncomingRequestRouterTest {
 
     @Test
     void clientTimestampExtremesRouteThroughTheLadder(@TempDir Path tempDir) throws Exception {
-        seedTimestamps(tempDir, 1000L, packed(100, 0), packed(101, 0), packed(102, 0));
+        seedTimestamps(tempDir, TS_BASE + 1000, packed(100, 0), packed(101, 0), packed(102, 0));
         var players = new ConcurrentHashMap<UUID, TestState>();
         var p1 = addPlayer(players, 4, 4);
         var proc = new TestProcessor(players, new StubDiskReader(), true, tempDir);
@@ -1007,7 +1013,7 @@ class IncomingRequestRouterTest {
 
     @Test
     void quiescentFullLedgerBalancesEveryDispositionClass(@TempDir Path tempDir) throws Exception {
-        seedTimestamps(tempDir, 1000L, packed(3, 0));
+        seedTimestamps(tempDir, TS_BASE + 1000, packed(3, 0));
         var players = new ConcurrentHashMap<UUID, TestState>();
         var p1 = addPlayer(players, 4, 1);
         var reader = new StubDiskReader();
@@ -1032,8 +1038,8 @@ class IncomingRequestRouterTest {
             reader.getPlayerQueue(p1.getPlayerUUID())
                     .add(ChunkReadResult.notFoundAuthoritative(p1.getPlayerUUID(), 2, 0, DIM, 2L));
             offer(p1,
-                    new IncomingRequest(3, 0, 2000), // timestamp-ladder up-to-date (cached 1000)
-                    new IncomingRequest(3, 0, 3000), // done-bit duplicate up-to-date
+                    new IncomingRequest(3, 0, TS_BASE + 2000), // timestamp-ladder up-to-date (cached base+1000)
+                    new IncomingRequest(3, 0, TS_BASE + 3000), // done-bit duplicate up-to-date
                     new IncomingRequest(4, 0, -1));  // in-memory probe payload
             var probes = new Long2ObjectOpenHashMap<LoadedColumnData>();
             probes.put(packed(4, 0), new LoadedColumnData(4, 0, new byte[]{1}, 16));
@@ -1095,9 +1101,10 @@ class IncomingRequestRouterTest {
     void epochSecondGranularityAndSkewedStampsFollowTheCacheVsClaimLadder(@TempDir Path tempDir) throws Exception {
         long future = LSSConstants.epochSeconds() + 7200;
         var seed = new ColumnTimestampCache(1024L * 1024L, 0);
-        seed.put(DIM, packed(110, 0), 1000L, 0);
+        seed.put(DIM, packed(110, 0), TS_BASE + 1000, 0);
         seed.put(DIM, packed(111, 0), future, 0);
         seed.put(DIM, packed(112, 0), future, 0);
+        seed.put(DIM, packed(113, 0), 1000L, 0); // pre-epoch: the tile cache clamps it UP to base+1
         seed.save(tempDir);
         var players = new ConcurrentHashMap<UUID, TestState>();
         var p1 = addPlayer(players, 4, 4);
@@ -1109,20 +1116,26 @@ class IncomingRequestRouterTest {
             // reads fresh BY DESIGN (the accepted one-second blind spot), even though the
             // cache stamp may postdate the client's copy by up to a second of content.
             var extremes = new ArrayList<IncomingRequest>();
-            extremes.add(new IncomingRequest(110, 0, 1000L));
+            extremes.add(new IncomingRequest(110, 0, TS_BASE + 1000));
             // (111,0): the server clock ran ahead when it stamped (cache in the client's
             // future); the honest lower claim must re-serve, never read up-to-date.
-            extremes.add(new IncomingRequest(111, 0, 1000L));
+            extremes.add(new IncomingRequest(111, 0, TS_BASE + 1000));
             // (112,0): convergence under skew — the client stamps with the SERVER-sent
             // columnTimestamp verbatim (never its own clock), so its next claim equals
             // the future stamp and resolves up-to-date.
             extremes.add(new IncomingRequest(112, 0, future));
+            // (113,0): a PRE-EPOCH stamp was seeded (a legacy/garbage clock). The tile
+            // cache clamped it up to base+1 (§2.2 — clamps round UP, never fabricate
+            // freshness), so the matching pre-epoch claim reads STALE and re-serves:
+            // the clamp's safe direction, pinned end-to-end through the ladder.
+            extremes.add(new IncomingRequest(113, 0, 1000L));
             offer(p1, extremes.toArray(new IncomingRequest[0]));
             proc.postSnapshot(snapshot(p1), List.of());
-            waitFor(() -> proc.submits.size() == 1, "skewed-behind claim re-serves");
+            waitFor(() -> proc.submits.size() == 2, "skewed-behind + clamped claims re-serve");
 
-            assertEquals(List.of(packed(111, 0)), submitPositions(proc));
+            assertEquals(List.of(packed(111, 0), packed(113, 0)), submitPositions(proc));
             assertTrue(p1.hasPendingRequest(111, 0));
+            assertTrue(p1.hasPendingRequest(113, 0));
             var delivered = drainUntil(proc, d ->
                     count(d, LSSConstants.RESPONSE_UP_TO_DATE, packed(110, 0)) == 1
                             && count(d, LSSConstants.RESPONSE_UP_TO_DATE, packed(112, 0)) == 1);

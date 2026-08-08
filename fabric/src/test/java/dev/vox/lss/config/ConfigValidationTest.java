@@ -246,8 +246,16 @@ class ConfigValidationTest {
         c.lodDistanceChunks = 256;
         c.validate();
         int at256 = c.effectiveTimestampCacheMB();
-        assertTrue(at256 >= 28 && at256 <= 36,
-                "AUTO at the 256 default must land near the historic hand-tuned 32 MB, got " + at256);
+        // The D0 tile model: 8x the scanned disc area at ~5 B/column. At the 256 default
+        // that is ~12 MB — a third of the pre-tile 32 MB while covering 5.3x the columns
+        // (timestamp-cache-tile-redesign.md §6); pin the exact derivation, not a band.
+        long side = 2L * (256 + LSSConstants.LOD_DISTANCE_BUFFER) + 1;
+        long want = side * side
+                * (long) LSSConstants.TIMESTAMP_CACHE_AUTO_COVERAGE_FACTOR
+                * LSSConstants.TIMESTAMP_CACHE_HEAP_BYTES_PER_COLUMN / (1024 * 1024);
+        assertEquals(want, at256, "AUTO at the 256 default follows the tile-cost derivation");
+        assertTrue(at256 >= 10 && at256 <= 16,
+                "sanity band: the derivation itself must stay in the ~12 MB regime, got " + at256);
 
         c.lodDistanceChunks = 512;
         c.validate();

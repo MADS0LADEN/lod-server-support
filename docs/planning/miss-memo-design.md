@@ -204,7 +204,10 @@ monotonic nanos`) as a sibling of the timestamp maps in
 - Memory: miss entries count toward the same per-dimension entry budget
   *(as-built divergence: the miss map checks its own equal-size cap independently —
   see the review-round addendum above)*
-  (`perDimensionTimestampCacheSizeMB` → `mbToEntries`) and are evicted by
+  (`perDimensionTimestampCacheSizeMB` → `mbToEntries`; since the D0 tile redesign
+  (timestamp-cache-tile-redesign.md §5) `mbToEntries` is deleted — the memo's overflow
+  cap is `maxBytesPerDimension / 64`, the same numeric result for the same MB) and are
+  evicted by
   `evictIfOversized` FIRST (a miss is always cheaper to lose than a stamp — losing one
   costs a redundant read, losing a stamp costs a redundant serve).
 - **Excluded from `save()`/`load()` and `snapshotForSave()`**: a restart may follow
