@@ -115,7 +115,10 @@ class NbtSectionSerializerTest {
 
     /** v20 wire -> the native view every assertion below predates (exact inverse
      *  resolvers over the SAME registries the emit used — a translation failure here is
-     *  a real wire defect, not a fixture gap). */
+     *  a real wire defect, not a fixture gap). Since C2 this decodes through the
+     *  PRODUCTION inverse statics (biomeIdLookup/biomeIdCount — review C1-15), so the
+     *  round trip is no longer independent of those tables; independence is anchored by
+     *  {@code LegacyColumnEgressTest}'s chain against the FROZEN committed goldens. */
     private static byte[] toNativeForTest(byte[] v20Wire) {
         // C2 (review C1-15): the exact inverses are production statics now — decode
         // through the same tables the legacy egress translators use.

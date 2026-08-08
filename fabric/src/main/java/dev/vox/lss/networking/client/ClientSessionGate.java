@@ -198,7 +198,8 @@ final class ClientSessionGate {
         // REJECT a 20 echo exactly like the real v19 client it emulates would).
         if (version != SoakDialectOverride.announceVersion() && !v16) {
             LSSLogger.warn("Server has incompatible " + Brand.shortName() + " protocol version " + version
-                    + " (client: " + LSSConstants.PROTOCOL_VERSION + "), LOD distribution disabled");
+                    + " (client: " + SoakDialectOverride.announceVersion()
+                    + "), LOD distribution disabled");
             this.serverEnabled = false;
             return;
         }

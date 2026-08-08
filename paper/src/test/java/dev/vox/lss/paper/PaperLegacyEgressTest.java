@@ -51,7 +51,7 @@ class PaperLegacyEgressTest {
 
     // ---- fixtures ----
 
-    private static Path corpusDir(String dirName) {
+    static Path corpusDir(String dirName) {
         Path dir = Path.of("").toAbsolutePath();
         for (int depth = 0; depth < 5 && dir != null; depth++, dir = dir.getParent()) {
             if (Files.isDirectory(dir.resolve("src/test/java/dev/vox/lss"))) {
@@ -66,7 +66,7 @@ class PaperLegacyEgressTest {
                 + Path.of("").toAbsolutePath());
     }
 
-    private static byte[] readCorpus(String dirName, String name) {
+    static byte[] readCorpus(String dirName, String name) {
         try {
             return Files.readAllBytes(corpusDir(dirName).resolve(name));
         } catch (IOException e) {
@@ -126,6 +126,10 @@ class PaperLegacyEgressTest {
                     "per-entry block ids must survive the palette collapse (section " + i + ")");
             assertArrayEquals(resolvedValues(e.biomes(), 64), resolvedValues(a.biomes(), 64),
                     "per-entry biome ids must survive the palette collapse (section " + i + ")");
+            // A collapse only ever SHRINKS: a wider re-emit (e.g. DIRECT where indexed
+            // was right) would be a byte-drift this carve-out must not mask (review m8).
+            assertTrue(a.blocks().bits() <= e.blocks().bits(),
+                    "collapsed block width must not exceed the original (section " + i + ")");
             assertArrayEquals(e.blockLight(), a.blockLight());
             assertArrayEquals(e.skyLight(), a.skyLight());
         }
@@ -213,6 +217,75 @@ class PaperLegacyEgressTest {
         assertArrayEquals(PaperPayloadHandler.rewriteColumnToV16(nativeFrame),
                 PaperPayloadHandler.rewriteColumnToV16(translatedFrame),
                 "the v16 splice must compose on the translated frame");
+    }
+
+    // ---- review MAJOR-1/2/3 pins (Fabric twins) ----
+
+    @Test
+    void dialectTrackerAttachIsWiredInTheServiceConstructor() throws IOException {
+        // Source-regex pin (review MAJOR-1): an UNATTACHED tracker fails toward
+        // shipping v20 dictionary bodies to legacy clients while every tier stays
+        // green. The REAL enqueue path is additionally driven end-to-end by
+        // PaperRequestProcessingServiceTest.enqueueTranslatesLegacySessionBodies...
+        Path src = corpusDir("..").normalize().getParent()
+                .resolve("main/java/dev/vox/lss/paper/PaperRequestProcessingService.java");
+        String body = Files.readString(src);
+        assertTrue(body.contains("offThreadProcessor.attachDialectTracker(this.dialects)"),
+                "PaperRequestProcessingService must attach its dialect tracker to the "
+                        + "processor — without it every legacy session gets v20 bodies");
+    }
+
+    @Test
+    void overCapTranslationThrowsBeforeItCanKillTheLegacyConnection() {
+        // Review MAJOR-3 (Fabric twin): a v20 body under the admission cap can
+        // translate LARGER (wide palettes repack from <=12-bit dictionary indices to
+        // native DIRECT at the ~15-16 bit registry width); buildLegacyColumn must
+        // refuse loudly instead of shipping a connection-killing frame.
+        var identities = PaperIdentityTables.blockIdentities();
+        int distinct = 300;
+        var dict = new java.util.ArrayList<String>(distinct + 1);
+        for (int i = 0; i < distinct; i++) {
+            dict.add(identities[i]);
+        }
+        dict.add(PaperNbtSectionSerializer.biomeIdentityLookup(REGISTRY_ACCESS).apply(0));
+
+        int[] palette = new int[distinct];
+        int[] values = new int[4096];
+        for (int i = 0; i < distinct; i++) {
+            palette[i] = i;
+        }
+        for (int i = 0; i < 4096; i++) {
+            values[i] = i % distinct;
+        }
+        int v20Bits = 9;
+        var blocks = new WireSectionCursor.WireContainer(v20Bits, palette,
+                WireSectionCursor.pack(values, v20Bits));
+        var biomes = new WireSectionCursor.WireContainer(0, new int[] {distinct}, new long[0]);
+        var sections = new java.util.ArrayList<WireSectionCursor.WireSection>();
+        for (int y = 0; y < 220; y++) {
+            sections.add(new WireSectionCursor.WireSection(y - 100, 4096, 0,
+                    blocks, biomes, new byte[2048], null));
+        }
+        byte[] v20Body = WireSectionCursor.emit(
+                new WireSectionCursor.WireColumn(dict, sections), WireSectionCursor.Layout.V20);
+        assertTrue(v20Body.length <= LSSConstants.MAX_SEND_SECTIONS_SIZE,
+                "premise: the v20 body passes the enqueue admission guard ("
+                        + v20Body.length + " bytes) — otherwise this test is vacuous");
+
+        var thrown = assertThrows(IllegalStateException.class,
+                () -> PaperOffThreadProcessor.buildLegacyColumn(v20Body, REGISTRY_ACCESS, false, null));
+        assertTrue(thrown.getMessage().contains("exceeds send limit"),
+                "the refusal must name the cap, got: " + thrown.getMessage());
+    }
+
+    @Test
+    void corpusDirectoriesStayInLockstep() throws IOException {
+        try (Stream<Path> files = Files.list(corpusDir("v20-corpus"))) {
+            var v20Names = files.map(p -> p.getFileName().toString())
+                    .filter(n -> n.endsWith(".bin")).sorted().toList();
+            assertEquals(corpusNames(), v20Names,
+                    "nbt-corpus and v20-corpus must hold the same fixture set");
+        }
     }
 
     // ---- the loud failure shape (contained at the enqueue as an up_to_date answer) ----

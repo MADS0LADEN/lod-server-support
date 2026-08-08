@@ -1233,6 +1233,41 @@ class PaperRequestProcessingServiceTest {
     }
 
     @Test
+    void enqueueTranslatesLegacySessionBodiesThroughTheRealDialectRead() throws Exception {
+        // Review MAJOR-1's discriminating pin: the REAL enqueue path — the tracker the
+        // service attached, the dialect read on it, the translate branch, the queued
+        // frame — driven end to end. The emitted frame must byte-equal a natively-built
+        // frame (header preserved, body the frozen native golden); shipping the v20
+        // body here is the C1-1 CRITICAL failure mode no other tier can see (the mock
+        // client does not decode, and the soak lever is not in CI).
+        var uuid = UUID.randomUUID();
+        service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V19);
+        var level = level(Level.OVERWORLD);
+        when(level.registryAccess()).thenReturn(CorpusRegistryAccess.build());
+        var state = service.registerPlayer(playerIn(uuid, level), LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        processor.updateDimensionContext("minecraft:overworld", level);
+
+        byte[] v20 = PaperLegacyEgressTest.readCorpus("v20-corpus", "multi-section.bin");
+        byte[] nativeGolden = PaperLegacyEgressTest.readCorpus("nbt-corpus", "multi-section.bin");
+        boolean sent = processor.buildAndEnqueueColumnPayload(state, 3, 4, "minecraft:overworld",
+                99L, 1L, dev.vox.lss.common.processing.ColumnBytes.ofRaw(null, v20),
+                v20.length, LSSConstants.COLUMN_SOURCE_DISK);
+        assertTrue(sent, "the legacy build must enqueue, not refuse");
+
+        var sentFrames = new ArrayList<byte[]>();
+        service.setColumnPayloadSender((s, data) -> sentFrames.add(data));
+        awaitBandwidthWindow();
+        service.tick();
+
+        assertEquals(1, sentFrames.size(), "the queued legacy payload must flush");
+        assertArrayEquals(PaperPayloadHandler.encodeVoxelColumnPreEncoded(3, 4,
+                        "minecraft:overworld", 99L, LSSConstants.COLUMN_SOURCE_DISK,
+                        LSSConstants.COLUMN_CODEC_RAW, nativeGolden), sentFrames.get(0),
+                "the flushed frame must carry the TRANSLATED native body under the "
+                        + "preserved header — a v20 body here is the C1-1 failure mode");
+    }
+
+    @Test
     void routeColumnFrameDropsWhenTheLegacySpliceRefusesTheFrame() {
         // The cross-dialect downgrade window: a codec-1 frame reaching a v18 session's
         // splice throws (nowhere to carry a codec) — contained as a warn-drop, never a

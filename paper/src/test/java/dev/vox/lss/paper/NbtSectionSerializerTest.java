@@ -111,7 +111,9 @@ class NbtSectionSerializerTest {
                                   boolean hasSkyLight, byte[] skyLight) {}
 
     /** v20 wire -> the native view every assertion below predates (exact inverse
-     *  resolvers over the SAME registries the emit used). */
+     *  resolvers over the SAME registries the emit used). Since C2 this decodes through
+     *  the PRODUCTION inverse statics (review C1-15); independence is anchored by
+     *  {@code PaperLegacyEgressTest}'s chain against the FROZEN committed goldens. */
     private static byte[] toNativeForTest(byte[] v20Wire) {
         // C2 (review C1-15): the exact inverses are production statics now — decode
         // through the same tables the legacy egress translators use.

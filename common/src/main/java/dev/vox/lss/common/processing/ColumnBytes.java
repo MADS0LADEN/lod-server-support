@@ -105,6 +105,33 @@ public final class ColumnBytes {
         return f;
     }
 
+    // The C2 legacy-egress build memo (XVER §4.2, review MAJOR-2): the translated build
+    // depends only on (this column's raw bytes × wants-compressed) — the registry is
+    // server-global — so at most TWO distinct builds exist per column. Memoized here,
+    // the holder every dedup recipient already shares, so an N-recipient legacy group
+    // costs ONE translate (+ at most one recompress), never one per recipient. The
+    // compute lives in platform code (the translators are per-platform); thread-confined
+    // plain fields like everything else in this class.
+    private LegacyColumnBuild legacyRawBuild;
+    private LegacyColumnBuild legacyFramedBuild;
+
+    /** The memoized legacy build for this column (see the field comment). {@code compute}
+     *  runs at most once per (column × wantsCompressed); its throw propagates uncached so
+     *  the per-recipient containment sees every failure. */
+    public LegacyColumnBuild legacyBuild(boolean wantsCompressed,
+                                         java.util.function.Supplier<LegacyColumnBuild> compute) {
+        if (wantsCompressed) {
+            if (this.legacyFramedBuild == null) {
+                this.legacyFramedBuild = compute.get();
+            }
+            return this.legacyFramedBuild;
+        }
+        if (this.legacyRawBuild == null) {
+            this.legacyRawBuild = compute.get();
+        }
+        return this.legacyRawBuild;
+    }
+
     /** True when {@link #raw()} is already materialized (no decompress would run).
      *  Observability for the compress/decompress-once pins. */
     public boolean rawMaterialized() {

@@ -140,6 +140,10 @@ class LegacyColumnEgressTest {
                     "per-entry block ids must survive the palette collapse (section " + i + ")");
             assertArrayEquals(resolvedValues(e.biomes(), 64), resolvedValues(a.biomes(), 64),
                     "per-entry biome ids must survive the palette collapse (section " + i + ")");
+            // A collapse only ever SHRINKS: a wider re-emit (e.g. DIRECT where indexed
+            // was right) would be a byte-drift this carve-out must not mask (review m8).
+            assertTrue(a.blocks().bits() <= e.blocks().bits(),
+                    "collapsed block width must not exceed the original (section " + i + ")");
             assertArrayEquals(e.blockLight(), a.blockLight());
             assertArrayEquals(e.skyLight(), a.skyLight());
         }
@@ -283,6 +287,101 @@ class LegacyColumnEgressTest {
             assertEquals(0, buf.readableBytes());
         } finally {
             buf.release();
+        }
+    }
+
+    // ---- review MAJOR-1/2/3 pins ----
+
+    @Test
+    void dialectTrackerAttachIsWiredInTheServiceConstructor() throws IOException {
+        // Source-regex pin (review MAJOR-1): the enqueue's dialect read is the single
+        // decision selecting the translate branch, and an UNATTACHED tracker fails
+        // toward shipping v20 dictionary bodies to legacy clients (the C1-1 CRITICAL
+        // failure mode) while every tier stays green — the soak lever is the only
+        // thing that would notice, and it is not in CI. Pin the attach call site.
+        Path src = corpusDir("..").normalize().getParent()
+                .resolve("main/java/dev/vox/lss/networking/server/RequestProcessingService.java");
+        String body = Files.readString(src);
+        assertTrue(body.contains("offThreadProcessor.attachDialectTracker(this.dialects)"),
+                "RequestProcessingService must attach its dialect tracker to the "
+                        + "processor — without it every legacy session gets v20 bodies");
+    }
+
+    @Test
+    void legacyBuildIsMemoizedPerColumnAcrossTheFanOut() {
+        // Review MAJOR-2: a dedup fan-out must cost ONE translate per column, never one
+        // per recipient — the memo rides the ColumnBytes holder every recipient shares.
+        byte[] v20 = readCorpus("v20-corpus", "multi-section.bin");
+        var bytes = dev.vox.lss.common.processing.ColumnBytes.ofRaw(null, v20);
+        var computeCount = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.function.Supplier<dev.vox.lss.common.processing.LegacyColumnBuild> compute =
+                () -> {
+                    computeCount.incrementAndGet();
+                    return FabricOffThreadProcessor.buildLegacyColumn(
+                            v20, REGISTRY_ACCESS, false, null);
+                };
+        var first = bytes.legacyBuild(false, compute);
+        var second = bytes.legacyBuild(false, compute);
+        assertEquals(1, computeCount.get(), "the second recipient must reuse the memo");
+        assertTrue(first == second, "same build instance across the fan-out");
+    }
+
+    @Test
+    void overCapTranslationThrowsBeforeItCanKillTheLegacyConnection() {
+        // Review MAJOR-3: the enqueue admission guard checks the V20 size, but native
+        // can be LARGER — wide-palette sections repack from v20's ≤12-bit dictionary
+        // indices to native DIRECT at ~15-16 registry bits. A body admitted under the
+        // cap as v20 that translates over it would kill the legacy client at
+        // readByteArray (RAW) or park it in a permanent ingest-failure loop (ZSTD), so
+        // buildLegacyColumn must refuse loudly (→ the up_to_date containment).
+        var identities = IdentityTables.blockIdentities();
+        int distinct = 300; // > 256 → native goes DIRECT at the registry width
+        var dict = new java.util.ArrayList<String>(distinct + 1);
+        for (int i = 0; i < distinct; i++) {
+            dict.add(identities[i]);
+        }
+        String biomeIdentity = NbtSectionSerializer.biomeIdentityLookup(REGISTRY_ACCESS).apply(0);
+        dict.add(biomeIdentity);
+
+        int[] palette = new int[distinct];
+        int[] values = new int[4096];
+        for (int i = 0; i < distinct; i++) {
+            palette[i] = i;
+        }
+        for (int i = 0; i < 4096; i++) {
+            values[i] = i % distinct;
+        }
+        int v20Bits = 9; // ceillog2(300); v20's dictionary-index width for this palette
+        var blocks = new WireSectionCursor.WireContainer(v20Bits, palette,
+                WireSectionCursor.pack(values, v20Bits));
+        var biomes = new WireSectionCursor.WireContainer(0, new int[] {distinct}, new long[0]);
+        var sections = new java.util.ArrayList<WireSectionCursor.WireSection>();
+        int sectionCount = 220;
+        for (int y = 0; y < sectionCount; y++) {
+            sections.add(new WireSectionCursor.WireSection(y - 100, 4096, 0,
+                    blocks, biomes, new byte[2048], null));
+        }
+        byte[] v20Body = WireSectionCursor.emit(
+                new WireSectionCursor.WireColumn(dict, sections), WireSectionCursor.Layout.V20);
+        assertTrue(v20Body.length <= LSSConstants.MAX_SEND_SECTIONS_SIZE,
+                "premise: the v20 body passes the enqueue admission guard ("
+                        + v20Body.length + " bytes) — otherwise this test is vacuous");
+
+        var thrown = assertThrows(IllegalStateException.class,
+                () -> FabricOffThreadProcessor.buildLegacyColumn(v20Body, REGISTRY_ACCESS, false, null));
+        assertTrue(thrown.getMessage().contains("exceeds send limit"),
+                "the refusal must name the cap, got: " + thrown.getMessage());
+    }
+
+    @Test
+    void corpusDirectoriesStayInLockstep() throws IOException {
+        // A v20-corpus fixture added without its native sibling would be silently
+        // unchecked by the chain test (it iterates nbt-corpus names) — pin the dirs.
+        try (Stream<Path> files = Files.list(corpusDir("v20-corpus"))) {
+            var v20Names = files.map(p -> p.getFileName().toString())
+                    .filter(n -> n.endsWith(".bin")).sorted().toList();
+            assertEquals(corpusNames(), v20Names,
+                    "nbt-corpus and v20-corpus must hold the same fixture set");
         }
     }
 
