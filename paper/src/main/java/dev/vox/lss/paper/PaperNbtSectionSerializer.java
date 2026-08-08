@@ -177,11 +177,11 @@ final class PaperNbtSectionSerializer {
 
     /** Sizing-exactness telemetry — see the Fabric twin. Tests pin 0. */
     static final AtomicLong SIZE_MISMATCH_FALLBACKS = new AtomicLong();
+    private static final AtomicBoolean SIZE_MISMATCH_WARNED = new AtomicBoolean();
 
     /** Direct-emit routing telemetry (C6 follow-up) — see the Fabric twin: byte-equal
      *  outputs make silent re-routing invisible to goldens; tests pin the routing. */
     static final AtomicLong DIRECT_V20_EMITS = new AtomicLong();
-    private static final AtomicBoolean SIZE_MISMATCH_WARNED = new AtomicBoolean();
 
     /**
      * Serialize a chunk's NBT (as read from a region file) into MC-native wire format.
@@ -809,7 +809,9 @@ final class PaperNbtSectionSerializer {
         for (var p : parsed) {
             var t = p.transcoded();
             sections.add(new dev.vox.lss.common.wire.WireSectionCursor.WireSection(
-                    p.sectionY(), p.nonEmptyCount(), p.fluidCount(),
+                    // (byte) cast — see the Fabric twin: the native route's writeByte
+                    // truncates out-of-range sectionY; the direct route must match.
+                    (byte) p.sectionY(), p.nonEmptyCount(), p.fluidCount(),
                     dev.vox.lss.common.wire.NativeToV20Translator.convertIndexed(
                             t.blockBits(), t.blockIds(), t.blockData(), true, dict, blockIdentity),
                     dev.vox.lss.common.wire.NativeToV20Translator.convertIndexed(

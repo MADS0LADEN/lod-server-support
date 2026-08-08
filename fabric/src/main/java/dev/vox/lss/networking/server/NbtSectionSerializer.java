@@ -974,7 +974,13 @@ final class NbtSectionSerializer {
         for (var p : parsed) {
             var t = p.transcoded();
             sections.add(new WireSectionCursor.WireSection(
-                    p.sectionY(), p.nonEmptyCount(), p.fluidCount(),
+                    // (byte) cast: the native route's writeByte TRUNCATES an
+                    // out-of-byte-range sectionY (translate then round-trips the
+                    // truncated value), so the direct route must truncate identically —
+                    // production gates Y to the world range, but the range-free corpus/
+                    // tool overload serializes garbage Y and the byte-identity claim
+                    // must hold there too (review finding 2).
+                    (byte) p.sectionY(), p.nonEmptyCount(), p.fluidCount(),
                     dev.vox.lss.common.wire.NativeToV20Translator.convertIndexed(
                             t.blockBits(), t.blockIds(), t.blockData(), true, dict, blockIdentity),
                     dev.vox.lss.common.wire.NativeToV20Translator.convertIndexed(

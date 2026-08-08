@@ -104,6 +104,18 @@ public final class NativeToV20Translator {
                                                                  long[] data, boolean isBlocks,
                                                                  IdentityDictionary dict,
                                                                  IntFunction<String> identity) {
+        // The byte-identity claim rests on the descriptor width sitting INSIDE the
+        // native indexed thresholds — beyond them, parse would classify the same bytes
+        // DIRECT and translate() would take the re-palettize branch (or throw the
+        // C1-16 asymmetry guard), silently diverging from this path. Enforced, not
+        // assumed: a transcoder that relaxes its fallback gate must red here.
+        int maxBits = isBlocks ? WireSectionCursor.NATIVE_BLOCK_PALETTE_MAX_BITS
+                : WireSectionCursor.NATIVE_BIOME_PALETTE_MAX_BITS;
+        if (bits > maxBits) {
+            throw new IllegalArgumentException("convertIndexed given "
+                    + (isBlocks ? "block" : "biome") + " width " + bits
+                    + " beyond the native indexed threshold " + maxBits);
+        }
         int[] palette = new int[paletteIds.length];
         for (int i = 0; i < palette.length; i++) {
             palette[i] = dict.indexOf(identityFor(identity, paletteIds[i], isBlocks));

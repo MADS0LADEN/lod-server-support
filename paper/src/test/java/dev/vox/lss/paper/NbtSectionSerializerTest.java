@@ -1089,6 +1089,7 @@ class NbtSectionSerializerTest {
                 Biomes.SWAMP, Biomes.TAIGA, Biomes.SAVANNA, Biomes.BADLANDS, Biomes.BEACH,
                 Biomes.RIVER);
         var rng = new java.util.Random(20260730L);
+        long directBefore = PaperNbtSectionSerializer.DIRECT_V20_EMITS.get();
         for (int round = 0; round < 32; round++) {
             var pool = round % 8 < 6 ? narrowPool : widePool;
             int placements = switch (round % 4) {
@@ -1116,6 +1117,10 @@ class NbtSectionSerializerTest {
                     null, Integer.MIN_VALUE, Integer.MAX_VALUE, false);
             assertArrayEquals(object, transcoded, "round " + round);
         }
+        assertTrue(PaperNbtSectionSerializer.DIRECT_V20_EMITS.get() > directBefore,
+                "the fuzz must actually drive the direct emit — a pre-gate widening that"
+                        + " pushed every round to the object path would leave the"
+                        + " direct-vs-translate comparison vacuous");
     }
 
     /**
@@ -1312,17 +1317,20 @@ class NbtSectionSerializerTest {
                 for (int x = 0; x < 16; x++)
                     globalStates.set(x, y, z, pool.get(i++ % pool.size()));
         long beforeMixed = PaperNbtSectionSerializer.DIRECT_V20_EMITS.get();
-        PaperNbtSectionSerializer.serializeChunkNbt(
+        byte[] mixed = PaperNbtSectionSerializer.serializeChunkNbt(
                 chunkNbt("minecraft:full",
                         sectionNbt(0, true, true, null, null),
                         sectionFrom(1, globalStates, FACTORY.createForBiomes())),
                 REGISTRY_ACCESS);
+        assertEquals(2, decode(mixed).size(),
+                "premise: the mixed column still SERVES both sections via translate");
         assertEquals(beforeMixed, PaperNbtSectionSerializer.DIRECT_V20_EMITS.get(),
                 "a column with any fallback section keeps the translate route wholesale");
 
-        PaperNbtSectionSerializer.serializeChunkNbt(
+        byte[] flagOff = PaperNbtSectionSerializer.serializeChunkNbt(
                 chunkNbt("minecraft:full", sectionNbt(0, true, true, null, null)),
                 REGISTRY_ACCESS, null, Integer.MIN_VALUE, Integer.MAX_VALUE, false);
+        assertEquals(1, decode(flagOff).size(), "premise: the flag-off column still serves");
         assertEquals(beforeMixed, PaperNbtSectionSerializer.DIRECT_V20_EMITS.get(),
                 "useNbtTranscode=false is the object path — no direct emit");
     }
@@ -1379,6 +1387,25 @@ class NbtSectionSerializerTest {
                 sectionNbt(4, false, true, light(0, (byte) 1), null)), REGISTRY_ACCESS);
         PaperNbtSectionSerializer.serializeChunkNbt(chunkNbt("minecraft:full",
                 sectionNbt(2, true, true, null, null)), REGISTRY_ACCESS);
+        // Mixed column — see the Fabric twin: since the direct v20 emit, only a column
+        // with a fallback section still exercises the exact-sizing arithmetic.
+        var pool = new ArrayList<net.minecraft.world.level.block.state.BlockState>();
+        for (var block : List.of(Blocks.OAK_STAIRS, Blocks.SPRUCE_STAIRS, Blocks.BIRCH_STAIRS,
+                Blocks.JUNGLE_STAIRS)) {
+            pool.addAll(block.getStateDefinition().getPossibleStates());
+        }
+        var globalStates = FACTORY.createForBlockStates();
+        int gi = 0;
+        for (int y = 0; y < 16; y++)
+            for (int z = 0; z < 16; z++)
+                for (int x = 0; x < 16; x++)
+                    globalStates.set(x, y, z, pool.get(gi++ % pool.size()));
+        long directBefore = PaperNbtSectionSerializer.DIRECT_V20_EMITS.get();
+        PaperNbtSectionSerializer.serializeChunkNbt(chunkNbt("minecraft:full",
+                sectionNbt(0, true, true, light(3, (byte) 9), null),
+                sectionFrom(1, globalStates, FACTORY.createForBiomes())), REGISTRY_ACCESS);
+        assertEquals(directBefore, PaperNbtSectionSerializer.DIRECT_V20_EMITS.get(),
+                "premise: the mixed column took the sized-buffer route, not the direct emit");
         assertEquals(before, PaperNbtSectionSerializer.SIZE_MISMATCH_FALLBACKS.get(),
                 "exact sizing fell back to the copy path — getSerializedSize drifted from write");
     }
