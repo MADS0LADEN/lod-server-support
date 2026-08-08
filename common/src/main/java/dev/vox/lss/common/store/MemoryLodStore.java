@@ -183,6 +183,8 @@ public final class MemoryLodStore implements LodStoreService {
         if (this.shutdown.get()) return false;
         var dep = new Deposit(dimension, packed, frame, columnTimestamp,
                 System.nanoTime(), true, usize);
+        // offered bumps BEFORE the offer — see deposit() (pre-D3 review L2-1).
+        this.offeredForTest.incrementAndGet();
         while (!this.queue.offer(dep)) {
             // In-loop shutdown re-check (SQLite-twin parity, 2026-08-05 review H4): after
             // shutdown the batcher is dead and the queue cleared, so a racing deposit
@@ -194,7 +196,6 @@ public final class MemoryLodStore implements LodStoreService {
                 // Shed still returns TRUE — see the SQLite twin's depositFrame comment.
             }
         }
-        this.offeredForTest.incrementAndGet();
         return true;
     }
 
@@ -206,6 +207,12 @@ public final class MemoryLodStore implements LodStoreService {
         if (this.shutdown.get()) return false;
         byte[] normalized = sectionBytes == null || sectionBytes.length == 0 ? EMPTY : sectionBytes;
         var dep = new Deposit(dimension, packed, normalized, columnTimestamp, System.nanoTime());
+        // offered bumps BEFORE the offer (pre-D3 review L2-1): counting after lets a
+        // concurrent producer's retired deposit satisfy retired >= offered while this
+        // one is queued-but-uncounted — quiesce would declare early, re-opening the
+        // mid-apply visibility window the counters exist to close. A shutdown return
+        // below leaves offered > retired; shutdown()'s resync squares it.
+        this.offeredForTest.incrementAndGet();
         boolean shed = false;
         while (!this.queue.offer(dep)) {
             // In-loop shutdown re-check (SQLite-twin parity, 2026-08-05 review H4) — see
@@ -219,7 +226,6 @@ public final class MemoryLodStore implements LodStoreService {
                 shed = true;
             }
         }
-        this.offeredForTest.incrementAndGet();
         // Deliberately NO gauge write here: store.queue is a DRAIN-SIDE gauge (the
         // SERVER_DRAINS contract — the SQLite twin documents the burn-in red a
         // producer-side write caused; R2 found this twin kept the old shape).

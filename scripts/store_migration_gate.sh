@@ -54,7 +54,15 @@ if [[ ! -f "$CARRY_DIR/world/lss-lod/store.db" ]]; then
 fi
 
 log "=== phase 2: store-migration-join (downgrade → lazy upgrade → warm 19-row serves) ==="
-SOAK_WORLD_FROM="$CARRY_DIR" "$PROJECT_ROOT/scripts/soak.sh" store-migration-join
+# Walk hold (pre-D3 review L3-1): without it the ~2.4k-row walk finishes seconds
+# after boot while the client joins tens of seconds later, so every "warm from
+# 19-rows" serve actually hit already-migrated v20 rows and a broken 19-row serve
+# rung still passed. 90 s parks the walk past the join (EXPECTED_SECONDS=280
+# leaves it ample room to complete); the ordering assertions below make the
+# overlap a checked premise, not a hope.
+MIGRATION_HOLD="${SOAK_MIGRATION_HOLD_SECONDS:-90}"
+SOAK_WORLD_FROM="$CARRY_DIR" SOAK_MIGRATION_HOLD_SECONDS="$MIGRATION_HOLD" \
+    "$PROJECT_ROOT/scripts/soak.sh" store-migration-join
 JOIN_DIR="$(latest_results store-migration-join)"
 
 log "wrapper assertions over $JOIN_DIR/server.log"
@@ -76,6 +84,28 @@ if grep "background migration complete" "$SERVER_LOG" | grep -q "DELETED"; then
     log "FAIL: the walk deleted anomaly rows — on a freshly-downgraded store every row"
     log "      must translate cleanly (a deletion here is a translator/hash defect)"
     fail=1
+fi
+# Overlap premise (L3-1): the walk must have been HELD, the client must have
+# JOINED while it was held (line order in the log — rows cannot migrate during
+# the hold, so the join's warm serves necessarily exercised the 19-row rung),
+# and the walk must have RESUMED and completed afterwards.
+if ! grep -q "Store migration walk HELD" "$SERVER_LOG"; then
+    log "FAIL: the walk hold never engaged — phase 2 cannot prove 19-row serves"
+    fail=1
+elif ! grep -q "Store migration walk RESUMING" "$SERVER_LOG"; then
+    log "FAIL: the walk never resumed — the hold outlived the scenario"
+    fail=1
+else
+    join_line="$(grep -n "joined the game" "$SERVER_LOG" | head -1 | cut -d: -f1)"
+    resume_line="$(grep -n "Store migration walk RESUMING" "$SERVER_LOG" | head -1 | cut -d: -f1)"
+    if [[ -z "$join_line" ]]; then
+        log "FAIL: no join line in server.log — overlap unprovable"
+        fail=1
+    elif [[ "$join_line" -ge "$resume_line" ]]; then
+        log "FAIL: the client joined AFTER the walk resumed (join@$join_line, resume@$resume_line)"
+        log "      — the warm serves may have hit migrated rows; raise SOAK_MIGRATION_HOLD_SECONDS"
+        fail=1
+    fi
 fi
 if [[ "$fail" -ne 0 ]]; then
     exit 1

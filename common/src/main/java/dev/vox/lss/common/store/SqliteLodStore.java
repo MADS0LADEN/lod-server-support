@@ -110,6 +110,13 @@ public final class SqliteLodStore implements LodStoreService {
 
     // ---- C4 background migration walk state (batcher thread; status reads volatile) ----
     private volatile boolean migratePending;
+    // Dev-only soak hold (see maybeMigrateBatch): 0 = off. Batcher-thread mutated
+    // after init; nonzero only when -Dlss.soak.migrationHoldSeconds is set.
+    private long migrationHoldUntilNanos =
+            Integer.getInteger("lss.soak.migrationHoldSeconds", 0) <= 0 ? 0
+                    : System.nanoTime()
+                            + Integer.getInteger("lss.soak.migrationHoldSeconds", 0) * 1_000_000_000L;
+    private boolean migrationHoldLogged;
     private volatile long migrateTotal;
     private final java.util.concurrent.atomic.AtomicLong migrateRemaining =
             new java.util.concurrent.atomic.AtomicLong();
@@ -1072,6 +1079,23 @@ public final class SqliteLodStore implements LodStoreService {
      *  work, unlike a vacuous idle iteration). */
     private boolean maybeMigrateBatch() throws Exception {
         if (!this.migratePending) return false;
+        // Dev-only walk hold (-Dlss.soak.migrationHoldSeconds, default 0 = off): the
+        // store-migration soak gate needs the client's join to PROVABLY overlap the
+        // 19-row serving window — without a hold the ~2.4k-row scenario walk finishes
+        // seconds after boot, long before the join, and the gate's "served warm from
+        // legacy rows" premise is timing-vacuous (pre-D3 review L3-1). One nanoTime
+        // compare per idle iteration in production, where the property is unset.
+        if (this.migrationHoldUntilNanos != 0) {
+            if (System.nanoTime() - this.migrationHoldUntilNanos < 0) {
+                if (!this.migrationHoldLogged) {
+                    this.migrationHoldLogged = true;
+                    LSSLogger.info("Store migration walk HELD (lss.soak.migrationHoldSeconds)");
+                }
+                return false;
+            }
+            this.migrationHoldUntilNanos = 0;
+            LSSLogger.info("Store migration walk RESUMING after soak hold");
+        }
         var translator = this.legacyMigrationTranslator;
         if (translator == null) return false;
         Integer dimId = this.migrateDims.peekFirst();

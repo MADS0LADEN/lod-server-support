@@ -5,12 +5,14 @@
   version-independent block identities and translate to whatever your client
   runs. Supported pairs: any two of 26.2, 26.1, and 1.21.11 running v0.10.0.
   Blocks that don't exist on your version render via a configurable fallback
-  (`unknownBlockFallback`, default stone). Older LSS clients (v0.7.x–v0.9.x) keep
-  working through the existing compatibility rungs.
-- **Via-proxy mismatch guard** — When ViaVersion/ViaBackwards lets a
-  different-MC-version vanilla client join, LSS now detects the mismatch and
-  declines the LOD session cleanly instead of serving columns the client would
-  decode as garbage. **Known hole:** when Via runs on a proxy (Velocity/Bungee)
+  (`unknownBlockFallback`, default stone). Older LSS clients keep working: v0.9.x
+  gets a NEW native rung (`enableV19Compat`), and v0.7.x–v0.8.x keep their
+  existing ones.
+- **Via-proxy mismatch guard** — When ViaVersion/ViaBackwards lets a client on
+  a different MC version join with an OLDER LSS installed, the server now
+  detects the mismatch and declines the LOD session cleanly instead of serving
+  columns that client would decode as garbage (a vanilla client has no LSS and
+  never starts a session). **Known hole:** when Via runs on a proxy (Velocity/Bungee)
   in front of the server, the server cannot see the client's real version — such
   setups should not rely on the guard.
 - **Vanilla-first transport yield** (`lodYieldsToVanillaTransport`, default
@@ -26,22 +28,27 @@
   thread; decompression and parsing run on LSS's own reader pool
   (`useBackgroundReadSplit`, default on). This removes the main historic cause
   of LOD serving slowing vanilla chunk loads under pressure.
-- **The background store warm-up costs ~21% less CPU** — the backfill's
-  parse/hash/dedup work was measured across the round at a >21% cut with
-  deposit throughput unchanged.
-- **Serving allocates ~30% less memory per column** (selective NBT parsing +
-  buffer reuse), which lowers GC pressure on busy servers.
+- **The background store warm-up is cheaper net-of-everything** — the perf
+  round cut the walk's parse/hash work by ~21%, the new cross-version encode
+  added roughly 17% of it back, and deposit throughput is unchanged
+  throughout: net, warming a store costs modestly less CPU than v0.9.x.
+- **Selective chunk parsing (Fabric)** — disk serves now materialize only the
+  chunk data LOD serving needs, cutting the targeted allocation-churn classes
+  roughly in half on the read path. (Net per-column allocation is still higher
+  than v0.9.x — the cross-version format costs more than the parsing saved;
+  see the cost item below.)
 - **The freshness cache tracks ~13× more terrain per MB** — its default (auto)
   sizing now uses ~2.5× less RAM while remembering ~5× more columns, so large
   view distances and roaming players stop thrashing it. Existing cache files
   migrate automatically at first boot.
-- **The cost of cross-version columns, honestly**: encoding version-independent
-  identities makes serving a cold column cost ~12–15% more CPU than v0.9.x
-  (measured; it was ~18% before a follow-up optimization) and the wire/store
-  bytes grow ~10%. Warm store serves and backfill throughput are unaffected.
-  This buys the entire cross-version feature.
+- **The honest cost of cross-version columns** — Encoding version-independent
+  identities makes serving a cold column cost roughly 12–16% more CPU than
+  v0.9.x (composed from the separately measured arms; it was ~18% before a
+  follow-up optimization) with per-column allocation and wire/store bytes
+  ~10% higher. Warm store serves and backfill throughput are unaffected. This
+  buys the entire cross-version feature.
 - **Store rows are integrity-hashed with CRC32C** (hardware-accelerated),
-  replacing a slower software hash on the warm-serve path.
+  replacing a slower software hash on the store's write path.
 
 ### Configuration
 

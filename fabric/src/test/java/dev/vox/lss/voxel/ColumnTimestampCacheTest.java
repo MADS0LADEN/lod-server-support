@@ -877,6 +877,17 @@ class ColumnTimestampCacheTest {
         assertEquals(0, loaded.size());
     }
 
+    /** TS_EPOCH_SECONDS is a PERSISTED-FORMAT anchor: every v2 file's slots are offsets
+     *  from it, so an accidental edit re-times every stamp loaded from existing
+     *  lss-timestamps.bin files — and a DOWNWARD drift reads old stamps as newer,
+     *  the false-up_to_date direction §2.2 forbids. Every other expectation in this
+     *  suite derives from the constant, so only a literal pins it (review L3-10). */
+    @Test
+    void tsEpochAnchorIsLiterallyPinned() {
+        assertEquals(1_735_689_600L, ColumnTimestampCache.TS_EPOCH_SECONDS,
+                "2025-01-01T00:00:00Z — changing this re-times every persisted stamp");
+    }
+
     /** The design-§5 constants coherence pin (WantSetBudgetInvariantTest-style): AUTO
      *  sizing budgets {@code TIMESTAMP_CACHE_HEAP_BYTES_PER_COLUMN} per column, and that
      *  claim is honest only while a full tile's real cost per column stays at or under

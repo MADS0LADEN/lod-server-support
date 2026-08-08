@@ -227,7 +227,13 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
                             var region = ((dev.vox.lss.mixin.AccessorRegionFileStorage) (Object) storage)
                                     .lss$getRegionFile(pos);
                             var record = RegionFileRawRead.read(region, pos);
-                            this.rawServes.incrementAndGet();
+                            // Count only PRESENT records (pre-D3 review L2-2): a
+                            // not-found/corrupt fetch is no raw-path "serve", and on a
+                            // miss-heavy backfill the diag token would climb at the miss
+                            // rate while zero raw columns were delivered.
+                            if (record.isPresent()) {
+                                this.rawServes.incrementAndGet();
+                            }
                             f.complete(record);
                         } catch (Throwable t) {
                             // BROADER than the full-read task's catch (Exception), review C2:

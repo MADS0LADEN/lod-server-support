@@ -360,6 +360,17 @@ class SqliteLodStoreTest {
         // The kept legacy validator (C4's wirefmt=19 dispatch) stays FNV-1a 64:
         // FNV of empty input is the 64-bit offset basis.
         assertEquals(0xcbf29ce484222325L, LodStoreService.legacyContentHashFnv(new byte[0]));
+        // NON-EMPTY known-answer vectors (pre-D3 review L3-2): the migration/serve
+        // fixtures compute their expected hashes with this same function, so without
+        // an external anchor a body drift (prime, order, sign) keeps writer and
+        // validator in lockstep through every test — and then FNV-mismatches every
+        // row of a REAL v0.9.x store at upgrade, purging it. Reference values from
+        // the published FNV-1a 64 test vectors (same set the CRC32C twin pins).
+        assertEquals(0xaf63dc4c8601ec8cL, LodStoreService.legacyContentHashFnv(new byte[]{'a'}));
+        assertEquals(0xe71fa2190541574bL,
+                LodStoreService.legacyContentHashFnv("abc".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+        assertEquals(0x85944171f73967e8L,
+                LodStoreService.legacyContentHashFnv("foobar".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
     }
 
     @Test

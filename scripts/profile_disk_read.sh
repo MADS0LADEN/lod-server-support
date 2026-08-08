@@ -269,6 +269,13 @@ EOF
         log "run $arm rep$rep INVALID ARM: config echo '${echo_line:-<missing>}' does not carry the staged knobs"
         return 1
     fi
+    # dialect_ok joins the return-1 ladder (pre-D3 review L3-6): it stamped
+    # arm_valid:false but fell through to "done", so only compare_profile.py's
+    # pooling would surface the invalid arm — any other analysis path consumed it.
+    if [[ "$dialect_ok" != "true" ]]; then
+        log "run $arm rep$rep INVALID ARM: negotiated protocol did not match the arm's dialect"
+        return 1
+    fi
     log "run $arm rep$rep done -> $RUN_OUT"
 }
 
