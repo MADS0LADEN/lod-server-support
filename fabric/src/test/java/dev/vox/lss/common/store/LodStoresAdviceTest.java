@@ -7,17 +7,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Pins the store-off startup recommendation (v0.9.1, user request): shown exactly when
- * an ENABLED, non-Folia server runs without the store — the store is opt-in (2026-08-03),
- * so this line is how the feature reaches admins. The message must name the one key that
- * turns the whole feature on, the disk implication, and the bound.
+ * an ENABLED, non-Folia server runs without the store — on-by-default since the 2026-08-08
+ * rework, so the line reaches only explicit opt-outs and pre-rework "off" files, where the
+ * recommendation still holds. The message must name the one key that turns the whole
+ * feature on, the disk implication, and the bound.
  */
 class LodStoresAdviceTest {
 
     @Test
     void enabledNonFoliaServerWithoutTheStoreGetsTheRecommendation() {
         String advice = LodStores.offRecommendationOrNull(true, false);
-        assertTrue(advice != null && advice.contains("\"lodStore\": \"full\""),
-                "the one-key enable must be quoted verbatim: " + advice);
+        assertTrue(advice != null && advice.contains("\"lodStore\": \"on\""),
+                "the one-key enable must be quoted verbatim (canonical spelling since the"
+                        + " 2026-08-08 rework): " + advice);
         assertTrue(advice.contains("lss-server-config.json"),
                 "the admin must be told WHERE: " + advice);
         assertTrue(advice.contains("doubles the size of your world directory"),

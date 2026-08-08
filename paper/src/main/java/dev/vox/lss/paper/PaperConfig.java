@@ -64,22 +64,18 @@ public class PaperConfig extends ServerConfigBase {
     public void validate() {
         super.validate();
         if (updateEvents == null) updateEvents = List.of();
-        // The shared default is `off` on every platform (2026-08-03 — the store is
-        // opt-in), so an armed store on Folia means an admin explicitly set "full" here
-        // or carried a plugins folder whose config had it set. It stays a warning rather
-        // than a gate (an admin who deliberately sets full on Folia should get it), but
-        // it must not be silent: the store is unvalidated on Folia. (Round-3 review;
-        // message text refreshed by the 2026-08-05 review D3 — it used to claim "Paper
-        // writes lodStore=full into the file on every run", the retired v0.9.0-dev
-        // default.)
+        // Since the 2026-08-08 rework the store is ON BY DEFAULT on every platform, so
+        // an armed store on Folia is the normal state, not an explicit opt-in — the old
+        // "this was explicitly enabled" framing no longer holds. It stays a warning
+        // rather than a gate (Folia support is experimental wholesale; the store adds
+        // one more unvalidated surface, not the first), but it must not be silent.
         if (FoliaSupport.IS_FOLIA
                 && dev.vox.lss.common.store.LodStoreMode.normalize(lodStore)
                         != dev.vox.lss.common.store.LodStoreMode.OFF) {
-            LSSLogger.warn("lodStore=" + lodStore + " is set on FOLIA, where the LOD store is"
-                    + " NOT validated (single-player soaks only; concurrent multi-region"
-                    + " ingress is untested). The default is off on every platform, so this"
-                    + " was explicitly enabled — set lodStore=off unless you intend to"
-                    + " test it.");
+            LSSLogger.warn("The LOD store is armed on FOLIA (lodStore=" + lodStore
+                    + ", the shipped default), where it is NOT validated (single-player"
+                    + " soaks only; concurrent multi-region ingress is untested). Set"
+                    + " lodStore=off to disable it if you see store-related issues.");
         }
     }
 

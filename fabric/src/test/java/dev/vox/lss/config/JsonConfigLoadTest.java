@@ -58,8 +58,11 @@ class JsonConfigLoadTest {
     }
 
     private static List<String> serializedFieldNames() {
+        // @HiddenFromFile fields are excluded: at their compiled defaults they are
+        // deliberately absent from every written file (the 2026-08-08 config rework).
         List<String> names = Arrays.stream(TestServerConfig.class.getFields())
                 .filter(f -> !Modifier.isStatic(f.getModifiers()))
+                .filter(f -> f.getAnnotation(dev.vox.lss.common.config.JsonConfig.HiddenFromFile.class) == null)
                 .map(Field::getName)
                 .toList();
         assertTrue(names.size() >= 13, "field reflection broke, found only: " + names);
@@ -79,15 +82,16 @@ class JsonConfigLoadTest {
         Path configDir = tempDir.resolve("config"); // not yet existing — load must create it
         TestServerConfig c = TestServerConfig.load(configDir);
 
-        assertEquals(256, c.lodDistanceChunks);
-        assertEquals(15_728_640, c.bytesPerSecondLimitPerPlayer);
+        assertEquals(512, c.lodDistanceChunks);
+        assertEquals(15.0, c.mbPerSecondLimitPerPlayer);
+        assertEquals(15_728_640, c.bytesPerSecondPerPlayer());
         assertTrue(Files.isRegularFile(configDir.resolve(FILE)));
 
         JsonObject saved = savedJson(configDir);
         for (String key : serializedFieldNames()) {
             assertTrue(saved.has(key), "defaults file missing field " + key);
         }
-        assertEquals(256, saved.get("lodDistanceChunks").getAsInt());
+        assertEquals(512, saved.get("lodDistanceChunks").getAsInt());
     }
 
     @Test
@@ -97,7 +101,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(256, c.lodDistanceChunks); // defaults, not the half-written value
+        assertEquals(512, c.lodDistanceChunks); // defaults, not the half-written value
         assertEquals(broken, Files.readString(configDir.resolve(FILE)));
     }
 
@@ -108,7 +112,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(256, c.lodDistanceChunks);
+        assertEquals(512, c.lodDistanceChunks);
         assertEquals(broken, Files.readString(configDir.resolve(FILE)));
     }
 
@@ -119,7 +123,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(256, c.lodDistanceChunks);
+        assertEquals(512, c.lodDistanceChunks);
         assertEquals(broken, Files.readString(configDir.resolve(FILE)));
     }
 
@@ -129,7 +133,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(256, c.lodDistanceChunks);
+        assertEquals(512, c.lodDistanceChunks);
         assertEquals("", Files.readString(configDir.resolve(FILE)));
     }
 
@@ -145,16 +149,21 @@ class JsonConfigLoadTest {
         // constructor silently switches it to Unsafe.allocateInstance, zeroing every
         // default (then validate() clamps the zeros to the minimums, e.g. 20 MB/s -> 1 KB/s).
         // These exact-value assertions are the only guard against that landmine.
+        // (The bandwidth pair asserts POST-VALIDATE resolved values: the compiled
+        // default is the -1 "not in the file" sentinel, which load()'s validate
+        // resolves to 15/60 MiB/s — the accessor is what every consumer reads.)
         assertTrue(c.enabled);
-        assertEquals(15_728_640, c.bytesPerSecondLimitPerPlayer);
+        assertEquals(15.0, c.mbPerSecondLimitPerPlayer);
+        assertEquals(15_728_640, c.bytesPerSecondPerPlayer());
         assertEquals(0, c.diskReaderThreads);           // 0 = AUTO (derived per read path)
         assertEquals(1024, c.sendQueueLimitPerPlayer);
-        assertEquals(62_914_560, c.bytesPerSecondLimitGlobal);
+        assertEquals(60.0, c.mbPerSecondLimitGlobal);
+        assertEquals(62_914_560, c.bytesPerSecondGlobal());
         assertTrue(c.enableChunkGeneration);
-        assertEquals(32, c.generationConcurrencyLimitGlobal);
+        assertEquals(40, c.generationConcurrencyLimitGlobal);
         assertEquals(60, c.generationTimeoutSeconds);
         assertEquals(10, c.dirtyBroadcastIntervalSeconds);
-        assertEquals(16, c.generationConcurrencyLimitPerPlayer);
+        assertEquals(40, c.generationConcurrencyLimitPerPlayer);
         assertEquals(0, c.perDimensionTimestampCacheSizeMB); // 0 = AUTO (from lodDistance)
     }
 
@@ -169,7 +178,106 @@ class JsonConfigLoadTest {
         for (String key : serializedFieldNames()) {
             assertTrue(saved.has(key), "re-saved file missing migrated field " + key);
         }
-        assertEquals(15_728_640, saved.get("bytesPerSecondLimitPerPlayer").getAsInt());
+        assertEquals(15.0, saved.get("mbPerSecondLimitPerPlayer").getAsDouble());
+        // The hidden expert switches and the retired byte-denominated spellings must
+        // NOT be migrated in — the whole point of @HiddenFromFile (2026-08-08 rework).
+        for (String hidden : List.of("useBackgroundReadPriority", "useBackgroundReadSplit",
+                "useNbtTranscode", "useSelectiveNbtParse", "useCompressedColumns",
+                "bytesPerSecondLimitPerPlayer", "bytesPerSecondLimitGlobal")) {
+            assertFalse(saved.has(hidden), "hidden key must stay out of the re-saved file: " + hidden);
+        }
+    }
+
+    // ---- the 2026-08-08 config rework: @HiddenFromFile honor + the bandwidth key rename ----
+
+    @Test
+    void hiddenKeyOverrideIsHonoredAndSurvivesEveryResave(@TempDir Path configDir) throws Exception {
+        // "Continue to honor them" must mean FOREVER, not for one boot: a hidden key at a
+        // NON-default value is written back by the re-save (only default-valued hidden keys
+        // vanish), so the admin's rollback switch survives arbitrarily many restarts.
+        Files.writeString(configDir.resolve(FILE),
+                "{\"useNbtTranscode\": false, \"useBackgroundReadPriority\": false}");
+
+        TestServerConfig first = TestServerConfig.load(configDir);
+        assertFalse(first.useNbtTranscode, "hidden key must still bind from a file that carries it");
+        assertFalse(first.useBackgroundReadPriority);
+
+        JsonObject saved = savedJson(configDir);
+        assertFalse(saved.get("useNbtTranscode").getAsBoolean(),
+                "a NON-default hidden value must survive the write-back");
+        assertFalse(saved.get("useBackgroundReadPriority").getAsBoolean());
+        assertFalse(saved.has("useSelectiveNbtParse"),
+                "hidden keys still at their default must stay absent");
+
+        TestServerConfig second = TestServerConfig.load(configDir); // the boot after the write-back
+        assertFalse(second.useNbtTranscode, "the override must not evaporate after one boot");
+        assertFalse(second.useBackgroundReadPriority);
+    }
+
+    @Test
+    void hiddenKeyAtItsDefaultValueDropsFromTheFileOnResave(@TempDir Path configDir) throws Exception {
+        Files.writeString(configDir.resolve(FILE),
+                "{\"useNbtTranscode\": true, \"lodDistanceChunks\": 64}");
+
+        TestServerConfig c = TestServerConfig.load(configDir);
+
+        assertTrue(c.useNbtTranscode);
+        JsonObject saved = savedJson(configDir);
+        assertFalse(saved.has("useNbtTranscode"),
+                "a default-valued hidden key is dropped by the write-back (no behavior change)");
+        assertEquals(64, saved.get("lodDistanceChunks").getAsInt());
+    }
+
+    @Test
+    void legacyBandwidthKeysStillBindAndMigrateToMbKeysOnResave(@TempDir Path configDir) throws Exception {
+        // An old file with only the byte-denominated keys: the values must be honored
+        // identically (10 MiB/s stays 10 MiB/s) and the write-back migrates them into the
+        // mb keys — the legacy spellings drop, but no information is lost.
+        Files.writeString(configDir.resolve(FILE),
+                "{\"bytesPerSecondLimitPerPlayer\": 10485760, \"bytesPerSecondLimitGlobal\": 31457280}");
+
+        TestServerConfig c = TestServerConfig.load(configDir);
+
+        assertEquals(10.0, c.mbPerSecondLimitPerPlayer);
+        assertEquals(10_485_760, c.bytesPerSecondPerPlayer());
+        assertEquals(30.0, c.mbPerSecondLimitGlobal);
+        assertEquals(31_457_280, c.bytesPerSecondGlobal());
+
+        JsonObject saved = savedJson(configDir);
+        assertEquals(10.0, saved.get("mbPerSecondLimitPerPlayer").getAsDouble());
+        assertEquals(30.0, saved.get("mbPerSecondLimitGlobal").getAsDouble());
+        assertFalse(saved.has("bytesPerSecondLimitPerPlayer"), "legacy spelling migrates away");
+        assertFalse(saved.has("bytesPerSecondLimitGlobal"));
+
+        TestServerConfig reloaded = TestServerConfig.load(configDir); // the migrated file round-trips
+        assertEquals(10_485_760, reloaded.bytesPerSecondPerPlayer());
+        assertEquals(31_457_280, reloaded.bytesPerSecondGlobal());
+    }
+
+    @Test
+    void mbKeysBeatLegacyKeysWhenBothArePresent(@TempDir Path configDir) throws Exception {
+        Files.writeString(configDir.resolve(FILE),
+                "{\"mbPerSecondLimitPerPlayer\": 5, \"bytesPerSecondLimitPerPlayer\": 10485760,"
+                        + " \"mbPerSecondLimitGlobal\": 20, \"bytesPerSecondLimitGlobal\": 31457280}");
+
+        TestServerConfig c = TestServerConfig.load(configDir);
+
+        assertEquals(5.0, c.mbPerSecondLimitPerPlayer, "the new key wins over the legacy one");
+        assertEquals(5_242_880, c.bytesPerSecondPerPlayer());
+        assertEquals(20.0, c.mbPerSecondLimitGlobal);
+        assertEquals(20_971_520, c.bytesPerSecondGlobal());
+    }
+
+    @Test
+    void decimalMbValuesBindResolveAndRoundTrip(@TempDir Path configDir) throws Exception {
+        Files.writeString(configDir.resolve(FILE), "{\"mbPerSecondLimitPerPlayer\": 12.5}");
+
+        TestServerConfig c = TestServerConfig.load(configDir);
+
+        assertEquals(12.5, c.mbPerSecondLimitPerPlayer);
+        assertEquals(13_107_200, c.bytesPerSecondPerPlayer()); // 12.5 * 1024 * 1024, exact
+        assertEquals(12.5, savedJson(configDir).get("mbPerSecondLimitPerPlayer").getAsDouble(),
+                "the decimal survives the write-back");
     }
 
     @Test
@@ -211,10 +319,10 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = TestServerConfig.load(configDir);
 
-        assertEquals(256, c.lodDistanceChunks); // the typo'd value never binds
+        assertEquals(512, c.lodDistanceChunks); // the typo'd value never binds
         JsonObject saved = savedJson(configDir);
         assertFalse(saved.has("lodDistanceChunk"), "typo'd key must be dropped by the re-save");
-        assertEquals(256, saved.get("lodDistanceChunks").getAsInt());
+        assertEquals(512, saved.get("lodDistanceChunks").getAsInt());
         assertEquals(12, saved.get("diskReaderThreads").getAsInt()); // bound values survive the rewrite
         // Same mechanism retires a key: lodStoreBackfillTickCeilingMillis and lodStoreMemoryMB
         // are gone as fields, so a file still carrying them loads fine and the re-save drops
@@ -234,7 +342,7 @@ class JsonConfigLoadTest {
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
         assertEquals(0, c.diskReaderThreads);          // the valid customization is reverted too
-        assertEquals(256, c.lodDistanceChunks);
+        assertEquals(512, c.lodDistanceChunks);
         assertEquals(broken, Files.readString(configDir.resolve(FILE)));
     }
 
@@ -244,7 +352,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(256, c.lodDistanceChunks);
+        assertEquals(512, c.lodDistanceChunks);
         assertEquals("null", Files.readString(configDir.resolve(FILE)));
     }
 
@@ -255,7 +363,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(256, c.lodDistanceChunks);
+        assertEquals(512, c.lodDistanceChunks);
         assertEquals(body, Files.readString(configDir.resolve(FILE)));
     }
 
@@ -269,10 +377,10 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(256, c.lodDistanceChunks);       // compiled default kept
+        assertEquals(512, c.lodDistanceChunks);       // compiled default kept
         assertEquals(12, c.diskReaderThreads);        // parse succeeded: sibling customization kept
         JsonObject saved = savedJson(configDir);
-        assertEquals(256, saved.get("lodDistanceChunks").getAsInt()); // healed to a number on disk
+        assertEquals(512, saved.get("lodDistanceChunks").getAsInt()); // healed to a number on disk
         assertEquals(12, saved.get("diskReaderThreads").getAsInt());
     }
 
@@ -323,7 +431,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(256, c.lodDistanceChunks); // NOT truncated to 32
+        assertEquals(512, c.lodDistanceChunks); // NOT truncated to 32
         assertEquals(broken, Files.readString(configDir.resolve(FILE)));
     }
 
@@ -335,8 +443,8 @@ class JsonConfigLoadTest {
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
         // The overflow dies in the PARSER, before validate() ever runs: the result is the
-        // compiled default (256), not the clamp ceiling (2048) a successful bind would produce.
-        assertEquals(256, c.lodDistanceChunks);
+        // compiled default (512), not the clamp ceiling (2048) a successful bind would produce.
+        assertEquals(512, c.lodDistanceChunks);
         assertEquals(broken, Files.readString(configDir.resolve(FILE)));
     }
 
@@ -361,7 +469,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(configDir));
 
-        assertEquals(256, c.lodDistanceChunks); // not-a-regular-file -> missing-file path -> defaults
+        assertEquals(512, c.lodDistanceChunks); // not-a-regular-file -> missing-file path -> defaults
         assertTrue(Files.isDirectory(configDir.resolve(FILE)),
                 "the failed defaults-save must be swallowed and leave the directory alone");
     }
@@ -374,7 +482,7 @@ class JsonConfigLoadTest {
                 "filesystem does not enforce write permissions here (e.g. running as root)");
         try {
             TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(locked));
-            assertEquals(256, c.lodDistanceChunks);
+            assertEquals(512, c.lodDistanceChunks);
             assertFalse(Files.exists(locked.resolve(FILE)), "failed save must not leave a partial file");
 
             c.lodDistanceChunks = 64;
@@ -525,7 +633,7 @@ class JsonConfigLoadTest {
 
         assertEquals(222, c.lodDistanceChunks, "falls back to the other brand's existing file");
         // adopt-and-write-the-SAME-file: the fallback is migrated in place, NO second primary forked
-        assertTrue(savedJson(configDir, "lss-server-config.json").has("bytesPerSecondLimitPerPlayer"),
+        assertTrue(savedJson(configDir, "lss-server-config.json").has("mbPerSecondLimitPerPlayer"),
                 "the adopted fallback is written back (migrated), not abandoned");
         assertFalse(Files.exists(configDir.resolve("vss-server-config.json")),
                 "adopting the fallback must NOT fork a fresh primary that would shadow it");
@@ -535,7 +643,7 @@ class JsonConfigLoadTest {
     void candidateLoadCreatesThePrimaryWhenNoCandidateExists(@TempDir Path configDir) throws Exception {
         TestServerConfig c = TestServerConfig.load(VSS_FIRST, configDir);
 
-        assertEquals(256, c.lodDistanceChunks); // defaults
+        assertEquals(512, c.lodDistanceChunks); // defaults
         // This is the assertion that distinguishes activeFileName (candidates[0]) from getFileName()
         // (which is "lss-..." here): a genuinely fresh install creates the brand-PRIMARY, not getFileName.
         assertTrue(Files.isRegularFile(configDir.resolve("vss-server-config.json")),
@@ -571,7 +679,7 @@ class JsonConfigLoadTest {
 
         TestServerConfig c = assertDoesNotThrow(() -> TestServerConfig.load(VSS_FIRST, configDir));
 
-        assertEquals(256, c.lodDistanceChunks, "defaults — not the fallback's 222 nor the corrupt 111");
+        assertEquals(512, c.lodDistanceChunks, "defaults — not the fallback's 222 nor the corrupt 111");
         assertEquals(brokenPrimary, Files.readString(configDir.resolve("vss-server-config.json")),
                 "the corrupt primary is preserved for the admin to fix, never overwritten");
         assertEquals("{\"lodDistanceChunks\": 222}",

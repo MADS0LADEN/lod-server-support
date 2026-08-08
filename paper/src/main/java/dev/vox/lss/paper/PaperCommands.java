@@ -128,7 +128,7 @@ public class PaperCommands implements CommandExecutor, TabCompleter {
         var genService = service.getGenerationService();
         var data = DiagnosticsFormatter.collectDiagData(
                 config.enabled, config.lodDistanceChunks,
-                config.bytesPerSecondLimitPerPlayer, config.bytesPerSecondLimitGlobal,
+                config.bytesPerSecondPerPlayer(), config.bytesPerSecondGlobal(),
                 config.sendQueueLimitPerPlayer,
                 service.getUptimeSeconds(), service.getTickDiagnostics(), service.getWindowBandwidthRate(),
                 service.getTickDiag().getTotalSectionsSent(), service.getTickDiag().getTotalBytesSent(),

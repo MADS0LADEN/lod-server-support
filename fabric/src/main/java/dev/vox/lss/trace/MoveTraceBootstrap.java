@@ -88,8 +88,8 @@ public final class MoveTraceBootstrap {
     private static void emitBootRow(MoveDesyncTracer tracer) {
         var config = new LinkedHashMap<String, Object>();
         var cfg = LSSServerConfig.CONFIG;
-        config.put("bytesPerSecondLimitPerPlayer", cfg.bytesPerSecondLimitPerPlayer);
-        config.put("bytesPerSecondLimitGlobal", cfg.bytesPerSecondLimitGlobal);
+        config.put("bytesPerSecondLimitPerPlayer", cfg.bytesPerSecondPerPlayer());
+        config.put("bytesPerSecondLimitGlobal", cfg.bytesPerSecondGlobal());
         config.put("lodDistanceChunks", cfg.lodDistanceChunks);
         config.put("lodStore", cfg.lodStore);
         config.put("outboundBufferCeilingKB", cfg.outboundBufferCeilingKB);

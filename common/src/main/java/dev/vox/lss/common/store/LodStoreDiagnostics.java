@@ -149,7 +149,10 @@ public final class LodStoreDiagnostics {
         if (mode == LodStoreMode.OFF) return "store=off";
         return String.format(
                 "store=%s h=%d m=%d dep=%d drop=%d err=%d q=%d avg_read=%dus",
-                mode.configValue(), getHits(), getMisses(), getDeposits(),
+                // The RUNNING ENGINE name, not the config-file spelling ("on" writes to
+                // the file since the 2026-08-08 rework, but diag reports what runs —
+                // full/memory/off — and harness greps key on these tokens).
+                mode.name().toLowerCase(java.util.Locale.ROOT), getHits(), getMisses(), getDeposits(),
                 getDepositDrops(), getErrors(), getQueueDepth(), getReadAvgMicros());
     }
 }

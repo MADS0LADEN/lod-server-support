@@ -52,12 +52,26 @@
 
 ### Configuration
 
+- **Bigger defaults out of the box** — the default LOD distance rises from 256
+  to 512 chunks, and the default generation concurrency caps rise to 40
+  server-wide / 40 per player. Existing config files keep their values.
+- **The LOD store is now ON by default** (`lodStore: "on"`; the old `"full"`
+  spelling still works and means the same). Repeat requests are served from
+  `<world>/lss-lod/` for a fraction of the CPU and disk work — the tradeoff is
+  that a fully warmed store roughly doubles your world folder. Set
+  `lodStore: "off"` to opt out, or bound it with `lodStoreMaxMB`; existing
+  files that say `"off"` stay off.
+- **Bandwidth caps are now set in MiB/s** — `mbPerSecondLimitPerPlayer`
+  (default `15.0`) and `mbPerSecondLimitGlobal` (default `60.0`) replace the
+  byte-denominated keys, and decimals like `12.5` work. Old config files keep
+  working: the old keys are still honored (the new ones win if both are
+  present) and migrate to the new keys on the next start.
+- **A slimmer generated config** — the expert rollback switches
+  (`useCompressedColumns`, `useBackgroundReadPriority`, `useBackgroundReadSplit`,
+  `useNbtTranscode`, `useSelectiveNbtParse`; all default on) no longer appear
+  in generated config files, but remain honored if you add them.
 - **`lodYieldsToVanillaTransport`** (server, default `false`) — the transport
   yield above.
-- **`useBackgroundReadSplit`** (server, default `true`) — the Fabric read split
-  above; `false` restores the old single-thread read.
-- **`useSelectiveNbtParse`** (server, default `true`) — parse only the chunk
-  data LOD serving needs; `false` restores the full parse.
 - **`enableV19Compat`** (server, default `true`) — serve v0.9.x clients natively
   on their own wire format.
 - **`enableViaMismatchGuard`** (server, default `true`) — the Via guard above.

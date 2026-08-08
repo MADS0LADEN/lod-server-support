@@ -104,7 +104,7 @@ stage_move_trace_marker() {
     esac
 }
 
-# LOD store for manual play: LSS_LODSTORE=off|full (default full — the shipped default) is written into
+# LOD store for manual play: LSS_LODSTORE=off|on|full (default on — the shipped default; on==full) is written into
 # the staged lss-server-config.json on EVERY run — the staging rewrites that file, so a
 # hand-edit does not survive a re-run; this variable is the supported way to flip it.
 # `run-fabric-store` / `run-paper-store` below force "full". The store DB lives at
@@ -114,10 +114,10 @@ stage_move_trace_marker() {
 # opt-in so an upgrade never silently doubles a world folder). So a plain ./test-server.sh
 # exercises what players actually get, and run-fabric-store / run-paper-store are once more
 # the meaningful store arm rather than aliases of the plain entrypoints.
-LSS_LODSTORE="${LSS_LODSTORE:-off}"
+LSS_LODSTORE="${LSS_LODSTORE:-on}"
 case "$LSS_LODSTORE" in
-    off|full) ;;
-    *) echo "LSS_LODSTORE must be off or full (got '$LSS_LODSTORE')" >&2; exit 1 ;;
+    off|on|full) ;; # "on" == "full" since the 2026-08-08 config rework
+    *) echo "LSS_LODSTORE must be off, on, or full (got '$LSS_LODSTORE')" >&2; exit 1 ;;
 esac
 # Background store population (Fabric only — Paper has no backfill wiring yet, the key
 # is inert there): lodStoreBackfill=true auto-starts a low-priority region walk that
@@ -323,8 +323,9 @@ EOF
 #     rig throttled exactly the bandwidth behaviour it exists to eyeball.
 # A dev rig that contradicts the shipped defaults tests a configuration no player runs.
 # Only genuinely rig-specific keys belong here now; everything else falls through to the
-# mod's own defaults. NOTE this raises lodDistanceChunks 64 -> 256 (16x the area) — set
-# LSS_LOD_DISTANCE to dial it back on a small box.
+# mod's own defaults. NOTE the shipped default lodDistanceChunks is 512 since the
+# 2026-08-08 rework (64x the old rig's 64-chunk area) — set LSS_LOD_DISTANCE to dial it
+# back on a small box or when running all three servers.
 write_lss_config() {
     local dir="$1"
     echo "  Writing lss-server-config.json (shipped defaults; lodStore=${LSS_LODSTORE}, backfill=${LSS_LODSTORE_BACKFILL}${LSS_LOD_DISTANCE:+, lodDistance=${LSS_LOD_DISTANCE}}$([ "$LSS_VIA_GUARD" = 0 ] && echo ', viaGuard=OFF'))"

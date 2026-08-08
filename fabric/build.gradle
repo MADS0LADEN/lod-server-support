@@ -182,6 +182,23 @@ afterEvaluate {
             vmArg "-Dfabric.client.gametest.disableNetworkSynchronizer=true"
         }
     }
+    // The gametest tiers measure the store-OFF pipeline (their source-attribution and
+    // parity pins were calibrated that way, same as the soak/benchmark stagings) —
+    // since lodStore defaults to "on" (2026-08-08 rework), pin it off in the gametest
+    // run dirs explicitly. Overwritten every run: the run dirs persist, and a stale
+    // hand-edit here would silently change what the tiers measure.
+    loom.runs.matching { it.name.toLowerCase().contains("gametest") }.configureEach { runCfg ->
+        def taskName = "run" + runCfg.name.capitalize()
+        def dir = runCfg.runDir
+        tasks.matching { it.name == taskName }.configureEach { task ->
+            task.doFirst {
+                def cfgDir = new File(project.file(dir ?: "run"), "config")
+                cfgDir.mkdirs()
+                new File(cfgDir, "lss-server-config.json").text =
+                        '{\n  "lodStore": "off",\n  "lodStoreBackfill": false\n}\n'
+            }
+        }
+    }
 }
 
 processResources {
@@ -316,11 +333,9 @@ tasks.register('vssJar') {
     // remapped release jar directly (with the nested common JiJ + Fabric-Mapping-Namespace).
     // String dependency so it resolves at graph-build time, not config time.
     dependsOn 'jar'
-    def iconFile = rootProject.file('branding/vss/icon.png')
     def srcJar = layout.buildDirectory.file("libs/${lssFabricJarName}")
     def outFile = layout.buildDirectory.file("libs/${vssFabricJarName}")
     inputs.file(srcJar)
-    inputs.file(iconFile)
     outputs.file(outFile)
     doLast {
         def src = srcJar.get().asFile
@@ -338,7 +353,8 @@ tasks.register('vssJar') {
                         def json = new groovy.json.JsonSlurper().parse(zf.getInputStream(e))
                         json.name = 'Voxy Server Side'
                         json.description = 'Server-side backend for Voxy multiplayer LOD rendering. Identical to LOD Server Support (same mod, second distribution channel) — fully interchangeable.'
-                        json.icon = 'assets/lss/icon-vss.png'
+                        // The dedicated VSS icon was DELETED (user decision 2026-08-08);
+                        // the descriptor keeps the standard LSS icon already in the jar.
                         if (json.contact instanceof Map) {
                             json.contact.homepage = 'https://modrinth.com/plugin/voxy-server-side'
                         }
@@ -373,9 +389,6 @@ tasks.register('vssJar') {
                         zos.closeEntry()
                     }
                 }
-                zos.putNextEntry(new ZipEntry('assets/lss/icon-vss.png'))
-                zos.write(iconFile.bytes)
-                zos.closeEntry()
             }
         } finally {
             zf.close()

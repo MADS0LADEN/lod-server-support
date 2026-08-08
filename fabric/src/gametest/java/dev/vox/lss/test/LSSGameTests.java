@@ -127,9 +127,11 @@ public class LSSGameTests {
     @GameTest(structure = "fabric-gametest-api-v1:empty")
     public void allConfigFieldsInValidRange(GameTestHelper helper) {
         var c = LSSServerConfig.CONFIG;
-        helper.assertTrue(c.bytesPerSecondLimitPerPlayer >= LSSConstants.MIN_BYTES_PER_SECOND && c.bytesPerSecondLimitPerPlayer <= LSSConstants.MAX_BYTES_PER_SECOND_PER_PLAYER, "bytesPerSecondLimitPerPlayer");
+        // The bandwidth pair reads through the resolved accessors (2026-08-08 rename):
+        // the raw fields are a file-format concern and sit at the -1 sentinel post-validate.
+        helper.assertTrue(c.bytesPerSecondPerPlayer() >= LSSConstants.MIN_BYTES_PER_SECOND && c.bytesPerSecondPerPlayer() <= LSSConstants.MAX_BYTES_PER_SECOND_PER_PLAYER, "bytesPerSecondPerPlayer");
         helper.assertTrue(c.sendQueueLimitPerPlayer >= LSSConstants.MIN_SEND_QUEUE_SIZE && c.sendQueueLimitPerPlayer <= LSSConstants.MAX_SEND_QUEUE_SIZE, "sendQueueLimitPerPlayer");
-        helper.assertTrue(c.bytesPerSecondLimitGlobal >= LSSConstants.MIN_BYTES_PER_SECOND && c.bytesPerSecondLimitGlobal <= LSSConstants.MAX_BYTES_PER_SECOND_GLOBAL_LIMIT, "bytesPerSecondLimitGlobal");
+        helper.assertTrue(c.bytesPerSecondGlobal() >= LSSConstants.MIN_BYTES_PER_SECOND && c.bytesPerSecondGlobal() <= LSSConstants.MAX_BYTES_PER_SECOND_GLOBAL_LIMIT, "bytesPerSecondGlobal");
         helper.assertTrue(c.generationConcurrencyLimitGlobal >= LSSConstants.MIN_CONCURRENT_GENERATIONS && c.generationConcurrencyLimitGlobal <= LSSConstants.MAX_CONCURRENT_GENERATIONS, "generationConcurrencyLimitGlobal");
         helper.assertTrue(c.generationTimeoutSeconds >= LSSConstants.MIN_GENERATION_TIMEOUT && c.generationTimeoutSeconds <= LSSConstants.MAX_GENERATION_TIMEOUT, "generationTimeoutSeconds");
         helper.assertTrue(c.dirtyBroadcastIntervalSeconds >= LSSConstants.MIN_DIRTY_BROADCAST_INTERVAL && c.dirtyBroadcastIntervalSeconds <= LSSConstants.MAX_DIRTY_BROADCAST_INTERVAL, "dirtyBroadcastIntervalSeconds");

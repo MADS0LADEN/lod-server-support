@@ -41,8 +41,11 @@ class PaperConfigLoadTest {
     private static final List<String> DEFAULT_EVENTS = new PaperConfig().updateEvents;
 
     private static List<String> serializedFieldNames() {
+        // @HiddenFromFile fields are excluded: at their compiled defaults they are
+        // deliberately absent from every written file (the 2026-08-08 config rework).
         List<String> names = Arrays.stream(PaperConfig.class.getFields())
                 .filter(f -> !Modifier.isStatic(f.getModifiers()))
+                .filter(f -> f.getAnnotation(dev.vox.lss.common.config.JsonConfig.HiddenFromFile.class) == null)
                 .map(Field::getName)
                 .toList();
         assertTrue(names.size() >= 14, "field reflection broke, found only: " + names);
@@ -58,7 +61,7 @@ class PaperConfigLoadTest {
         Path dataFolder = tempDir.resolve("LodServerSupport"); // first run: folder doesn't exist yet
         PaperConfig c = PaperConfig.load(dataFolder);
 
-        assertEquals(256, c.lodDistanceChunks);
+        assertEquals(512, c.lodDistanceChunks);
         assertFalse(DEFAULT_EVENTS.isEmpty(), "compiled updateEvents defaults must not be empty");
         assertEquals(DEFAULT_EVENTS, c.updateEvents);
         assertTrue(Files.isRegularFile(dataFolder.resolve(FILE)));
@@ -77,7 +80,7 @@ class PaperConfigLoadTest {
 
         PaperConfig c = assertDoesNotThrow(() -> PaperConfig.load(dataFolder));
 
-        assertEquals(256, c.lodDistanceChunks); // defaults, not the half-written value
+        assertEquals(512, c.lodDistanceChunks); // defaults, not the half-written value
         assertEquals(DEFAULT_EVENTS, c.updateEvents);
         assertEquals(broken, Files.readString(dataFolder.resolve(FILE)));
     }
@@ -88,7 +91,7 @@ class PaperConfigLoadTest {
 
         PaperConfig c = assertDoesNotThrow(() -> PaperConfig.load(dataFolder));
 
-        assertEquals(256, c.lodDistanceChunks);
+        assertEquals(512, c.lodDistanceChunks);
         assertEquals(DEFAULT_EVENTS, c.updateEvents);
         assertEquals("", Files.readString(dataFolder.resolve(FILE)));
     }
@@ -105,15 +108,19 @@ class PaperConfigLoadTest {
         // Exact values double as Fabric/Paper default-parity pins (see ServerConfigBase).
         assertEquals(DEFAULT_EVENTS, c.updateEvents);
         assertTrue(c.enabled);
-        assertEquals(15_728_640, c.bytesPerSecondLimitPerPlayer);
+        // Post-validate resolved bandwidth (the compiled default is the -1 sentinel —
+        // see the Fabric JsonConfigLoadTest twin for the full rationale).
+        assertEquals(15.0, c.mbPerSecondLimitPerPlayer);
+        assertEquals(15_728_640, c.bytesPerSecondPerPlayer());
         assertEquals(0, c.diskReaderThreads);           // 0 = AUTO (derived per read path)
         assertEquals(1024, c.sendQueueLimitPerPlayer);
-        assertEquals(62_914_560, c.bytesPerSecondLimitGlobal);
+        assertEquals(60.0, c.mbPerSecondLimitGlobal);
+        assertEquals(62_914_560, c.bytesPerSecondGlobal());
         assertTrue(c.enableChunkGeneration);
-        assertEquals(32, c.generationConcurrencyLimitGlobal);
+        assertEquals(40, c.generationConcurrencyLimitGlobal);
         assertEquals(60, c.generationTimeoutSeconds);
         assertEquals(10, c.dirtyBroadcastIntervalSeconds);
-        assertEquals(16, c.generationConcurrencyLimitPerPlayer);
+        assertEquals(40, c.generationConcurrencyLimitPerPlayer);
         assertEquals(0, c.perDimensionTimestampCacheSizeMB); // 0 = AUTO (from lodDistance)
     }
 
@@ -182,7 +189,7 @@ class PaperConfigLoadTest {
         PaperConfig c = assertDoesNotThrow(() -> PaperConfig.load(dataFolder));
 
         assertEquals(DEFAULT_EVENTS, c.updateEvents);
-        assertEquals(256, c.lodDistanceChunks); // the valid customization is reverted with the rest
+        assertEquals(512, c.lodDistanceChunks); // the valid customization is reverted with the rest
         assertEquals(broken, Files.readString(dataFolder.resolve(FILE)));
 
         List<Class<?>> registered = new ArrayList<>();

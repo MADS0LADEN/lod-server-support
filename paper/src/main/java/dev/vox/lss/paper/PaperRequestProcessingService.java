@@ -335,7 +335,7 @@ public class PaperRequestProcessingService {
         this.players = wiring.players();
         this.diskReader = wiring.diskReader();
         this.generationService = wiring.generationService();
-        this.bandwidthLimiter = new SharedBandwidthLimiter(config.bytesPerSecondLimitGlobal);
+        this.bandwidthLimiter = new SharedBandwidthLimiter(config.bytesPerSecondGlobal());
         this.offThreadProcessor = wiring.offThreadProcessor();
         this.dirtyTracker = wiring.dirtyTracker();
         this.dirtyBroadcaster = wiring.dirtyBroadcaster();
@@ -1002,7 +1002,7 @@ public class PaperRequestProcessingService {
 
     private void flushSendQueues(int activeCount) {
         long perPlayerAllocation = this.bandwidthLimiter.getPerPlayerAllocation(activeCount);
-        long perPlayerCap = Math.min(perPlayerAllocation, this.config.bytesPerSecondLimitPerPlayer);
+        long perPlayerCap = Math.min(perPlayerAllocation, this.config.bytesPerSecondPerPlayer());
 
         for (var state : this.players.values()) {
             if (!state.hasCompletedHandshake())
@@ -1029,7 +1029,7 @@ public class PaperRequestProcessingService {
         if (++this.diagLogCounter >= DIAG_LOG_INTERVAL_TICKS) {
             this.diagLogCounter = 0;
             DiagnosticsFormatter.logDebugSummary(this.diag, this.getUptimeSeconds(),
-                    this.config.bytesPerSecondLimitGlobal, this.bandwidthLimiter, this.players.values());
+                    this.config.bytesPerSecondGlobal(), this.bandwidthLimiter, this.players.values());
         }
     }
 

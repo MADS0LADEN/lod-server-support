@@ -14,12 +14,12 @@ public abstract class ServerConfigBase extends JsonConfig {
     protected static final String FILE_NAME = "lss-server-config.json";
 
     public boolean enabled = true;
-    /** LOD radius in chunks. Briefly 512 on 2026-08-02 and returned to 256 the same day
-     *  (user decision). Note what scales with it — the timestamp cache (see
-     *  effectiveTimestampCacheMB, which now derives from this rather than sitting at a fixed
-     *  value that would silently under-provision) and, when the store is on, the warmed disk
-     *  footprint. Admins who want the larger disc raise this one key and the cache follows. */
-    public int lodDistanceChunks = 256;
+    /** LOD radius in chunks. 512 by user decision 2026-08-08 (config rework) — this
+     *  REVERSES the 2026-08-02 same-day revert of 512: the D0 tile cache made the
+     *  derived footprint cheap (AUTO ~45 MB/dim at 512 vs ~109 MB pre-tile). Note what
+     *  scales with it — the timestamp cache (see effectiveTimestampCacheMB) and, with
+     *  the store on (its 2026-08-08 default), the warmed disk footprint. */
+    public int lodDistanceChunks = 512;
     /**
      * Per-player bandwidth cap. Went 20 -> 50 -> 25 MiB on 2026-08-02, then 25 -> 15 MiB
      * on 2026-08-05 (all user decisions; the last for v0.9.1).
@@ -38,8 +38,19 @@ public abstract class ServerConfigBase extends JsonConfig {
      * decode-queue halt sit underneath as client-side guards. The falsifiable check is
      * the cap sweep in the investigation's section 11.7 — sweep upward until {@code runway}
      * collapses in the client trace.
+     *
+     * <p><b>Key spelling since the 2026-08-08 config rework:</b> {@code
+     * mbPerSecondLimitPerPlayer}, a decimal in MiB/s (12.5 works). −1 = "not in the
+     * file" sentinel; {@link #validate} resolves it — the new key wins when both are
+     * present, else the legacy {@code bytesPerSecondLimitPerPlayer} converts, else the
+     * 15.0 default. Consumers never read these fields directly: {@link
+     * #bytesPerSecondPerPlayer()} is the resolved byte value.
      */
-    public int bytesPerSecondLimitPerPlayer = 15_728_640;
+    public double mbPerSecondLimitPerPlayer = -1;
+    /** RETIRED key spelling — honored on read, never written (see the rework note
+     *  above; −1 = absent). */
+    @HiddenFromFile
+    public int bytesPerSecondLimitPerPlayer = -1;
     /**
      * LSS disk-read pool size. <b>0 = AUTO (the default)</b>, derived from the resolved read
      * path — see {@link #effectiveDiskReaderThreads(boolean)}.
@@ -110,10 +121,16 @@ public abstract class ServerConfigBase extends JsonConfig {
      *  15 MiB per-player cut): a deliberate total-egress bound sized for typical hosts. At
      *  the 15 MiB per-player default it binds at FOUR concurrent full-rate LOD players and
      *  manifests as everyone slowing together — operators with more simultaneous LOD
-     *  traffic should raise this first. */
-    public int bytesPerSecondLimitGlobal = 62_914_560;
+     *  traffic should raise this first. Key spelling since the 2026-08-08 rework:
+     *  {@code mbPerSecondLimitGlobal}, decimal MiB/s; same sentinel/priority scheme as
+     *  the per-player pair; consumers read {@link #bytesPerSecondGlobal()}. */
+    public double mbPerSecondLimitGlobal = -1;
+    /** RETIRED key spelling — honored on read, never written (−1 = absent). */
+    @HiddenFromFile
+    public int bytesPerSecondLimitGlobal = -1;
     public boolean enableChunkGeneration = true;
-    public int generationConcurrencyLimitGlobal = 32;
+    /** 32 -> 40 by user decision 2026-08-08 (config rework), matching the per-player cap. */
+    public int generationConcurrencyLimitGlobal = 40;
     public int generationTimeoutSeconds = 60;
     public int dirtyBroadcastIntervalSeconds = 10;
     // The per-player SYNC (disk-read) slot cap is NOT config anymore — see
@@ -121,7 +138,9 @@ public abstract class ServerConfigBase extends JsonConfig {
     // default pool size; a fixed fairness ceiling above it). The generation caps stay
     // config: they are the real worldgen limiters, but they are server-internal (off the
     // wire since the server-owned-generation fold into v17).
-    public int generationConcurrencyLimitPerPlayer = 16;
+    /** 16 -> 40 by user decision 2026-08-08 (config rework). validate() still clamps
+     *  this to the global cap. */
+    public int generationConcurrencyLimitPerPlayer = 40;
     /**
      * Per-dimension up-to-date timestamp cache size (live heap, not disk). <b>0 = AUTO (the
      * default)</b> — derived from {@link #lodDistanceChunks}, see
@@ -153,6 +172,7 @@ public abstract class ServerConfigBase extends JsonConfig {
      * comparison. Retiring it would not have broken that harness — it would have made its two
      * arms silently identical, which is worse than breaking.
      */
+    @HiddenFromFile // expert rollback switch — honored from files, never written (2026-08-08 rework)
     public boolean useBackgroundReadPriority = true;
     /**
      * When true (default), the Fabric vanilla-IOWorker background read is SPLIT (perf
@@ -167,6 +187,7 @@ public abstract class ServerConfigBase extends JsonConfig {
      * Moonrise, which never had the executor-parse problem; the Moonrise rung on
      * Fabric is likewise untouched. No clamp: a boolean has no out-of-range value.
      */
+    @HiddenFromFile // expert rollback switch — honored from files, never written (2026-08-08 rework)
     public boolean useBackgroundReadSplit = true;
     /**
      * When true (default), the Phase 3 split's pool-side NBT parse is SELECTIVE (perf
@@ -182,6 +203,7 @@ public abstract class ServerConfigBase extends JsonConfig {
      * restore the full root parse as a rollback. No clamp: a boolean has no
      * out-of-range value.
      */
+    @HiddenFromFile // expert rollback switch — honored from files, never written (2026-08-08 rework)
     public boolean useSelectiveNbtParse = true;
     /**
      * When true (default), disk-read column serving transcodes region NBT straight into
@@ -194,6 +216,7 @@ public abstract class ServerConfigBase extends JsonConfig {
      * (the pre-round-2 behavior) as a rollback. No clamp: a boolean has no out-of-range
      * value.
      */
+    @HiddenFromFile // expert rollback switch — honored from files, never written (2026-08-08 rework)
     public boolean useNbtTranscode = true;
     /**
      * When true (default), columns for capability-declaring protocol-19 clients ship as
@@ -205,6 +228,7 @@ public abstract class ServerConfigBase extends JsonConfig {
      * Set false as the rollback lever: codec 0 for everyone, capability ignored. No
      * clamp: a boolean has no out-of-range value.
      */
+    @HiddenFromFile // expert rollback switch — honored from files, never written (2026-08-08 rework)
     public boolean useCompressedColumns = true;
     /**
      * When true (default), clients running the legacy protocol-16 mod (v0.6.x) get a
@@ -263,21 +287,26 @@ public abstract class ServerConfigBase extends JsonConfig {
      * ~10.6 KB/chunk of region data). It is derived data: deleting the {@code lss-lod/} folder
      * is always safe, and the service logs the expected growth once at startup.
      *
-     * <p>DEFAULT IS OFF on every platform (user decision, 2026-08-03). It briefly defaulted
-     * to "full" during v0.9.0 development and that was reverted before release for one
-     * reason: an upgrade must never silently double the size of somebody's world folder.
-     * A server operator who has not read the release notes cannot consent to that, and
-     * disk exhaustion is not a failure they can undo cheaply. So the store is opt-in, and
-     * the documentation recommends turning it on rather than the default deciding for
-     * them. {@code lodStoreBackfill} deliberately stays ON so that flipping this one key
-     * to "full" also gets the background warm-up — one switch, not two.
+     * <p>DEFAULT IS "on" (user decision, 2026-08-08 config rework — SUPERSEDES the
+     * 2026-08-03 opt-in decision, which itself reversed a brief v0.9.0-dev default-full).
+     * "on" ≡ "full" (the old spelling stays a read alias; the file writes back "on").
+     * The 2026-08-03 concern — an upgrade silently doubling a world folder — is now
+     * carried by the release notes + README stating the disk cost and the one-key
+     * opt-out ({@code lodStore: "off"}), plus the standing safety floors (the 2 GiB
+     * free-space backfill stop, {@code lodStoreMaxMB}). {@code lodStoreBackfill}
+     * deliberately stays ON so the default gets the background warm-up — one switch.
      *
-     * <p>Unknown values normalize to "off" — the SAFE value, deliberately unlike
-     * xrayObfuscation's normalize-to-auto: a typo must never enable a storage engine.
-     * "memory" was a third value until 2026-08-02 and is now one of those unknowns;
-     * the in-memory tier survives only as the SQLite-init degrade (see LodStores).
+     * <p>Unknown values still normalize to "off"; the direction of that safety flipped
+     * with the default (a typo now silently DISABLES a default feature instead of
+     * enabling a storage engine — predictable either way, and the config echo names
+     * the effective mode). "memory" remains one of those unknowns; the in-memory tier
+     * survives only as the SQLite-init degrade (see LodStores).
+     *
+     * <p><b>Harness note:</b> the soak/benchmark stagings and gametest run dirs pin
+     * this OFF explicitly (store scenarios excepted) — their law baselines and source
+     * pins were calibrated store-off, and re-baselining them buys nothing.
      */
-    public String lodStore = "off";
+    public String lodStore = "on";
     // NOTE: lodStoreMemoryMB is RETIRED (2026-08-02) along with the "memory" mode — the
     // in-memory tier survives only as the boot-time degrade when SQLite cannot init, at
     // a fixed budget (LodStores.DEGRADE_MAX_BYTES). GSON ignores the key on load and
@@ -485,10 +514,55 @@ public abstract class ServerConfigBase extends JsonConfig {
         return FILE_NAME;
     }
 
+    /** MiB — the mb* bandwidth keys' unit. */
+    private static final double MB = 1024.0 * 1024.0;
+    // The shipped bandwidth defaults, in MiB/s (2026-08-05 user decision on the byte
+    // values; re-denominated by the 2026-08-08 key rename).
+    private static final double DEFAULT_MB_PER_PLAYER = 15.0;
+    private static final double DEFAULT_MB_GLOBAL = 60.0;
+
+    /** The key-rename resolution ladder (2026-08-08 rework), pure: the NEW decimal-MiB
+     *  key wins when present (its sentinel −1 means "not in the file"), else the legacy
+     *  byte key converts, else the default. Shared by validate() and the accessors so a
+     *  config validate() never touched still resolves sanely (the lodStoreMaxBytes()
+     *  robustness convention) instead of leaking a −1 sentinel to consumers. */
+    private static double resolveMb(double mbValue, int legacyBytes, double defaultMb) {
+        if (mbValue >= 0) return mbValue;
+        return legacyBytes >= 0 ? legacyBytes / MB : defaultMb;
+    }
+
+    /** Resolved per-player bandwidth in bytes/s — the ONLY reader-facing form (the
+     *  mb/legacy field pair is a file-format concern; validate() canonicalizes it). */
+    public int bytesPerSecondPerPlayer() {
+        return (int) Math.round(
+                resolveMb(mbPerSecondLimitPerPlayer, bytesPerSecondLimitPerPlayer, DEFAULT_MB_PER_PLAYER) * MB);
+    }
+
+    /** Resolved global bandwidth ceiling in bytes/s — see {@link #bytesPerSecondPerPlayer()}. */
+    public int bytesPerSecondGlobal() {
+        return (int) Math.round(
+                resolveMb(mbPerSecondLimitGlobal, bytesPerSecondLimitGlobal, DEFAULT_MB_GLOBAL) * MB);
+    }
+
+    /** validate()'s half of the rename: fold the resolution into the mb field (what
+     *  save() writes and the clamps bound) and re-sentinel the legacy field so it can
+     *  never leak stale state into a later validate pass. */
+    private void resolveBandwidthKeys() {
+        mbPerSecondLimitPerPlayer =
+                resolveMb(mbPerSecondLimitPerPlayer, bytesPerSecondLimitPerPlayer, DEFAULT_MB_PER_PLAYER);
+        mbPerSecondLimitGlobal =
+                resolveMb(mbPerSecondLimitGlobal, bytesPerSecondLimitGlobal, DEFAULT_MB_GLOBAL);
+        bytesPerSecondLimitPerPlayer = -1;
+        bytesPerSecondLimitGlobal = -1;
+    }
+
     @Override
     public void validate() {
         lodDistanceChunks = Math.clamp(lodDistanceChunks, LSSConstants.MIN_LOD_DISTANCE, LSSConstants.MAX_LOD_DISTANCE);
-        bytesPerSecondLimitPerPlayer = Math.clamp(bytesPerSecondLimitPerPlayer, LSSConstants.MIN_BYTES_PER_SECOND, LSSConstants.MAX_BYTES_PER_SECOND_PER_PLAYER);
+        resolveBandwidthKeys();
+        mbPerSecondLimitPerPlayer = Math.clamp(mbPerSecondLimitPerPlayer,
+                LSSConstants.MIN_BYTES_PER_SECOND / MB,
+                LSSConstants.MAX_BYTES_PER_SECOND_PER_PLAYER / MB);
         // 0 = AUTO is a first-class value (the default); only a nonzero explicit override
         // clamps into the supported band — the same shape as lodStoreMaxMB.
         diskReaderThreads = diskReaderThreads <= 0 ? 0 : Math.clamp(diskReaderThreads,
@@ -500,7 +574,9 @@ public abstract class ServerConfigBase extends JsonConfig {
         outboundBufferCeilingKB = outboundBufferCeilingKB <= 0 ? 0 : Math.clamp(
                 outboundBufferCeilingKB, LSSConstants.MIN_OUTBOUND_BUFFER_CEILING_KB,
                 LSSConstants.MAX_OUTBOUND_BUFFER_CEILING_KB);
-        bytesPerSecondLimitGlobal = (int) Math.clamp((long) bytesPerSecondLimitGlobal, LSSConstants.MIN_BYTES_PER_SECOND, LSSConstants.MAX_BYTES_PER_SECOND_GLOBAL_LIMIT);
+        mbPerSecondLimitGlobal = Math.clamp(mbPerSecondLimitGlobal,
+                LSSConstants.MIN_BYTES_PER_SECOND / MB,
+                LSSConstants.MAX_BYTES_PER_SECOND_GLOBAL_LIMIT / MB);
         generationConcurrencyLimitGlobal = Math.clamp(generationConcurrencyLimitGlobal, LSSConstants.MIN_CONCURRENT_GENERATIONS, LSSConstants.MAX_CONCURRENT_GENERATIONS);
         generationTimeoutSeconds = Math.clamp(generationTimeoutSeconds, LSSConstants.MIN_GENERATION_TIMEOUT, LSSConstants.MAX_GENERATION_TIMEOUT);
         dirtyBroadcastIntervalSeconds = Math.clamp(dirtyBroadcastIntervalSeconds, LSSConstants.MIN_DIRTY_BROADCAST_INTERVAL, LSSConstants.MAX_DIRTY_BROADCAST_INTERVAL);
