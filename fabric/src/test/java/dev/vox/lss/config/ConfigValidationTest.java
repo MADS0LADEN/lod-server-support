@@ -627,6 +627,55 @@ class ConfigValidationTest {
     }
 
     /**
+     * The §3 fallback ladder's TERMINAL config carrier (XVER §9 client-config
+     * validation): GSON can null or blank this from a malformed/hand-edited file, and
+     * a null reaching {@code ClientIdentityResolver.resolveTerminalBlock} is survivable
+     * (it coerces to stone) but a BLANK would resolve as a malformed identity every
+     * session with no heal on disk — validate() owns restoring the default. The
+     * resolver validates the value's RESOLUTION itself; config only carries it, so
+     * an arbitrary non-blank string must survive validate() untouched.
+     */
+    @Test
+    void unknownBlockFallbackHealsNullAndBlankToTheDefault() {
+        var c = clientConfig();
+        c.unknownBlockFallback = null;
+        c.validate();
+        assertEquals("minecraft:stone", c.unknownBlockFallback, "null must heal to the default");
+
+        c.unknownBlockFallback = "   ";
+        c.validate();
+        assertEquals("minecraft:stone", c.unknownBlockFallback, "blank must heal to the default");
+
+        c.unknownBlockFallback = "minecraft:sandstone";
+        c.validate();
+        assertEquals("minecraft:sandstone", c.unknownBlockFallback,
+                "a configured value is carried verbatim — resolution is the resolver's job");
+    }
+
+    /**
+     * The ladder's CURATED rung table: the resolver's constructor does
+     * {@code Map.copyOf(CONFIG.crossVersionBlockFallbacks)}, which throws on null —
+     * so a GSON-nulled table would crash resolver construction on the FIRST v20
+     * column of every session unless validate() heals it to the empty map. A
+     * populated table must pass through untouched (it is user-extended as real
+     * cross-version gaps are reported).
+     */
+    @Test
+    void crossVersionBlockFallbacksHealNullToTheEmptyMap() {
+        var c = clientConfig();
+        c.crossVersionBlockFallbacks = null;
+        c.validate();
+        assertNotNull(c.crossVersionBlockFallbacks, "null must heal to an empty map");
+        assertTrue(c.crossVersionBlockFallbacks.isEmpty());
+
+        c.crossVersionBlockFallbacks = new java.util.HashMap<>(
+                java.util.Map.of("ancient:sulfur", "minecraft:sandstone"));
+        c.validate();
+        assertEquals(java.util.Map.of("ancient:sulfur", "minecraft:sandstone"),
+                c.crossVersionBlockFallbacks, "user entries must survive validate() untouched");
+    }
+
+    /**
      * The effective-config echo is a SCRIPT-CONSUMED CONTRACT (PERF Phase 0 item 1):
      * profile_disk_read.sh / compress_gate.sh / backfill_profile.sh grep
      * "Effective config: " from server.log and match per-key substrings into each
