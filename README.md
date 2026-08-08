@@ -6,7 +6,7 @@ Supports **Fabric** clients, and **Fabric**, **Paper**, **Purpur** and **Folia**
 
 https://github.com/user-attachments/assets/721fb344-890e-4e03-ab36-539444427f7b
 
-**Try it live:** join `lod-server-support.modrinth.gg` (Minecraft 26.2) with [Voxy](https://modrinth.com/mod/voxy) and this mod installed.
+**Try it live:** join `lod-server-support.modrinth.gg` with [Voxy](https://modrinth.com/mod/voxy) and this mod installed. The server runs Minecraft 26.2, but clients on **any supported version** — 26.2, 26.1.x, or 1.21.11 — can join and get full LOD streaming (cross-version columns, with ViaVersion bridging the Minecraft protocol).
 
 ## Installation
 
