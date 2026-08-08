@@ -97,6 +97,37 @@ public final class SqliteLodStore implements LodStoreService {
      *  v0.9.x rows), 20 = the canonical v20 dictionary layout. */
     static final int WIREFMT_NATIVE_19 = 19;
     static final int WIREFMT_V20 = 20;
+    /** Rows per background-migration batch (C4 §5.4). One batch runs per IDLE batcher
+     *  iteration only (the 200 ms queue-poll timeout), so the walk structurally yields
+     *  to ALL live store traffic — deposits, deletes, sweeps — and tops out around
+     *  ~320 rows/s on a quiet server (a multi-GB store migrates in under an hour;
+     *  restraint-first, the spec's pacing intent, with idle-gating standing in for the
+     *  backfill's MSPT gate — the batcher is an off-main MIN_PRIORITY+1 thread, so its
+     *  tick impact is IO contention, which idle-gating bounds). */
+    private static final int MIGRATE_ROWS_PER_BATCH = 64;
+
+    // ---- C4 background migration walk state (batcher thread; status reads volatile) ----
+    private volatile boolean migratePending;
+    private volatile long migrateTotal;
+    private final java.util.concurrent.atomic.AtomicLong migrateRemaining =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** Dims not yet exhausted by the walk; rebuilt at boot from dimIds when pending. */
+    private final java.util.ArrayDeque<Integer> migrateDims = new java.util.ArrayDeque<>();
+    /** The native→v20 body translator for the walk (platform-wired, same function the
+     *  serve rung uses). Null = walk waits (serves still translate via the reader). */
+    private volatile java.util.function.UnaryOperator<byte[]> legacyMigrationTranslator;
+
+    @Override
+    public void setLegacyMigrationTranslator(java.util.function.UnaryOperator<byte[]> t) {
+        this.legacyMigrationTranslator = t;
+    }
+
+    @Override
+    public String migrationStatusToken() {
+        if (!this.migratePending) return "";
+        return " migrating=" + Math.max(0, this.migrateRemaining.get())
+                + "/" + this.migrateTotal;
+    }
     private static final String DB_FILE = "store.db";
     private static final int PAGE_SIZE = 16384;
     private static final int WRITE_TXN_ROWS = 64;
@@ -292,6 +323,7 @@ public final class SqliteLodStore implements LodStoreService {
         // Open + validate meta on the CALLER thread (service construction): a mismatch
         // or corruption drops the DB and recreates it fresh — before the batcher exists.
         openOrRecreateWriter();
+        initMigrationState();
         this.batcher = new Thread(this::batcherLoop, Brand.shortName() + " LOD Store SQLite");
         this.batcher.setDaemon(true);
         this.batcher.setPriority(Thread.MIN_PRIORITY + 1);
@@ -399,6 +431,7 @@ public final class SqliteLodStore implements LodStoreService {
         LSSLogger.info("LOD store: lazy-upgrading the v0.9.x store in place (schema 3 → 4)"
                 + " — existing rows tagged wirefmt=19, translated on serve, migrated in"
                 + " the background (never a blocking rewrite)");
+        long total = 0;
         try (Statement st = this.writer.createStatement()) {
             for (int dimId : this.dimIds.values()) {
                 if (!tableHasColumn("lods_" + dimId, "wirefmt")) {
@@ -406,7 +439,17 @@ public final class SqliteLodStore implements LodStoreService {
                             + " ADD COLUMN wirefmt INTEGER NOT NULL DEFAULT "
                             + WIREFMT_NATIVE_19);
                 }
+                try (ResultSet rs = st.executeQuery("SELECT count(*) FROM lods_" + dimId)) {
+                    rs.next();
+                    total += rs.getLong(1);
+                }
             }
+            // Walk bookkeeping (meta so it survives restarts; the version keys never
+            // track completion — §5.1): pending flag + totals; per-dim watermarks are
+            // written by the walk itself, riding each batch's transaction.
+            st.executeUpdate("INSERT OR REPLACE INTO meta (k, v) VALUES"
+                    + " ('migrate_pending','1'), ('migrate_total','" + total
+                    + "'), ('migrate_done','0')");
         }
         writeMeta();
     }
@@ -993,6 +1036,135 @@ public final class SqliteLodStore implements LodStoreService {
 
     // ---- batcher thread ----
 
+    /** Arm the C4 walk from meta (caller thread, before the batcher starts). */
+    private void initMigrationState() throws SQLException {
+        Map<String, String> meta = readMetaMap();
+        if (!"1".equals(meta.get("migrate_pending"))) return;
+        long total = parseLongOr(meta.get("migrate_total"), 0);
+        long done = parseLongOr(meta.get("migrate_done"), 0);
+        this.migrateTotal = total;
+        this.migrateRemaining.set(Math.max(0, total - done));
+        this.migrateDims.addAll(this.dimIds.values());
+        this.migratePending = true;
+        LSSLogger.info("LOD store: background migration pending — "
+                + this.migrateRemaining.get() + "/" + total + " rows to rewrite to the"
+                + " v20 body format (idle-paced; serves translate meanwhile)");
+    }
+
+    private static long parseLongOr(String s, long dflt) {
+        try {
+            return s == null ? dflt : Long.parseLong(s);
+        } catch (NumberFormatException e) {
+            return dflt;
+        }
+    }
+
+    /**
+     * One background-migration batch (C4, XVER §5.4; batcher thread, IDLE iterations
+     * only): up to {@link #MIGRATE_ROWS_PER_BATCH} {@code wirefmt=19} rows of the
+     * current dim — decompress → translate native→v20 → recompress → UPDATE row
+     * (CRC32C hashes, {@code wirefmt=20}, {@code ts}/{@code src_stamp} untouched so
+     * age order and sweep semantics survive) — with the per-dim watermark riding the
+     * SAME transaction as its batch (a rolled-back batch retries because the
+     * watermark rolled back with it; a watermark committed apart from its rows would
+     * silently skip them). A per-row parse/translate anomaly DELETES the row (derived
+     * data). The {@code AND wirefmt=19} guard on the UPDATE yields to a concurrent
+     * re-deposit (latest-wins already retagged the row). SQL throws propagate to the
+     * batcher's shared failure handling (rollback + WRITE_FAILURE_LATCH).
+     */
+    private void maybeMigrateBatch() throws Exception {
+        if (!this.migratePending) return;
+        var translator = this.legacyMigrationTranslator;
+        if (translator == null) return;
+        Integer dimId = this.migrateDims.peekFirst();
+        if (dimId == null) {
+            finishMigration();
+            return;
+        }
+        long watermark = parseLongOr(readMetaMap().get("migrate_progress_" + dimId),
+                Long.MIN_VALUE);
+        record Row(long pos, int usize, byte[] blob) {}
+        var rows = new java.util.ArrayList<Row>(MIGRATE_ROWS_PER_BATCH);
+        try (PreparedStatement ps = this.writer.prepareStatement(
+                "SELECT pos, usize, blob FROM lods_" + dimId
+                        + " WHERE wirefmt=" + WIREFMT_NATIVE_19 + " AND pos>?"
+                        + " ORDER BY pos LIMIT " + MIGRATE_ROWS_PER_BATCH)) {
+            ps.setLong(1, watermark);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    rows.add(new Row(rs.getLong(1), rs.getInt(2), rs.getBytes(3)));
+                }
+            }
+        }
+        if (rows.isEmpty()) {
+            // Dim exhausted: retire it (and its watermark) inside the shared txn.
+            this.migrateDims.pollFirst();
+            try (PreparedStatement ps = this.writer.prepareStatement(
+                    "DELETE FROM meta WHERE k=?")) {
+                ps.setString(1, "migrate_progress_" + dimId);
+                ps.executeUpdate();
+            }
+            bumpTxn(1);
+            return;
+        }
+        int migrated = 0;
+        try (PreparedStatement up = this.writer.prepareStatement(
+                "UPDATE lods_" + dimId + " SET chash=?, usize=?, fhash=?, wirefmt="
+                        + WIREFMT_V20 + ", blob=? WHERE pos=? AND wirefmt="
+                        + WIREFMT_NATIVE_19);
+             PreparedStatement del = this.writer.prepareStatement(
+                     "DELETE FROM lods_" + dimId + " WHERE pos=?")) {
+            for (Row row : rows) {
+                try {
+                    byte[] raw = this.codec.decompress(row.blob(), row.usize());
+                    byte[] v20 = translator.apply(raw);
+                    byte[] frame = this.codec.compress(v20);
+                    up.setLong(1, contentHash(v20));
+                    up.setInt(2, v20.length);
+                    up.setLong(3, contentHash(frame));
+                    up.setBytes(4, frame);
+                    up.setLong(5, row.pos());
+                    up.executeUpdate();
+                    migrated++;
+                } catch (Exception rowFailure) {
+                    // Derived data: an unparseable/untranslatable row is deleted, never
+                    // retried forever — the next serve re-warms it from region truth.
+                    del.setLong(1, row.pos());
+                    del.executeUpdate();
+                }
+            }
+        }
+        long newWatermark = rows.get(rows.size() - 1).pos();
+        try (PreparedStatement ps = this.writer.prepareStatement(
+                "INSERT OR REPLACE INTO meta (k, v) VALUES (?,?)")) {
+            ps.setString(1, "migrate_progress_" + dimId);
+            ps.setString(2, String.valueOf(newWatermark));
+            ps.executeUpdate();
+            ps.setString(1, "migrate_done");
+            ps.setString(2, String.valueOf(
+                    this.migrateTotal - Math.max(0, this.migrateRemaining.get() - rows.size())));
+            ps.executeUpdate();
+        }
+        // Rows + watermark + done-count commit as ONE transaction.
+        this.txnRows += rows.size() + 2;
+        commitTxn();
+        this.migrateRemaining.addAndGet(-rows.size());
+        this.diag.recordMigrated(migrated, rows.size() - migrated);
+    }
+
+    private void finishMigration() throws SQLException {
+        try (Statement st = this.writer.createStatement()) {
+            st.executeUpdate("DELETE FROM meta WHERE k IN ('migrate_pending',"
+                    + " 'migrate_total', 'migrate_done')"
+                    + " OR k LIKE 'migrate_progress_%'");
+        }
+        this.writer.commit();
+        this.migratePending = false;
+        this.migrateRemaining.set(0);
+        LSSLogger.info("LOD store: background migration complete — every row is v20"
+                + " (" + this.migrateTotal + " rows walked)");
+    }
+
     private void batcherLoop() {
         try {
             startupSweep();
@@ -1036,6 +1208,7 @@ public final class SqliteLodStore implements LodStoreService {
             try {
                 if (op == null) {
                     commitTxn(); // idle flush: never hold a sub-batch across the snapshot cadence
+                    maybeMigrateBatch();
                 } else {
                     apply(op);
                 }
@@ -1192,8 +1365,17 @@ public final class SqliteLodStore implements LodStoreService {
                 // up front too, so a mark racing the drop cannot survive in it.
                 try (Statement st = this.writer.createStatement()) {
                     st.executeUpdate("DELETE FROM backfill");
+                    // C4: the migration walk's subject rows are being dropped — reset
+                    // its bookkeeping with them (§5.4: DropAll mid-walk resets
+                    // migrate_progress_*).
+                    st.executeUpdate("DELETE FROM meta WHERE k IN ('migrate_pending',"
+                            + " 'migrate_total', 'migrate_done')"
+                            + " OR k LIKE 'migrate_progress_%'");
                 }
                 this.writer.commit();
+                this.migratePending = false;
+                this.migrateRemaining.set(0);
+                this.migrateDims.clear();
                 for (var e : List.copyOf(this.dimIds.entrySet())) {
                     if (this.shutdown.get()) break; // same reason as inside the drop loop
                     // dropDimensionRows publishes each batch to the sweep-drop

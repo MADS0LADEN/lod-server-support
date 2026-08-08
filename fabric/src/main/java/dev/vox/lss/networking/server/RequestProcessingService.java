@@ -265,6 +265,8 @@ public class RequestProcessingService {
                 // v20 form at the serve rung, against this server's own registries.
                 this.diskReader.setStoreLegacyTranslator(nativeRaw ->
                         NbtSectionSerializer.toV20(nativeRaw, this.server.registryAccess()));
+                this.lodStore.setLegacyMigrationTranslator(nativeRaw ->
+                        NbtSectionSerializer.toV20(nativeRaw, this.server.registryAccess()));
                 this.offThreadProcessor.attachStore(this.lodStore);
             }
             // Opt-in background backfill (Phase 4): built only over the SQLite store

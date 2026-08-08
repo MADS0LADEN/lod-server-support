@@ -101,6 +101,18 @@ public interface LodStoreService {
         return hash;
     }
 
+    /** C4: wire the native→v20 body translator the background migration walk uses
+     *  (the same platform function the serve rung gets). Default: ignored — only the
+     *  SQLite tier migrates; an unwired translator leaves the walk waiting while
+     *  serves still translate via the reader rung. */
+    default void setLegacyMigrationTranslator(java.util.function.UnaryOperator<byte[]> t) {}
+
+    /** C4: the background-migration status token for `/lsslod store status` — empty
+     *  when no walk is pending, else e.g. {@code " migrating=1234/98765"}. */
+    default String migrationStatusToken() {
+        return "";
+    }
+
     /** The mode this store was built for (memory tier only vs memory+disk). */
     LodStoreMode mode();
 

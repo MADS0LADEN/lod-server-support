@@ -65,6 +65,8 @@ class LSSServerCommands {
                 // The one-shot cap log (§2) points here — the ongoing capped
                 // steady-state must stay diagnosable without any log line.
                 + " evicted=" + store.diagnostics().getSqlEvictions()
+                // C4: background-migration progress (empty once every row is v20).
+                + store.migrationStatusToken()
                 // Memory-tier visibility (review B1): db/wal/evicted are SQL-only and
                 // rendered a thrashing memory store as all-zero.
                 + (store.diagnostics().getMemBytes() > 0

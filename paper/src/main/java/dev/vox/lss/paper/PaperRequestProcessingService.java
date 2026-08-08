@@ -466,6 +466,8 @@ public class PaperRequestProcessingService {
                 // v20 form at the serve rung, against this server's own registries.
                 diskReader.setStoreLegacyTranslator(nativeRaw ->
                         PaperNbtSectionSerializer.toV20(nativeRaw, server.registryAccess()));
+                lodStore.setLegacyMigrationTranslator(nativeRaw ->
+                        PaperNbtSectionSerializer.toV20(nativeRaw, server.registryAccess()));
                 offThreadProcessor.attachStore(lodStore);
             }
         }
