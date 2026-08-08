@@ -90,6 +90,27 @@ public final class NativeToV20Translator {
         return new WireSectionCursor.WireContainer(bits, palette, data);
     }
 
+    /**
+     * The DIRECT-EMIT rung (the C6-triggered follow-up to translate-at-producer):
+     * converts an already-INDEXED native container descriptor — palette of global ids
+     * in wire order plus the verbatim long words at a vanilla-shaped width — without
+     * ever materializing or re-parsing native bytes. Byte-equal to {@link #translate}
+     * on the same container by the indexed rule above (longs verbatim, palette values
+     * rewritten to dictionary indices); callers own the guarantee that the descriptor
+     * is indexed-shaped (the NBT transcoder's fallback ladder routes every other shape
+     * through the object path, which keeps the translate route).
+     */
+    public static WireSectionCursor.WireContainer convertIndexed(int bits, int[] paletteIds,
+                                                                 long[] data, boolean isBlocks,
+                                                                 IdentityDictionary dict,
+                                                                 IntFunction<String> identity) {
+        int[] palette = new int[paletteIds.length];
+        for (int i = 0; i < palette.length; i++) {
+            palette[i] = dict.indexOf(identityFor(identity, paletteIds[i], isBlocks));
+        }
+        return new WireSectionCursor.WireContainer(bits, palette, data);
+    }
+
     private static String identityFor(IntFunction<String> lookup, int id, boolean isBlocks) {
         String identity = lookup.apply(id);
         if (identity == null) {

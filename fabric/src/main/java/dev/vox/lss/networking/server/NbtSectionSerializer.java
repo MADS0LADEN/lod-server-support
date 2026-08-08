@@ -27,6 +27,8 @@ import net.minecraft.world.level.chunk.PalettedContainerRO;
 import net.minecraft.world.level.chunk.Strategy;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 
+import dev.vox.lss.common.wire.WireSectionCursor;
+
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -324,6 +326,13 @@ final class NbtSectionSerializer {
         }
     }
 
+    /** Direct-emit routing telemetry (C6 follow-up): bumped once per column served
+     *  through {@link #emitV20Direct}. Outputs are byte-identical to the translate
+     *  route, so WITHOUT this counter a regression silently re-routing everything
+     *  through the native intermediate would pass every golden — tests pin the
+     *  routing, and a benchmark validity check can assert the fast path engaged. */
+    static final AtomicLong DIRECT_V20_EMITS = new AtomicLong();
+
     /** Sizing-exactness telemetry: bumped when the exact pre-size mismatched the written
      *  bytes and the safe copy fallback ran (never wrong bytes, one warn). Tests pin 0. */
     static final AtomicLong SIZE_MISMATCH_FALLBACKS = new AtomicLong();
@@ -454,6 +463,26 @@ final class NbtSectionSerializer {
                     if (manager != null) manager.countMaskedSection();
                 }
             }
+        }
+
+        // Direct v20 emit (the C6-triggered follow-up, 2026-08-08): when EVERY surviving
+        // section is transcoded, the descriptors already hold global ids in wire order
+        // plus the verbatim disk longs — build the v20 column straight from them instead
+        // of emitting native bytes and re-parsing the whole column through the
+        // translator (the measured +18.5% serve cost of translate-at-producer).
+        // Byte-identical by the translator's indexed rule (the transcode pre-gate
+        // guarantees indexed shapes; the transcode-vs-object fuzz now compares this
+        // path against the translate route for free). Any object-path or mask-needing
+        // section keeps the native-emit + translate route wholesale.
+        boolean allTranscoded = true;
+        for (var p : parsed) {
+            if (p.transcoded() == null) {
+                allTranscoded = false;
+                break;
+            }
+        }
+        if (allTranscoded) {
+            return emitV20Direct(parsed, registryAccess);
         }
 
         // Second pass: serialize to wire format, into an EXACTLY-sized buffer (the old
@@ -919,13 +948,43 @@ final class NbtSectionSerializer {
 
     /** The C1 produce-path v20 hook (progress-doc decision 2026-08-07): every producer
      *  emits its NATIVE body exactly as before and translates at the return boundary —
-     *  ONE corpus-proven encoder, byte-determinism across paths by construction. The
-     *  direct transcode-path emit is the recorded C6-gated optimization; output bytes
-     *  are identical either way, so swapping later is invisible to every golden. */
+     *  ONE corpus-proven encoder, byte-determinism across paths by construction. Since
+     *  the C6-gated follow-up landed, the all-transcoded disk column bypasses this via
+     *  {@link #emitV20Direct} (byte-identical by the translator's indexed rule); this
+     *  translate route remains for the live path, mixed/fallback columns, and masking. */
     static byte[] toV20(byte[] nativeBody, RegistryAccess registryAccess) {
         return dev.vox.lss.common.wire.NativeToV20Translator.translate(nativeBody,
                 IdentityTables::blockIdentityFor,
                 biomeIdentityLookup(registryAccess));
+    }
+
+    /** The direct transcode-path v20 emit (C6 follow-up): every section's descriptor
+     *  carries palette GLOBAL ids in wire order + the disk long words verbatim, which
+     *  is exactly the translator's indexed input — so the dictionary walk (first-seen,
+     *  sections in order, blocks then biomes) runs on the descriptors and the native
+     *  intermediate (emit + whole-column re-parse) disappears. Callers guarantee every
+     *  section is transcoded (the assembly's allTranscoded gate). */
+    private static byte[] emitV20Direct(java.util.List<ParsedSection> parsed,
+                                        RegistryAccess registryAccess) {
+        DIRECT_V20_EMITS.incrementAndGet();
+        var dict = new dev.vox.lss.common.wire.IdentityDictionary();
+        java.util.function.IntFunction<String> blockIdentity = IdentityTables::blockIdentityFor;
+        var biomeIdentity = biomeIdentityLookup(registryAccess);
+        var sections = new java.util.ArrayList<WireSectionCursor.WireSection>(parsed.size());
+        for (var p : parsed) {
+            var t = p.transcoded();
+            sections.add(new WireSectionCursor.WireSection(
+                    p.sectionY(), p.nonEmptyCount(), p.fluidCount(),
+                    dev.vox.lss.common.wire.NativeToV20Translator.convertIndexed(
+                            t.blockBits(), t.blockIds(), t.blockData(), true, dict, blockIdentity),
+                    dev.vox.lss.common.wire.NativeToV20Translator.convertIndexed(
+                            t.biomeBits(), t.biomeIds(), t.biomeData(), false, dict, biomeIdentity),
+                    p.litByBlock() ? p.blockLight() : null,
+                    p.litBySky() ? p.skyLight() : null));
+        }
+        return WireSectionCursor.emit(
+                new WireSectionCursor.WireColumn(dict.entries(), sections),
+                WireSectionCursor.Layout.V20);
     }
 
     /** The C2 egress inverse of {@link #toV20} (XVER §4.2): v20 body → native section

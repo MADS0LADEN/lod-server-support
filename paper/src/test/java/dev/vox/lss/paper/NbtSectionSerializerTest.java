@@ -1290,6 +1290,44 @@ class NbtSectionSerializerTest {
     }
 
     @Test
+    void directEmitRoutesExactlyTheAllTranscodedColumns() {
+        // The C6 follow-up's routing pin — see the Fabric twin: direct-emit output is
+        // byte-identical to the translate route, so only this counter catches a silent
+        // re-route back through the native intermediate.
+        long before = PaperNbtSectionSerializer.DIRECT_V20_EMITS.get();
+        PaperNbtSectionSerializer.serializeChunkNbt(
+                chunkNbt("minecraft:full", sectionNbt(0, true, true, null, null)), REGISTRY_ACCESS);
+        assertEquals(before + 1, PaperNbtSectionSerializer.DIRECT_V20_EMITS.get(),
+                "an all-transcoded column must take the direct v20 emit");
+
+        var pool = new ArrayList<net.minecraft.world.level.block.state.BlockState>();
+        for (var block : List.of(Blocks.OAK_STAIRS, Blocks.SPRUCE_STAIRS, Blocks.BIRCH_STAIRS,
+                Blocks.JUNGLE_STAIRS)) {
+            pool.addAll(block.getStateDefinition().getPossibleStates());
+        }
+        var globalStates = FACTORY.createForBlockStates();
+        int i = 0;
+        for (int y = 0; y < 16; y++)
+            for (int z = 0; z < 16; z++)
+                for (int x = 0; x < 16; x++)
+                    globalStates.set(x, y, z, pool.get(i++ % pool.size()));
+        long beforeMixed = PaperNbtSectionSerializer.DIRECT_V20_EMITS.get();
+        PaperNbtSectionSerializer.serializeChunkNbt(
+                chunkNbt("minecraft:full",
+                        sectionNbt(0, true, true, null, null),
+                        sectionFrom(1, globalStates, FACTORY.createForBiomes())),
+                REGISTRY_ACCESS);
+        assertEquals(beforeMixed, PaperNbtSectionSerializer.DIRECT_V20_EMITS.get(),
+                "a column with any fallback section keeps the translate route wholesale");
+
+        PaperNbtSectionSerializer.serializeChunkNbt(
+                chunkNbt("minecraft:full", sectionNbt(0, true, true, null, null)),
+                REGISTRY_ACCESS, null, Integer.MIN_VALUE, Integer.MAX_VALUE, false);
+        assertEquals(beforeMixed, PaperNbtSectionSerializer.DIRECT_V20_EMITS.get(),
+                "useNbtTranscode=false is the object path — no direct emit");
+    }
+
+    @Test
     void maskedColumnMixesTranscodedAndFallbackSectionsByteIdentically() {
         // Under a mask, sections split by the pre-gate: ore-bearing below the cutoff go
         // to the object fallback and get masked; ore-free or above-cutoff sections

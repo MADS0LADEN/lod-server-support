@@ -1290,6 +1290,49 @@ class NbtSectionSerializerTest {
     }
 
     @Test
+    void directEmitRoutesExactlyTheAllTranscodedColumns() {
+        // The C6 follow-up's routing pin. Direct-emit output is BYTE-IDENTICAL to the
+        // native-emit + translate route (the fuzz above proves it), so without this
+        // counter pin a regression silently re-routing everything through the native
+        // intermediate — re-paying the measured +18.5% serve cost — would pass every
+        // golden in the tree.
+        long before = NbtSectionSerializer.DIRECT_V20_EMITS.get();
+        NbtSectionSerializer.serializeChunkNbt(
+                chunkNbt("minecraft:full", sectionNbt(0, true, true, null, null)), REGISTRY_ACCESS);
+        assertEquals(before + 1, NbtSectionSerializer.DIRECT_V20_EMITS.get(),
+                "an all-transcoded column must take the direct v20 emit");
+
+        // A >256-entry palette is the transcoder's Global fallback: the object-path
+        // section makes the WHOLE column keep the translate route.
+        var pool = new ArrayList<net.minecraft.world.level.block.state.BlockState>();
+        for (var block : List.of(Blocks.OAK_STAIRS, Blocks.SPRUCE_STAIRS, Blocks.BIRCH_STAIRS,
+                Blocks.JUNGLE_STAIRS)) {
+            pool.addAll(block.getStateDefinition().getPossibleStates());
+        }
+        var globalStates = FACTORY.createForBlockStates();
+        int i = 0;
+        for (int y = 0; y < 16; y++)
+            for (int z = 0; z < 16; z++)
+                for (int x = 0; x < 16; x++)
+                    globalStates.set(x, y, z, pool.get(i++ % pool.size()));
+        long beforeMixed = NbtSectionSerializer.DIRECT_V20_EMITS.get();
+        NbtSectionSerializer.serializeChunkNbt(
+                chunkNbt("minecraft:full",
+                        sectionNbt(0, true, true, null, null),
+                        sectionFrom(1, globalStates, FACTORY.createForBiomes())),
+                REGISTRY_ACCESS);
+        assertEquals(beforeMixed, NbtSectionSerializer.DIRECT_V20_EMITS.get(),
+                "a column with any fallback section keeps the translate route wholesale");
+
+        // The flag-off rollback path must never route direct either.
+        NbtSectionSerializer.serializeChunkNbt(
+                chunkNbt("minecraft:full", sectionNbt(0, true, true, null, null)),
+                REGISTRY_ACCESS, null, Integer.MIN_VALUE, Integer.MAX_VALUE, false);
+        assertEquals(beforeMixed, NbtSectionSerializer.DIRECT_V20_EMITS.get(),
+                "useNbtTranscode=false is the object path — no direct emit");
+    }
+
+    @Test
     void maskedColumnMixesTranscodedAndFallbackSectionsByteIdentically() {
         // Under a mask, sections split by the pre-gate: ore-bearing below the cutoff go
         // to the object fallback and get masked; ore-free or above-cutoff sections
