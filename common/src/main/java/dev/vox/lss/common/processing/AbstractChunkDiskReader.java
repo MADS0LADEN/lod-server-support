@@ -111,6 +111,19 @@ public abstract class AbstractChunkDiskReader {
     }
 
     /** Attach the LOD store (lodStore != off). Must happen before the first submit. */
+    /** The native→v20 body translator for pre-migration {@code wirefmt=19} store rows
+     *  (C4, XVER §5.3): platform-wired ({@code NbtSectionSerializer.toV20} against the
+     *  server's own registries). REQUIRED for 19-row serves — {@code raw() == v20} is a
+     *  C2 pipeline invariant (the client decodes v20; the legacy egress translates FROM
+     *  v20), so an unwired translator reads a 19-hit as an errored miss rather than
+     *  leaking native bytes downstream. Runs on the reader pool (the emit tables are
+     *  memoized and thread-safe). */
+    private volatile java.util.function.UnaryOperator<byte[]> storeLegacyTranslator;
+
+    public final void setStoreLegacyTranslator(java.util.function.UnaryOperator<byte[]> t) {
+        this.storeLegacyTranslator = t;
+    }
+
     public final void attachStore(dev.vox.lss.common.store.LodStoreService store) {
         this.store = store;
     }
@@ -288,6 +301,24 @@ public abstract class AbstractChunkDiskReader {
                         false, false, false, true, submissionOrder, 0L));
                 return true;
             }
+            if (hit.wirefmt() == 19) {
+                // Pre-migration native-layout row (C4, XVER §5.3): decompress (fhash
+                // already validated in the store) and translate to the canonical v20
+                // form HERE — raw()==v20 is a C2 pipeline invariant, and a verbatim
+                // native frame would be mis-decoded by every consumer. Delivered as
+                // RAW bytes; the delivery re-compresses per recipient capability
+                // (ColumnBytes.frame()) as with any raw source. Cost: tens of µs,
+                // doubly decaying (the walk migrates rows; clients update).
+                byte[] v20 = translateLegacyStoreRow(s, hit.frame(), hit.usize());
+                if (v20 == null) {
+                    return false; // errored miss, counted; the NBT ladder serves truth
+                }
+                addResult(playerUuid, new ChunkReadResult(playerUuid, chunkX, chunkZ, v20,
+                        dimension, v20.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                        hit.columnTimestamp(),
+                        false, false, false, true, submissionOrder, 0L));
+                return true;
+            }
             int estimatedBytes = hit.usize() + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
             addResult(playerUuid, new ChunkReadResult(playerUuid, chunkX, chunkZ, null,
                     dimension, estimatedBytes, hit.columnTimestamp(),
@@ -320,12 +351,61 @@ public abstract class AbstractChunkDiskReader {
         s.diagnostics().recordHit(System.nanoTime() - t0);
         boolean allAir = hit.sectionBytes().length == 0;
         byte[] bytes = allAir ? null : hit.sectionBytes();
+        if (!allAir && hit.wirefmt() == 19) {
+            // Pre-migration native-layout row on the raw rung — same translation
+            // contract as the frame rung above.
+            bytes = translateLegacyRaw(s, bytes);
+            if (bytes == null) {
+                return false;
+            }
+        }
         int estimatedBytes = allAir ? 0
                 : bytes.length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
         addResult(playerUuid, new ChunkReadResult(playerUuid, chunkX, chunkZ, bytes,
                 dimension, estimatedBytes, hit.columnTimestamp(),
                 false, false, false, true, submissionOrder, 0L));
         return true;
+    }
+
+    /** Decompress + translate a 19-row frame to v20; null = contained errored miss. */
+    private byte[] translateLegacyStoreRow(dev.vox.lss.common.store.LodStoreService s,
+                                           byte[] frame, int usize) {
+        var codec = dev.vox.lss.common.store.StoreCodec.zstdOrNull();
+        if (codec == null) {
+            s.diagnostics().recordError();
+            s.diagnostics().recordMiss();
+            return null;
+        }
+        try {
+            return translateLegacyRawOrThrow(codec.decompress(frame, usize));
+        } catch (Throwable t) {
+            s.diagnostics().recordError();
+            s.diagnostics().recordMiss();
+            return null;
+        }
+    }
+
+    /** Translate native raw bytes to v20; null = contained errored miss. */
+    private byte[] translateLegacyRaw(dev.vox.lss.common.store.LodStoreService s,
+                                      byte[] nativeRaw) {
+        try {
+            return translateLegacyRawOrThrow(nativeRaw);
+        } catch (Throwable t) {
+            s.diagnostics().recordError();
+            s.diagnostics().recordMiss();
+            return null;
+        }
+    }
+
+    private byte[] translateLegacyRawOrThrow(byte[] nativeRaw) {
+        var translator = this.storeLegacyTranslator;
+        if (translator == null) {
+            // Unwired translator (test rigs) + a 19-row: never leak native bytes into
+            // the v20 pipeline — the errored miss is the safe reading.
+            throw new IllegalStateException("no store legacy translator wired for a"
+                    + " wirefmt=19 row");
+        }
+        return translator.apply(nativeRaw);
     }
 
     private void readAndDeliver(UUID playerUuid, int chunkX, int chunkZ, String dimension,

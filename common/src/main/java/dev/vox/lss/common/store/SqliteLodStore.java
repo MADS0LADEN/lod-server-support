@@ -90,6 +90,13 @@ public final class SqliteLodStore implements LodStoreService {
     // dispatch against legacyContentHashFnv); a Phase-2-era store drops there via
     // metaMatches (meta wire 19 != 20) — no shipped v0.9.x store ever sees this shape.
     static final int SCHEMA_VERSION = 4;
+    /** The table-structure generation metaMatches pins (C4): "wirefmt" = every lods_*
+     *  table carries the wirefmt column. */
+    static final String STORE_LAYOUT = "wirefmt";
+    /** The row body format constants (C4, XVER §5): 19 = native-layout (pre-migration
+     *  v0.9.x rows), 20 = the canonical v20 dictionary layout. */
+    static final int WIREFMT_NATIVE_19 = 19;
+    static final int WIREFMT_V20 = 20;
     private static final String DB_FILE = "store.db";
     private static final int PAGE_SIZE = 16384;
     private static final int WRITE_TXN_ROWS = 64;
@@ -296,6 +303,7 @@ public final class SqliteLodStore implements LodStoreService {
     private void openOrRecreateWriter() throws Exception {
         try {
             openWriter();
+            maybeLazyUpgradeFromV19();
             if (!metaMatches()) {
                 LSSLogger.info("LOD store: schema/wire/version drift — dropping and"
                         + " rebuilding the store (derived data, never migrated)");
@@ -352,13 +360,75 @@ public final class SqliteLodStore implements LodStoreService {
         this.writer.commit();
     }
 
-    private boolean metaMatches() throws SQLException {
+    private Map<String, String> readMetaMap() throws SQLException {
         Map<String, String> meta = new HashMap<>();
         try (Statement st = this.writer.createStatement();
              ResultSet rs = st.executeQuery("SELECT k, v FROM meta")) {
             while (rs.next()) meta.put(rs.getString(1), rs.getString(2));
         }
+        return meta;
+    }
+
+    /**
+     * The C4 lazy schema 3→4 upgrade (XVER §5.1): fires ONLY from the exact released
+     * v0.9.x state — {@code schema_version=3 ∧ wire_format_version=19} with matching
+     * mc/codec/fingerprint — and upgrades IN PLACE: ALTER each {@code lods_*} table
+     * {@code ADD COLUMN wirefmt INTEGER NOT NULL DEFAULT 19} (existing rows ARE
+     * native-layout), then stamp meta {@code 4 ∧ 20 ∧ store_layout} in the SAME
+     * writer transaction (autocommit is off; {@code writeMeta}'s commit lands the
+     * ALTERs and the stamp together). Stamping is IMMEDIATE (the §5.1 review MAJOR:
+     * {@code metaMatches} is an equality compare, so a stamp-on-completion scheme
+     * drops the multi-GB store on the first post-upgrade restart) — migration
+     * COMPLETION is tracked by the rows' own {@code wirefmt} values, never the
+     * version keys. Any OTHER from-state (dev-era metas, ≤18, foreign fingerprint)
+     * returns untouched and falls through to {@code metaMatches} → drop-and-rebuild;
+     * any THROW here reaches {@code openOrRecreateWriter}'s catch → drop-and-rebuild
+     * (the {@code pragma table_info} probe makes a half-applied ALTER re-entrant,
+     * but the drop is the simpler contract and the fallback is always legal on
+     * derived data).
+     */
+    private void maybeLazyUpgradeFromV19() throws SQLException {
+        Map<String, String> meta = readMetaMap();
+        if (!"3".equals(meta.get("schema_version"))
+                || !"19".equals(meta.get("wire_format_version"))
+                || !this.env.mcVersion().equals(meta.get("mc_version"))
+                || !StoreCodec.NAME.equals(meta.get("codec"))
+                || !this.env.registryFingerprint().equals(meta.get("registry_fingerprint"))) {
+            return;
+        }
+        LSSLogger.info("LOD store: lazy-upgrading the v0.9.x store in place (schema 3 → 4)"
+                + " — existing rows tagged wirefmt=19, translated on serve, migrated in"
+                + " the background (never a blocking rewrite)");
+        try (Statement st = this.writer.createStatement()) {
+            for (int dimId : this.dimIds.values()) {
+                if (!tableHasColumn("lods_" + dimId, "wirefmt")) {
+                    st.execute("ALTER TABLE lods_" + dimId
+                            + " ADD COLUMN wirefmt INTEGER NOT NULL DEFAULT "
+                            + WIREFMT_NATIVE_19);
+                }
+            }
+        }
+        writeMeta();
+    }
+
+    /** {@code pragma table_info} presence probe (SQLite has no ADD COLUMN IF NOT
+     *  EXISTS). */
+    private boolean tableHasColumn(String table, String column) throws SQLException {
+        try (Statement st = this.writer.createStatement();
+             ResultSet rs = st.executeQuery("PRAGMA table_info(" + table + ")")) {
+            while (rs.next()) {
+                if (column.equals(rs.getString("name"))) return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean metaMatches() throws SQLException {
+        Map<String, String> meta = readMetaMap();
         return String.valueOf(SCHEMA_VERSION).equals(meta.get("schema_version"))
+                // The structural guard (C4): a dev-window store with this schema+wire
+                // but no wirefmt column carries no store_layout key → drop-and-rebuild.
+                && STORE_LAYOUT.equals(meta.get("store_layout"))
                 && String.valueOf(this.env.wireVersion()).equals(meta.get("wire_format_version"))
                 && this.env.mcVersion().equals(meta.get("mc_version"))
                 && StoreCodec.NAME.equals(meta.get("codec"))
@@ -380,6 +450,11 @@ public final class SqliteLodStore implements LodStoreService {
                     "wire_format_version", String.valueOf(this.env.wireVersion()),
                     "mc_version", this.env.mcVersion(),
                     "codec", StoreCodec.NAME,
+                    // Structural layout key (C4 mega-plan): metaMatches compares meta
+                    // only, never table structure — a C1..C3-era dev store (meta 4∧20,
+                    // NO wirefmt column) would otherwise open "valid" and latch dead at
+                    // WRITE_FAILURE_LATCH on the first wirefmt INSERT.
+                    "store_layout", STORE_LAYOUT,
                     "registry_fingerprint", this.env.registryFingerprint()).entrySet()) {
                 ps.setString(1, e.getKey());
                 ps.setString(2, e.getValue());
@@ -465,27 +540,32 @@ public final class SqliteLodStore implements LodStoreService {
             Connection c = readerConnection();
             if (c == null) return null;
             PreparedStatement ps = readerStatement(c, dimId, READER_STMT_GET,
-                    "SELECT ts, chash, usize, blob FROM lods_" + dimId + " WHERE pos=?");
+                    "SELECT ts, chash, usize, wirefmt, blob FROM lods_" + dimId + " WHERE pos=?");
             ps.setLong(1, packed);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) return null;
                 long ts = rs.getLong(1);
                 long chash = rs.getLong(2);
                 int usize = rs.getInt(3);
-                if (usize == 0) return new StoreHit(EMPTY, ts);
+                int wirefmt = rs.getInt(4);
+                if (usize == 0) return new StoreHit(EMPTY, ts, wirefmt);
                 if (usize < 0 || usize > MAX_ROW_USIZE) {
                     // Bound the alloc BEFORE trusting the row's own size field — a
                     // bit-rotted usize otherwise allocates whatever it says (R1).
                     throw new IllegalStateException("row integrity failure at " + packed
                             + " (usize " + usize + " out of bounds)");
                 }
-                byte[] blob = rs.getBytes(4);
+                byte[] blob = rs.getBytes(5);
                 byte[] raw = this.codec.decompress(blob, usize);
-                if (raw.length != usize || contentHash(raw) != chash) {
+                // Per-row hash dispatch (C4): pre-migration 19-rows were written under
+                // FNV-1a 64 (schema 3); everything else validates under CRC32C.
+                long expect = wirefmt == WIREFMT_NATIVE_19
+                        ? LodStoreService.legacyContentHashFnv(raw) : contentHash(raw);
+                if (raw.length != usize || expect != chash) {
                     throw new IllegalStateException("row integrity failure at " + packed
                             + " (usize/chash mismatch)");
                 }
-                return new StoreHit(raw, ts);
+                return new StoreHit(raw, ts, wirefmt);
             }
         } catch (Throwable t) {
             invalidateReaderStatement(dimId, READER_STMT_GET);
@@ -527,25 +607,29 @@ public final class SqliteLodStore implements LodStoreService {
             Connection c = readerConnection();
             if (c == null) return null;
             PreparedStatement ps = readerStatement(c, dimId, READER_STMT_GET_FRAME,
-                    "SELECT ts, fhash, usize, blob FROM lods_" + dimId + " WHERE pos=?");
+                    "SELECT ts, fhash, usize, wirefmt, blob FROM lods_" + dimId + " WHERE pos=?");
             ps.setLong(1, packed);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) return null;
                 long ts = rs.getLong(1);
                 long fhash = rs.getLong(2);
                 int usize = rs.getInt(3);
-                if (usize == 0) return new FrameHit(EMPTY, 0, ts);
+                int wirefmt = rs.getInt(4);
+                if (usize == 0) return new FrameHit(EMPTY, 0, ts, wirefmt);
                 if (usize < 0 || usize > MAX_ROW_USIZE) {
                     throw new IllegalStateException("row integrity failure at " + packed
                             + " (usize " + usize + " out of bounds)");
                 }
-                byte[] blob = rs.getBytes(4);
-                if (contentHash(blob) != fhash
+                byte[] blob = rs.getBytes(5);
+                // Per-row hash dispatch (C4) — see get().
+                long expect = wirefmt == WIREFMT_NATIVE_19
+                        ? LodStoreService.legacyContentHashFnv(blob) : contentHash(blob);
+                if (expect != fhash
                         || this.codec.declaredContentSize(blob) != usize) {
                     throw new IllegalStateException("row integrity failure at " + packed
                             + " (fhash/declared-size mismatch)");
                 }
-                return new FrameHit(blob, usize, ts);
+                return new FrameHit(blob, usize, ts, wirefmt);
             }
         } catch (Throwable t) {
             invalidateReaderStatement(dimId, READER_STMT_GET_FRAME);
@@ -1177,11 +1261,16 @@ public final class SqliteLodStore implements LodStoreService {
         PreparedStatement insert = this.insertByDim.get(dep.dim());
         if (insert == null) {
             insert = this.writer.prepareStatement("INSERT INTO lods_" + dimId
-                    + " (pos, ts, chash, usize, src_stamp, fhash, blob) VALUES (?,?,?,?,?,?,?)"
+                    + " (pos, ts, chash, usize, src_stamp, fhash, wirefmt, blob)"
+                    + " VALUES (?,?,?,?,?,?,20,?)"
                     + " ON CONFLICT(pos) DO UPDATE SET ts=excluded.ts,"
                     + " chash=excluded.chash, usize=excluded.usize,"
                     + " src_stamp=excluded.src_stamp, fhash=excluded.fhash,"
-                    + " blob=excluded.blob"
+                    // wirefmt flips to 20 WITH the row (C4 mega-plan pin §3.1): a
+                    // re-deposit over an unmigrated 19-row that left the tag would
+                    // carry CRC hashes under an FNV dispatch — purged as corrupt on
+                    // its next hit.
+                    + " wirefmt=excluded.wirefmt, blob=excluded.blob"
                     + " WHERE excluded.ts >= ts");
             this.insertByDim.put(dep.dim(), insert);
         }
@@ -1255,7 +1344,11 @@ public final class SqliteLodStore implements LodStoreService {
             st.execute("CREATE TABLE IF NOT EXISTS lods_" + next + " ("
                     + "pos INTEGER PRIMARY KEY, ts INTEGER NOT NULL, chash INTEGER NOT NULL,"
                     + " usize INTEGER NOT NULL, src_stamp INTEGER NOT NULL,"
-                    + " fhash INTEGER NOT NULL, blob BLOB NOT NULL)");
+                    // wirefmt (C4, XVER §5.1): the row's body format — every fresh
+                    // deposit writes 20; DEFAULT 19 exists only on the lazy-upgrade
+                    // ALTER (existing v0.9.x rows ARE native-layout).
+                    + " fhash INTEGER NOT NULL, wirefmt INTEGER NOT NULL DEFAULT 20,"
+                    + " blob BLOB NOT NULL)");
             // ts index (review A2): eviction's ORDER BY ts and the sweep's index-only
             // key scan both need it — without it each is a full scan of the blob pages.
             st.execute("CREATE INDEX IF NOT EXISTS lods_" + next + "_ts ON lods_"

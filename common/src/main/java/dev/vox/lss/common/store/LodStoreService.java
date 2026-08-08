@@ -39,14 +39,26 @@ package dev.vox.lss.common.store;
 public interface LodStoreService {
 
     /** A store hit: wire-format section bytes ({@code length == 0} = all-air) plus the
-     *  stored column timestamp. */
-    record StoreHit(byte[] sectionBytes, long columnTimestamp) {}
+     *  stored column timestamp. {@code wirefmt} (C4, XVER §5): the row's body format —
+     *  20 = the canonical v20 dictionary layout; 19 = a pre-migration native-layout row
+     *  (the lazy-upgraded v0.9.x store), which the serve rung must translate to v20
+     *  before it enters the pipeline (raw() == v20 is a C2 invariant). */
+    record StoreHit(byte[] sectionBytes, long columnTimestamp, int wirefmt) {
+        public StoreHit(byte[] sectionBytes, long columnTimestamp) {
+            this(sectionBytes, columnTimestamp, 20);
+        }
+    }
 
     /** A frame-form store hit (protocol 19 verbatim serving —
      *  compressed-columns-implementation-plan.md §3): the stored zstd frame, its
      *  validated uncompressed size, and the stored column timestamp.
-     *  {@code usize == 0} = all-air ({@code frame} is empty). */
-    record FrameHit(byte[] frame, int usize, long columnTimestamp) {}
+     *  {@code usize == 0} = all-air ({@code frame} is empty). {@code wirefmt}: see
+     *  {@link StoreHit} — a 19 row's decompressed body is NATIVE layout. */
+    record FrameHit(byte[] frame, int usize, long columnTimestamp, int wirefmt) {
+        public FrameHit(byte[] frame, int usize, long columnTimestamp) {
+            this(frame, usize, columnTimestamp, 20);
+        }
+    }
 
     /** The store's content hash (CRC32C since schema v4, zero-extended into the 64-bit
      *  hash columns): {@code chash} over raw bytes, {@code fhash} over the compressed
