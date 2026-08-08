@@ -101,6 +101,64 @@ class StoreFrameServingRungTest {
         r.shutdown();
     }
 
+    // ---- C4: pre-migration wirefmt=19 rows translate at the rung ----
+
+    @Test
+    void nineteenRowFrameHitDeliversTheTranslatedRawBody() {
+        // raw()==v20 is a C2 pipeline invariant: a 19-row's native body must translate
+        // HERE and deliver as RAW bytes (recompressed per recipient downstream), never
+        // ship the stored frame verbatim.
+        var r = reader(true);
+        var store = new StubStore();
+        byte[] nativeRaw = new byte[2048];
+        for (int i = 0; i < nativeRaw.length; i++) nativeRaw[i] = (byte) i;
+        store.frameAnswer = new LodStoreService.FrameHit(
+                codec.compress(nativeRaw), nativeRaw.length, 777L, 19);
+        byte[] marker = new byte[]{0x42};
+        r.setStoreLegacyTranslator(raw -> {
+            byte[] out = new byte[raw.length + 1];
+            out[0] = marker[0];
+            System.arraycopy(raw, 0, out, 1, raw.length);
+            return out;
+        });
+        r.attachStore(store);
+
+        r.submitRead(PLAYER, 3, -4, DIM, 1L, () -> {
+            throw new AssertionError("the NBT operation must not run on a 19-row hit");
+        });
+        var result = awaitResult(r);
+
+        assertTrue(result.fromStore());
+        assertNull(result.frameBytes(), "a translated 19-row delivers RAW, never the stored frame");
+        assertEquals(nativeRaw.length + 1, result.sectionBytes().length);
+        assertEquals(0x42, result.sectionBytes()[0], "the translated body, not the native one");
+        assertEquals(777L, result.columnTimestamp());
+        assertEquals(result.sectionBytes().length
+                        + dev.vox.lss.common.LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                result.estimatedBytes(),
+                "the charge re-derives from the TRANSLATED body (law A2's denomination)");
+        r.shutdown();
+    }
+
+    @Test
+    void nineteenRowWithoutAWiredTranslatorReadsAsAnErroredMiss() {
+        // Never leak native bytes into the v20 pipeline: unwired translator (test rigs,
+        // a broken platform wire-up) = contained errored miss, the NBT ladder serves.
+        var r = reader(true);
+        var store = new StubStore();
+        byte[] nativeRaw = new byte[512];
+        store.frameAnswer = new LodStoreService.FrameHit(
+                codec.compress(nativeRaw), nativeRaw.length, 5L, 19);
+        r.attachStore(store);
+
+        r.submitRead(PLAYER, 1, 1, DIM, 1L, () -> new byte[]{9});
+        var result = awaitResult(r);
+        assertFalse(result.fromStore(), "the 19-row must not serve untranslated");
+        assertArrayEquals(new byte[]{9}, result.sectionBytes(), "the NBT ladder serves truth");
+        assertTrue(store.diag.getErrors() > 0, "counted store.errors");
+        r.shutdown();
+    }
+
     @Test
     void frameAllAirKeepsTheRawRungShape() {
         var r = reader(true);
