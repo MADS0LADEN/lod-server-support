@@ -177,9 +177,15 @@ class ReleaseWorkflowContractTest {
         // build.yml is shared in spirit across lines; keeping the branches filter identical
         // on main makes the recurring main→support merges conflict-free and ensures a
         // support branch pushed before its own build.yml edit still gets CI.
-        long hits = Pattern.compile(Pattern.quote("branches: [main, 'support/**']"))
+        // 'feat/protocol-20' rides the filter for the v0.10.0 C-phase (C1-C5 land on
+        // that integration branch — PRs into it must build like main; C1 shipped on
+        // local-gauntlet evidence alone before this). Drop it from the filter AND this
+        // pin together when the integration branch merges at C6.
+        long hits = Pattern.compile(
+                        Pattern.quote("branches: [main, 'support/**', 'feat/protocol-20']"))
                 .matcher(buildYml).results().count();
         assertEquals(2, hits,
-                "build.yml must keep branches: [main, 'support/**'] on push AND pull_request");
+                "build.yml must keep branches: [main, 'support/**', 'feat/protocol-20']"
+                        + " on push AND pull_request");
     }
 }
