@@ -552,7 +552,14 @@ python3 "$PROJECT_ROOT/scripts/soak_report.py" "$RUN_RESULTS_DIR" > "$RUN_RESULT
 
 # Step 15: Run the checker — its exit code is this script's exit code
 echo "[soak] Running checker..."
-if python3 "$PROJECT_ROOT/scripts/check_soak.py" "$RUN_RESULTS_DIR" "$SCENARIO"; then
+# C6 negotiated-protocol assertion: every soak asserts the session's established
+# dialect — SOAK_DIALECT when the lever is armed, else the native protocol read from
+# LSSConstants. A lever run that silently degraded to another rung (e.g. 19 falling
+# to the v16 fallback) used to PASS on format-blind laws; now it reds session-version.
+NATIVE_PROTOCOL=$(grep -oE 'int PROTOCOL_VERSION = [0-9]+' \
+    "$PROJECT_ROOT/common/src/main/java/dev/vox/lss/common/LSSConstants.java" | grep -oE '[0-9]+')
+if python3 "$PROJECT_ROOT/scripts/check_soak.py" "$RUN_RESULTS_DIR" "$SCENARIO" \
+    --expect-session-version "${SOAK_DIALECT:-${NATIVE_PROTOCOL:-20}}"; then
     echo "[soak] PASS: $SCENARIO — results in $RUN_RESULTS_DIR"
 else
     code=$?

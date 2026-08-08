@@ -56,6 +56,11 @@ public class LSSClientNetworking {
         return sessionGate.isServerEnabled();
     }
 
+    /** C6 observability: the established session's protocol version (0 pre-config). */
+    public static int getSessionVersion() {
+        return sessionGate.getSessionVersion();
+    }
+
     public static boolean hasReceivedSessionConfig() {
         return sessionGate.hasReceivedSessionConfig();
     }

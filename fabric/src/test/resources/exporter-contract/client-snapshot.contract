@@ -32,5 +32,6 @@ scan.rate_gated=long
 scan.ring=int
 send_cycles=long
 server_enabled=boolean
+session_version=int
 tracker_in_flight=int
 wire_received_bytes=long

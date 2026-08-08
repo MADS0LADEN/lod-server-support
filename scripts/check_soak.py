@@ -86,6 +86,10 @@ ANOMALY_OPT_INS = {
     "store-offline-populate": frozenset({"saturated"}),
     "store-offline-mutate": frozenset(),
     "store-offline-verify": frozenset({"saturated"}),
+    # C6 store-migration variant: a carried v0.9.x-downgraded store, warm 19-row serves
+    # through the inverse translator while the background walk migrates — same
+    # load-shaped opt-in as the other store rejoin legs.
+    "store-migration-join": frozenset({"saturated"}),
     "store-save-storm": frozenset({"saturated"}),
     "store-save-storm-off": frozenset({"saturated"}),
     "dimension-rejoin-warm": frozenset({"saturated"}),
@@ -126,6 +130,7 @@ MIN_CLIENT_WINDOWS = {
     "store-offline-populate": {(1, 0): 4},
     "store-offline-mutate": {(1, 0): 3},
     "store-offline-verify": {(1, 0): 4},
+    "store-migration-join": {(1, 0): 4},
     "store-save-storm": {(1, 0): 4, (1, 1): 4},
     "store-save-storm-off": {(1, 0): 4},
     "dimension-rejoin-warm": {(1, 0): 2, (1, 1): 5, (2, 0): 3, (2, 1): 3},
@@ -354,11 +359,16 @@ KNOWN_CLIENT_KEYS = {
     # wire_received_bytes: shipped (codec-1 frame) volume next to the raw-denominated
     # received_bytes (compressed columns, protocol 19) — presence-optional like the
     # other late additions.
+    # session_version: the ESTABLISHED session's protocol version (0 pre-config) — the
+    # C6 negotiated-protocol observability (C3 review m8/m11); presence-optional for old
+    # recordings, ASSERTED via --expect-session-version (soak.sh always passes it, so a
+    # dialect-lever run that silently degraded to another rung reds instead of passing
+    # format-blind laws on the wrong dialect).
     "snapshot": {"event", "wallMs", "dimension", "received_columns", "received_bytes",
                  "dropped", "responses", "requested_total", "send_cycles", "columns",
                  "scan", "tracker_in_flight", "queued", "queued_bytes", "server_enabled",
                  "probes", "effective_lod", "rtt", "ingest_failures",
-                 "wire_received_bytes"},
+                 "wire_received_bytes", "session_version"},
     # One scripted client-side action (-Dlss.soak.clientActionAt); resets the request
     # metrics, so the loader treats it as a client segment boundary.
     "action": {"event", "wallMs", "action", "atSeconds"},
@@ -498,6 +508,40 @@ def client_run_completion_violations(run_name, snaps):
         return [Violation("run-completion", run_name,
                           "no disconnect event — client died mid-run (uncontrolled exit)", {})]
     return []
+
+
+def session_version_violations(run_name, snaps, expected):
+    """The negotiated-dialect assertion (C6, C3 review m8/m11): every client row that has
+    ESTABLISHED a session (session_version != 0) must carry the expected version, and at
+    least one row in the run must have established one at all — otherwise a client that
+    never completed its handshake ladder would pass the assertion vacuously. Rows missing
+    the key entirely (a pre-C6 client jar) are a violation too: the caller explicitly
+    asked for the assertion, and an old jar cannot carry it. Shared by run_checker and
+    the selftest."""
+    if expected is None:
+        return []
+    out = []
+    established = 0
+    for i, s in enumerate(snaps):
+        if s.get("event") not in ("snapshot", "disconnect"):
+            continue
+        if "session_version" not in s:
+            return [Violation("session-version", run_name,
+                              "rows lack session_version — the client jar predates the "
+                              "C6 observability field, cannot assert the dialect", {})]
+        v = s["session_version"]
+        if v != 0:
+            established += 1
+            if v != expected:
+                out.append(Violation("session-version", run_name,
+                                     f"row {i}: established session_version {v} != expected "
+                                     f"{expected} — the session degraded to another rung",
+                                     {"row": i, "got": v, "expected": expected}))
+    if not out and established == 0:
+        out.append(Violation("session-version", run_name,
+                             f"no row ever established a session (expected {expected}) — "
+                             "the assertion would be vacuous", {}))
+    return out
 
 
 # ------------------------------------------------------------------------- quiescence
@@ -1975,6 +2019,57 @@ def make_store_second_join(scenario):
 check_store_second_join = make_store_second_join("store-second-join")
 
 
+@named_check("store-migration-join", ["client.received_columns", "server.store.hits",
+                                      "server.store.errors", "server.disk.submitted"])
+def check_store_migration_join(ctx):
+    """The C6 store-migration variant (XVER §9): the staged store was DOWNGRADED to the
+    released v0.9.x shape at SERVER_STARTING (schema 3, FNV hashes, native bodies), the
+    boot ran the REAL lazy 3->4 upgrade, and this cold-cache join must be served warm
+    from 19-rows through the inverse translator WHILE the background walk migrates.
+    store.hits carries the warm serve (a wrong downgrade or a broken rung FNV-fails or
+    errors out -> zero hits); disk stays nearly still; store.errors must be exactly 0
+    (every serve validates the rewritten hashes -- one corrupt row = one error).
+    Migration COMPLETION is asserted by the wrapper (store_migration_gate.sh) from the
+    server log; snapshots carry no walk gauge."""
+    snaps = ctx.runs.get(1)
+    if not snaps:
+        yield Violation("store-migration-join", "run1", "no client snapshots", {})
+        return
+    final_cli = snaps[-1]
+    recv = final_cli.get("received_columns", 0)
+    if recv < 500:
+        yield Violation("store-migration-join", "run1",
+                        "the cold-cache join never downloaded the disc -- nothing for the "
+                        "19-row rung to serve", {"expected": ">= 500", "actual": recv})
+        return
+    srv_final = ctx.server_snaps[-1] if ctx.server_snaps else None
+    if srv_final is None:
+        yield Violation("store-migration-join", "server series", "no server snapshots", {})
+        return
+    hits = get_path(srv_final, "store.hits")
+    if hits < 800:
+        yield Violation("store-migration-join", "warm serve",
+                        "the downgraded store did not serve the join -- the 19-row rung "
+                        "(or the lazy upgrade that precedes it) is broken",
+                        {"expected": ">= 800 store hits", "actual": hits})
+    disk = get_path(srv_final, "disk.submitted")
+    ceiling = max(200, int(0.25 * recv))
+    if disk > ceiling:
+        yield Violation("store-migration-join", "warm serve",
+                        "the join re-read region files -- 19-rows are not intercepting",
+                        {"disk.submitted": disk, "ceiling": ceiling})
+    errors = get_path(srv_final, "store.errors")
+    if errors:
+        yield Violation("store-migration-join", "whole run",
+                        "contained store failures fired -- on this scenario every one is "
+                        "a downgrade/translation/hash defect, never noise",
+                        {"store.errors": errors})
+    if ctx.server_snaps and (len(ctx.server_snaps) - 1) not in ctx.quiescent_server:
+        yield Violation("store-migration-join", "final snapshot",
+                        "last server snapshot is not verified-quiescent",
+                        {"wallMs": ctx.server_snaps[-1]["wallMs"]})
+
+
 @named_check("paper-store-unfired-event", ["server.store.hits", "server.store.errors",
                                            "server.store.deposits", "client.received_columns"])
 def check_paper_store_unfired_event(ctx):
@@ -2578,6 +2673,11 @@ CHECKS = {
     "store-second-join": [check_store_second_join,
                           make_handshake_check("store-second-join"),
                           make_disc_completeness("store-second-join")],
+    # C6 store-migration variant (XVER §9): downgraded-store warm join while the
+    # background walk migrates; migration completion asserted by the wrapper.
+    "store-migration-join": [check_store_migration_join,
+                             make_handshake_check("store-migration-join"),
+                             make_disc_completeness("store-migration-join")],
     # store_offline_edit.sh phases: each individually law-checked; the cross-phase
     # probe-hash comparison (edited differs, control identical) lives in the wrapper.
     "store-offline-populate": [check_store_offline_populate,
@@ -2788,7 +2888,7 @@ def check_global_schema(server_snaps, runs, violations):
     return ok
 
 
-def run_checker(results_dir, scenario):
+def run_checker(results_dir, scenario, expect_session_version=None):
     violations, warnings = [], []
     unknown_keys, unknown_events = set(), set()
 
@@ -2813,6 +2913,8 @@ def run_checker(results_dir, scenario):
             violations.append(Violation("input", run_path.name, "zero snapshot rows", {}))
         else:
             violations.extend(client_run_completion_violations(run_path.name, snaps))
+            violations.extend(session_version_violations(run_path.name, snaps,
+                                                         expect_session_version))
         runs[n] = snaps
         run_actions[n] = actions
     for extra in sorted(results_dir.glob("client-run*.jsonl")):
@@ -3968,6 +4070,28 @@ def selftest():
     assert validate_config_overrides({"xrayHiddenBlocks": [1, 2]}), \
         "config allowlist: non-string list entries must be rejected"
 
+    # ---- session-version assertion (C6 negotiated-protocol observability) ----
+    sv_rows = [{"event": "snapshot", "session_version": 0},
+               {"event": "snapshot", "session_version": 19},
+               {"event": "disconnect", "session_version": 19}]
+    clean("session-version: pre-config 0 rows + established 19 under expect 19",
+          session_version_violations("client-run1.jsonl", sv_rows, 19))
+    clean("session-version: expectation None is a no-op on any rows",
+          session_version_violations("client-run1.jsonl",
+                                     [{"event": "snapshot"}], None))
+    hits("session-version: a 16 row under expect 19 (the silent-degrade shape)",
+         session_version_violations("client-run1.jsonl",
+                                    [{"event": "snapshot", "session_version": 16}], 19),
+         "session-version")
+    hits("session-version: all rows 0 under an expectation is vacuous, must red",
+         session_version_violations("client-run1.jsonl",
+                                    [{"event": "snapshot", "session_version": 0}], 19),
+         "session-version")
+    hits("session-version: rows lacking the key under an expectation (pre-C6 jar)",
+         session_version_violations("client-run1.jsonl",
+                                    [{"event": "snapshot"}], 19),
+         "session-version")
+
     print(f"selftest OK: {cases[0]} cases — every law (A1-A7, B2), the quiescence "
           f"predicate (server pair AND client mirror), disc completeness, window floors, "
           f"the config allowlist, action "
@@ -3983,6 +4107,9 @@ def main(argv=None):
     parser.add_argument("--validate", metavar="SCENARIO",
                         help="pre-flight validation of a scenario (no results needed)")
     parser.add_argument("--selftest", action="store_true", help="run in-memory law selftest")
+    parser.add_argument("--expect-session-version", type=int, default=None,
+                        metavar="N", help="assert every established client session is "
+                        "protocol N (soak.sh passes SOAK_DIALECT or the native version)")
     parser.add_argument("args", nargs="*", metavar="RESULTS_DIR SCENARIO",
                         help="results directory and scenario name")
     opts = parser.parse_args(argv)
@@ -4005,7 +4132,7 @@ def main(argv=None):
     if not results_dir.is_dir():
         print(f"FAIL: results dir not found: {results_dir}")
         return 1
-    return run_checker(results_dir, scenario)
+    return run_checker(results_dir, scenario, opts.expect_session_version)
 
 
 if __name__ == "__main__":

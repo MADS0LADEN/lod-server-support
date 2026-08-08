@@ -77,6 +77,14 @@ final class ClientSessionGate {
     /** The ESTABLISHED session's protocol version (0 = none) — the downgrade guard's
      *  reference and the re-announce value. */
     private volatile int sessionVersion = 0;
+
+    /** The ESTABLISHED session's protocol version (0 before any SessionConfig accept) —
+     *  the C6 negotiated-protocol observability read (soak snapshot `session_version`):
+     *  a dialect-lever soak that silently degraded to another rung becomes visible
+     *  instead of passing format-blind laws on the wrong dialect. */
+    int getSessionVersion() {
+        return this.sessionVersion;
+    }
     private volatile boolean isV16Server = false;
 
     private volatile boolean serverEnabled = false;
