@@ -2816,8 +2816,22 @@ def validate_scenario(name):
     return errors
 
 
+SCENARIO_TOP_LEVEL_KEYS = frozenset({
+    "snapshotIntervalSeconds", "joinTimeoutSeconds", "steps", "end",
+    # C6 store-migration variant: the SERVER_STARTING downgrade flag. Allowlisted
+    # (review m10) so a typo'd key reds validation instead of silently skipping the
+    # downgrade and measuring an ordinary v20 store — the same hole the config-override
+    # allowlist exists to close (the R4 lesson).
+    "downgradeStoreToV19",
+})
+
+
 def validate_timeline(scen):
     errors = []
+    for key in scen:
+        if key not in SCENARIO_TOP_LEVEL_KEYS:
+            errors.append(f"unknown scenario key '{key}' (allowed: "
+                          f"{sorted(SCENARIO_TOP_LEVEL_KEYS)})")
     for key, lo, hi in (("snapshotIntervalSeconds", 1, 300), ("joinTimeoutSeconds", 1, 3600)):
         v = scen.get(key)
         if not isinstance(v, int) or isinstance(v, bool) or not (lo <= v <= hi):

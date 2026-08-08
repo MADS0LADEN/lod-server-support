@@ -73,13 +73,17 @@ public class PaperWorldHandler {
         }
     }
 
+    /** Hoisted (C6 review m8, the ADMISSION_TRACE pattern): read once, not per event
+     *  on the main/region thread in the release jar. */
+    private static final boolean DIRTY_TRACE = Boolean.getBoolean("lss.soak.dirtyTrace");
+
     private void handleUpdateEvent(Event event) {
         // Dirty-mark trace (-Dlss.soak.dirtyTrace, SOAK_DIRTY_TRACE=true on soak.sh):
         // names every mark-driving event + its extracted shape. Diagnostic that found
         // the 2026-08-08 unfired-event premise breaker in ONE run (world-gen pack
         // sheep grazing near spawn — EntityChangeBlockEvent/BlockSpreadEvent cycle);
         // off by default, costs one Boolean read per event.
-        if (Boolean.getBoolean("lss.soak.dirtyTrace")) {
+        if (DIRTY_TRACE) {
             dev.vox.lss.common.LSSLogger.info("[dirty-trace] " + event.getClass().getSimpleName()
                     + " " + describeForTrace(event));
         }

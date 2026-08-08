@@ -560,9 +560,15 @@ echo "[soak] Running checker..."
 # LSSConstants. A lever run that silently degraded to another rung (e.g. 19 falling
 # to the v16 fallback) used to PASS on format-blind laws; now it reds session-version.
 NATIVE_PROTOCOL=$(grep -oE 'int PROTOCOL_VERSION = [0-9]+' \
-    "$PROJECT_ROOT/common/src/main/java/dev/vox/lss/common/LSSConstants.java" | grep -oE '[0-9]+')
+    "$PROJECT_ROOT/common/src/main/java/dev/vox/lss/common/LSSConstants.java" | grep -oE '[0-9]+' || true)
+if [[ -z "$NATIVE_PROTOCOL" ]]; then
+    # Loud, not a silent fallback (C6 review m1): under set -e a failed grep used to
+    # abort the script AFTER the whole run with an opaque exit and no verdict.
+    echo "[soak] ERROR: cannot read PROTOCOL_VERSION from LSSConstants.java — fix the grep"
+    exit 1
+fi
 if python3 "$PROJECT_ROOT/scripts/check_soak.py" "$RUN_RESULTS_DIR" "$SCENARIO" \
-    --expect-session-version "${SOAK_DIALECT:-${NATIVE_PROTOCOL:-20}}"; then
+    --expect-session-version "${SOAK_DIALECT:-$NATIVE_PROTOCOL}"; then
     echo "[soak] PASS: $SCENARIO — results in $RUN_RESULTS_DIR"
 else
     code=$?

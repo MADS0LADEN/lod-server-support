@@ -57,6 +57,7 @@ class XverLiveCorpusDecodeTest {
         biomeIds = biomeTable.idsByIdentity();
         blockRegistrySize = IdentityTables.blockIdentities().length;
         biomeRegistrySize = biomeTable.identities().length;
+        biomeIdentityByIdCache = biomeTable.identities();
     }
 
     private static Path corpusDir() {
@@ -118,6 +119,64 @@ class XverLiveCorpusDecodeTest {
                     WireSectionCursor.Layout.NATIVE);
             assertEquals(column.sections().size(), nativeColumn.sections().size(),
                     fixture + ": section structure must survive the decode");
+
+            // Identity-level content + count shorts (C6 review M-2): a packed-index
+            // remap off-by-one produces the same section count and the same resolver
+            // call set — only comparing the IDENTITY AT EVERY VOXEL catches it. The
+            // v20 side reads identities through the dictionary; the native side maps
+            // the decoded global ids back through this line's own tables.
+            var dict = column.dictionary();
+            String[] blockIdentities = IdentityTables.blockIdentities();
+            for (int i = 0; i < column.sections().size(); i++) {
+                var sv = column.sections().get(i);
+                var sn = nativeColumn.sections().get(i);
+                String at = fixture + " section " + i;
+                assertEquals(sv.sectionY(), sn.sectionY(), at);
+                assertEquals(sv.nonEmptyBlockCount(), sn.nonEmptyBlockCount(),
+                        at + ": nonEmptyBlockCount must pass through the decode");
+                assertEquals(sv.fluidCount(), sn.fluidCount(),
+                        at + ": fluidCount must pass through the decode");
+                int[] v20Blocks = resolvedValues(sv.blocks(), 4096);
+                int[] nativeBlocks = resolvedValues(sn.blocks(), 4096);
+                for (int v = 0; v < 4096; v++) {
+                    String want = dict.get(v20Blocks[v]);
+                    String got = blockIdentities[nativeBlocks[v]];
+                    if (!want.equals(got)) {
+                        throw new AssertionError(at + " voxel " + v + ": v20 identity '"
+                                + want + "' decoded to '" + got + "'");
+                    }
+                }
+                int[] v20Biomes = resolvedValues(sv.biomes(), 64);
+                int[] nativeBiomes = resolvedValues(sn.biomes(), 64);
+                for (int v = 0; v < 64; v++) {
+                    String want = dict.get(v20Biomes[v]);
+                    String got = biomeIdentityByIdCache[nativeBiomes[v]];
+                    if (!want.equals(got)) {
+                        throw new AssertionError(at + " biome voxel " + v + ": '"
+                                + want + "' decoded to '" + got + "'");
+                    }
+                }
+            }
         }
+    }
+
+    private static String[] biomeIdentityByIdCache;
+
+    /** DIRECT-aware per-voxel resolve (the CrossRegistrySimulationTest helper's twin). */
+    private static int[] resolvedValues(WireSectionCursor.WireContainer c, int entries) {
+        if (c.bits() == 0) {
+            int[] out = new int[entries];
+            java.util.Arrays.fill(out, c.palette()[0]);
+            return out;
+        }
+        int[] values = WireSectionCursor.unpack(c.data(), c.bits(), entries);
+        if (c.palette() == null) {
+            return values;
+        }
+        int[] out = new int[entries];
+        for (int i = 0; i < entries; i++) {
+            out[i] = c.palette()[values[i]];
+        }
+        return out;
     }
 }
