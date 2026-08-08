@@ -28,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class OffThreadProcessorLifecycleTest {
 
     private static final String DIM = LSSConstants.DIM_STR_OVERWORLD;
-    private static final long COLUMN_TS = 1_700_000_000L;
+    private static final long COLUMN_TS = 1_750_000_000L; // post-TS_EPOCH_SECONDS: pre-epoch stamps clamp (tile redesign §2.2)
 
     private static final class TestState extends AbstractPlayerRequestState<Object> {
         TestState(UUID uuid) { super(uuid, 4, 4); }

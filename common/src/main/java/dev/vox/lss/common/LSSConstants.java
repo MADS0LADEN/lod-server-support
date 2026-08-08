@@ -146,11 +146,18 @@ public final class LSSConstants {
      *  ServerConfigBase.effectiveTimestampCacheMB — so validate() clamps only nonzero. */
     public static final int MIN_TIMESTAMP_CACHE_SIZE_MB = 1;
     public static final int MAX_TIMESTAMP_CACHE_SIZE_MB = 512;
-    /** Approximate LIVE heap per timestamp-cache entry — mirrors
-     *  ColumnTimestampCache.HEAP_BYTES_PER_ENTRY, exposed here so the config's AUTO sizing
-     *  (ServerConfigBase.effectiveTimestampCacheMB) converts entries to MB with the same
-     *  constant the cache itself uses. A drift guard pins the two together. */
-    public static final int TIMESTAMP_CACHE_HEAP_BYTES_PER_ENTRY = 64;
+    /** The tile cache's per-COLUMN heap budget for AUTO sizing (D0,
+     *  timestamp-cache-tile-redesign.md §5: a full tile costs ~4.25 B/column, so 5 is
+     *  honest for fills of ~85% and above; at 75% fill the true figure is ~5.67 B),
+     *  used by ServerConfigBase.effectiveTimestampCacheMB. Replaced the per-entry 64 B
+     *  model when the two parallel hash maps became flat tiles; the honest-fill bound
+     *  is pinned by autoSizingPerColumnConstantCoversTheRealTileCost. */
+    public static final int TIMESTAMP_CACHE_HEAP_BYTES_PER_COLUMN = 5;
+    /** AUTO provisions this multiple of the lodDistance disc's area (D0, user decision
+     *  2026-08-08): part of the tile win is spent on COVERAGE (~5.3x the old tracked
+     *  columns) so roaming players and multi-player spread stop thrashing eviction,
+     *  rather than returning all of it as RAM. */
+    public static final double TIMESTAMP_CACHE_AUTO_COVERAGE_FACTOR = 8.0;
 
     /** Miss-memo TTL clamp (docs/planning/miss-memo-design.md): 0 disables the memo
      *  wholesale (the config kill switch). The ceiling bounds the staleness window — the

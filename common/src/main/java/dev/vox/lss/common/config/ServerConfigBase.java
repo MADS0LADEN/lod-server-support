@@ -379,15 +379,20 @@ public abstract class ServerConfigBase extends JsonConfig {
      *
      * <p>The scan is a Chebyshev (square) ring walk, so the tracked region is
      * {@code (2*(lodDistanceChunks + LOD_DISTANCE_BUFFER) + 1)^2} positions; AUTO provisions
-     * 1.5x that, which reproduces the historic hand-tuned 32 MB at the old 256-chunk distance
-     * and scales with the setting instead of silently under-provisioning when it is raised.
-     * Clamped into the same band an explicit value gets.
+     * TIMESTAMP_CACHE_AUTO_COVERAGE_FACTOR (8x) that area at the tile cache's ~5 B/column
+     * (D0 — part of the ~13x tile win is spent on coverage, so roaming and multi-player
+     * spread stop thrashing eviction; net at the default distance: ~2.5x less RAM (~30 MB
+     * -> ~12 MB) tracking ~5.3x more columns than the pre-tile 1.5x/64 B model). Clamped
+     * into the same band an
+     * explicit value gets — the 512 MB ceiling now clears distance 1024 at full coverage.
      */
     public int effectiveTimestampCacheMB() {
         if (perDimensionTimestampCacheSizeMB > 0) return perDimensionTimestampCacheSizeMB;
         long side = 2L * (lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER) + 1L;
-        long entries = (long) (side * side * 1.5);
-        long mb = entries * LSSConstants.TIMESTAMP_CACHE_HEAP_BYTES_PER_ENTRY / (1024L * 1024L);
+        long columns = (long) (side * side
+                * LSSConstants.TIMESTAMP_CACHE_AUTO_COVERAGE_FACTOR);
+        long mb = columns * LSSConstants.TIMESTAMP_CACHE_HEAP_BYTES_PER_COLUMN
+                / (1024L * 1024L);
         return (int) Math.clamp(mb, LSSConstants.MIN_TIMESTAMP_CACHE_SIZE_MB,
                 LSSConstants.MAX_TIMESTAMP_CACHE_SIZE_MB);
     }

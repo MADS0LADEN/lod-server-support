@@ -83,6 +83,47 @@ class PositionPackingTest {
         assertTrue(PositionUtil.isOutOfRange(PositionUtil.packPosition(0, -65), 0, 0, 64));
     }
 
+    // ---- D0 tile-cache region/slot math (timestamp-cache-tile-redesign.md §3) ----
+
+    @Test
+    void regionAndSlotAgreeWithAFloorDivReferenceIncludingNegativesAndExtremes() {
+        // The tile cache buckets by these two functions; a sign error on negatives
+        // splits one region's columns across two tiles (silent stamp loss on eviction).
+        int[] probes = {0, 1, 31, 32, -1, -31, -32, -33, 1000, -1000,
+                Integer.MAX_VALUE, Integer.MIN_VALUE,
+                Integer.MAX_VALUE - 31, Integer.MIN_VALUE + 31};
+        for (int cx : probes) {
+            for (int cz : probes) {
+                long packed = PositionUtil.packPosition(cx, cz);
+                long region = PositionUtil.packRegionOf(packed);
+                int slot = PositionUtil.tileSlotOf(packed);
+                int wantRx = Math.floorDiv(cx, 32);
+                int wantRz = Math.floorDiv(cz, 32);
+                assertEquals(wantRx, (int) (region >> 32), cx + "," + cz + " region x");
+                assertEquals(wantRz, (int) region, cx + "," + cz + " region z");
+                int wantSlot = Math.floorMod(cx, 32) * 32 + Math.floorMod(cz, 32);
+                assertEquals(wantSlot, slot, cx + "," + cz + " slot");
+                assertTrue(slot >= 0 && slot < 1024, cx + "," + cz + " slot bounds");
+            }
+        }
+    }
+
+    @Test
+    void everySlotOfARegionRoundTripsUniquely() {
+        // 1024 distinct slots per region, and (region, slot) recovers the column —
+        // the tile's whole addressing contract in one sweep, on a negative region.
+        var seen = new java.util.HashSet<Integer>();
+        for (int cx = -64; cx < -32; cx++) {
+            for (int cz = 32; cz < 64; cz++) {
+                long packed = PositionUtil.packPosition(cx, cz);
+                assertEquals(PositionUtil.packRegionOf(PositionUtil.packPosition(-64, 32)),
+                        PositionUtil.packRegionOf(packed), "same region");
+                assertTrue(seen.add(PositionUtil.tileSlotOf(packed)), "unique slot");
+            }
+        }
+        assertEquals(1024, seen.size());
+    }
+
     @Test
     void hostileExtremeCoordinatesCannotSlipUnderTheGate() {
         // Overflowed int math reports these as near the player (negative or wrapped-small

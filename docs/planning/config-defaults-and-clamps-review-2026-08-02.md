@@ -360,6 +360,14 @@ acceptable answers, not a correctness issue.
 around 40 MB — close to today's value, but it *tracks* the setting it depends on instead
 of silently under-provisioning when an admin raises the distance.
 
+> **Erratum (2026-08-08, D0 tile redesign):** the derivation above (and §3.3's per-entry
+> cost model) describes the retired two-map cache. Since
+> `timestamp-cache-tile-redesign.md` the AUTO formula is the scanned SQUARE disc ×
+> `TIMESTAMP_CACHE_AUTO_COVERAGE_FACTOR` (8.0) at
+> `TIMESTAMP_CACHE_HEAP_BYTES_PER_COLUMN` (5 B) — ~12 MB at distance 256, covering
+> ~5.3× the columns. That doc is the current authority for this key; the reasoning here
+> (track the distance, don't fix a number) still stands.
+
 **Not recommended for auto-config:** `generationConcurrencyLimitGlobal` from core count.
 Worldgen cost per core varies enormously with datapacks and platform, and §3.6's point
 stands — there is no MSPT gate underneath it on Fabric. A derived value would be

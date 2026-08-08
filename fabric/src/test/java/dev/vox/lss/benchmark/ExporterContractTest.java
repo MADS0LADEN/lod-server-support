@@ -427,18 +427,23 @@ class ExporterContractTest {
 
     @Test
     void timestampCacheEvictionCounterAndPerDimensionSizesTrackMutations() {
-        var cache = new ColumnTimestampCache(2, 0);
-        cache.put("d", 100L, 10L, 1L);
-        cache.put("d", 200L, 20L, 2L);
-        cache.put("d", 300L, 30L, 3L);
+        // Two-tile byte budget; the three positions land in three DIFFERENT region tiles
+        // (raw packed longs 100/200/300 are cz 100/200/300 → regions 3/6/9), so the third
+        // put oversizes the dimension by exactly one tile. Stamps are epoch-relative —
+        // pre-epoch stamps clamp to base+1 and would all read back identical.
+        long base = ColumnTimestampCache.TS_EPOCH_SECONDS;
+        var cache = new ColumnTimestampCache(2L * ColumnTimestampCache.TILE_HEAP_BYTES, 0);
+        cache.put("d", 100L, base + 10, 1L);
+        cache.put("d", 200L, base + 20, 2L);
+        cache.put("d", 300L, base + 30, 3L);
         assertEquals(Map.of("d", 3), cache.sizesPerDimension());
         assertEquals(0L, cache.getEvictionCount());
 
         assertEquals(1, cache.evictIfOversized());
         assertEquals(1L, cache.getEvictionCount(), "evictions accumulate the removed entry count");
         assertEquals(Map.of("d", 2), cache.sizesPerDimension(), "sizes reflect the post-eviction count");
-        assertEquals(0L, cache.get("d", 100L), "the oldest-inserted entry is the one evicted");
-        assertEquals(30L, cache.get("d", 300L));
+        assertEquals(0L, cache.get("d", 100L), "the oldest-touched tile is the one evicted");
+        assertEquals(base + 30, cache.get("d", 300L));
 
         cache.invalidate("d", new long[]{300L});
         assertEquals(Map.of("d", 1), cache.sizesPerDimension());

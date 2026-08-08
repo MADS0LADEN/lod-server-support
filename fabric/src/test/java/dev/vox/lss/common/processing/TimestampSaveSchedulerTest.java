@@ -56,16 +56,23 @@ class TimestampSaveSchedulerTest {
         @Override public boolean awaitTermination(long timeout, TimeUnit unit) { return true; }
     }
 
+    /** Fixture stamps are epoch-relative: the tile cache clamps pre-epoch stamps up to
+     *  {@code TS_EPOCH_SECONDS + 1} (timestamp-cache-tile-redesign.md §2.2), so a raw
+     *  100L would read back as base+1. The helpers shift on the way in and out; 0 stays
+     *  the absent sentinel. */
+    private static final long B = ColumnTimestampCache.TS_EPOCH_SECONDS;
+
     private static ColumnTimestampCache cacheWith(long pos, long ts) {
         var c = new ColumnTimestampCache(1024, 0);
-        c.put(DIM, pos, ts, 0L);
+        c.put(DIM, pos, B + ts, 0L);
         return c;
     }
 
     private static long loadedGet(Path dir, long pos) {
         var c = new ColumnTimestampCache(1024, 0);
         c.load(dir);
-        return c.get(DIM, pos);
+        long ts = c.get(DIM, pos);
+        return ts == 0 ? 0 : ts - B;
     }
 
     @Test
@@ -189,9 +196,9 @@ class TimestampSaveSchedulerTest {
         try {
             // Seed pre-start (no concurrency yet; Thread.start() publishes it).
             var cache = proc.timestampCacheForTest();
-            cache.put(DIM, 1L, 100L, 1000L);
-            cache.put(DIM, 2L, 200L, 1000L);
-            cache.put(DIM, 3L, 300L, 1000L);
+            cache.put(DIM, 1L, B + 100, 1000L);
+            cache.put(DIM, 2L, B + 200, 1000L);
+            cache.put(DIM, 3L, B + 300, 1000L);
 
             // Occupy the save worker so every scheduled drain stays observable in the queue.
             // First-ever task on a corePoolSize-1 executor: handed straight to the new
@@ -225,7 +232,7 @@ class TimestampSaveSchedulerTest {
 
             var loaded = new ColumnTimestampCache(1024, 0);
             loaded.load(tempDir);
-            assertEquals(300L, loaded.get(DIM, 3L), "the surviving entry is on disk");
+            assertEquals(B + 300, loaded.get(DIM, 3L), "the surviving entry is on disk");
             assertEquals(0L, loaded.get(DIM, 2L),
                     "the drain wrote the NEWEST snapshot (post-second-invalidation), not the first");
             assertEquals(0L, loaded.get(DIM, 1L));
