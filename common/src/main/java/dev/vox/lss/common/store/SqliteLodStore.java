@@ -1114,6 +1114,25 @@ public final class SqliteLodStore implements LodStoreService {
              PreparedStatement del = this.writer.prepareStatement(
                      "DELETE FROM lods_" + dimId + " WHERE pos=?")) {
             for (Row row : rows) {
+                if (row.usize() == 0) {
+                    // All-air row (C6 review M-1): usize 0 is the LEGITIMATE all-air
+                    // shape, not corruption — the serve path short-circuits it before
+                    // any hash/body work on both rungs, and the walk must do the same.
+                    // Bare retag; hashes are never consulted at usize 0. The C4 bound
+                    // below deliberately rejects usize <= 0 as poison — all-air must
+                    // be peeled off BEFORE it, or every End/void column of a real
+                    // v0.9.x upgrade is deleted and reported as corruption.
+                    try (PreparedStatement retag = this.writer.prepareStatement(
+                            "UPDATE lods_" + dimId + " SET wirefmt=" + WIREFMT_V20
+                                    + " WHERE pos=? AND wirefmt=" + WIREFMT_NATIVE_19)) {
+                        retag.setLong(1, row.pos());
+                        retag.executeUpdate();
+                        migrated++;
+                    } catch (Throwable rowFailure) {
+                        anomalies++;
+                    }
+                    continue;
+                }
                 try {
                     // The R1 bound, HERE too (C4 review CRITICAL-1): decompress
                     // allocates byte[usize] from the row's own size field — a

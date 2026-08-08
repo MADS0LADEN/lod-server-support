@@ -125,7 +125,11 @@ cmd_run() {
         # C6 legacy-dialect arm pair (XVER §12): SAME tree, arm variable = the client's
         # announced protocol. dialect19 exercises the server's per-recipient egress
         # translation (v20 -> native + zstd recompress) on every served column.
-        native) ;;
+        # unset, not bare (C6 review C-1, empirically proven): cmd_run is a FUNCTION,
+        # so an exported var from a prior dialect19 arm survives into native arms —
+        # 7 of 8 runs of the first c6-dialect matrix negotiated v19 and the "A/B" was
+        # an A/A. The arm-validity check below pins the announced protocol per run.
+        native) unset BENCHMARK_CLIENT_GRADLE_ARGS ;;
         dialect19) export BENCHMARK_CLIENT_GRADLE_ARGS="-Psoak.dialect=19" ;;
         base|change)
             [[ -n "$BASE_REF" ]] || die "arm '$arm' needs PROFILE_BASE_REF (ref-vs-ref mode)"
@@ -190,6 +194,19 @@ cmd_run() {
         [[ -f "$root/benchmark-results/$f" ]] && cp "$root/benchmark-results/$f" "$RUN_OUT/"
     done
 
+    # A/B validity 0 (dialect arms): the negotiated protocol IS the arm variable —
+    # assert it from the client log (C6 review C-1; no meta field carries it).
+    local dialect_ok=true
+    if [[ "$arm" == "native" || "$arm" == "dialect19" ]]; then
+        local want_proto="v20"
+        [[ "$arm" == "dialect19" ]] && want_proto="v19"
+        if ! grep -q "Server session config received (protocol ${want_proto})" \
+                "$RUN_OUT/client.log" 2>/dev/null; then
+            dialect_ok=false
+            log "ARM INVALID: $arm rep$rep did not negotiate ${want_proto} (see client.log)"
+        fi
+    fi
+
     # A/B validity 1 (io-path mode): the c2me arm must have latched the incompatible
     # fallback (warn present), every other arm must not. Ref arms run vanilla IO.
     local warn="absent"
@@ -218,7 +235,8 @@ cmd_run() {
     fi
 
     local arm_valid=true
-    { [[ "$warn_ok" == "true" ]] && [[ "$echo_ok" == "true" ]]; } || arm_valid=false
+    { [[ "$warn_ok" == "true" ]] && [[ "$echo_ok" == "true" ]] \
+        && [[ "$dialect_ok" == "true" ]]; } || arm_valid=false
 
     cat > "$RUN_OUT/meta.json" <<EOF
 {

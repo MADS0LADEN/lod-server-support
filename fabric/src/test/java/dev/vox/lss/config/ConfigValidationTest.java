@@ -39,6 +39,25 @@ class ConfigValidationTest {
         assertTrue(serverConfig().enableV19Compat);
     }
 
+    /** C6 review C-2: a null/blank ENTRY in the curated table NPEs Map.copyOf at
+     *  resolver construction — inside the decode drain, every tick, no ingest-failure
+     *  report: LOD dead for the session off one hand-edited entry. validate() must
+     *  drop such entries fail-open. */
+    @Test
+    void curatedTableNullOrBlankEntriesAreDroppedFailOpen() {
+        var c = clientConfig();
+        c.crossVersionBlockFallbacks = new java.util.HashMap<>();
+        c.crossVersionBlockFallbacks.put("ancient:sulfur", null);
+        c.crossVersionBlockFallbacks.put("", "minecraft:stone");
+        c.crossVersionBlockFallbacks.put("ok:kept", "minecraft:dirt");
+        c.validate();
+        assertEquals(java.util.Map.of("ok:kept", "minecraft:dirt"),
+                c.crossVersionBlockFallbacks,
+                "null/blank entries dropped, the valid one kept");
+        assertDoesNotThrow(() -> java.util.Map.copyOf(c.crossVersionBlockFallbacks),
+                "the resolver's Map.copyOf must be safe after validate()");
+    }
+
     /** The Via cross-MC guard ships ON (XVER §7): without it a legacy client behind
      *  Via silently receives columns it cannot decode. Fail-open by construction (no
      *  Via / no signal = unchanged), so the on-default is safe without Via installed. */

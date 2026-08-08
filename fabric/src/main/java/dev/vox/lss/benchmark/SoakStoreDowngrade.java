@@ -107,6 +107,24 @@ final class SoakStoreDowngrade {
                     st.executeUpdate("ALTER TABLE lods_" + dimId + " DROP COLUMN wirefmt");
                 }
             }
+            // Synthesize one all-air 19-row per dimension (C6 review M-1): the walk
+            // must RETAG usize-0 rows, and no populate world reliably produces one —
+            // without this the gate's zero-anomaly assertion never covers the shape
+            // that a real End/void upgrade hits on every column.
+            for (int dimId : dimIds) {
+                try (PreparedStatement ins = c.prepareStatement(
+                        "INSERT OR IGNORE INTO lods_" + dimId
+                                + " (pos, ts, chash, usize, src_stamp, fhash, blob)"
+                                + " VALUES (?, ?, 0, 0, ?, 0, ?)")) {
+                    long pos = (1_000_000L << 32) | (1_000_000L & 0xFFFFFFFFL);
+                    long now = System.currentTimeMillis() / 1000L;
+                    ins.setLong(1, pos);
+                    ins.setLong(2, now);
+                    ins.setLong(3, now);
+                    ins.setBytes(4, new byte[0]);
+                    ins.executeUpdate();
+                }
+            }
             try (Statement st = c.createStatement()) {
                 st.executeUpdate("UPDATE meta SET v='3' WHERE k='schema_version'");
                 st.executeUpdate("UPDATE meta SET v='19' WHERE k='wire_format_version'");
