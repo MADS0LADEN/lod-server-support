@@ -1,108 +1,44 @@
 ### New Features
 
-- **Cross-version LOD serving (protocol 20)** — A client and server on different
-  supported Minecraft versions can now exchange LODs: columns travel as
-  version-independent block identities and translate to whatever your client
-  runs. Supported pairs: any two of 26.2, 26.1, and 1.21.11 running v0.10.0.
-  Blocks that don't exist on your version render via a configurable fallback
-  (`unknownBlockFallback`, default stone). Older LSS clients keep working: v0.9.x
-  gets a NEW native rung (`enableV19Compat`), and v0.7.x–v0.8.x keep their
-  existing ones.
-- **Via-proxy mismatch guard** — When ViaVersion/ViaBackwards lets a client on
-  a different MC version join with an OLDER LSS installed, the server now
-  detects the mismatch and declines the LOD session cleanly instead of serving
-  columns that client would decode as garbage (a vanilla client has no LSS and
-  never starts a session). **Known hole:** when Via runs on a proxy (Velocity/Bungee)
-  in front of the server, the server cannot see the client's real version — such
-  setups should not rely on the guard.
-- **Vanilla-first transport yield** (`lodYieldsToVanillaTransport`, default
-  `false`) — When enabled, LOD sending pauses while a player's connection is
-  backed up, so LSS never deepens the queue ahead of vanilla's own chunk
-  packets. Ships off pending live validation; behind a buffering proxy the gate
-  is best-effort (it under-yields, never over-yields).
+- **Cross-version LOD serving** — a client and server on different Minecraft
+  versions can now exchange LODs: any two of 26.2, 26.1, and 1.21.11 work
+  together once both sides run v0.10.0. Older LSS clients (v0.4.x and newer)
+  keep working through the built-in compatibility layers.
+- **ViaVersion safety guard** — a client joining through ViaVersion with an
+  older LSS installed is declined cleanly instead of being sent LODs it
+  cannot decode.
 
 ### Performance
 
-- **LOD disk reads leave Minecraft's chunk-IO thread almost entirely** — On
-  Fabric's vanilla read path, LSS now only fetches raw bytes on the shared IO
-  thread; decompression and parsing run on LSS's own reader pool
-  (`useBackgroundReadSplit`, default on). This removes the main historic cause
-  of LOD serving slowing vanilla chunk loads under pressure.
-- **The background store warm-up is cheaper net-of-everything** — the perf
-  round cut the walk's parse/hash work by ~21%, the new cross-version encode
-  added roughly 17% of it back, and deposit throughput is unchanged
-  throughout: net, warming a store costs modestly less CPU than v0.9.x.
-- **Selective chunk parsing (Fabric)** — disk serves now materialize only the
-  chunk data LOD serving needs, cutting the targeted allocation-churn classes
-  roughly in half on the read path. (Net per-column allocation is still higher
-  than v0.9.x — the cross-version format costs more than the parsing saved;
-  see the cost item below.)
-- **The freshness cache tracks ~13× more terrain per MB** — its default (auto)
-  sizing now uses ~2.5× less RAM while remembering ~5× more columns, so large
-  view distances and roaming players stop thrashing it. Existing cache files
-  migrate automatically at first boot.
-- **The honest cost of cross-version columns** — Encoding version-independent
-  identities makes serving a cold column cost roughly 12–16% more CPU than
-  v0.9.x (composed from the separately measured arms; it was ~18% before a
-  follow-up optimization) with per-column allocation and wire/store bytes
-  ~10% higher. Warm store serves and backfill throughput are unaffected. This
-  buys the entire cross-version feature.
-- **Store rows are integrity-hashed with CRC32C** (hardware-accelerated),
-  replacing a slower software hash on the store's write path.
+- **LOD serving interferes less with normal chunk loading** — LOD disk reads
+  now stay almost entirely off Minecraft's own chunk-loading path (Fabric),
+  and chunk parsing is leaner.
+- **The freshness cache tracks far more terrain in the same memory** — large
+  LOD distances no longer thrash it; existing caches upgrade automatically.
 
 ### Configuration
 
-- **Bigger defaults out of the box** — the default LOD distance rises from 256
-  to 512 chunks, and the default generation concurrency caps rise to 40
-  server-wide / 40 per player. Existing config files keep their values.
-- **The LOD store is on for new servers** (`lodStore: "on"` in freshly
-  generated configs; the old `"full"` spelling still works and means the
-  same). Repeat requests are served from `<world>/lss-lod/` for a fraction of
-  the CPU and disk work — the tradeoff is that a fully warmed store roughly
-  doubles your world folder, bounded by `lodStoreMaxMB` if you set one.
-  **Upgrading never changes your disk footprint:** an existing config file
-  without the `lodStore` key keeps the store off (and files that say `"off"`
-  stay off) — enable it with `lodStore: "on"`.
-- **Bandwidth caps are now set in MiB/s, with raised defaults** —
-  `mbPerSecondLimitPerPlayer` (default `25.0`, was 15 MiB/s) and
-  `mbPerSecondLimitGlobal` (default `75.0`, was 60 MiB/s) replace the
-  byte-denominated keys, and decimals like `12.5` work. Old config files keep
-  working: the old keys are still honored (the new ones win if both are
-  present) and migrate to the new keys on the next start.
-- **A slimmer generated config** — the expert rollback switches
-  (`useCompressedColumns`, `useBackgroundReadPriority`, `useBackgroundReadSplit`,
-  `useNbtTranscode`, `useSelectiveNbtParse`; all default on) no longer appear
-  in generated config files, but remain honored if you add them.
-- **`lodYieldsToVanillaTransport`** (server, default `false`) — the transport
-  yield above.
-- **`enableV19Compat`** (server, default `true`) — serve v0.9.x clients natively
-  on their own wire format.
-- **`enableViaMismatchGuard`** (server, default `true`) — the Via guard above.
-- **`unknownBlockFallback`** (client, default `"minecraft:stone"`) and
-  **`crossVersionBlockFallbacks`** (client, default empty) — what a
-  cross-version column renders when a block has no local equivalent, globally
-  and per-block.
-- **`perDimensionTimestampCacheSizeMB`** keeps its `0` = auto default, but auto
-  now derives from the new tile layout (~2.5× less RAM for ~5× the coverage at
-  the same setting).
-
-### Store
-
-- **One-time background migration** — On first boot, existing LOD store rows
-  migrate to the cross-version format in a paced background walk (this is a
-  migration, NOT a rebuild: nothing is re-read from region files, and serving
-  continues meanwhile). Store rows grow ~10% with the new format; if you run a
-  `lodStoreMaxMB` cap, the same cap now holds ~10% fewer columns (evicted
-  columns re-warm on demand, as always).
-- A modded block/biome registry change still drops and rebuilds the store (the
-  fingerprint guard) — migration never runs on drifted registries.
+- **Bigger defaults** — LOD distance defaults to 512 chunks (was 256), and
+  generation concurrency to 40 server-wide / 40 per player.
+- **Bandwidth caps are now set in MiB/s** — `mbPerSecondLimitPerPlayer`
+  (default `25.0`) and `mbPerSecondLimitGlobal` (default `75.0`) replace the
+  old byte-denominated keys; decimals like `12.5` work, and old config files
+  keep working unchanged.
+- **The LOD store is on for new servers** — freshly generated configs enable
+  it (`lodStore: "on"`): repeat requests are served from a per-world store for
+  a fraction of the work, at the cost of roughly doubling the world folder
+  once warmed (`lodStoreMaxMB` bounds it). Upgrading never changes your disk
+  footprint: an existing config without the key keeps the store off until you
+  enable it.
+- **A slimmer generated config** — rarely-needed expert switches no longer
+  appear in generated files, but remain honored if you add them.
 
 ### Notes
 
+- An existing LOD store upgrades in place on first boot via a background pass
+  — no rebuild, and serving continues meanwhile.
+- Folia support remains **experimental** (single-player validation only).
 - This is the MC 1.21.11 build of the v0.10.0 tri-release: all three lines (26.2,
   26.1, 1.21.11) ship the same mod at the same feature level, differing only in
   Minecraft bindings. Cross-version LOD serving works between any two of them
   once both sides run v0.10.0.
-
-- Folia support remains **experimental** (single-player soak validated;
-  concurrent multi-region ingress untested).
