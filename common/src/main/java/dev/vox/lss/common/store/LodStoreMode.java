@@ -18,9 +18,12 @@ import java.util.Locale;
  * Phase 2 A/B had already deleted it from {@code full} mode for costing +14.6% CPU/col
  * to save 5 µs against a 2.4 ms NBT path.
  *
- * <p>Unknown values normalize to {@link #OFF} — the SAFE value (unlike
- * {@code xrayObfuscation}'s normalize-to-auto, this one is deliberately safe-biased: a
- * typo must never enable a storage engine). Pinned by {@code LodStoreModeTest}.
+ * <p>Since the 2026-08-08 config rework (user decision) the store is ON BY DEFAULT and
+ * {@code "on"} is the canonical spelling of {@link #FULL} ({@code "full"} stays accepted
+ * forever). Unknown values still normalize to {@link #OFF} with the same rationale as
+ * before, direction-adjusted: a typo now silently DISABLES a default feature rather
+ * than silently enabling a storage engine — predictable either way, and the boot's
+ * config echo names the effective mode. Pinned by {@code LodStoreModeTest}.
  */
 public enum LodStoreMode {
     OFF, MEMORY, FULL;
@@ -30,13 +33,14 @@ public enum LodStoreMode {
         return switch (value.trim().toLowerCase(Locale.ROOT)) {
             // NOTE: no "memory" case — see the MEMORY javadoc. A config that still says
             // "memory" lands on OFF and validate() rewrites the file to "off".
-            case "full" -> FULL;
+            case "full", "on" -> FULL;
             default -> OFF;
         };
     }
 
-    /** The canonical config-file spelling. */
+    /** The canonical config-file spelling ({@code FULL} writes back as {@code "on"} —
+     *  the 2026-08-08 rework's user-facing name; {@code "full"} remains a read alias). */
     public String configValue() {
-        return name().toLowerCase(Locale.ROOT);
+        return this == FULL ? "on" : name().toLowerCase(Locale.ROOT);
     }
 }

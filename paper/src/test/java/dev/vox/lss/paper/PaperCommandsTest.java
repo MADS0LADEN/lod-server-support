@@ -218,7 +218,7 @@ class PaperCommandsTest {
         assertTrue(run(commands(service, config), "diag"));
 
         assertEquals("=== LSS LOD Diagnostics ===", messages.get(0));
-        assertTrue(messages.get(1).startsWith("Config: enabled=false, lodDist=256, bw/player="),
+        assertTrue(messages.get(1).startsWith("Config: enabled=false, lodDist=512, bw/player="),
                 "the Config line must render the disabled flag and the config values: " + messages.get(1));
         assertTrue(messages.stream().anyMatch(m -> m.equals("Xray: active=off, masked_sections=0")),
                 "no active mask manager renders the off xray line: " + messages);

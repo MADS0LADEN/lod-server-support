@@ -95,23 +95,20 @@ class PaperConfigValidationTest {
         assertEquals(0, c.outboundBufferCeilingKB, "0 stays 0 — it is the off switch");
     }
 
-    /** The store is OPT-IN on every platform (user decision, 2026-08-03): it briefly
-     *  defaulted to "full" during v0.9.0 development and was reverted before release,
-     *  because an upgrade must never silently double the size of an operator's world
-     *  folder. Paper inherits that default with no Folia-specific override any more — the
-     *  shared default already is the safe one, and the override was leaky besides (a Paper
-     *  run persisted lodStore=full into the file, so carrying that folder to Folia armed
-     *  the store anyway).
+    /** The store is ON BY DEFAULT on every platform (user decision, 2026-08-08 config
+     *  rework, superseding the 2026-08-03 opt-in decision; "on" is canonical, "full" a
+     *  permanent read alias). Paper inherits the shared default with no Folia-specific
+     *  override — on Folia validate() WARNS about the armed store instead (the pin
+     *  below), since Folia support is experimental wholesale.
      *
-     *  <p>lodStoreBackfill stays ON, and that pairing is the point: it is inert while the
-     *  store is off, so flipping the single lodStore key to "full" gets the background
-     *  warm-up too rather than leaving a second switch to discover. */
+     *  <p>lodStoreBackfill stays ON, and that pairing is the point: the default
+     *  experience is the whole feature, and lodStore=off still disables both. */
     @Test
-    void lodStoreIsOptInWhileBackfillStaysArmedForWhenItIsEnabled() {
+    void lodStoreDefaultsOnWithBackfillArmed() {
         var c = new PaperConfig();
-        assertEquals("off", c.lodStore, "the store must be opt-in — never a silent 2x world folder");
+        assertEquals("on", c.lodStore, "the store ships on-by-default (2026-08-08 user decision)");
         assertTrue(c.lodStoreBackfill,
-                "backfill stays on so ONE key enables the whole feature; it is inert while off");
+                "backfill stays on so the default experience is the whole feature");
     }
 
     /** Paper inherits the shared yield default: unarmed until the live E3 A/B (§4). */
@@ -140,11 +137,9 @@ class PaperConfigValidationTest {
     private static final Map<String, Bounds> SHARED_BOUNDS = Map.ofEntries(
             Map.entry("lodDistanceChunks",
                     new Bounds(LSSConstants.MIN_LOD_DISTANCE, LSSConstants.MAX_LOD_DISTANCE)),
-            Map.entry("bytesPerSecondLimitPerPlayer",
-                    new Bounds(LSSConstants.MIN_BYTES_PER_SECOND, LSSConstants.MAX_BYTES_PER_SECOND_PER_PLAYER)),
-            Map.entry("bytesPerSecondLimitGlobal",
-                    new Bounds(LSSConstants.MIN_BYTES_PER_SECOND,
-                            Math.toIntExact(LSSConstants.MAX_BYTES_PER_SECOND_GLOBAL_LIMIT))),
+            // The bandwidth pair left the int table with the 2026-08-08 rename: the visible
+            // knobs are the mb DOUBLES (their exact-bounds sweep is the dedicated arm below)
+            // and the legacy byte ints are re-sentineling readers, not clamped fields.
             Map.entry("generationConcurrencyLimitGlobal",
                     new Bounds(LSSConstants.MIN_CONCURRENT_GENERATIONS, LSSConstants.MAX_CONCURRENT_GENERATIONS)),
             Map.entry("generationTimeoutSeconds",
@@ -188,7 +183,11 @@ class PaperConfigValidationTest {
         // none has fixed both-ends bounds, so a table-driven sweep cannot express them. Named
         // tests in the Fabric twin cover all three.
         var derived = java.util.Set.of("diskReaderThreads", "perDimensionTimestampCacheSizeMB",
-                "generationConcurrencyLimitPerPlayer");
+                "generationConcurrencyLimitPerPlayer",
+                // The 2026-08-08 bandwidth rename: the mb doubles have their own exact-bounds
+                // arm below; the legacy byte ints re-sentinel instead of clamping (also below).
+                "mbPerSecondLimitPerPlayer", "mbPerSecondLimitGlobal",
+                "bytesPerSecondLimitPerPlayer", "bytesPerSecondLimitGlobal");
         List<Field> fields = Arrays.stream(PaperConfig.class.getFields())
                 .filter(f -> !Modifier.isStatic(f.getModifiers()))
                 .filter(f -> f.getType().isPrimitive() && f.getType() != boolean.class)
@@ -222,8 +221,41 @@ class PaperConfigValidationTest {
         }
     }
 
+    /** The mb bandwidth doubles' exact-bounds arm (the 2026-08-08 rename twin of the old
+     *  bytesPerSecond table rows): the byte bands re-denominated, THROUGH the Paper subclass. */
+    @Test
+    void mbBandwidthFieldsClampToExactSharedBoundsAtBothEnds() {
+        double mb = 1024.0 * 1024.0;
 
-    /** Compiled Paper defaults must already sit inside the clamp ranges: validate() may not move them. */
+        PaperConfig c = new PaperConfig();
+        c.mbPerSecondLimitPerPlayer = 0.0000001;
+        c.validate();
+        assertEquals(LSSConstants.MIN_BYTES_PER_SECOND / mb, c.mbPerSecondLimitPerPlayer);
+        c.mbPerSecondLimitPerPlayer = Double.MAX_VALUE;
+        c.validate();
+        assertEquals(LSSConstants.MAX_BYTES_PER_SECOND_PER_PLAYER / mb, c.mbPerSecondLimitPerPlayer);
+
+        c.mbPerSecondLimitGlobal = 0.0000001;
+        c.validate();
+        assertEquals(LSSConstants.MIN_BYTES_PER_SECOND / mb, c.mbPerSecondLimitGlobal);
+        c.mbPerSecondLimitGlobal = Double.MAX_VALUE;
+        c.validate();
+        assertEquals(LSSConstants.MAX_BYTES_PER_SECOND_GLOBAL_LIMIT / mb, c.mbPerSecondLimitGlobal);
+
+        // The legacy byte spellings resolve into the mb keys and re-sentinel — never clamp in place.
+        PaperConfig legacy = new PaperConfig();
+        legacy.bytesPerSecondLimitPerPlayer = 10_485_760;
+        legacy.bytesPerSecondLimitGlobal = Integer.MAX_VALUE;
+        legacy.validate();
+        assertEquals(10_485_760, legacy.bytesPerSecondPerPlayer(), "legacy value honored exactly");
+        assertEquals(1_073_741_824, legacy.bytesPerSecondGlobal(), "legacy value rides the same clamp");
+        assertEquals(-1, legacy.bytesPerSecondLimitPerPlayer, "re-sentineled after resolution");
+        assertEquals(-1, legacy.bytesPerSecondLimitGlobal);
+    }
+
+    /** Compiled Paper defaults must already sit inside the clamp ranges: validate() may not
+     *  move them — except the bandwidth sentinels, which resolve to the real defaults by
+     *  design (the Fabric twin pins the same exception). */
     @Test
     void defaultsSurviveValidateUnchangedIncludingUpdateEvents() throws Exception {
         PaperConfig validated = new PaperConfig();
@@ -231,9 +263,12 @@ class PaperConfigValidationTest {
         PaperConfig pristine = new PaperConfig();
         for (Field f : PaperConfig.class.getFields()) {
             if (Modifier.isStatic(f.getModifiers())) continue;
+            if (f.getName().startsWith("mbPerSecondLimit")) continue; // sentinel -> resolved
             assertEquals(f.get(pristine), f.get(validated),
                     "default for " + f.getName() + " is outside its clamp range");
         }
+        assertEquals(15.0, validated.mbPerSecondLimitPerPlayer);
+        assertEquals(60.0, validated.mbPerSecondLimitGlobal);
     }
 
     /**

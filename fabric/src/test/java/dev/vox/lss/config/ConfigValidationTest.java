@@ -78,21 +78,48 @@ class ConfigValidationTest {
         assertEquals(2048, c.lodDistanceChunks);
     }
 
+    private static final double MB = 1024.0 * 1024.0;
+
     @Test
-    void bytesPerSecondLimitPerPlayerClamped() {
+    void mbPerSecondLimitPerPlayerClamped() {
+        // Since the 2026-08-08 rework the visible knob is decimal MiB/s; the clamp band is
+        // the old byte band re-denominated, so nothing an admin could type before is newly
+        // rejected. A fresh (unvalidated) field is the -1 sentinel, so every arm here sets
+        // the mb field DIRECTLY — the sentinel/legacy resolution has its own tests below.
         var c = serverConfig();
-        c.bytesPerSecondLimitPerPlayer = 100;
+        c.mbPerSecondLimitPerPlayer = 0.0000001; // below the 1 KiB/s byte floor
         c.validate();
-        assertEquals(1024, c.bytesPerSecondLimitPerPlayer);
+        assertEquals(LSSConstants.MIN_BYTES_PER_SECOND / MB, c.mbPerSecondLimitPerPlayer);
+        assertEquals(LSSConstants.MIN_BYTES_PER_SECOND, c.bytesPerSecondPerPlayer());
 
         // Ceiling raised 100 MB -> 1 GiB 2026-08-02 (config review §5): the live server hit
         // the old one exactly. The DEFAULT is untouched — this bounds only what an admin types.
+        c.mbPerSecondLimitPerPlayer = 200.0;
+        c.validate();
+        assertEquals(200.0, c.mbPerSecondLimitPerPlayer, "200 MiB/s is inside the band");
+        assertEquals(209_715_200, c.bytesPerSecondPerPlayer());
+        c.mbPerSecondLimitPerPlayer = 999_999.0;
+        c.validate();
+        assertEquals(LSSConstants.MAX_BYTES_PER_SECOND_PER_PLAYER / MB, c.mbPerSecondLimitPerPlayer);
+        assertEquals(LSSConstants.MAX_BYTES_PER_SECOND_PER_PLAYER, c.bytesPerSecondPerPlayer());
+    }
+
+    /** The legacy byte-denominated key must ride the SAME clamp band after conversion —
+     *  an old file's out-of-range value lands exactly where it always did. */
+    @Test
+    void legacyBytesPerSecondKeyRidesTheSameClampAfterConversion() {
+        var c = serverConfig();
+        c.bytesPerSecondLimitPerPlayer = 100; // below the 1 KiB/s floor, legacy spelling
+        c.validate();
+        assertEquals(LSSConstants.MIN_BYTES_PER_SECOND, c.bytesPerSecondPerPlayer());
+        assertEquals(-1, c.bytesPerSecondLimitPerPlayer,
+                "the legacy field is re-sentineled after resolution (it never persists)");
+
+        c = serverConfig();
         c.bytesPerSecondLimitPerPlayer = 200_000_000;
         c.validate();
-        assertEquals(200_000_000, c.bytesPerSecondLimitPerPlayer, "200 MB is now inside the band");
-        c.bytesPerSecondLimitPerPlayer = Integer.MAX_VALUE;
-        c.validate();
-        assertEquals(LSSConstants.MAX_BYTES_PER_SECOND_PER_PLAYER, c.bytesPerSecondLimitPerPlayer);
+        assertEquals(200_000_000, c.bytesPerSecondPerPlayer(),
+                "an in-band legacy value must be honored EXACTLY (int/2^20 is exact in double)");
     }
 
     @Test
@@ -152,15 +179,24 @@ class ConfigValidationTest {
     }
 
     @Test
-    void bytesPerSecondLimitGlobalClamped() {
+    void mbPerSecondLimitGlobalClamped() {
         var c = serverConfig();
-        c.bytesPerSecondLimitGlobal = 100;
+        c.mbPerSecondLimitGlobal = 0.0000001;
         c.validate();
-        assertEquals(1024, c.bytesPerSecondLimitGlobal);
+        assertEquals(LSSConstants.MIN_BYTES_PER_SECOND / MB, c.mbPerSecondLimitGlobal);
+        assertEquals(LSSConstants.MIN_BYTES_PER_SECOND, c.bytesPerSecondGlobal());
 
+        c.mbPerSecondLimitGlobal = 2_000_000.0;
+        c.validate();
+        assertEquals(LSSConstants.MAX_BYTES_PER_SECOND_GLOBAL_LIMIT / MB, c.mbPerSecondLimitGlobal);
+        assertEquals(1_073_741_824, c.bytesPerSecondGlobal());
+
+        // Legacy spelling, same band after conversion.
+        c = serverConfig();
         c.bytesPerSecondLimitGlobal = 2_000_000_000;
         c.validate();
-        assertEquals(1_073_741_824, c.bytesPerSecondLimitGlobal);
+        assertEquals(1_073_741_824, c.bytesPerSecondGlobal());
+        assertEquals(-1, c.bytesPerSecondLimitGlobal, "re-sentineled after resolution");
     }
 
     @Test
@@ -269,22 +305,41 @@ class ConfigValidationTest {
         assertEquals(77, c.effectiveTimestampCacheMB(), "an explicit value always wins");
     }
 
-    /** The LOD store is OPT-IN on every platform (user decision, 2026-08-03). It briefly
-     *  defaulted to "full" during v0.9.0 development; that was reverted before release
-     *  because an upgrade must never silently double the size of an operator's world
-     *  folder — that is not a cost someone can consent to without reading the notes, and
-     *  a full disk is not cheap to undo. The docs recommend enabling it instead.
+    /** The LOD store is ON BY DEFAULT (user decision, 2026-08-08 config rework — it
+     *  supersedes the 2026-08-03 opt-in decision now that the store has a released
+     *  record; "on" is the canonical spelling, "full" a permanent read alias). The
+     *  disk cost is documented in the README instead of gated behind an opt-in;
+     *  lodStore=off remains the one-key opt-out.
      *
-     *  <p>lodStoreBackfill stays ON deliberately: it is inert while the store is off, so
-     *  the only thing it decides is what an operator gets when they DO opt in, and they
-     *  should get the whole feature from the one key rather than find a second switch
-     *  later. Pinning both together is what keeps that one-switch property true. */
+     *  <p>lodStoreBackfill stays ON so the DEFAULT experience is the whole feature —
+     *  warm serves from the first join, not only after organic traffic — and turning
+     *  the store off still disables both with the one key. */
     @Test
-    void lodStoreIsOptInWhileBackfillStaysArmedForWhenItIsEnabled() {
-        assertEquals("off", serverConfig().lodStore,
-                "the store must be opt-in — never a silent 2x world folder on upgrade");
+    void lodStoreDefaultsOnWithBackfillArmed() {
+        assertEquals("on", serverConfig().lodStore,
+                "the store ships on-by-default (2026-08-08 user decision)");
         assertTrue(serverConfig().lodStoreBackfill,
-                "backfill stays on so ONE key enables the whole feature; it is inert while off");
+                "backfill stays on so the default experience is the whole feature");
+    }
+
+    /** "on" is canonical on disk; "full" (the pre-rework spelling) must stay accepted
+     *  forever and normalize to "on" — an existing file must not change behavior. An
+     *  unknown word still lands on "off": a typo now silently DISABLES a default
+     *  feature rather than silently arming a storage engine. */
+    @Test
+    void lodStoreOnIsCanonicalAndFullIsAPermanentAlias() {
+        var c = serverConfig();
+        c.lodStore = "full";
+        c.validate();
+        assertEquals("on", c.lodStore, "'full' must normalize to the canonical 'on'");
+
+        c.lodStore = "ON";
+        c.validate();
+        assertEquals("on", c.lodStore);
+
+        c.lodStore = "garbage";
+        c.validate();
+        assertEquals("off", c.lodStore, "unknown values disable, never arm");
     }
 
     /** The cap-behavior user decision (store-cap-behavior-plan.md §1): the store ships
@@ -430,11 +485,41 @@ class ConfigValidationTest {
      * even from int extremes. Auto-catches future fields added without a clamp — the named
      * tests above pin the exact bounds, this pins that bounds exist at all.
      */
+    // The bandwidth pair's SENTINEL fields (config rework 2026-08-08): the legacy int
+    // spellings always re-sentinel to -1 in validate(), and the mb doubles treat any
+    // negative as "not in the file". The sweep handles each specially below.
+    private static final List<String> LEGACY_BANDWIDTH_FIELDS =
+            List.of("bytesPerSecondLimitPerPlayer", "bytesPerSecondLimitGlobal");
+
     @Test
     void everyNumericServerFieldClampedAtIntExtremes() throws Exception {
         for (Field f : numericServerConfigFields()) {
+            if (f.getType() == double.class) {
+                // The mb bandwidth fields: a negative extreme is read as the sentinel and
+                // resolves to the default; a positive extreme must clamp into the byte band.
+                var c = serverConfig();
+                f.setDouble(c, -Double.MAX_VALUE);
+                c.validate();
+                assertTrue(f.getDouble(c) >= LSSConstants.MIN_BYTES_PER_SECOND / MB,
+                        f.getName() + " not resolved/clamped up from a negative extreme");
+                f.setDouble(c, Double.MAX_VALUE);
+                c.validate();
+                assertTrue(f.getDouble(c) <= LSSConstants.MAX_BYTES_PER_SECOND_GLOBAL_LIMIT / MB,
+                        f.getName() + " not clamped down from Double.MAX_VALUE");
+                continue;
+            }
             assertEquals(int.class, f.getType(),
                     f.getName() + ": extend the clamp sweep for non-int numeric fields");
+
+            if (LEGACY_BANDWIDTH_FIELDS.contains(f.getName())) {
+                // Hidden legacy spellings: the post-validate contract is "folded into the
+                // mb key and re-sentineled", not a clamp on the field itself.
+                var c = serverConfig();
+                f.setInt(c, Integer.MAX_VALUE);
+                c.validate();
+                assertEquals(-1, f.getInt(c), f.getName() + " must re-sentinel after resolution");
+                continue;
+            }
 
             var c = serverConfig();
             f.setInt(c, Integer.MIN_VALUE);
@@ -462,7 +547,10 @@ class ConfigValidationTest {
         }
     }
 
-    /** Compiled defaults must already sit inside their clamp ranges: validate() may not move them. */
+    /** Compiled defaults must already sit inside their clamp ranges: validate() may not
+     *  move them — EXCEPT the bandwidth sentinels, whose whole design is that validate()
+     *  resolves -1 into the real defaults (asserted exactly). A second validate() must
+     *  then be a fixed point, so the resolution never churns the file. */
     @Test
     void defaultsSurviveValidateUnchanged() throws Exception {
         var validated = serverConfig();
@@ -470,8 +558,20 @@ class ConfigValidationTest {
         var pristine = serverConfig();
         for (Field f : LSSServerConfig.class.getFields()) {
             if (Modifier.isStatic(f.getModifiers())) continue;
+            if (f.getName().startsWith("mbPerSecondLimit")) continue; // sentinel -> resolved, below
             assertEquals(f.get(pristine), f.get(validated),
                     "default for " + f.getName() + " is outside its clamp range");
+        }
+        assertEquals(15.0, validated.mbPerSecondLimitPerPlayer, "sentinel resolves to the 15 MiB/s default");
+        assertEquals(60.0, validated.mbPerSecondLimitGlobal, "sentinel resolves to the 60 MiB/s default");
+
+        var again = serverConfig();
+        again.validate();
+        again.validate();
+        for (Field f : LSSServerConfig.class.getFields()) {
+            if (Modifier.isStatic(f.getModifiers())) continue;
+            assertEquals(f.get(validated), f.get(again),
+                    "validate() must be idempotent for " + f.getName());
         }
     }
 

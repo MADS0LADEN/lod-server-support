@@ -148,7 +148,7 @@ public class LSSClientGameTests implements FabricClientGameTest {
             }
 
             // C5: Bandwidth is bounded
-            long maxExpectedBytes = (long) LSSServerConfig.CONFIG.bytesPerSecondLimitPerPlayer * 15;
+            long maxExpectedBytes = (long) LSSServerConfig.CONFIG.bytesPerSecondPerPlayer() * 15;
             if (LSSClientNetworking.getBytesReceived() > maxExpectedBytes) {
                 throw new AssertionError("Bytes received exceeds bandwidth budget: "
                         + LSSClientNetworking.getBytesReceived() + " > " + maxExpectedBytes);

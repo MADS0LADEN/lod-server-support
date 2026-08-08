@@ -18,6 +18,46 @@ import java.nio.file.StandardCopyOption;
 public abstract class JsonConfig {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
+    /**
+     * Marks a config field as HONORED-BUT-HIDDEN: {@link #load} still deserializes it
+     * from files that carry it (and {@link #validate} may fold it into visible state),
+     * but {@link #save} writes it ONLY while its value differs from the compiled
+     * default — so the key never appears in a freshly generated file and a
+     * default-valued key disappears on the next write-back, yet an admin's explicit
+     * override survives every re-save instead of being honored for exactly one boot.
+     * Two uses (config rework 2026-08-08): expert rollback switches that only add
+     * noise to the default file (non-default = written back), and RETIRED key
+     * spellings kept as silent readers for old files (validate() folds them into the
+     * successor key and re-sentinels them to the default, so they always drop).
+     */
+    @java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME)
+    @java.lang.annotation.Target(java.lang.annotation.ElementType.FIELD)
+    public @interface HiddenFromFile {}
+
+    /**
+     * Serializes this config for {@link #save}, dropping every {@link HiddenFromFile}
+     * field whose live value equals the compiled default (compared against a freshly
+     * constructed instance — validate() is deliberately NOT run on it, the comparison
+     * is against raw field initializers). Reflection failure keeps the keys in the
+     * file: a visible-but-hidden key is still honored on read, the safe direction.
+     */
+    private String toJsonForSave() {
+        com.google.gson.JsonObject tree = GSON.toJsonTree(this).getAsJsonObject();
+        try {
+            JsonConfig defaults = getClass().getDeclaredConstructor().newInstance();
+            for (java.lang.reflect.Field f : getClass().getFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                if (f.getAnnotation(HiddenFromFile.class) == null) continue;
+                if (java.util.Objects.equals(f.get(this), f.get(defaults))) {
+                    tree.remove(f.getName());
+                }
+            }
+        } catch (ReflectiveOperationException e) {
+            LSSLogger.warn("Config hidden-key filtering skipped (" + e + ")");
+        }
+        return GSON.toJson(tree);
+    }
+
     // Set by load(); transient so GSON neither serializes nor overwrites it.
     private transient Path configDir;
     // The filename load() actually resolved — read AND written here, so a config adopted from the
@@ -46,7 +86,7 @@ public abstract class JsonConfig {
             // every startup, so a plain truncate-then-write that crashes mid-write would leave
             // a corrupt file and every subsequent boot would silently fall back to all defaults.
             Path tmp = path.resolveSibling(name + ".tmp");
-            Files.writeString(tmp, GSON.toJson(this));
+            Files.writeString(tmp, toJsonForSave());
             try {
                 Files.move(tmp, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             } catch (AtomicMoveNotSupportedException e) {

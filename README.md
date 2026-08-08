@@ -51,45 +51,39 @@ Config is generated on first run at the paths in the install table above. The ge
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `enabled` | `true` | Enable LOD distribution |
-| `lodDistanceChunks` | `256` | Max LOD distance in chunks |
-| `bytesPerSecondLimitPerPlayer` | `15728640` | Per-player bandwidth cap (15 MiB/s), counted **before** compression |
-| `bytesPerSecondLimitGlobal` | `62914560` | Total bandwidth cap across all players (60 MiB/s), counted **before** compression |
+| `lodDistanceChunks` | `512` | Max LOD distance in chunks |
+| `mbPerSecondLimitPerPlayer` | `15.0` | Per-player bandwidth cap in MiB/s (decimals like `12.5` work), counted **before** compression |
+| `mbPerSecondLimitGlobal` | `60.0` | Total bandwidth cap across all players in MiB/s, counted **before** compression |
 | `enableChunkGeneration` | `true` | Generate missing chunks on demand, so players see terrain nobody has visited |
-| `generationConcurrencyLimitGlobal` | `32` | Max chunks generating server-wide at once |
-| `generationConcurrencyLimitPerPlayer` | `16` | Max concurrently generating chunks per player |
-| `lodStore` | `"off"` | **Recommended: set to `"full"`.** Keeps a compressed copy of every served LOD column in `<world>/lss-lod/` and serves repeat requests from it — far less CPU and disk work per chunk. Off by default only because it roughly doubles your world folder, which you should agree to rather than discover. See **Tuning** |
-| `lodStoreBackfill` | `true` | Pre-warms the store with a low-priority background walk of your existing world, so the first player to arrive already gets fast serves. Inert unless `lodStore` is on, so enabling the store gets this too. Yields to players, pauses under load, resumes across restarts. Fabric only |
+| `generationConcurrencyLimitGlobal` | `40` | Max chunks generating server-wide at once |
+| `generationConcurrencyLimitPerPlayer` | `40` | Max concurrently generating chunks per player |
+| `lodStore` | `"on"` | Keeps a compressed copy of every served LOD column in `<world>/lss-lod/` and serves repeat requests from it — far less CPU and disk work per chunk. The cost: it roughly doubles your world folder. `"off"` disables it. See **Tuning** |
+| `lodStoreBackfill` | `true` | Pre-warms the store with a low-priority background walk of your existing world, so the first player to arrive already gets fast serves. Inert unless `lodStore` is on. Yields to players, pauses under load, resumes across restarts. Fabric only |
 | `lodStoreMaxMB` | `0` | Size cap for the store. `0` = uncapped; set a value to bound it, and the oldest columns are evicted first |
-| `useCompressedColumns` | `true` | Send LOD columns pre-compressed, which cuts CPU on both server and client. Clients that do not support it are served the old format automatically; `false` disables it entirely as a rollback |
-| `useBackgroundReadPriority` | `true` | LOD disk reads yield to normal chunk loading, so streaming distant terrain doesn't delay the chunks players are actively walking into |
-| `useBackgroundReadSplit` | `true` | Fabric: LOD reads only fetch raw bytes on Minecraft's shared chunk-IO thread; decompression and parsing run on LSS's own reader threads (set `false` to restore the old single-thread behavior) |
 | `enableV16Compat` | `true` | Serve legacy v0.4.x–v0.6.x clients through a built-in translation layer. `false` requires every client to match the server's protocol |
-| `enableV18Compat` | `true` | Serve v0.7.x–v0.8.x clients natively — a full session, minus only the column compression their client predates. `false` drops them to the `enableV16Compat` fallback |
+| `enableV18Compat` | `true` | Serve v0.7.x–v0.8.x clients natively — a full session, minus only the features their client predates. `false` drops them to the `enableV16Compat` fallback |
+| `enableV19Compat` | `true` | Serve v0.9.x clients natively. `false` drops them to the `enableV16Compat` fallback |
 | `xrayObfuscation` | `"auto"` | Anti-xray masking for LOD data. `"auto"` mirrors your anti-xray engine's own hidden-block list and height cutoff whenever one is detected (Paper's built-in, per world; the DrexHD AntiXray mod on Fabric). `"on"` forces masking, `"off"` disables it — LOD data then carries real ore locations even on anti-xray servers |
 | `xrayHiddenBlocks` / `xrayMaxBlockHeight` | ore list / `64` | Fallback list and Y cutoff, used only when no engine settings can be adopted |
 
 Masking applies to columns served after it activates — columns already cached by clients are not recalled, as with any anti-xray retrofit. Cave shapes and lighting are not hidden, matching packet-level anti-xray.
 
+Older config files keep working unchanged: the byte-denominated `bytesPerSecondLimitPerPlayer` / `bytesPerSecondLimitGlobal` keys are still honored (the `mb*` keys win if both are present) and migrate to the new keys on the next start, and `"lodStore": "full"` means the same as `"on"`.
+
 ### Tuning
 
-**Turn the LOD store on if you can spare the disk.** It is the single biggest performance win available here, and it is off by default only so that upgrading never doubles your world folder without you agreeing to it.
+**Disk: the LOD store.** It ships on because it is the biggest performance win available — repeat requests are served from `<world>/lss-lod/` for a fraction of the CPU and disk work. The cost is that a fully warmed store roughly doubles your world folder. If that's too much, `lodStoreMaxMB` bounds it (oldest columns evicted first, re-warmed on demand), or `"lodStore": "off"` disables it. It is derived data — deleting `lss-lod/` while the server is stopped is always safe.
 
-```json
-"lodStore": "full"
-```
+**CPU: the bandwidth and generation limiters.** LSS's cost is essentially how many columns per second it serves plus how many chunks it generates:
 
-That one key also enables the background warm-up. A repeat request is then answered from `<world>/lss-lod/` instead of re-reading and re-serializing the chunk: about 99% less read-and-serialize work, roughly 80% less total LSS CPU per served column, and ~29µs to serve where a disk read takes ~2ms.
+- `mbPerSecondLimitPerPlayer` / `mbPerSecondLimitGlobal` bound the serve rate. They count **uncompressed** data on purpose, so compression doesn't quietly raise the real ceiling.
+- `generationConcurrencyLimitGlobal` / `generationConcurrencyLimitPerPlayer` bound generation — by far the most expensive thing LSS can trigger, since it is worldgen. On a server exploring fresh terrain, lowering these is the single biggest saving; `enableChunkGeneration: false` removes it entirely.
 
-The cost is disk — the store grows to roughly the size of your region files, so a 10 GB world adds about 7 GB. If that is too much, `lodStoreMaxMB` bounds it (oldest columns are evicted first and re-warm on demand). It is derived data, so deleting `lss-lod/` while the server is stopped is always safe.
+Lowering either costs *speed*, not correctness: LOD fills in more slowly, nothing breaks.
 
-**To further limit CPU, use the bandwidth and generation limiters.** LSS's cost is essentially how many columns per second it serves plus how many chunks it generates, and those two families cap exactly that:
+**Old clients cost more.** Serving outdated LSS clients makes the server do extra translation work and forgoes the current protocol's efficiency wins. If everyone on your server runs a current client, setting `enableV16Compat`, `enableV18Compat`, and `enableV19Compat` to `false` can improve performance — players on old versions then simply get vanilla render distance.
 
-- `bytesPerSecondLimitPerPlayer` / `bytesPerSecondLimitGlobal` bound the serve rate. They count **uncompressed** bytes on purpose, so compression doesn't quietly raise the real ceiling.
-- `generationConcurrencyLimitGlobal` / `generationConcurrencyLimitPerPlayer` bound generation — by far the most expensive thing LSS can trigger, since it is worldgen. On a server exploring fresh terrain this dominates, and lowering it is the single biggest saving. `enableChunkGeneration: false` removes it entirely.
-
-Lowering either costs *speed*, not correctness: LOD fills in more slowly, nothing breaks. Most other settings change *how* the work is done rather than how much, so they are the wrong lever for a CPU problem.
-
-**Network compression and LOD traffic.** Vanilla deflates every packet above `network-compression-threshold` — including LSS's already-compressed column frames, which adds roughly 30% to the warm store-serve cost for almost no size win (measured; there is no per-packet opt-out in the protocol). Do **not** raise the global threshold to avoid this: your vanilla chunk-packet bandwidth pays far more for that than LSS's re-deflate costs. If the overhead matters to you, terminating compression at a proxy (e.g. Velocity) moves the deflate work off the game server entirely — with the caveat that behind such a proxy LSS's transport-yield gate is best-effort (it under-yields, never over-yields).
+**Network compression.** Vanilla deflates every packet above `network-compression-threshold`, including LSS's already-compressed column frames — measurable overhead for almost no size win. Don't raise the global threshold to avoid it (vanilla chunk bandwidth pays far more than you save); if it matters, terminate compression at a proxy like Velocity instead.
 
 ## License
 

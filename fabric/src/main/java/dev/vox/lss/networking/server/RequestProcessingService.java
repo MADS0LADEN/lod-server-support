@@ -146,7 +146,7 @@ public class RequestProcessingService {
         } else {
             this.generationService = null;
         }
-        this.bandwidthLimiter = new SharedBandwidthLimiter(config.bytesPerSecondLimitGlobal);
+        this.bandwidthLimiter = new SharedBandwidthLimiter(config.bytesPerSecondGlobal());
 
         var dataDir = server.getWorldPath(LevelResource.ROOT).resolve("data");
         this.offThreadProcessor = new FabricOffThreadProcessor(
@@ -585,7 +585,7 @@ public class RequestProcessingService {
 
     private void flushSendQueues(int activeCount, LSSServerConfig config) {
         long perPlayerAllocation = this.bandwidthLimiter.getPerPlayerAllocation(activeCount);
-        long perPlayerCap = Math.min(perPlayerAllocation, config.bytesPerSecondLimitPerPlayer);
+        long perPlayerCap = Math.min(perPlayerAllocation, config.bytesPerSecondPerPlayer());
         flushSendQueues(this.players.values(), perPlayerCap, this.bandwidthLimiter, this.diag,
                 this::sendColumnPayload, this.offThreadProcessor,
                 (long) config.outboundBufferCeilingKB * 1024L,
@@ -782,7 +782,7 @@ public class RequestProcessingService {
         if (++this.diagLogCounter >= DIAG_LOG_INTERVAL_TICKS) {
             this.diagLogCounter = 0;
             DiagnosticsFormatter.logDebugSummary(this.diag, this.getUptimeSeconds(),
-                    config.bytesPerSecondLimitGlobal, this.bandwidthLimiter, this.players.values());
+                    config.bytesPerSecondGlobal(), this.bandwidthLimiter, this.players.values());
         }
     }
 

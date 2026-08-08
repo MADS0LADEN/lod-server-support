@@ -45,18 +45,18 @@ public final class LodStores {
         var diag = new LodStoreDiagnostics();
         SqliteLodStore sqlite = SqliteLodStore.createOrNull(LodStoreMode.FULL, env, diag);
         if (sqlite == null) {
-            LSSLogger.warn("lodStore=full requested but the SQLite store is unavailable —"
+            LSSLogger.warn("lodStore=on requested but the SQLite store is unavailable —"
                     + " degrading to the in-memory store (warm joins survive kicks, not"
                     + " restarts)");
             // MEMORY, not FULL: mode() feeds the diag token, which must report what is
             // actually RUNNING (store=memory), never the configured aspiration.
             return new MemoryLodStore(LodStoreMode.MEMORY, codec, DEGRADE_MAX_BYTES, diag);
         }
-        // The store defaults ON as of 2026-08-02, so its disk cost now lands on servers that
-        // never asked for it. Say so once, at the point it becomes true, rather than leaving
-        // admins to discover a doubled world folder — a changelog line does not reach someone
-        // who upgraded through a host panel.
-        LSSLogger.info("LOD store active (lodStore=full). It stores served LOD bytes under"
+        // The store defaults ON (2026-08-08 rework), so its disk cost now lands on servers
+        // that never asked for it. Say so once, at the point it becomes true, rather than
+        // leaving admins to discover a doubled world folder — a changelog line does not
+        // reach someone who upgraded through a host panel.
+        LSSLogger.info("LOD store active (lodStore=on). It stores served LOD bytes under"
                 + " <world>/lss-lod/ and, once fully warmed, occupies roughly as much space as"
                 + " the region files themselves. It is DERIVED data — deleting lss-lod/ is"
                 + " always safe. Set lodStore=off to disable, lodStoreMaxMB to bound it.");
@@ -65,16 +65,18 @@ public final class LodStores {
 
     /**
      * One-line startup recommendation, emitted by both platforms when the store is OFF and
-     * LSS itself is enabled. The store went opt-in on 2026-08-03 (an upgrade must never
-     * silently double a world folder), which makes this line — not the default — how the
-     * feature reaches admins. Returns the message rather than logging so the decision is
-     * pinnable; callers log INFO. Null when LSS is disabled (nothing to recommend into)
-     * and on Folia — the store is unvalidated there and {@code PaperConfig.validate()}
-     * WARNS on an explicit {@code full}; recommending what we warn about is incoherent.
+     * LSS itself is enabled. The store is ON BY DEFAULT since the 2026-08-08 rework, so
+     * this line now reaches only admins who explicitly opted out (or whose file predates
+     * the rework and says "off") — it stays because the recommendation is still true for
+     * them, and it documents the disk tradeoff at the moment it matters. Returns the
+     * message rather than logging so the decision is pinnable; callers log INFO. Null when
+     * LSS is disabled (nothing to recommend into) and on Folia — the store is unvalidated
+     * there and {@code PaperConfig.validate()} WARNS on an armed store; recommending what
+     * we warn about is incoherent.
      */
     public static String offRecommendationOrNull(boolean lssEnabled, boolean isFolia) {
         if (!lssEnabled || isFolia) return null;
-        return "LOD store is off. Recommended: set \"lodStore\": \"full\" in"
+        return "LOD store is off. Recommended: set \"lodStore\": \"on\" in"
                 + " lss-server-config.json for much faster LOD serving; the tradeoff is it"
                 + " roughly doubles the size of your world directory.";
     }
