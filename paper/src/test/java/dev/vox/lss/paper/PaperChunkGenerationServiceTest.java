@@ -60,6 +60,7 @@ import static org.mockito.Mockito.when;
 class PaperChunkGenerationServiceTest {
 
     private static PalettedContainerFactory FACTORY;
+    private static RegistryAccess REGISTRY_ACCESS;
 
     @BeforeAll
     static void setup() {
@@ -72,8 +73,8 @@ class PaperChunkGenerationServiceTest {
         MappedRegistry<Biome> biomes = new MappedRegistry<>(Registries.BIOME, Lifecycle.stable());
         src.listElements().forEach(ref -> biomes.register(ref.key(), ref.value(), RegistrationInfo.BUILT_IN));
         biomes.freeze();
-        FACTORY = PalettedContainerFactory.create(
-                new RegistryAccess.ImmutableRegistryAccess(List.of(biomes)));
+        REGISTRY_ACCESS = new RegistryAccess.ImmutableRegistryAccess(List.of(biomes));
+        FACTORY = PalettedContainerFactory.create(REGISTRY_ACCESS);
     }
 
     // ---- harness ----
@@ -110,6 +111,8 @@ class PaperChunkGenerationServiceTest {
     private static ServerLevel overworldLevel() {
         ServerLevel level = mock(ServerLevel.class);
         when(level.dimension()).thenReturn(Level.OVERWORLD);
+        // C1: the produce-path v20 hook reads the level's registry access.
+        when(level.registryAccess()).thenReturn(REGISTRY_ACCESS);
         return level;
     }
 

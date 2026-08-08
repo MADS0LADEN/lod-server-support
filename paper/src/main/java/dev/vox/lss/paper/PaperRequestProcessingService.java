@@ -6,7 +6,7 @@ import dev.vox.lss.common.LSSLogger;
 import dev.vox.lss.common.PositionUtil;
 import dev.vox.lss.common.SharedBandwidthLimiter;
 import dev.vox.lss.common.compat.V16CompatManager;
-import dev.vox.lss.common.compat.V18CompatTracker;
+import dev.vox.lss.common.compat.WireDialectTracker;
 import dev.vox.lss.common.processing.IncomingBatch;
 import dev.vox.lss.common.processing.IncomingRequest;
 import dev.vox.lss.common.processing.LoadedColumnData;
@@ -57,11 +57,12 @@ public class PaperRequestProcessingService {
     // never consults it: a v16 player is an ordinary registered player whose want-set is
     // declared by the shim at 1 Hz. See docs/planning/v16-compat-design.md.
     private final V16CompatManager v16Compat = new V16CompatManager();
-    // The v18 compat rung's membership (protocol-18 clients, v0.7.x–v0.8.x): an ordinary
-    // CURRENT-dialect session forced codec-RAW whose column frames drop the codec byte at
-    // the egress seam. Marked ONLY on the pump (the dialectFlip runnable) — see
+    // Every session's wire dialect (cross-version-identity-encoding-plan §4.3): the
+    // single source of truth for egress shape decisions — replaces the old v18 bare set
+    // AND the v16 egress checks (the manager keeps its session objects for the ingress
+    // shim). Marked ONLY on the pump (the dialectFlip runnable) — see
     // docs/planning/v18-compat-design.md §2.3.
-    private final V18CompatTracker v18Compat = new V18CompatTracker();
+    private final WireDialectTracker dialects = new WireDialectTracker();
 
     private final long startTimeNanos = System.nanoTime();
     // Keyed by the lightweight ResourceKey (not ServerLevel): a ServerLevel key strongly
@@ -117,6 +118,8 @@ public class PaperRequestProcessingService {
     private boolean v16SpliceWarned;
     /** Warn-once latch for the v18 egress splice guard (pump thread only). */
     private boolean v18SpliceWarned;
+    /** Warn-once latch for the C1-intermediate legacy-egress drop (PUMP only). */
+    private boolean legacyDropWarned;
 
     /** The per-player column egress (PUMP). For a v16 session, splices the frame
      *  UNCONDITIONALLY into the legacy source-less shape — every producer
@@ -129,44 +132,27 @@ public class PaperRequestProcessingService {
      *  today — every frame comes from encodeVoxelColumnPreEncoded. */
     private ColumnPayloadSender columnPayloadSender = (state, data) -> {
         var uuid = state.getPlayerUUID();
-        if (this.v16Compat.isV16(uuid)) {
-            byte[] legacy;
-            long packedPos;
-            try {
-                legacy = PaperPayloadHandler.rewriteColumnToV16(data);
-                packedPos = PaperPayloadHandler.readColumnPackedPos(data);
-            } catch (Exception e) {
-                if (!this.v16SpliceWarned) {
-                    this.v16SpliceWarned = true;
-                    LSSLogger.error("v16-compat: dropping unspliceable column frame for "
-                            + state.getPlayerName() + " (further drops are silent)", e);
-                }
-                return;
+        var dialect = this.dialects.dialectOf(uuid);
+        if (dialect != dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT) {
+            // C1 INTERMEDIATE (restored at C2): every legacy dialect needs a BODY
+            // translation before its header shape applies — the v18/v16 splices only
+            // rewrite headers and would ship v20 dictionary bodies a legacy decoder
+            // reads as garbage (review C1-1). All legacy column egress drops behind a
+            // once-warn latch; the done-bit is cleared so the state never claims
+            // delivery. The 1 Hz re-declare loop this leaves is bounded by the same
+            // bandwidth accounting a healthy session gets, and no legacy client exists
+            // in CI — C1–C5 merge to main together.
+            if (!this.legacyDropWarned) {
+                this.legacyDropWarned = true;
+                LSSLogger.warn(dialect + "-compat: column egress not yet translated (C1"
+                        + " intermediate) — dropping columns for legacy session "
+                        + state.getPlayerName() + " (further drops are silent)");
             }
-            PaperPayloadHandler.sendRawNmsPayload(state.getPlayer().getBukkitEntity(),
-                    PaperPayloadHandler.ID_VOXEL_COLUMN, legacy);
-            this.v16Compat.onColumnSent(uuid, packedPos);
-            return;
-        }
-        if (this.v18Compat.isV18(uuid)) {
-            // v18 egress (v18-compat design §2.6): strip the codec byte, keep the source
-            // byte. No prune — there is no synthetic want-set; the client's own
-            // re-declaration heals any drop. The splice THROWS on a non-RAW codec (same
-            // narrow cross-dialect downgrade window as the v16 guard); the warn-drop
-            // contains it, mirroring the v16 branch above.
-            byte[] v18Frame;
             try {
-                v18Frame = PaperPayloadHandler.rewriteColumnToV18(data);
+                state.clearDiskReadDone(PaperPayloadHandler.readColumnPackedPos(data));
             } catch (Exception e) {
-                if (!this.v18SpliceWarned) {
-                    this.v18SpliceWarned = true;
-                    LSSLogger.error("v18-compat: dropping unspliceable column frame for "
-                            + state.getPlayerName() + " (further drops are silent)", e);
-                }
-                return;
+                // Unparseable frame position: nothing to clear; the drop stands.
             }
-            PaperPayloadHandler.sendRawNmsPayload(state.getPlayer().getBukkitEntity(),
-                    PaperPayloadHandler.ID_VOXEL_COLUMN, v18Frame);
             return;
         }
         PaperPayloadHandler.sendRawNmsPayload(state.getPlayer().getBukkitEntity(),
@@ -592,7 +578,7 @@ public class PaperRequestProcessingService {
                         // cycle calls removePlayer directly), so dropping here is exactly
                         // the network-disconnect semantics and cannot break the
                         // identity-survives-dim-change contract.
-                        this.v18Compat.onDisconnect(r.uuid());
+                        this.dialects.onDisconnect(r.uuid());
                     }
                 }
             } catch (Exception e) {
@@ -622,8 +608,8 @@ public class PaperRequestProcessingService {
         // deferred reply, so no serve precedes the flag.
         state.setWantsCompressedColumns(this.wireCompressionLive
                 && (capabilities & LSSConstants.CAPABILITY_ZSTD_COLUMNS) != 0
-                && !this.v16Compat.isV16(player.getUUID())
-                && !this.v18Compat.isV18(player.getUUID()));
+                && !this.dialects.isV16(player.getUUID())
+                && !this.dialects.isV18(player.getUUID()));
         state.markHandshakeComplete();
         return state;
     }
@@ -829,7 +815,7 @@ public class PaperRequestProcessingService {
                 // finding 2 for v18; 2026-08-05 review H2 closed the v16 twin —
                 // removePlayer's onServiceRemove deliberately keeps identity, so the
                 // sweep was the one removal path that leaked it).
-                this.v18Compat.onDisconnect(uuid);
+                this.dialects.onDisconnect(uuid);
                 this.v16Compat.onDisconnect(uuid);
             }
         }
@@ -1241,8 +1227,8 @@ public class PaperRequestProcessingService {
         return this.v16Compat;
     }
 
-    public V18CompatTracker getV18CompatTracker() {
-        return this.v18Compat;
+    public WireDialectTracker getDialectTracker() {
+        return this.dialects;
     }
 
     public PaperChunkDiskReader getDiskReader() {

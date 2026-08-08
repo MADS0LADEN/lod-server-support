@@ -132,6 +132,10 @@ final class PaperSectionSerializer {
 
             byte[] serialized = new byte[buf.readableBytes()];
             buf.readBytes(serialized);
+            // C1 produce-path v20 hook (progress-doc decision 2026-08-07): native emit
+            // unchanged, canonical translation at the boundary — live, generation, and
+            // the dirty-detection consumers all see the same translated bytes.
+            serialized = PaperNbtSectionSerializer.toV20(serialized, level.registryAccess());
             return new LoadedColumnData(cx, cz, serialized, serialized.length);
         } finally {
             buf.release();

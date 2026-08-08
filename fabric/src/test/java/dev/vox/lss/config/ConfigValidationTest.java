@@ -27,15 +27,16 @@ class ConfigValidationTest {
         assertEquals(0, serverConfig().lodStoreResweepSeconds);
     }
 
-    /** Both compat rungs ship ON: a fleet of released v0.6.x (protocol 16) and
-     *  v0.7.x–v0.8.x (protocol 18) clients must keep working across a server upgrade
-     *  without any operator action. Neither default existed as a pin before the v18
-     *  rung (plan-review finding); flipping either is a player-facing compat break and
-     *  must be a deliberate release decision, not drift. */
+    /** All compat rungs ship ON: a fleet of released v0.6.x (protocol 16),
+     *  v0.7.x–v0.8.x (protocol 18), and v0.9.x–v0.10.x-pre (protocol 19) clients must
+     *  keep working across a server upgrade without any operator action. Flipping any
+     *  is a player-facing compat break and must be a deliberate release decision, not
+     *  drift. */
     @Test
     void compatRungsDefaultOn() {
         assertTrue(serverConfig().enableV16Compat);
         assertTrue(serverConfig().enableV18Compat);
+        assertTrue(serverConfig().enableV19Compat);
     }
 
     @Test

@@ -7,7 +7,7 @@ import dev.vox.lss.common.LogThrottle;
 import dev.vox.lss.common.PositionUtil;
 import dev.vox.lss.common.SharedBandwidthLimiter;
 import dev.vox.lss.common.compat.V16CompatManager;
-import dev.vox.lss.common.compat.V18CompatTracker;
+import dev.vox.lss.common.compat.WireDialectTracker;
 import dev.vox.lss.common.processing.IncomingBatch;
 import dev.vox.lss.common.processing.IncomingRequest;
 import dev.vox.lss.common.processing.LoadedColumnData;
@@ -69,10 +69,12 @@ public class RequestProcessingService {
     // never consults it: a v16 player is an ordinary registered player whose want-set is
     // declared by the shim at 1 Hz. See docs/planning/v16-compat-design.md.
     private final V16CompatManager v16Compat = new V16CompatManager();
-    // The v18 compat rung's membership (protocol-18 clients, v0.7.x–v0.8.x): an ordinary
-    // CURRENT-dialect session forced codec-RAW whose column frames drop the codec byte at
-    // the egress seam. See docs/planning/v18-compat-design.md.
-    private final V18CompatTracker v18Compat = new V18CompatTracker();
+    // Every session's wire dialect (cross-version-identity-encoding-plan §4.3): the
+    // single source of truth for egress shape decisions — replaces the old v18 bare set
+    // AND the v16 egress checks (the manager keeps its session objects for the ingress
+    // shim and consults this tracker for membership; its 75 s session prune is also the
+    // v16 tracker-removal hook — the single-lifetime rule).
+    private final WireDialectTracker dialects = new WireDialectTracker();
     // Keyed by the lightweight ResourceKey (not ServerLevel): a ServerLevel key strongly
     // retains every world an LSS player ever visited — harmless for vanilla's permanent
     // dimensions, but a leak on world-cycling servers. The dimension string is derivable
@@ -343,8 +345,8 @@ public class RequestProcessingService {
         // nowhere to carry.
         state.setWantsCompressedColumns(this.wireCompressionLive
                 && (capabilities & LSSConstants.CAPABILITY_ZSTD_COLUMNS) != 0
-                && !this.v16Compat.isV16(player.getUUID())
-                && !this.v18Compat.isV18(player.getUUID()));
+                && !this.dialects.isV16(player.getUUID())
+                && !this.dialects.isV18(player.getUUID()));
         state.markHandshakeComplete();
         return state;
     }
@@ -613,11 +615,50 @@ public class RequestProcessingService {
 
     /** Warn-once latch for the v18 egress guard (MAIN thread only). */
     private boolean v18UnconvertibleWarned;
+    /** Warn-once latch for the C1-intermediate legacy-egress drop (MAIN thread only). */
+    private boolean legacyDropWarned;
+
+    /**
+     * C1 INTERMEDIATE (restored at C2): with v20 as the canonical internal form, EVERY
+     * legacy dialect needs a BODY translation before its header shape applies — the
+     * v18/v16 splices only rewrite headers, so they would ship v20 dictionary bodies a
+     * legacy decoder reads as garbage (review C1-1). Until the C2 translators land,
+     * column egress for ALL THREE legacy dialects is dropped behind this latch. The
+     * done-bit is cleared so the state never claims delivery; the client re-declares at
+     * 1 Hz and the loop is bounded by the same bandwidth accounting a healthy session
+     * gets (NOT "healthy-idle" — a real legacy client against a C1-window build churns
+     * one want-set of reads per second until C2; acceptable only because no such client
+     * exists in CI and C1–C5 merge to main together).
+     */
+    private boolean dropLegacyColumn(PlayerRequestState state, CustomPacketPayload payload,
+                                     String dialect) {
+        if (!(payload instanceof dev.vox.lss.networking.payloads.VoxelColumnS2CPayload col)) {
+            return false;
+        }
+        if (!this.legacyDropWarned) {
+            this.legacyDropWarned = true;
+            LSSLogger.warn(dialect + "-compat: column egress not yet translated (C1"
+                    + " intermediate) — dropping columns for legacy session "
+                    + state.getPlayerName() + " (further drops are silent)");
+        }
+        state.clearDiskReadDone(PositionUtil.packPosition(col.chunkX(), col.chunkZ()));
+        return true;
+    }
 
     private void sendColumnPayload(PlayerRequestState state, CustomPacketPayload payload)
             throws Exception {
         var uuid = state.getPlayerUUID();
-        if (this.v16Compat.isV16(uuid)) {
+        if (this.dialects.isV19(uuid)) {
+            if (dropLegacyColumn(state, payload, "v19")) {
+                return;
+            }
+            ServerPlayNetworking.send(state.getPlayer(), payload);
+            return;
+        }
+        if (this.dialects.isV16(uuid)) {
+            if (dropLegacyColumn(state, payload, "v16")) {
+                return;
+            }
             if (!(payload instanceof dev.vox.lss.networking.payloads.VoxelColumnS2CPayload col)) {
                 if (!this.v16UnconvertibleWarned) {
                     this.v16UnconvertibleWarned = true;
@@ -651,7 +692,10 @@ public class RequestProcessingService {
                     PositionUtil.packPosition(col.chunkX(), col.chunkZ()));
             return;
         }
-        if (this.v18Compat.isV18(uuid)) {
+        if (this.dialects.isV18(uuid)) {
+            if (dropLegacyColumn(state, payload, "v18")) {
+                return;
+            }
             // v18 egress (v18-compat design §2.6): strip the codec byte, keep the source
             // byte. No prune bookkeeping — there is no synthetic want-set; the client's
             // own re-declaration heals any drop. The RAW guard mirrors the v16 one and is
@@ -950,8 +994,8 @@ public class RequestProcessingService {
         return this.v16Compat;
     }
 
-    public V18CompatTracker getV18CompatTracker() {
-        return this.v18Compat;
+    public WireDialectTracker getDialectTracker() {
+        return this.dialects;
     }
 
     public ChunkDiskReader getDiskReader() {

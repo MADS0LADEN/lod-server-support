@@ -44,7 +44,20 @@ public final class PaperPayloadHandler {
             buf.writeBoolean(enabled);
             buf.writeVarInt(lodDistanceChunks);
             buf.writeBoolean(generationEnabled);
+            if (protocolVersion == LSSConstants.PROTOCOL_VERSION) {
+                // v20-only append (XVER §2.2): the client branches per-frame on the
+                // leading version, so only the version-20 arm reads this — the v19/v18
+                // echoes must stay 4-field or their strict clients hard-kick.
+                buf.writeVarInt(net.minecraft.SharedConstants.getCurrentVersion()
+                        .dataVersion().version());
+            }
         });
+    }
+
+    /** The lss:client_info sidecar's payload: one VarInt data version; trailing bytes
+     *  tolerated (a future client may append — the SessionConfig foreign-arm stance). */
+    public static int decodeClientInfo(byte[] data) {
+        return withReadBuffer(data, FriendlyByteBuf::readVarInt);
     }
 
     public static void sendSessionConfig(Player player,

@@ -82,6 +82,15 @@ class MoveRowGoldenTest {
                 MoveRow.SendState.moonrise(6, -13, 0, 0, 1, 10, 6, -13, 40, 1),
                 MoveRow.SendState.moonrise(6, -13, 0, 0, 0, 10, 6, -13, 40, 1)));
 
+        // too_quickly again, v19-dialect session (the C1 protocol-20 bump: v0.9.x
+        // clients ride the v19 compat rung — the dialect set is writer/reader-shared,
+        // so the fixture carries all three legacy values).
+        var lssV19 = new MoveRow.LssBlock(45, 3, 19, "v19", 2, 512L, 0L);
+        rows.add(MoveRow.tooQuickly(env, true, lssV19,
+                new double[] {-40.0, 70.0, 80.0}, new double[] {-58.5, 70.0, 80.0},
+                false, 28.4, 35, 80, 6, 2, 0.12,
+                MoveRow.SendState.none()));
+
         // rejected: the SILENT path (logged_wrongly false), stop_block/entity_collide
         // uncapturable (absent), rung none, v18-dialect session.
         var lssV18 = new MoveRow.LssBlock(300, 1, 18, "v18", 5, 42L, 0L);

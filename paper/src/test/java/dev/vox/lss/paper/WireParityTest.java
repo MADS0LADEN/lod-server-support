@@ -129,6 +129,9 @@ class WireParityTest {
                 b.writeBoolean(true);
                 b.writeVarInt(lod);
                 b.writeBoolean(false);
+                // v20-only data-version append (XVER §2.2); Paper reads it directly.
+                b.writeVarInt(net.minecraft.SharedConstants.getCurrentVersion()
+                        .dataVersion().version());
             });
             assertArrayEquals(expected, PaperPayloadHandler.encodeSessionConfig(
                     LSSConstants.PROTOCOL_VERSION, true, lod, false),
@@ -264,7 +267,8 @@ class WireParityTest {
         // Bump the literal only with a deliberate wire change reviewed on both platforms.
         // 16 -> 17: the declarative want-set model retires the rate-limited bounce (byte 0).
         // 18: serve-source byte; 19: codec byte (zstd column frames).
-        assertEquals(19, LSSConstants.PROTOCOL_VERSION);
+        // 20: identity-dictionary section bodies (cross-version-identity-encoding-plan.md).
+        assertEquals(20, LSSConstants.PROTOCOL_VERSION);
     }
 
     @Test
@@ -296,11 +300,38 @@ class WireParityTest {
                 declared.add((String) f.get(null));
             }
         }
-        var covered = Set.of("lss:handshake_c2s", "lss:batch_chunk_req", "lss:session_config",
-                "lss:dirty_columns", "lss:voxel_column", "lss:batch_response");
+        var covered = Set.of("lss:handshake_c2s", "lss:batch_chunk_req", "lss:client_info",
+                "lss:session_config", "lss:dirty_columns", "lss:voxel_column", "lss:batch_response");
         assertEquals(covered, declared,
                 "every LSS channel must have a reference frame in this suite — a new payload"
                 + " requires frames in BOTH WireParityTests");
+    }
+
+    @Test
+    void v19EchoStaysFourFieldWithNoDataVersionAppend() {
+        // The v20-only append must NOT ride the v19 echo — the strict v0.9.x client
+        // hard-kicks on a trailing byte (Fabric twin pins the same shape).
+        byte[] expected = ref(b -> {
+            b.writeVarInt(LSSConstants.V19_COMPAT_PROTOCOL_VERSION);
+            b.writeBoolean(true);
+            b.writeVarInt(256);
+            b.writeBoolean(true);
+        });
+        assertArrayEquals(expected, PaperPayloadHandler.encodeSessionConfig(
+                LSSConstants.V19_COMPAT_PROTOCOL_VERSION, true, 256, true));
+    }
+
+    @Test
+    void clientInfoDecodesOneVarIntAndToleratesTrailingBytes() {
+        // The lss:client_info sidecar (XVER §2.2): one VarInt data version; trailing
+        // bytes tolerated (a future client may append fields).
+        byte[] plain = ref(b -> b.writeVarInt(3955));
+        assertEquals(3955, PaperPayloadHandler.decodeClientInfo(plain));
+        byte[] trailing = ref(b -> {
+            b.writeVarInt(3955);
+            b.writeVarInt(42);
+        });
+        assertEquals(3955, PaperPayloadHandler.decodeClientInfo(trailing));
     }
 
     // ---- v16 compat legacy shapes (docs/planning/v16-compat-design.md §2) ----

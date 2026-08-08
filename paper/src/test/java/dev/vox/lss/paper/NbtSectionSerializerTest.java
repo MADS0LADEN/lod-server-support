@@ -123,7 +123,26 @@ class NbtSectionSerializerTest {
                                   boolean hasBlockLight, byte[] blockLight,
                                   boolean hasSkyLight, byte[] skyLight) {}
 
-    private List<DecodedSection> decode(byte[] wire) {
+    /** v20 wire -> the native view every assertion below predates (exact inverse
+     *  resolvers over the SAME registries the emit used). */
+    private static byte[] toNativeForTest(byte[] v20Wire) {
+        var blockInverse = PaperIdentityTables.blockIdsByIdentity();
+        var biomeIdentity = PaperNbtSectionSerializer.biomeIdentityLookup(REGISTRY_ACCESS);
+        var biomeInverse = new java.util.HashMap<String, Integer>();
+        for (int id = 0; ; id++) {
+            String identity = biomeIdentity.apply(id);
+            if (identity == null) break;
+            biomeInverse.put(identity, id);
+        }
+        return dev.vox.lss.common.wire.V20ToNativeTranslator.translate(v20Wire,
+                ident -> blockInverse.getOrDefault(ident, -1),
+                ident -> biomeInverse.getOrDefault(ident, -1),
+                net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(),
+                biomeInverse.size());
+    }
+
+    private List<DecodedSection> decode(byte[] v20Wire) {
+        byte[] wire = toNativeForTest(v20Wire);
         var buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(wire));
         try {
             int count = buf.readVarInt();
@@ -567,7 +586,9 @@ class NbtSectionSerializerTest {
     // Gradle use --no-daemon so the env reaches the forked test worker) — the run writes
     // the fixtures and fails with "re-run"; then re-run without the flag and commit.
 
-    private static final String GOLDEN_DIR = "src/test/resources/nbt-corpus";
+    // v20-corpus since C1 (see the Fabric twin); the NATIVE nbt-corpus stays committed
+    // as a frozen fixture (its generator now emits v20) for C2's translation targets.
+    private static final String GOLDEN_DIR = "src/test/resources/v20-corpus";
 
     private static boolean regenGoldens() {
         return Boolean.getBoolean("lss.regenGoldens")
@@ -600,7 +621,7 @@ class NbtSectionSerializerTest {
         // fixture sets and commit the divergence green; Fabric clients would then
         // mis-decode Paper servers' disk-read columns.
         Path paperDir = goldenPath("probe").getParent();
-        Path fabricDir = locateRepoRelative("fabric/src/test/resources/nbt-corpus");
+        Path fabricDir = locateRepoRelative("fabric/src/test/resources/v20-corpus");
         java.util.Map<String, Path> paper = corpusFiles(paperDir);
         java.util.Map<String, Path> fabric = corpusFiles(fabricDir);
         assertEquals(fabric.keySet(), paper.keySet(),
@@ -1030,7 +1051,10 @@ class NbtSectionSerializerTest {
                     // all-air with no light: the headless path serves a CLEAR (empty array)
                     assertEquals(0, actual.length, "round " + round);
                 } else {
-                    assertArrayEquals(expected, actual, "round " + round);
+                    // C1: headless == toV20(real section.write) — pins the native emit
+                    // AND the produce-path hook together (Fabric twin).
+                    assertArrayEquals(PaperNbtSectionSerializer.toV20(expected, REGISTRY_ACCESS),
+                            actual, "round " + round);
                 }
             } finally {
                 expectedBuf.release();

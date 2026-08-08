@@ -17,7 +17,13 @@ public final class LSSConstants {
     // sessions ship the section bytes as a zstd-1 frame end-to-end instead of raw bytes
     // under netty deflate. Same fail-safe rationale as 17->18: the layout must be
     // version-agreed, the capability bit only carries ABILITY.
-    public static final int PROTOCOL_VERSION = 19;
+    // 20: cross-version identity encoding (docs/planning/cross-version-identity-encoding-plan.md):
+    // the section-array body replaces global-registry-id palettes with a per-column
+    // identity DICTIONARY (canonical name+properties strings, first-seen indices) and
+    // has NO DIRECT mode — the bytes stop depending on the emitting server's registry
+    // ids/sizes, so stored/served columns survive MC versions, mods, and datapacks.
+    // Column header, framing, codec byte, and every C2S shape are UNCHANGED.
+    public static final int PROTOCOL_VERSION = 20;
 
     // VoxelColumn serve-source tag values (one wire byte; unknown values are kept verbatim
     // client-side — same forward-safety stance as the retired response byte 0)
@@ -36,6 +42,13 @@ public final class LSSConstants {
     public static final String CHANNEL_DIRTY_COLUMNS = "lss:dirty_columns";
     public static final String CHANNEL_VOXEL_COLUMN = "lss:voxel_column";
     public static final String CHANNEL_BATCH_RESPONSE = "lss:batch_response";
+    /** C2S sidecar carrying the client's MC data version (protocol 20, XVER §2.2): the
+     *  handshake byte shape is FROZEN at two VarInts forever (a trailing byte hard-kicks
+     *  the v20 client from every shipped Fabric server), so new client facts ship on
+     *  their own channel — legacy servers silently discard unregistered channels, and
+     *  the v20 server treats absence as "legacy client". Diagnostics + the C5 Via-guard
+     *  input; never needed to decode v20 data. */
+    public static final String CHANNEL_CLIENT_INFO = "lss:client_info";
 
     // Time conversion constants
     public static final long NANOS_PER_SECOND = 1_000_000_000L;
@@ -271,9 +284,16 @@ public final class LSSConstants {
      *  gate hard-requires it), columns are forced codec-RAW and ship WITHOUT the codec tag
      *  (the v18 decode would consume it as the section-array length VarInt — hard kick),
      *  and C2S is byte-identical, so the want-set pipeline never learns the session is
-     *  legacy. Membership only ({@code V18CompatTracker}) — no v16-style synthetic
+     *  legacy. Membership only ({@code WireDialectTracker}) — no v16-style synthetic
      *  want-set. */
     public static final int V18_COMPAT_PROTOCOL_VERSION = 18;
+
+    /** The protocol-19 compat rung (v0.9.x–v0.10.x-pre clients, {@code enableV19Compat}):
+     *  a NATIVE session at the current header/framing — SessionConfig echoes 19, C2S is
+     *  byte-identical — but the section-array BODY must be the legacy global-id layout,
+     *  which is a per-serve TRANSLATION (v20 dictionary body → native palettes), not a
+     *  header splice like v18/v16. Membership rides {@code WireDialectTracker}. */
+    public static final int V19_COMPAT_PROTOCOL_VERSION = 19;
 
     // Capabilities bitmask
     public static final int CAPABILITY_VOXEL_COLUMNS = 1;

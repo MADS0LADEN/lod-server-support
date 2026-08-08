@@ -514,7 +514,7 @@ final class NbtSectionSerializer {
             }
 
             if (buf.writerIndex() == size && buf.arrayOffset() == 0 && buf.array().length == size) {
-                return buf.array();
+                return toV20(buf.array(), registryAccess);
             }
             SIZE_MISMATCH_FALLBACKS.incrementAndGet();
             if (SIZE_MISMATCH_WARNED.compareAndSet(false, true)) {
@@ -524,7 +524,7 @@ final class NbtSectionSerializer {
             }
             byte[] result = new byte[buf.readableBytes()];
             buf.readBytes(result);
-            return result;
+            return toV20(result, registryAccess);
         } finally {
             buf.release();
         }
@@ -890,7 +890,44 @@ final class NbtSectionSerializer {
 
     /** The registry-scoped pair the single-slot memo holds: the container factory and
      *  the transcoder's biome resolver share one lifetime (both die with their key). */
-    private record RegistryScoped(PalettedContainerFactory factory, BiomeIdResolver biomeResolver) {}
+    private record RegistryScoped(PalettedContainerFactory factory, BiomeIdResolver biomeResolver,
+                                  java.util.function.IntFunction<String> biomeIdentityFor) {}
+
+    /** The v20 biome identity lookup for this registry access (C1): wire biome ids are
+     *  the factory strategy's {@code globalMap} HOLDER ids — the identity table must be
+     *  built from that same map, never from bare {@code Registry.getId}. Shared by the
+     *  live path ({@code SectionSerializer}) and the transcode path via the same memo. */
+    static java.util.function.IntFunction<String> biomeIdentityLookup(RegistryAccess registryAccess) {
+        return scopedFor(registryAccess).biomeIdentityFor();
+    }
+
+    /** The C1 produce-path v20 hook (progress-doc decision 2026-08-07): every producer
+     *  emits its NATIVE body exactly as before and translates at the return boundary —
+     *  ONE corpus-proven encoder, byte-determinism across paths by construction. The
+     *  direct transcode-path emit is the recorded C6-gated optimization; output bytes
+     *  are identical either way, so swapping later is invisible to every golden. */
+    static byte[] toV20(byte[] nativeBody, RegistryAccess registryAccess) {
+        return dev.vox.lss.common.wire.NativeToV20Translator.translate(nativeBody,
+                IdentityTables::blockIdentityFor,
+                biomeIdentityLookup(registryAccess));
+    }
+
+    private static java.util.function.IntFunction<String> buildBiomeIdentities(IdMap<Holder<Biome>> idMap) {
+        var table = new String[idMap.size()];
+        for (int id = 0; id < table.length; id++) {
+            var holder = idMap.byId(id);
+            var key = holder == null ? null : holder.unwrapKey().orElse(null);
+            if (key == null) {
+                // C0's fail-loud-at-build posture (review C1-7): a keyless holder would
+                // otherwise surface as a per-serve translation failure much later.
+                throw new IllegalStateException("biome id " + id + " has no registry key");
+            }
+            String identity = key.identifier().toString();
+            dev.vox.lss.common.wire.IdentityCodec.validate(identity);
+            table[id] = identity;
+        }
+        return id -> id >= 0 && id < table.length ? table[id] : null;
+    }
 
     // PalettedContainerFactory.create builds two strategies + codecs per call — measurable
     // allocation churn when every disk read pays it (review 2026-07-27). The registry access
@@ -911,7 +948,8 @@ final class NbtSectionSerializer {
         var idMap = factory.biomeStrategy().globalMap();
         var scoped = new RegistryScoped(factory, new BiomeIdResolver(
                 registryAccess.lookupOrThrow(Registries.BIOME), idMap,
-                idMap.getId(factory.defaultBiome()), new ConcurrentHashMap<>()));
+                idMap.getId(factory.defaultBiome()), new ConcurrentHashMap<>()),
+                buildBiomeIdentities(idMap));
         factoryMemo = java.util.Map.entry(new java.lang.ref.WeakReference<>(registryAccess), scoped);
         return scoped;
     }

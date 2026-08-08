@@ -224,6 +224,17 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public boolean enableV18Compat = true;
     /**
+     * When true (default), clients running the protocol-19 mod (v0.9.x–v0.10.x-pre) get a
+     * native LOD session through the v19 compat rung
+     * (docs/planning/cross-version-identity-encoding-plan.md §4.2): the current session
+     * shape with the SessionConfig echoing 19 and the column BODY translated per serve
+     * from the v20 identity-dictionary layout back to native global-id palettes. Without
+     * the rung those clients degrade to the v16 fallback session after their 5 s
+     * discovery timeout. Inert for current-protocol clients; set false as the kill
+     * switch to restore the strict version gate for 19. No clamp: boolean.
+     */
+    public boolean enableV19Compat = true;
+    /**
      * The LOD store switch (docs/planning/lod-store-implementation-plan.md):
      * "off" (no store — the kill switch every store gate A/Bs against) and
      * <b>"full" (the SQLite disk store — the DEFAULT since 2026-08-02)</b>, alone since the

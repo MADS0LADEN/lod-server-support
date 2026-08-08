@@ -224,6 +224,51 @@ class HandshakeGateTest {
     }
 
     @Test
+    void v19WithCompatEnabledTakesTheNormalLadderWithTheV19Dialect() {
+        // The protocol-20 bump's third rung (XVER §4.2): same
+        // dialect-decided-by-the-version-rung-only contract as v16/v18.
+        var register = HandshakeGate.evaluate(19, VOXEL_CAPS, true, true, true, true, true);
+        assertEquals(Outcome.REGISTER, register.outcome());
+        assertEquals(HandshakeGate.WireDialect.V19, register.dialect());
+        assertTrue(register.registerPlayer());
+
+        var noConsumer = HandshakeGate.evaluate(19, 0, true, true, true, true, true);
+        assertEquals(Outcome.NO_CONSUMER, noConsumer.outcome());
+        assertEquals(HandshakeGate.WireDialect.V19, noConsumer.dialect());
+        assertTrue(noConsumer.sendSessionConfig());
+        assertFalse(noConsumer.registerPlayer());
+
+        var disabled = HandshakeGate.evaluate(19, VOXEL_CAPS, false, true, true, true, true);
+        assertEquals(Outcome.DISABLED, disabled.outcome());
+        assertEquals(HandshakeGate.WireDialect.V19, disabled.dialect());
+    }
+
+    @Test
+    void v19WithCompatDisabledStaysTheSilentVersionMismatch() {
+        var d = HandshakeGate.evaluate(19, VOXEL_CAPS, true, true, true, true, false);
+        assertEquals(Outcome.VERSION_MISMATCH, d.outcome());
+        assertFalse(d.sendSessionConfig());
+        // The 6-arg overload (pre-v19-compat call shape) is the v19-disabled ladder —
+        // a production call site left on it silently mismatches every v0.9.x client,
+        // which is why both platforms pin their handshake paths with a v19 frame.
+        assertEquals(Outcome.VERSION_MISMATCH,
+                HandshakeGate.evaluate(19, VOXEL_CAPS, true, true, true, true).outcome());
+    }
+
+    @Test
+    void theThirdCompatFlagIsIndependentToo() {
+        // v19 answers ONLY to its own flag, exactly like the other two rungs.
+        assertEquals(Outcome.VERSION_MISMATCH,
+                HandshakeGate.evaluate(19, VOXEL_CAPS, true, true, true, true, false).outcome());
+        assertEquals(HandshakeGate.WireDialect.V19,
+                HandshakeGate.evaluate(19, VOXEL_CAPS, true, true, false, false, true).dialect());
+        assertEquals(HandshakeGate.WireDialect.V18,
+                HandshakeGate.evaluate(18, VOXEL_CAPS, true, true, false, true, false).dialect());
+        assertEquals(HandshakeGate.WireDialect.V16,
+                HandshakeGate.evaluate(16, VOXEL_CAPS, true, true, true, false, false).dialect());
+    }
+
+    @Test
     void theTwoCompatFlagsAreIndependent() {
         // Each rung answers ONLY to its own flag: 18 with only the v16 flag mismatches,
         // 16 with only the v18 flag mismatches, and each version takes its own dialect

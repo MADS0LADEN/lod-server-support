@@ -162,6 +162,10 @@ SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBac
                                      # introduction so an A/B scenario CAN pin it, unlike
                                      # the two R4 holes above.
                                      "enableV18Compat",
+                                     # v19 compat rung kill switch (v0.10.0 C1, protocol
+                                     # 20) — listed at introduction per the same-commit
+                                     # allowlist rule so a dialect A/B scenario CAN pin it.
+                                     "enableV19Compat",
                                      # Transport yield (v0.10.0 A2, default false): the
                                      # writability gate is provably inert on loopback, so
                                      # an armed soak is expected-identical — the S-8

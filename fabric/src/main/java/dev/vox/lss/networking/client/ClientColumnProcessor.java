@@ -196,12 +196,39 @@ class ClientColumnProcessor {
     }
 
     private void drainColumnQueue(ClientLevel level, int epoch) {
+        var factory = PalettedContainerFactory.create(level.registryAccess());
+        var resolver = resolverFor(level, factory);
         drainColumnQueue(level.dimension(), level.getSectionsCount(), level.getMinSectionY(),
                 level.dimensionType().hasSkyLight(),
-                PalettedContainerFactory.create(level.registryAccess()),
+                factory,
+                // v16-compat servers ship NATIVE bodies — translating them would parse
+                // sectionCount as dictCount and fail every column (review C1-2). The
+                // per-application check keeps a session that re-handshakes across
+                // dialects correct without a drain restart.
+                bytes -> dev.vox.lss.networking.payloads.V16ClientWire.isColumnSourceless()
+                        ? bytes : resolver.toNative(bytes),
                 (dimension, chunkX, chunkZ, columnData) ->
                         LSSApi.dispatchColumn(level, dimension, chunkX, chunkZ, columnData),
                 epoch);
+    }
+
+    // Per-session §3 resolver (memoized identities + once-per-identity fallback warns).
+    // Rebuilt only if the registry access changes — dimensions share the server's, so a
+    // dimension change keeps the memo; a new server connection gets a fresh one.
+    private volatile ClientIdentityResolver identityResolver;
+    private volatile Object identityResolverKey;
+
+    private ClientIdentityResolver resolverFor(ClientLevel level, PalettedContainerFactory factory) {
+        var key = level.registryAccess();
+        var resolver = this.identityResolver;
+        if (resolver == null || this.identityResolverKey != key) {
+            resolver = new ClientIdentityResolver(
+                    key.lookupOrThrow(net.minecraft.core.registries.Registries.BIOME),
+                    factory.biomeStrategy().globalMap());
+            this.identityResolver = resolver;
+            this.identityResolverKey = key;
+        }
+        return resolver;
     }
 
     /**
@@ -212,9 +239,22 @@ class ClientColumnProcessor {
      * exactly once and the drain continues; the loop re-checks the session epoch at every
      * poll, so a teardown mid-drain lets at most the already-polled column dispatch.
      */
+    /** Test-seam overload: drives the drain over NATIVE-layout fixture bodies (no v20
+     *  translation) — the drain-mechanics suites predate protocol 20 and pin epoch/
+     *  reporting/dispatch behavior, not the body encoding. Production always goes
+     *  through the resolver-backed 8-arg form. */
     void drainColumnQueue(ResourceKey<Level> levelDimension, int levelSectionCount, int minSectionY,
                           boolean hasSkyLight,
                           PalettedContainerFactory factory, ColumnDispatcher dispatcher, int epoch) {
+        drainColumnQueue(levelDimension, levelSectionCount, minSectionY, hasSkyLight,
+                factory, java.util.function.UnaryOperator.identity(), dispatcher, epoch);
+    }
+
+    void drainColumnQueue(ResourceKey<Level> levelDimension, int levelSectionCount, int minSectionY,
+                          boolean hasSkyLight,
+                          PalettedContainerFactory factory,
+                          java.util.function.UnaryOperator<byte[]> v20ToNative,
+                          ColumnDispatcher dispatcher, int epoch) {
         QueuedColumn queued;
         while (epoch == this.sessionEpoch && (queued = this.columnQueue.poll()) != null) {
             this.queueSize.decrementAndGet();
@@ -240,7 +280,11 @@ class ClientColumnProcessor {
                 // failures too — NOT the source tag's pass-through rule; the byte changes
                 // how these bytes must be read (plan §0.7).
                 byte[] decompressed = decompressForDecode(payload.codec(), shipped);
-                var sections = decodeSections(decompressed, levelSectionCount, factory);
+                // Protocol 20: translate the identity-dictionary body to THIS client's
+                // native layout (identities resolved through the §3 fallback ladder),
+                // then feed the existing native decode unchanged (§2.3).
+                var sections = decodeSections(v20ToNative.apply(decompressed),
+                        levelSectionCount, factory);
                 if (ClientTraceLog.enabled()) {
                     // Per-section light presence — the boundary-lighting instrument (black
                     // leaf-face investigation 2026-07-27): [sectionY, hasBlockLight,
@@ -499,6 +543,16 @@ class ClientColumnProcessor {
 
     /** End the current session: any in-flight drain self-terminates at its next epoch check. */
     void shutdown() {
+        var resolver = this.identityResolver;
+        if (resolver != null && resolver.fallbackCount() > 0) {
+            // The §3 fallbacks= operator signal (review C1-5): one summary line per
+            // session, at teardown — the only client-side surface that needs no schema.
+            dev.vox.lss.common.LSSLogger.info("Session identity fallbacks: "
+                    + resolver.fallbackCount()
+                    + " (cross-version content rendered as fallback blocks)");
+        }
+        this.identityResolver = null;
+        this.identityResolverKey = null;
         this.sessionEpoch++;
         // Drain with the same poll+decrement discipline as the decode loop rather than
         // clear()+set(0): a set(0) races a decode iteration that already polled an item but

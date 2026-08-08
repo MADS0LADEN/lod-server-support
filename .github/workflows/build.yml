@@ -2,10 +2,13 @@ name: Build
 
 on:
   push:
-    branches: [main, 'support/**']
+    # feat/protocol-20 is the v0.10.0 C-phase integration branch (C1-C5 land as one
+    # release branch): pushes to it and PRs into it must build like main, or every
+    # C-stage PR ships on local-gauntlet evidence alone (C1 hit exactly that hole).
+    branches: [main, 'support/**', 'feat/protocol-20']
     paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.gitignore']
   pull_request:
-    branches: [main, 'support/**']
+    branches: [main, 'support/**', 'feat/protocol-20']
     paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.gitignore']
 
 jobs:

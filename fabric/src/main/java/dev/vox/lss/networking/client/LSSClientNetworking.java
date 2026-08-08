@@ -27,10 +27,26 @@ public class LSSClientNetworking {
     // and manager construction with live server-address resolution.
     private static final ClientSessionGate sessionGate = new ClientSessionGate(
             columnProcessor,
-            version -> ClientPlayNetworking.send(new HandshakeC2SPayload(
-                    version, LSSConstants.CAPABILITY_VOXEL_COLUMNS
-                            | ZstdWireSupport.capabilityBit())),
+            version -> {
+                ClientPlayNetworking.send(new HandshakeC2SPayload(
+                        version, LSSConstants.CAPABILITY_VOXEL_COLUMNS
+                                | ZstdWireSupport.capabilityBit()));
+                sendClientInfoSidecar();
+            },
             LSSClientNetworking::createRequestManager);
+
+    /** The lss:client_info sidecar rides beside every announce (XVER §2.2): the
+     *  handshake shape is frozen, so the client's data version travels on its own
+     *  channel. Best-effort — legacy servers discard the unregistered channel, and a
+     *  send failure must never take the announce down with it. */
+    private static void sendClientInfoSidecar() {
+        try {
+            ClientPlayNetworking.send(new dev.vox.lss.networking.payloads.ClientInfoC2SPayload(
+                    net.minecraft.SharedConstants.getCurrentVersion().dataVersion().version()));
+        } catch (Exception e) {
+            LSSLogger.debug("client_info sidecar send failed: " + e.getMessage());
+        }
+    }
 
     public static boolean isServerEnabled() {
         return sessionGate.isServerEnabled();
@@ -110,6 +126,7 @@ public class LSSClientNetworking {
                 ClientPlayNetworking.send(new HandshakeC2SPayload(
                         LSSConstants.PROTOCOL_VERSION, LSSConstants.CAPABILITY_VOXEL_COLUMNS
                                 | ZstdWireSupport.capabilityBit()));
+                sendClientInfoSidecar();
             } catch (Exception e) {
                 LSSLogger.debug("LAN host handshake send failed: " + e.getMessage());
             }

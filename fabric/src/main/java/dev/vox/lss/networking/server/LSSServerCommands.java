@@ -186,7 +186,7 @@ class LSSServerCommands {
                 service.getOffThreadProcessor().getStoreDiagnostics(),
                 service.getPlayers().values()
         ).withV16Line(service.getV16CompatManager().diagLineOrNull())
-                .withV18Line(service.getV18CompatTracker().diagLineOrNull())
+                .withV18Line(service.getDialectTracker().diagLine())
                 .withXrayLine(xrayDiagLine())
                 .withMoveTraceLine(moveTraceDiagLineOrNull())
                 .withYieldLine(DiagnosticsFormatter.yieldDiagLineOrNull(

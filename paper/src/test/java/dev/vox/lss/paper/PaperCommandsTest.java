@@ -149,7 +149,7 @@ class PaperCommandsTest {
         when(service.getDiskReader()).thenReturn(diskReader);
         when(service.getBandwidthLimiter()).thenReturn(new SharedBandwidthLimiter(1024));
         when(service.getV16CompatManager()).thenReturn(new V16CompatManager());
-        when(service.getV18CompatTracker()).thenReturn(new dev.vox.lss.common.compat.V18CompatTracker());
+        when(service.getDialectTracker()).thenReturn(new dev.vox.lss.common.compat.WireDialectTracker());
         when(service.getTickDiagnostics()).thenReturn("tick");
         when(service.getTickDiag()).thenReturn(new dev.vox.lss.common.processing.TickDiagnostics());
         when(service.getPlayers()).thenReturn(Map.of());
@@ -181,16 +181,17 @@ class PaperCommandsTest {
         when(service.getDiskReader()).thenReturn(diskReader);
         when(service.getBandwidthLimiter()).thenReturn(new SharedBandwidthLimiter(1024));
         when(service.getV16CompatManager()).thenReturn(new V16CompatManager());
-        var tracker = new dev.vox.lss.common.compat.V18CompatTracker();
-        tracker.onHandshake(java.util.UUID.randomUUID());
-        when(service.getV18CompatTracker()).thenReturn(tracker);
+        var tracker = new dev.vox.lss.common.compat.WireDialectTracker();
+        tracker.onHandshake(java.util.UUID.randomUUID(),
+                dev.vox.lss.common.HandshakeGate.WireDialect.V18);
+        when(service.getDialectTracker()).thenReturn(tracker);
         when(service.getTickDiagnostics()).thenReturn("tick");
         when(service.getTickDiag()).thenReturn(new dev.vox.lss.common.processing.TickDiagnostics());
         when(service.getPlayers()).thenReturn(Map.of());
 
         assertTrue(run(commands(service, new PaperConfig()), "diag"));
-        assertTrue(messages.contains("V18Compat: clients=1, started=1"),
-                "a live v18 session must render its diag line through the command: " + messages);
+        assertTrue(messages.contains("Dialects: v20=0, v19=0, v18=1, v16=0, started=0/0/1/0"),
+                "a live v18 session must render the Dialects line through the command: " + messages);
     }
 
     @Test
@@ -207,7 +208,7 @@ class PaperCommandsTest {
         when(service.getDiskReader()).thenReturn(diskReader);
         when(service.getBandwidthLimiter()).thenReturn(new SharedBandwidthLimiter(1024));
         when(service.getV16CompatManager()).thenReturn(new V16CompatManager());
-        when(service.getV18CompatTracker()).thenReturn(new dev.vox.lss.common.compat.V18CompatTracker());
+        when(service.getDialectTracker()).thenReturn(new dev.vox.lss.common.compat.WireDialectTracker());
         when(service.getTickDiagnostics()).thenReturn("tick");
         when(service.getTickDiag()).thenReturn(new dev.vox.lss.common.processing.TickDiagnostics());
         when(service.getPlayers()).thenReturn(Map.of());
@@ -221,8 +222,12 @@ class PaperCommandsTest {
                 "the Config line must render the disabled flag and the config values: " + messages.get(1));
         assertTrue(messages.stream().anyMatch(m -> m.equals("Xray: active=off, masked_sections=0")),
                 "no active mask manager renders the off xray line: " + messages);
-        assertEquals(9, messages.size(),
-                "all nine diagnostic lines render with no players connected: " + messages);
+        assertTrue(messages.stream().anyMatch(m ->
+                        m.equals("Dialects: v20=0, v19=0, v18=0, v16=0, started=0/0/0/0")),
+                "the Dialects line renders unconditionally (the v20 count IS the live"
+                        + " LOD-session count): " + messages);
+        assertEquals(10, messages.size(),
+                "all ten diagnostic lines render with no players connected: " + messages);
     }
 
     @Test
