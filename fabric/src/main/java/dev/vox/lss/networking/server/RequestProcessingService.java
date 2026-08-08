@@ -593,14 +593,6 @@ public class RequestProcessingService {
     /** Warn-once latch for the v16 egress guard (MAIN thread only). */
     private boolean v16UnconvertibleWarned;
 
-    /** The per-player column egress (MAIN). For a v16 session, converts UNCONDITIONALLY to
-     *  the legacy source-less shape — every producer (probe/disk/generation/ghost-clear)
-     *  funnels through here, so no producer can leak a v18 frame that would hard-kick the
-     *  old client — and prunes the position from the synthetic want-set after the send
-     *  (satisfied-by-data; the prune is load-bearing, see the design §4.4). A payload the
-     *  guard cannot convert is DROPPED with a warn-once (design §5): a dropped frame
-     *  self-heals by re-declaration, a wrong-shaped one kicks the client. Unreachable
-     *  today — only buildAndEnqueueColumnPayload feeds this queue. */
     /** Whether a column may be converted to a legacy (v16 OR v18) shape. Extracted so the
      *  guard's decision is pinnable: {@code sendColumnPayload} is private and needs a
      *  live server, so this — the only thing standing between a codec-1 payload and a
@@ -686,6 +678,15 @@ public class RequestProcessingService {
         }
     }
 
+    /** The per-player column egress (MAIN) — every producer (probe/disk/generation/
+     *  ghost-clear/store-hit) funnels through here, so no producer can leak a
+     *  wrong-dialect frame. Since C2 a legacy (v19/v18/v16) session first gets its v20
+     *  BODY translated back to the native section layout ({@link #translateForLegacy});
+     *  v16 then splices to the source-less shape and prunes the synthetic want-set
+     *  (satisfied-by-data; the prune is load-bearing, design §4.4), v18 strips the codec
+     *  byte, v19 ships at the CURRENT header (identical layout — only the body differs).
+     *  Every failure shape is a warn-once DROP (design §5): a dropped frame self-heals
+     *  by re-declaration, a wrong-shaped one kicks the client. */
     private void sendColumnPayload(PlayerRequestState state, CustomPacketPayload payload)
             throws Exception {
         var uuid = state.getPlayerUUID();

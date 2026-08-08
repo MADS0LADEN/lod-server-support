@@ -828,6 +828,13 @@ public class ServiceLifecycleGameTests {
                 "the reply must echo protocol " + announcedVersion + " — the legacy client "
                         + "disables itself on any other version, got "
                         + replies.get(0).protocolVersion());
+        // The echo must carry the REAL config, not zeroes (the dialect-19 soak lever
+        // caught a decode-side flavor of this — pin the encode side too).
+        helper.assertTrue(replies.get(0).enabled(),
+                "the legacy echo must carry the real enabled flag");
+        helper.assertTrue(replies.get(0).lodDistanceChunks() == LSSServerConfig.CONFIG.lodDistanceChunks,
+                "the legacy echo must carry the real LOD distance, got "
+                        + replies.get(0).lodDistanceChunks());
         var state = service.getPlayers().get(uuid);
         helper.assertTrue(state != null,
                 "a v" + announcedVersion + " handshake must register natively (not fall to "

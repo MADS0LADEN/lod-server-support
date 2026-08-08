@@ -1,4 +1,4 @@
-package dev.vox.lss.networking.client;
+package dev.vox.lss.networking.payloads;
 
 import dev.vox.lss.common.LSSConstants;
 

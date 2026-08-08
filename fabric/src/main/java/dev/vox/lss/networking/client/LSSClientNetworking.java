@@ -1,5 +1,6 @@
 package dev.vox.lss.networking.client;
 
+import dev.vox.lss.networking.payloads.SoakDialectOverride;
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.networking.payloads.ZstdWireSupport;
 import dev.vox.lss.common.LSSLogger;
