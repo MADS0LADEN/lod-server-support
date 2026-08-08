@@ -238,7 +238,8 @@ case "$SCENARIO" in
                                 # save-all go stale-invisible; two 10 s resweep cycles
                                 # later the clearcache re-declare must get FRESH bytes.
                                 CLIENT_EXTRA_ARGS=("-Psoak.clientActionAt=120:clearcache")
-                                SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
+                                SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0"
+                                                   "-Psoak.dirtyTrace=${SOAK_DIRTY_TRACE:-false}") ;;
 esac
 RUNTIME_BUDGET=$((EXPECTED_SECONDS + 240))
 DEADLINE_EPOCH=0

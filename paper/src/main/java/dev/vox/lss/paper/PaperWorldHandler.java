@@ -74,6 +74,15 @@ public class PaperWorldHandler {
     }
 
     private void handleUpdateEvent(Event event) {
+        // Dirty-mark trace (-Dlss.soak.dirtyTrace, SOAK_DIRTY_TRACE=true on soak.sh):
+        // names every mark-driving event + its extracted shape. Diagnostic that found
+        // the 2026-08-08 unfired-event premise breaker in ONE run (world-gen pack
+        // sheep grazing near spawn — EntityChangeBlockEvent/BlockSpreadEvent cycle);
+        // off by default, costs one Boolean read per event.
+        if (Boolean.getBoolean("lss.soak.dirtyTrace")) {
+            dev.vox.lss.common.LSSLogger.info("[dirty-trace] " + event.getClass().getSimpleName()
+                    + " " + describeForTrace(event));
+        }
         if (event instanceof BlockPistonEvent piston) {
             // Special-cased: the generic ladder reads getBlocks() — the moved blocks'
             // SOURCE positions only — missing the destination chunk of a cross-border push
@@ -140,6 +149,16 @@ public class PaperWorldHandler {
             String dimension = block.getWorld().getKey().toString();
             markBlockDirty(dimension, block.getX(), block.getZ());
             markBlockDirty(dimension, block.getX() + dx, block.getZ() + dz);
+        }
+    }
+
+    private String describeForTrace(Event event) {
+        try {
+            Method m = EXTRACTORS.get(event.getClass()).orElse(null);
+            Object r = m == null ? null : m.invoke(event);
+            return String.valueOf(r);
+        } catch (Exception e) {
+            return "?";
         }
     }
 

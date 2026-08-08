@@ -2115,22 +2115,51 @@ def check_paper_store_unfired_event(ctx):
         yield Violation("paper-store-unfired-event", "server series",
                         "need server snapshots on both sides of the action", {})
         return
-    # Premise guard: the edit must be INVISIBLE to the event-driven dirty pipeline —
-    # that is what makes the resweep the only healer. A neighbor-reaction event firing
-    # on the setblock (seen live: glowstone tripping a configured event racily) marks
-    # the column dirty, the broadcast re-serves it fresh BEFORE the action, and the
-    # pre/final hash comparison then measures the DIRTY pipeline, not the staleness
-    # bound. That run is a premise failure, not a store verdict either way.
-    if get_path(srv_final, "dirty.marked_total") != 0:
-        # Checked at the FINAL snapshot (covers pre- AND post-action): an event firing
-        # at any point means the dirty pipeline participated and the staleness bound
-        # was not what the probes measured.
+    # Premise guard (C6-hardened to the EDIT WINDOW): the edit must be INVISIBLE to
+    # the event-driven dirty pipeline — that is what makes the resweep the only healer.
+    # A neighbor-reaction event firing on the setblock (seen live: glowstone tripping a
+    # configured event racily) marks the column dirty, the broadcast re-serves it fresh
+    # BEFORE the action, and the pre/final hash comparison then measures the DIRTY
+    # pipeline, not the staleness bound. The original bar was whole-run flatness, but a
+    # rerolled base world produces AMBIENT settle marks (gravity blocks firing
+    # EntityChangeBlockEvent minutes away from the edit — first seen 2026-08-08 on the
+    # regenerated base-paper world) that say nothing about whether THIS edit fired.
+    # The window is [last snapshot before the setblock .. first snapshot after
+    # save-all + 10 s] (one 5 s broadcast interval + grace; an edit-fired mark lands
+    # within a second of the command). Position-blind counters cannot rule out an
+    # ambient mark landing exactly on the edited chunk inside the window — accepted
+    # residual, one improbable chunk out of the disc; outside the window ambient marks
+    # are tolerated by design.
+    setblocks = [c for c in ctx.commands if "setblock" in c.get("cmd", "")]
+    saves = [c for c in ctx.commands if "save-all" in c.get("cmd", "")]
+    if len(setblocks) != 1 or not saves:
+        yield Violation("paper-store-unfired-event", "premise",
+                        "timeline shape drifted — need exactly one setblock and a "
+                        "save-all command row to window the premise",
+                        {"setblocks": len(setblocks), "saves": len(saves)})
+        return
+    edit_wall = setblocks[0]["wallMs"]
+    window_end = saves[-1]["wallMs"] + 10_000
+    pre_marked = 0
+    for s in ctx.server_snaps:
+        if s["wallMs"] <= edit_wall:
+            pre_marked = get_path(s, "dirty.marked_total")
+        else:
+            break
+    post_marked = get_path(srv_final, "dirty.marked_total")
+    for s in ctx.server_snaps:
+        if s["wallMs"] >= window_end:
+            post_marked = get_path(s, "dirty.marked_total")
+            break
+    if post_marked - pre_marked != 0:
         yield Violation("paper-store-unfired-event", "premise",
                         "the edit fired a configured Bukkit event (dirty.marked_total "
-                        "moved) — the scenario measured the dirty pipeline, not the "
-                        "unfired-event staleness bound; use an inert edit (in-ground "
-                        "bedrock replace)",
-                        {"dirty.marked_total": get_path(srv_final, "dirty.marked_total")})
+                        "moved inside the edit window) — the scenario measured the "
+                        "dirty pipeline, not the unfired-event staleness bound; use an "
+                        "inert edit (in-ground bedrock replace)",
+                        {"window_delta": post_marked - pre_marked,
+                         "pre": pre_marked, "post": post_marked,
+                         "whole_run": get_path(srv_final, "dirty.marked_total")})
         return
     if get_path(srv_final, "store.sweep_drops") < 1:
         yield Violation("paper-store-unfired-event", "resweep",
@@ -3845,24 +3874,49 @@ def selftest():
 
     # --- paper-store-unfired-event: resweep culls the un-evented edit ---
     def psu_ctx(edited_final=999, control_final=222, sweep_drops=2, hits_final=2000,
-                errors=0, actions=None):
-        srv_pre = _srv(115_000, over={"store.hits": 0, "store.deposits": 1900})
+                errors=0, actions=None, marked_pre_window=0, marked_in_window=0,
+                marked_ambient_late=0):
+        # Window geometry: setblock at 70 s, save-all at 75 s → window end 85 s.
+        # A 90 s snapshot brackets the window; 115 s / 185 s carry the rest of the
+        # run (185 s may add AMBIENT marks the windowed premise must tolerate).
+        srv_win = _srv(90_000, over={"store.hits": 0, "store.deposits": 1880,
+                                     "dirty.marked_total": marked_pre_window
+                                             + marked_in_window})
+        srv_pre = _srv(115_000, over={"store.hits": 0, "store.deposits": 1900,
+                                      "dirty.marked_total": marked_pre_window
+                                              + marked_in_window})
         srv_pre["probe_hashes"] = {"20:0": 111, "-20:0": 222}
         srv_fin = _srv(185_000, over={"store.hits": hits_final,
                                       "store.sweep_drops": sweep_drops,
                                       "store.errors": errors,
-                                      "store.deposits": 1950})
+                                      "store.deposits": 1950,
+                                      "dirty.marked_total": marked_pre_window
+                                              + marked_in_window + marked_ambient_late})
         srv_fin["probe_hashes"] = {"20:0": edited_final, "-20:0": control_final}
+        srv_first = _srv(60_000, over={"store.deposits": 1800,
+                                       "dirty.marked_total": marked_pre_window})
         return _ctx(
-            server_snaps=[srv_pre, srv_fin],
+            server_snaps=[srv_first, srv_win, srv_pre, srv_fin],
+            commands=[{"event": "command", "wallMs": 70_000,
+                       "cmd": "setblock 328 -64 8 minecraft:stone", "ok": True},
+                      {"event": "command", "wallMs": 75_000,
+                       "cmd": "save-all", "ok": True}],
             runs={1: [_cli(110_000, seg=0, over={"received_columns": 2200}),
                       _cli(185_000, seg=1, over={"received_columns": 4300})]},
             run_actions={1: actions if actions is not None else [
                 {"event": "action", "wallMs": 120_000, "action": "clearcache",
                  "atSeconds": 120}]},
-            quiescent_server={1})
+            quiescent_server={3})
     clean("paper-store-unfired-event clean staleness-bound pass",
           list(check_paper_store_unfired_event(psu_ctx())))
+    clean("paper-store-unfired-event AMBIENT marks outside the edit window are tolerated"
+          " (the rerolled-base-world settle drip, 2026-08-08)",
+          list(check_paper_store_unfired_event(psu_ctx(marked_ambient_late=4))))
+    clean("paper-store-unfired-event pre-existing marks before the edit are tolerated",
+          list(check_paper_store_unfired_event(psu_ctx(marked_pre_window=2))))
+    hits("paper-store-unfired-event a mark INSIDE the edit window is the premise red",
+         list(check_paper_store_unfired_event(psu_ctx(marked_in_window=1))),
+         "paper-store-unfired-event")
     hits("paper-store-unfired-event stale bytes past the bound",
          list(check_paper_store_unfired_event(psu_ctx(edited_final=111))),
          "paper-store-unfired-event")
@@ -3881,10 +3935,13 @@ def selftest():
     hits("paper-store-unfired-event action never fired",
          list(check_paper_store_unfired_event(psu_ctx(actions=[]))),
          "paper-store-unfired-event")
-    premise_ctx = psu_ctx()
-    premise_ctx.server_snaps[-1]["dirty"]["marked_total"] = 1
-    hits("paper-store-unfired-event premise broke (edit fired an event)",
-         list(check_paper_store_unfired_event(premise_ctx)),
+    # (The old whole-run premise case — final-snapshot-only marks — is now the
+    # AMBIENT-tolerated clean case above; the in-window doctored case replaces it.)
+    shape_ctx = psu_ctx()
+    shape_ctx.commands.append({"event": "command", "wallMs": 76_000,
+                               "cmd": "setblock 1 2 3 minecraft:dirt", "ok": True})
+    hits("paper-store-unfired-event timeline shape drift (two setblocks) is a premise red",
+         list(check_paper_store_unfired_event(shape_ctx)),
          "paper-store-unfired-event")
 
     # --- store-save-storm: the delete-only save hook under an autosave storm ---
