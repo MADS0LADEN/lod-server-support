@@ -200,7 +200,7 @@ cmd_run() {
     if [[ "$arm" == "native" || "$arm" == "dialect19" ]]; then
         local want_proto="v20"
         [[ "$arm" == "dialect19" ]] && want_proto="v19"
-        if ! grep -q "Server session config received (protocol ${want_proto})" \
+        if ! grep -q "Server session config received (protocol ${want_proto}," \
                 "$RUN_OUT/client.log" 2>/dev/null; then
             dialect_ok=false
             log "ARM INVALID: $arm rep$rep did not negotiate ${want_proto} (see client.log)"
