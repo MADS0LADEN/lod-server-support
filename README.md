@@ -89,6 +89,8 @@ The cost is disk — the store grows to roughly the size of your region files, s
 
 Lowering either costs *speed*, not correctness: LOD fills in more slowly, nothing breaks. Most other settings change *how* the work is done rather than how much, so they are the wrong lever for a CPU problem.
 
+**Network compression and LOD traffic.** Vanilla deflates every packet above `network-compression-threshold` — including LSS's already-compressed column frames, which adds roughly 30% to the warm store-serve cost for almost no size win (measured; there is no per-packet opt-out in the protocol). Do **not** raise the global threshold to avoid this: your vanilla chunk-packet bandwidth pays far more for that than LSS's re-deflate costs. If the overhead matters to you, terminating compression at a proxy (e.g. Velocity) moves the deflate work off the game server entirely — with the caveat that behind such a proxy LSS's transport-yield gate is best-effort (it under-yields, never over-yields).
+
 ## License
 
 MIT
