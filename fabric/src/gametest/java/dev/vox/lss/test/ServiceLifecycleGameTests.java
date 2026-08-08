@@ -780,11 +780,11 @@ public class ServiceLifecycleGameTests {
      * removes). The reply must be exactly one CURRENT-layout SessionConfig echoing 18 (the
      * v0.8.x gate hard-requires its own version), the player must register with v18
      * membership, and the session must be forced codec-RAW. Since C2 the test also runs a
-     * DELIVERY leg: a probe serve must flush through the legacy egress (v20 body →
-     * {@code translateForLegacy} → {@code asV18()}) without the translation-failure drop —
-     * a drop clears the done-bit ({@code translateForLegacy}'s containment), so a surviving
-     * done-bit after the flush is the drop/deliver distinguisher counters cannot give
-     * (send-success accounting books either way).
+     * DELIVERY leg: a probe serve must translate at the enqueue choke point
+     * ({@code buildAndEnqueueColumnPayload} → {@code fromV20}) and flush through the
+     * {@code asV18()} splice — a translation failure there answers up_to_date and never
+     * enqueues, so {@code getTotalSectionsSent()} reaching 1 plus the surviving done-bit
+     * is the deliver-vs-contain distinguisher.
      */
     @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 1200)
     public void v18HandshakeRegistersNativelyAndEchoesProtocol18(GameTestHelper helper) {
@@ -794,9 +794,8 @@ public class ServiceLifecycleGameTests {
 
     /** The v19 rung through the PRODUCTION receiver (protocol 20, XVER §4.2): a v0.9.x
      *  client registers natively with the V19 dialect, the reply echoes 19, and since C2
-     *  a probe serve must flush through the v19 egress (body translated, CURRENT header)
-     *  without the translation-failure drop — same done-bit distinguisher as the v18
-     *  twin above. */
+     *  a probe serve must translate at enqueue and ship at the CURRENT header — same
+     *  sectionsSent + done-bit distinguisher as the v18 twin above. */
     @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 1200)
     public void v19HandshakeRegistersNativelyAndEchoesProtocol19(GameTestHelper helper) {
         legacyDialectHandshakeAndDelivery(helper, LSSConstants.V19_COMPAT_PROTOCOL_VERSION,
@@ -869,10 +868,11 @@ public class ServiceLifecycleGameTests {
         helper.succeedWhen(() -> {
             service.tick();
             helper.assertTrue(state.getTotalSectionsSent() >= 1,
-                    "waiting for the probe serve to flush through the legacy egress");
+                    "waiting for the probe serve to flush through the legacy egress — a "
+                            + "translation failure at enqueue answers up_to_date and never "
+                            + "sends a section, so this wait times out on one");
             helper.assertTrue(state.hasDiskReadDone(cx, cz),
-                    "the done-bit must SURVIVE the flush — a cleared bit means the egress "
-                            + "took the translation-failure drop instead of delivering");
+                    "the done-bit must SURVIVE the flush (no drop path fired)");
             chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
             service.shutdown();
             playerList.remove(mock);
