@@ -23,6 +23,18 @@ public final class HandshakeGate {
          */
         VERSION_MISMATCH,
         /**
+         * A LEGACY-dialect handshake from a client Via positively reports as running a
+         * DIFFERENT MC version (XVER §7): its native-id column bytes are for another
+         * registry set, so the session cannot be served. No reply — silence is each
+         * legacy client's native "no LSS here" signal (the v19/v18 client ladders fall
+         * through to their next rung and terminal disarm; a v16 client stays dark) —
+         * and the call site logs one INFO line naming the versions. Never fires for
+         * {@link WireDialect#CURRENT} (a v20 client carries mcDataVersion and is always
+         * servable), never fires on probe no-signal (fail-open), and
+         * {@code enableViaMismatchGuard=false} removes it entirely.
+         */
+        VIA_MISMATCH,
+        /**
          * No LOD consumer on the client — reply with the session config, but never
          * register: registering would only create a zombie state that ignores every
          * request.
@@ -79,9 +91,10 @@ public final class HandshakeGate {
      * @param dialect          wire shapes the reply/session must use (version rung's choice)
      */
     public record Decision(Outcome outcome, boolean effectiveEnabled, WireDialect dialect) {
-        /** Whether any reply may be sent at all (false only on version skew). */
+        /** Whether any reply may be sent at all (false on version skew and on the
+         *  cross-MC Via mismatch — both must stay silent). */
         public boolean sendSessionConfig() {
-            return outcome != Outcome.VERSION_MISMATCH;
+            return outcome != Outcome.VERSION_MISMATCH && outcome != Outcome.VIA_MISMATCH;
         }
 
         /** Whether to register the player for LOD request processing. */
@@ -103,11 +116,16 @@ public final class HandshakeGate {
      * @param v16CompatEnabled      server config {@code enableV16Compat} flag
      * @param v18CompatEnabled      server config {@code enableV18Compat} flag
      * @param v19CompatEnabled      server config {@code enableV19Compat} flag
+     * @param viaMismatch           true when Via POSITIVELY reports this client on a
+     *                              different MC version (call sites compose
+     *                              {@code enableViaMismatchGuard} × the ViaProbe ×
+     *                              the server's native protocol; false on no-signal —
+     *                              XVER §7, fail-open)
      */
     public static Decision evaluate(int clientProtocolVersion, int clientCapabilities,
                                     boolean configEnabled, boolean servicePresent,
                                     boolean v16CompatEnabled, boolean v18CompatEnabled,
-                                    boolean v19CompatEnabled) {
+                                    boolean v19CompatEnabled, boolean viaMismatch) {
         WireDialect dialect;
         if (clientProtocolVersion == LSSConstants.PROTOCOL_VERSION) {
             dialect = WireDialect.CURRENT;
@@ -123,6 +141,12 @@ public final class HandshakeGate {
         } else {
             return new Decision(Outcome.VERSION_MISMATCH, false, WireDialect.CURRENT);
         }
+        if (viaMismatch && dialect != WireDialect.CURRENT) {
+            // XVER §7: a legacy dialect cannot carry cross-MC bytes — deny BEFORE any
+            // register/reply rung, silently. CURRENT ignores the flag: a v20 client's
+            // mcDataVersion makes it servable on any MC version.
+            return new Decision(Outcome.VIA_MISMATCH, false, dialect);
+        }
         boolean effectiveEnabled = configEnabled && servicePresent;
         if ((clientCapabilities & LSSConstants.CAPABILITY_VOXEL_COLUMNS) == 0) {
             return new Decision(Outcome.NO_CONSUMER, effectiveEnabled, dialect);
@@ -133,8 +157,21 @@ public final class HandshakeGate {
         return new Decision(Outcome.REGISTER, true, dialect);
     }
 
+    /** Pre-Via-guard overload (no mismatch signal): kept so every existing gate pin
+     *  stays byte-identical — {@code viaMismatch=false} is exactly the guard-off /
+     *  probe-no-signal behavior. Production call sites use the 8-arg form; each
+     *  platform's wiring pin covers the composition. */
+    public static Decision evaluate(int clientProtocolVersion, int clientCapabilities,
+                                    boolean configEnabled, boolean servicePresent,
+                                    boolean v16CompatEnabled, boolean v18CompatEnabled,
+                                    boolean v19CompatEnabled) {
+        return evaluate(clientProtocolVersion, clientCapabilities, configEnabled,
+                servicePresent, v16CompatEnabled, v18CompatEnabled, v19CompatEnabled,
+                false);
+    }
+
     /** Pre-v19-compat overload (v19 rung disabled): kept so existing gate tests keep
-     *  pinning the two-rung ladder unchanged. Production call sites use the 7-arg form —
+     *  pinning the two-rung ladder unchanged. Production call sites use the 8-arg form —
      *  a call site left on this overload silently drops v19 clients to the v16 fallback,
      *  which is why each platform pins its PRODUCTION handshake path with a v19 frame. */
     public static Decision evaluate(int clientProtocolVersion, int clientCapabilities,

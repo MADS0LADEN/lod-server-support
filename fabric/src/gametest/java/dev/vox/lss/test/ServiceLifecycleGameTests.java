@@ -929,6 +929,49 @@ public class ServiceLifecycleGameTests {
     }
 
     /**
+     * C5 (review MAJOR-2): a legacy handshake with a FORCED Via mismatch through the
+     * PRODUCTION Fabric ladder — the seam overload carries the probe answer, so this
+     * is the only executable Fabric coverage of the denial (no test JVM has real Via;
+     * the wiring contract test pins only source shape). Must produce ZERO reply
+     * frames (silence — the legacy client ladders read any reply as a live server)
+     * and register nobody; the same frame through the no-signal path must register,
+     * pinning fail-open in the same production ladder.
+     */
+    @GameTest(structure = "fabric-gametest-api-v1:empty")
+    public void viaMismatchedLegacyHandshakeIsDeniedSilentlyThroughTheProductionLadder(GameTestHelper helper) {
+        var server = helper.getLevel().getServer();
+        var playerList = server.getPlayerList();
+        var mock = placeMockServerPlayer(helper);
+        var service = new RequestProcessingService(server);
+        var replies = new ArrayList<SessionConfigS2CPayload>();
+        try {
+            // Via positively reports MC protocol 763 against a native of 774.
+            LSSServerNetworking.handleHandshake(
+                    new HandshakeC2SPayload(19, LSSConstants.CAPABILITY_VOXEL_COLUMNS),
+                    mock, service, replies::add, 763, 774);
+            helper.assertTrue(replies.isEmpty(),
+                    "a Via-mismatched v19 handshake must stay SILENT, got "
+                            + replies.size() + " reply frame(s)");
+            helper.assertTrue(!service.getPlayers().containsKey(mock.getUUID()),
+                    "a Via-mismatched legacy client must never register");
+
+            // Fail-open twin: the same frame with no Via signal registers normally.
+            LSSServerNetworking.handleHandshake(
+                    new HandshakeC2SPayload(19, LSSConstants.CAPABILITY_VOXEL_COLUMNS),
+                    mock, service, replies::add,
+                    dev.vox.lss.common.compat.ViaProbe.NO_SIGNAL, 774);
+            helper.assertTrue(!replies.isEmpty(),
+                    "no Via signal must leave the v19 rung untouched (fail-open)");
+            helper.assertTrue(service.getPlayers().containsKey(mock.getUUID()),
+                    "the no-signal handshake must register");
+        } finally {
+            service.shutdown();
+            playerList.remove(mock);
+        }
+        helper.succeed();
+    }
+
+    /**
      * FP-015: {@code enabled=false} freezes the tick wholesale — no snapshot is ever
      * posted, so the processing thread cannot route anything — and events posted while
      * frozen (here a done-bit clear) apply on the FIRST resumed cycle, before routing.

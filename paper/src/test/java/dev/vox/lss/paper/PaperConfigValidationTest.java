@@ -41,6 +41,7 @@ class PaperConfigValidationTest {
         assertTrue(new PaperConfig().enableV16Compat);
         assertTrue(new PaperConfig().enableV18Compat);
         assertTrue(new PaperConfig().enableV19Compat);
+        assertTrue(new PaperConfig().enableViaMismatchGuard);
     }
 
     @Test

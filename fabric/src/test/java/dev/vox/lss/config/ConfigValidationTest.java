@@ -39,6 +39,14 @@ class ConfigValidationTest {
         assertTrue(serverConfig().enableV19Compat);
     }
 
+    /** The Via cross-MC guard ships ON (XVER §7): without it a legacy client behind
+     *  Via silently receives columns it cannot decode. Fail-open by construction (no
+     *  Via / no signal = unchanged), so the on-default is safe without Via installed. */
+    @Test
+    void viaMismatchGuardDefaultsOn() {
+        assertTrue(serverConfig().enableViaMismatchGuard);
+    }
+
     @Test
     void lodDistanceChunksClamped() {
         var c = serverConfig();

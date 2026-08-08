@@ -697,6 +697,12 @@ public class PaperRequestProcessingService {
     ReattachPromptSender reattachPromptSender = this::sendReattachPromptPayload;
 
     private void sendReattachPromptPayload(ServerPlayer player) {
+        // C5 note (review m14): this is the one SessionConfig send outside the
+        // handshake gate, so it is not Via-guarded. Reachable only through the
+        // narrow registered-then-denied window (a no-signal FIRST handshake during
+        // Via init) — there it produces a prompt→handshake→denial cycle bounded to
+        // one prompt per REATTACH_PROMPT_INTERVAL, which the guard's INFO line makes
+        // visible; a rejoin heals it.
         PaperPayloadHandler.sendSessionConfigV16(player.getBukkitEntity(),
                 this.config.enabled, this.config.lodDistanceChunks,
                 LSSConstants.SYNC_ON_LOAD_SLOT_CAP,

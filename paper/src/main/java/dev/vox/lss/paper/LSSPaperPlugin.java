@@ -307,7 +307,13 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
 
     private void handleHandshake(Player bukkitPlayer, ServerPlayer nmsPlayer, byte[] data) {
         var service = this.requestService;
+        // XVER §7: capture Via's answer once per handshake (the && keeps a disabled
+        // guard from ever triggering probe resolution); the pure seam applies the rule.
+        int viaProtocol = this.lssConfig.enableViaMismatchGuard
+                ? dev.vox.lss.common.compat.ViaProbe.playerProtocol(nmsPlayer.getUUID())
+                : dev.vox.lss.common.compat.ViaProbe.NO_SIGNAL;
         handleHandshake(data, nmsPlayer.getName().getString(), this.lssConfig, service != null,
+                viaProtocol, net.minecraft.SharedConstants.getProtocolVersion(),
                 (dialect, enabled, lodDistanceChunks, syncCap, genCap, generationEnabled) -> {
                     // A cross-dialect re-handshake sheds the stale compat identities it is
                     // NOT — otherwise columns keep shipping the old dialect's shape and
@@ -406,6 +412,19 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
     static void handleHandshake(byte[] data, String playerName, PaperConfig config,
                                 boolean servicePresent, SessionConfigSender configSender,
                                 HandshakeRegistrar registrar) {
+        // No-Via-signal overload: every pre-C5 glue pin rides this unchanged. The
+        // native slot gets 0 — a value no real MC protocol can be — never an LSS
+        // protocol number (review m6: pairing NO_SIGNAL with PROTOCOL_VERSION was a
+        // landmine one edit from denying everyone via 20 != <real via protocol>).
+        handleHandshake(data, playerName, config, servicePresent,
+                dev.vox.lss.common.compat.ViaProbe.NO_SIGNAL, 0,
+                configSender, registrar);
+    }
+
+    static void handleHandshake(byte[] data, String playerName, PaperConfig config,
+                                boolean servicePresent, int viaProtocol, int nativeProtocol,
+                                SessionConfigSender configSender,
+                                HandshakeRegistrar registrar) {
         var handshake = PaperPayloadHandler.decodeHandshake(data);
         if (handshake == null) return;
 
@@ -415,8 +434,24 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
 
         var decision = HandshakeGate.evaluate(handshake.protocolVersion(),
                 handshake.capabilities(), config.enabled, servicePresent,
-                config.enableV16Compat, config.enableV18Compat, config.enableV19Compat);
+                config.enableV16Compat, config.enableV18Compat, config.enableV19Compat,
+                dev.vox.lss.common.compat.ViaProbe.isMismatch(viaProtocol, nativeProtocol));
 
+        if (decision.outcome() == HandshakeGate.Outcome.VIA_MISMATCH) {
+            // Silent deny — "Minecraft protocol" to keep the number space distinct
+            // from the LSS protocol the handshake INFO above prints (review m5). Like
+            // VERSION_MISMATCH below, an EXISTING registration deliberately survives
+            // (review m1): the reachable window is a no-signal FIRST handshake (Via
+            // mid-init) that registered legacy, then a later denial — bounded to that
+            // race, healed by rejoin (the re-attach prompt loop this can enter is
+            // 1/minute-bounded; see sendReattachPromptPayload).
+            LSSLogger.info("LOD unavailable for " + playerName
+                    + ": Via reports client Minecraft protocol " + viaProtocol
+                    + " vs server " + nativeProtocol + " (cross-MC legacy session"
+                    + " cannot be served) — the client must update "
+                    + Brand.shortName());
+            return;
+        }
         if (!decision.sendSessionConfig()) {
             // See HandshakeGate.Outcome.VERSION_MISMATCH: replying would kick the player.
             // An EXISTING registration deliberately survives this rung (and NO_CONSUMER):
