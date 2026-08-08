@@ -21,29 +21,30 @@ public abstract class ServerConfigBase extends JsonConfig {
      *  the store on (its 2026-08-08 default), the warmed disk footprint. */
     public int lodDistanceChunks = 512;
     /**
-     * Per-player bandwidth cap. Went 20 -> 50 -> 25 MiB on 2026-08-02, then 25 -> 15 MiB
-     * on 2026-08-05 (all user decisions; the last for v0.9.1).
+     * Per-player bandwidth cap. Went 20 -> 50 -> 25 MiB on 2026-08-02, 25 -> 15 MiB on
+     * 2026-08-05 (v0.9.1), then 15 -> 25 MiB on 2026-08-08 (all user decisions; the
+     * last in the config rework's bandwidth re-bump alongside global 60 -> 75).
      *
      * <p><b>This charges RAW bytes, not wire bytes</b> ({@code estimatedBytes} = raw sections +
      * envelope; wire compression is deliberately invisible to it), because what it really
      * bounds is CLIENT DECODE AND INGEST WORK — and the elytra chunk-wall investigation
      * confirmed the client, not the link, is the binding constraint. So the ~6.25:1 the
      * compressed-columns work bought did NOT loosen the thing this cap exists to limit: at
-     * 15 MiB counted the wire cost is roughly 2.4 MB/s, but the client still decodes 15 MiB/s.
+     * 25 MiB counted the wire cost is roughly 4 MB/s, but the client still decodes 25 MiB/s.
      *
      * <p>Context for anyone retuning it: the elytra chunk wall reproduced at ~25 MB/s
-     * counted; 15 MiB places the CEILING comfortably BELOW the historic incident rate (the
-     * 2026-08-02 setting placed it AT that rate). The thing that actually caused the wall
-     * (the client's scan-cadence gate) is fixed, and the #71 ingest taper and the
-     * decode-queue halt sit underneath as client-side guards. The falsifiable check is
-     * the cap sweep in the investigation's section 11.7 — sweep upward until {@code runway}
-     * collapses in the client trace.
+     * counted, so the 25 default sits AT the historic incident rate (the 2026-08-05
+     * 15 MiB era sat below it). That is a deliberate return: the thing that actually
+     * caused the wall (the client's scan-cadence gate) is fixed, and the #71 ingest
+     * taper and the decode-queue halt sit underneath as client-side guards. The
+     * falsifiable check is the cap sweep in the investigation's section 11.7 — sweep
+     * upward until {@code runway} collapses in the client trace.
      *
      * <p><b>Key spelling since the 2026-08-08 config rework:</b> {@code
      * mbPerSecondLimitPerPlayer}, a decimal in MiB/s (12.5 works). −1 = "not in the
      * file" sentinel; {@link #validate} resolves it — the new key wins when both are
      * present, else the legacy {@code bytesPerSecondLimitPerPlayer} converts, else the
-     * 15.0 default. Consumers never read these fields directly: {@link
+     * 25.0 default. Consumers never read these fields directly: {@link
      * #bytesPerSecondPerPlayer()} is the resolved byte value.
      */
     public double mbPerSecondLimitPerPlayer = -1;
@@ -117,11 +118,12 @@ public abstract class ServerConfigBase extends JsonConfig {
     public boolean lodYieldsToVanillaTransport = false;
     /** Fleet-wide bandwidth ceiling. Raised 100 -> 256 MiB 2026-08-02 (config review
      *  section 3.2 — at 20 MiB/player the old value bound at FIVE concurrent LOD players),
-     *  then lowered 256 -> 60 MiB on 2026-08-05 (user decision, v0.9.1, alongside the
-     *  15 MiB per-player cut): a deliberate total-egress bound sized for typical hosts. At
-     *  the 15 MiB per-player default it binds at FOUR concurrent full-rate LOD players and
-     *  manifests as everyone slowing together — operators with more simultaneous LOD
-     *  traffic should raise this first. Key spelling since the 2026-08-08 rework:
+     *  lowered 256 -> 60 MiB on 2026-08-05 (user decision, v0.9.1, alongside the 15 MiB
+     *  per-player cut), then 60 -> 75 on 2026-08-08 with the per-player 15 -> 25 re-bump:
+     *  a deliberate total-egress bound sized for typical hosts. At the 25 MiB per-player
+     *  default it binds at THREE concurrent full-rate LOD players and manifests as
+     *  everyone slowing together — operators with more simultaneous LOD traffic should
+     *  raise this first. Key spelling since the 2026-08-08 rework:
      *  {@code mbPerSecondLimitGlobal}, decimal MiB/s; same sentinel/priority scheme as
      *  the per-player pair; consumers read {@link #bytesPerSecondGlobal()}. */
     public double mbPerSecondLimitGlobal = -1;
@@ -519,8 +521,8 @@ public abstract class ServerConfigBase extends JsonConfig {
     private static final double MB = 1024.0 * 1024.0;
     // The shipped bandwidth defaults, in MiB/s (2026-08-05 user decision on the byte
     // values; re-denominated by the 2026-08-08 key rename).
-    private static final double DEFAULT_MB_PER_PLAYER = 15.0;
-    private static final double DEFAULT_MB_GLOBAL = 60.0;
+    private static final double DEFAULT_MB_PER_PLAYER = 25.0;
+    private static final double DEFAULT_MB_GLOBAL = 75.0;
 
     /** The key-rename resolution ladder (2026-08-08 rework), pure: the NEW decimal-MiB
      *  key wins when present (its sentinel −1 means "not in the file"), else the legacy
