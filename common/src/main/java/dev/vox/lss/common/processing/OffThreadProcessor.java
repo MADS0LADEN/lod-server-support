@@ -200,7 +200,7 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
         this.saveScheduler = this.dataDir == null ? null
                 : new TimestampSaveScheduler(this.saveExecutor, this.dataDir);
         this.timestampCache = new ColumnTimestampCache(
-                ColumnTimestampCache.mbToEntries(perDimensionTimestampCacheSizeMB),
+                perDimensionTimestampCacheSizeMB * 1024L * 1024L,
                 java.util.concurrent.TimeUnit.SECONDS.toNanos(
                         Math.max(0, missMemoTtlSeconds)));
         if (this.dataDir != null) {

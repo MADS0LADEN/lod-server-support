@@ -120,7 +120,7 @@ class IncomingRequestRouterTest {
 
     /** Pre-populate the processor's timestamp cache through its production load path. */
     private static void seedTimestamps(Path dataDir, long timestamp, long... positions) {
-        var seed = new ColumnTimestampCache(ColumnTimestampCache.mbToEntries(1), 0);
+        var seed = new ColumnTimestampCache(1024L * 1024L, 0);
         for (long pos : positions) seed.put(DIM, pos, timestamp, 0);
         seed.save(dataDir);
     }
@@ -1094,7 +1094,7 @@ class IncomingRequestRouterTest {
     @Test
     void epochSecondGranularityAndSkewedStampsFollowTheCacheVsClaimLadder(@TempDir Path tempDir) throws Exception {
         long future = LSSConstants.epochSeconds() + 7200;
-        var seed = new ColumnTimestampCache(ColumnTimestampCache.mbToEntries(1), 0);
+        var seed = new ColumnTimestampCache(1024L * 1024L, 0);
         seed.put(DIM, packed(110, 0), 1000L, 0);
         seed.put(DIM, packed(111, 0), future, 0);
         seed.put(DIM, packed(112, 0), future, 0);

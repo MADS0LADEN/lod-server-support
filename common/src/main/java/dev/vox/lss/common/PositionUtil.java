@@ -15,6 +15,23 @@ public final class PositionUtil {
         return (int) (packed >> 32);
     }
 
+    /** Packed 32×32-chunk REGION key of a packed chunk position (the tile cache's
+     *  bucketing — timestamp-cache-tile-redesign.md §3; same regioning as .mca files
+     *  and the LOD store's regionOf). Arithmetic shift floors negatives correctly. */
+    public static long packRegionOf(long packed) {
+        int cx = unpackX(packed);
+        int cz = unpackZ(packed);
+        return ((long) (cx >> 5) << 32) | ((cz >> 5) & 0xFFFFFFFFL);
+    }
+
+    /** Slot index 0..1023 of a packed chunk position within its region tile
+     *  ({@code (cx & 31) << 5 | (cz & 31)} — non-negative for any input). */
+    public static int tileSlotOf(long packed) {
+        int cx = unpackX(packed);
+        int cz = unpackZ(packed);
+        return ((cx & 31) << 5) | (cz & 31);
+    }
+
     public static int unpackZ(long packed) {
         return (int) packed;
     }

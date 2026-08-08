@@ -14,7 +14,14 @@ import java.nio.file.Path;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ColumnTimestampCacheTest {
-    private static final int DEFAULT_MAX = ColumnTimestampCache.mbToEntries(32);
+    private static final long DEFAULT_MAX = 32L * 1024 * 1024; // bytes (D0 tile cache)
+
+    /** Epoch-relative stamp: the tile cache stores u32 offsets from TS_EPOCH_SECONDS,
+     *  so fixture stamps must be in-range to round-trip losslessly (pre-epoch values
+     *  clamp UP by design — pinned in the truth table, not scattered through here). */
+    private static long ts(long n) {
+        return ColumnTimestampCache.TS_EPOCH_SECONDS + n;
+    }
 
     private ColumnTimestampCache cache;
     private long now;
@@ -27,8 +34,8 @@ class ColumnTimestampCacheTest {
 
     @Test
     void putAndGet() {
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 100L, now);
-        assertEquals(100L, cache.get(LSSConstants.DIM_STR_OVERWORLD, 1L));
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(100L), now);
+        assertEquals(ts(100L), cache.get(LSSConstants.DIM_STR_OVERWORLD, 1L));
     }
 
     @Test
@@ -43,17 +50,17 @@ class ColumnTimestampCacheTest {
 
     @Test
     void invalidateRemovesEntries() {
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 100L, now);
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 2L, 200L, now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(100L), now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 2L, ts(200L), now);
         cache.invalidate(LSSConstants.DIM_STR_OVERWORLD, new long[]{1L});
         assertEquals(0L, cache.get(LSSConstants.DIM_STR_OVERWORLD, 1L));
-        assertEquals(200L, cache.get(LSSConstants.DIM_STR_OVERWORLD, 2L));
+        assertEquals(ts(200L), cache.get(LSSConstants.DIM_STR_OVERWORLD, 2L));
     }
 
     @Test
     void invalidateReturnsRemovedCount() {
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 100L, now);
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 2L, 200L, now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(100L), now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 2L, ts(200L), now);
         assertEquals(2, cache.invalidate(LSSConstants.DIM_STR_OVERWORLD, new long[]{1L, 2L, 3L}),
                 "returns the count actually removed (3L was never cached)");
         assertEquals(0, cache.invalidate(LSSConstants.DIM_STR_OVERWORLD, new long[]{1L}),
@@ -63,64 +70,86 @@ class ColumnTimestampCacheTest {
 
     @Test
     void invalidateCleansInsertionTimeToo() {
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 100L, now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(100L), now);
         cache.invalidate(LSSConstants.DIM_STR_OVERWORLD, new long[]{1L});
         assertEquals(0, cache.size());
         // Re-insert — should work cleanly with no stale insertion time
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 200L, now);
-        assertEquals(200L, cache.get(LSSConstants.DIM_STR_OVERWORLD, 1L));
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(200L), now);
+        assertEquals(ts(200L), cache.get(LSSConstants.DIM_STR_OVERWORLD, 1L));
         assertEquals(1, cache.size());
     }
 
     @Test
     void sizeCountsAcrossDimensions() {
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 100L, now);
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 2L, 200L, now);
-        cache.put(LSSConstants.DIM_STR_THE_NETHER, 3L, 300L, now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(100L), now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 2L, ts(200L), now);
+        cache.put(LSSConstants.DIM_STR_THE_NETHER, 3L, ts(300L), now);
         assertEquals(3, cache.size());
     }
 
     // ---- mbToEntries ----
 
     @Test
-    void mbToEntriesConversion() {
-        // 1 MB = 1048576 bytes / 64 bytes LIVE HEAP per entry = 16384. The divisor models
-        // real heap (two Long2LongOpenHashMap slots at 0.75 load factor + pow2 overshoot),
-        // not the 16-byte disk record — the old divisor made the configured MB cap mean
-        // 3-5x more RAM than the admin asked for.
-        assertEquals(16384, ColumnTimestampCache.mbToEntries(1));
-        assertEquals(16384 * 32, ColumnTimestampCache.mbToEntries(32));
+    void clampTruthTableEveryDirectionIsUpOrAbsent() {
+        String DIM = LSSConstants.DIM_STR_OVERWORLD;
+        // D0 §2.2: overstating a stamp forces a redundant re-serve (safe); understating
+        // can answer up_to_date against a stale claim (forbidden). Every clamp rounds
+        // UP or refuses to fabricate.
+        long epoch = ColumnTimestampCache.TS_EPOCH_SECONDS;
+        cache.put(DIM, 1L, epoch, now);
+        assertEquals(epoch + 1, cache.get(DIM, 1L),
+                "the epoch itself collides with the absent sentinel — +1 s overstate");
+        cache.put(DIM, 2L, epoch - 500_000, now);
+        assertEquals(epoch + 1, cache.get(DIM, 2L),
+                "pre-epoch (skewed clock) clamps UP to epoch+1 — the claim came from the"
+                        + " same skewed clock, so epoch+1 <= claim fails and it re-serves");
+        cache.put(DIM, 3L, 0L, now);
+        assertEquals(0, cache.get(DIM, 3L), "ts 0 stores NOTHING (no fabricated claim)");
+        cache.put(DIM, 4L, -5L, now);
+        assertEquals(0, cache.get(DIM, 4L), "negative ts stores nothing");
+        cache.put(DIM, 5L, ts(100L), now);
+        cache.put(DIM, 5L, 0L, now);
+        assertEquals(0, cache.get(DIM, 5L),
+                "a ts<=0 put CLEARS an existing slot (router-equivalent to the old map)");
+        cache.put(DIM, 6L, epoch + 0xFFFF_FFFFL + 99, now);
+        assertEquals(epoch + 0xFFFF_FFFFL, cache.get(DIM, 6L),
+                "offset overflow (~year 2161) clamps to the u32 max — documented unreachable");
+        long real = epoch + 50_000_000;
+        cache.put(DIM, 7L, real, now);
+        assertEquals(real, cache.get(DIM, 7L), "every in-range stamp is LOSSLESS");
     }
 
     // ---- Size-based eviction ----
 
     @Test
     void evictIfOversizedDoesNothingUnderLimit() {
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 100L, now);
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 2L, 200L, now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(100L), now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 2L, ts(200L), now);
         assertEquals(0, cache.evictIfOversized());
         assertEquals(2, cache.size());
     }
 
     @Test
-    void evictIfOversizedRemovesOldestEntries() {
-        // Use a small cache to actually test eviction
-        var smallCache = new ColumnTimestampCache(5, 0);
-        for (int i = 0; i < 8; i++) {
-            smallCache.put(LSSConstants.DIM_STR_OVERWORLD, i, i * 100L, now + i);
+    void evictIfOversizedRemovesOldestTiles() {
+        // Tile-granular eviction (D0): budget = 2 tiles (the ctor floors bytes at one
+        // TILE_HEAP_BYTES, so 2*4352 buys exactly two). Four regions, oldest-touched
+        // first — the victims are whole tiles, ranked by lastTouch (the put's now arg).
+        var smallCache = new ColumnTimestampCache(2L * 4352, 0);
+        for (int i = 0; i < 4; i++) {
+            long pos = dev.vox.lss.common.PositionUtil.packPosition(i * 40, 0);
+            smallCache.put(LSSConstants.DIM_STR_OVERWORLD, pos, ts(i * 100L + 1), now + i);
         }
-        assertEquals(8, smallCache.size());
+        assertEquals(4, smallCache.size());
 
         int evicted = smallCache.evictIfOversized();
-        assertEquals(3, evicted);
-        assertEquals(5, smallCache.size());
-
-        // Oldest entries (inserted at now+0, now+1, now+2) should be evicted
-        assertEquals(0L, smallCache.get(LSSConstants.DIM_STR_OVERWORLD, 0));
-        assertEquals(0L, smallCache.get(LSSConstants.DIM_STR_OVERWORLD, 1));
-        assertEquals(0L, smallCache.get(LSSConstants.DIM_STR_OVERWORLD, 2));
-        // Newer entries should remain
-        assertEquals(700L, smallCache.get(LSSConstants.DIM_STR_OVERWORLD, 7));
+        assertEquals(2, evicted, "two oldest-touched tiles = two entries here");
+        assertEquals(2, smallCache.size());
+        assertEquals(0L, smallCache.get(LSSConstants.DIM_STR_OVERWORLD,
+                dev.vox.lss.common.PositionUtil.packPosition(0, 0)));
+        assertEquals(0L, smallCache.get(LSSConstants.DIM_STR_OVERWORLD,
+                dev.vox.lss.common.PositionUtil.packPosition(40, 0)));
+        assertEquals(ts(301L), smallCache.get(LSSConstants.DIM_STR_OVERWORLD,
+                dev.vox.lss.common.PositionUtil.packPosition(120, 0)));
     }
 
     @Test
@@ -132,9 +161,9 @@ class ColumnTimestampCacheTest {
 
     @Test
     void saveAndLoadRoundTrip(@TempDir Path tempDir) {
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 100L, now);
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 2L, 200L, now);
-        cache.put(LSSConstants.DIM_STR_THE_NETHER, 3L, 300L, now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(100L), now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 2L, ts(200L), now);
+        cache.put(LSSConstants.DIM_STR_THE_NETHER, 3L, ts(300L), now);
 
         cache.save(tempDir);
 
@@ -142,9 +171,9 @@ class ColumnTimestampCacheTest {
         loaded.load(tempDir);
 
         assertEquals(3, loaded.size());
-        assertEquals(100L, loaded.get(LSSConstants.DIM_STR_OVERWORLD, 1L));
-        assertEquals(200L, loaded.get(LSSConstants.DIM_STR_OVERWORLD, 2L));
-        assertEquals(300L, loaded.get(LSSConstants.DIM_STR_THE_NETHER, 3L));
+        assertEquals(ts(100L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, 1L));
+        assertEquals(ts(200L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, 2L));
+        assertEquals(ts(300L), loaded.get(LSSConstants.DIM_STR_THE_NETHER, 3L));
     }
 
     @Test
@@ -154,8 +183,8 @@ class ColumnTimestampCacheTest {
         // a smaller "few thousand" corpus can fit in ONE buffer and never cross a boundary.
         var big = new ColumnTimestampCache(DEFAULT_MAX, 0);
         for (long i = 0; i < 6000; i++) {
-            big.put(LSSConstants.DIM_STR_OVERWORLD, i, i + 1_000_000L, now);
-            big.put(LSSConstants.DIM_STR_THE_NETHER, i, i + 2_000_000L, now);
+            big.put(LSSConstants.DIM_STR_OVERWORLD, i, ts(i + 1_000_000L), now);
+            big.put(LSSConstants.DIM_STR_THE_NETHER, i, ts(i + 2_000_000L), now);
         }
         big.save(tempDir);
 
@@ -163,8 +192,8 @@ class ColumnTimestampCacheTest {
         loaded.load(tempDir);
         assertEquals(12000, loaded.size());
         for (long i : new long[]{0, 1, 4095, 4096, 4097, 5999}) { // straddle the 4096-record buffer edge
-            assertEquals(i + 1_000_000L, loaded.get(LSSConstants.DIM_STR_OVERWORLD, i));
-            assertEquals(i + 2_000_000L, loaded.get(LSSConstants.DIM_STR_THE_NETHER, i));
+            assertEquals(ts(i + 1_000_000L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, i));
+            assertEquals(ts(i + 2_000_000L), loaded.get(LSSConstants.DIM_STR_THE_NETHER, i));
         }
     }
 
@@ -191,49 +220,49 @@ class ColumnTimestampCacheTest {
 
     @Test
     void saveOverwritesPreviousFile(@TempDir Path tempDir) {
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 100L, now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(100L), now);
         cache.save(tempDir);
 
         // Overwrite with different data
         var cache2 = new ColumnTimestampCache(DEFAULT_MAX, 0);
-        cache2.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 999L, now);
-        cache2.put(LSSConstants.DIM_STR_OVERWORLD, 5L, 500L, now);
+        cache2.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(999L), now);
+        cache2.put(LSSConstants.DIM_STR_OVERWORLD, 5L, ts(500L), now);
         cache2.save(tempDir);
 
         var loaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
         loaded.load(tempDir);
         assertEquals(2, loaded.size());
-        assertEquals(999L, loaded.get(LSSConstants.DIM_STR_OVERWORLD, 1L));
-        assertEquals(500L, loaded.get(LSSConstants.DIM_STR_OVERWORLD, 5L));
+        assertEquals(ts(999L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, 1L));
+        assertEquals(ts(500L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, 5L));
     }
 
     @Test
     void snapshotForSaveIsIndependent() {
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 100L, now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(100L), now);
         var snapshot = cache.snapshotForSave();
 
         // Modify original — snapshot should be unaffected
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 999L, now);
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 2L, 200L, now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(999L), now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 2L, ts(200L), now);
 
-        assertEquals(100L, snapshot.get(LSSConstants.DIM_STR_OVERWORLD, 1L));
+        assertEquals(ts(100L), snapshot.get(LSSConstants.DIM_STR_OVERWORLD, 1L));
         assertEquals(0L, snapshot.get(LSSConstants.DIM_STR_OVERWORLD, 2L));
     }
 
     @Test
     void loadPreservesExistingEntries(@TempDir Path tempDir) {
         // Save one entry
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 100L, now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(100L), now);
         cache.save(tempDir);
 
         // Load into a cache that already has a different entry
         var loaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
-        loaded.put(LSSConstants.DIM_STR_OVERWORLD, 99L, 999L, now);
+        loaded.put(LSSConstants.DIM_STR_OVERWORLD, 99L, ts(999L), now);
         loaded.load(tempDir);
 
         assertEquals(2, loaded.size());
-        assertEquals(100L, loaded.get(LSSConstants.DIM_STR_OVERWORLD, 1L));
-        assertEquals(999L, loaded.get(LSSConstants.DIM_STR_OVERWORLD, 99L));
+        assertEquals(ts(100L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, 1L));
+        assertEquals(ts(999L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, 99L));
     }
 
     // ---- Corrupt-file load guards ----
@@ -252,20 +281,20 @@ class ColumnTimestampCacheTest {
             out.writeInt(1); // one dimension
             out.writeUTF(LSSConstants.DIM_STR_OVERWORLD);
             out.writeInt(4); // declares 4 entries...
-            out.writeLong(11L); out.writeLong(100L);
-            out.writeLong(22L); out.writeLong(200L);
+            out.writeLong(11L); out.writeLong(ts(100L));
+            out.writeLong(22L); out.writeLong(ts(200L));
             out.writeLong(33L); // ...but power loss truncated mid-entry
         }
 
         var loaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
         assertDoesNotThrow(() -> loaded.load(tempDir));
-        assertEquals(100L, loaded.get(LSSConstants.DIM_STR_OVERWORLD, 11L));
-        assertEquals(200L, loaded.get(LSSConstants.DIM_STR_OVERWORLD, 22L));
+        assertEquals(ts(100L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, 11L));
+        assertEquals(ts(200L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, 22L));
         assertEquals(0L, loaded.get(LSSConstants.DIM_STR_OVERWORLD, 33L),
                 "the truncated entry must not be loaded");
         // The cache must remain fully usable after the failed load
-        loaded.put(LSSConstants.DIM_STR_OVERWORLD, 33L, 300L, now);
-        assertEquals(300L, loaded.get(LSSConstants.DIM_STR_OVERWORLD, 33L));
+        loaded.put(LSSConstants.DIM_STR_OVERWORLD, 33L, ts(300L), now);
+        assertEquals(ts(300L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, 33L));
     }
 
     @Test
@@ -276,8 +305,8 @@ class ColumnTimestampCacheTest {
         var loaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
         assertDoesNotThrow(() -> loaded.load(tempDir));
         assertEquals(0, loaded.size());
-        loaded.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 100L, now);
-        assertEquals(100L, loaded.get(LSSConstants.DIM_STR_OVERWORLD, 1L));
+        loaded.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(100L), now);
+        assertEquals(ts(100L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, 1L));
     }
 
     @Test
@@ -287,7 +316,7 @@ class ColumnTimestampCacheTest {
             out.writeInt(1);
             out.writeUTF(LSSConstants.DIM_STR_OVERWORLD);
             out.writeInt(1);
-            out.writeLong(1L); out.writeLong(100L);
+            out.writeLong(1L); out.writeLong(ts(100L));
         }
 
         var loaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
@@ -320,15 +349,22 @@ class ColumnTimestampCacheTest {
             out.writeUTF(LSSConstants.DIM_STR_OVERWORLD);
             out.writeInt(6);
             for (int i = 0; i < 6; i++) {
-                out.writeLong(i); out.writeLong(i * 100L);
+                // i*40 chunks apart: entries span multiple regions, so tile-granular
+                // eviction has more than one victim candidate.
+                out.writeLong(dev.vox.lss.common.PositionUtil.packPosition(i * 40, 0));
+                out.writeLong(ts(i * 100L + 1));
             }
         }
 
-        var small = new ColumnTimestampCache(5, 0);
+        // Budget = ONE tile (the ctor floors at TILE_HEAP_BYTES): the six entries span
+        // two regions below, so the load must ACCEPT them all and the next eviction
+        // pass trims the oldest-touched tile — the same load-then-trim contract the
+        // per-entry cap had.
+        var small = new ColumnTimestampCache(1, 0);
         assertDoesNotThrow(() -> small.load(tempDir));
         assertEquals(6, small.size(), "a valid over-cap count must load, not be discarded");
-        assertEquals(1, small.evictIfOversized(), "the next eviction pass trims the overshoot");
-        assertEquals(5, small.size());
+        assertTrue(small.evictIfOversized() > 0, "the next eviction pass trims the overshoot");
+        assertTrue(small.size() < 6);
     }
 
     @Test
@@ -340,7 +376,7 @@ class ColumnTimestampCacheTest {
             out.writeInt(1);
             out.writeUTF(LSSConstants.DIM_STR_OVERWORLD);
             out.writeInt(1_000_000); // file holds only a handful of entries
-            out.writeLong(1L); out.writeLong(100L);
+            out.writeLong(1L); out.writeLong(ts(100L));
         }
 
         var loaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
@@ -355,14 +391,14 @@ class ColumnTimestampCacheTest {
             out.writeInt(2); // two dimensions
             out.writeUTF(LSSConstants.DIM_STR_OVERWORLD);
             out.writeInt(1);
-            out.writeLong(7L); out.writeLong(70L);
+            out.writeLong(7L); out.writeLong(ts(70L));
             out.writeUTF(LSSConstants.DIM_STR_THE_NETHER);
             out.writeInt(-1); // corrupt second dimension: discard the rest, keep what loaded
         }
 
         var loaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
         assertDoesNotThrow(() -> loaded.load(tempDir));
-        assertEquals(70L, loaded.get(LSSConstants.DIM_STR_OVERWORLD, 7L));
+        assertEquals(ts(70L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, 7L));
         assertEquals(1, loaded.size());
     }
 
@@ -371,43 +407,50 @@ class ColumnTimestampCacheTest {
     @Test
     void putGetInvalidateAreDimensionScoped() {
         long p = 42L;
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, p, 100L, now);
-        cache.put(LSSConstants.DIM_STR_THE_NETHER, p, 200L, now);
-        assertEquals(100L, cache.get(LSSConstants.DIM_STR_OVERWORLD, p));
-        assertEquals(200L, cache.get(LSSConstants.DIM_STR_THE_NETHER, p));
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, p, ts(100L), now);
+        cache.put(LSSConstants.DIM_STR_THE_NETHER, p, ts(200L), now);
+        assertEquals(ts(100L), cache.get(LSSConstants.DIM_STR_OVERWORLD, p));
+        assertEquals(ts(200L), cache.get(LSSConstants.DIM_STR_THE_NETHER, p));
 
         cache.invalidate(LSSConstants.DIM_STR_OVERWORLD, new long[]{p});
         assertEquals(0L, cache.get(LSSConstants.DIM_STR_OVERWORLD, p), "invalidate is dimension-scoped");
-        assertEquals(200L, cache.get(LSSConstants.DIM_STR_THE_NETHER, p),
+        assertEquals(ts(200L), cache.get(LSSConstants.DIM_STR_THE_NETHER, p),
                 "the same packed position in another dimension survives");
     }
 
     // ---- SP-052: eviction refreshes age on re-put and evicts per dimension ----
 
     @Test
-    void rePutRefreshesInsertionAgeSoTheReputEntrySurvivesEviction() {
-        var small = new ColumnTimestampCache(3, 0);
-        small.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 10L, 1L);
-        small.put(LSSConstants.DIM_STR_OVERWORLD, 2L, 20L, 2L);
-        small.put(LSSConstants.DIM_STR_OVERWORLD, 3L, 30L, 3L);
-        small.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 11L, 10L); // re-put p1: now the NEWEST
-        small.put(LSSConstants.DIM_STR_OVERWORLD, 4L, 40L, 11L); // 4 entries, cap is 3
-        assertEquals(1, small.evictIfOversized(), "one excess entry evicted");
-        assertEquals(11L, small.get(LSSConstants.DIM_STR_OVERWORLD, 1L),
-                "the re-put refreshed p1's insertion age, so it survives");
-        assertEquals(0L, small.get(LSSConstants.DIM_STR_OVERWORLD, 2L),
-                "the genuinely-oldest entry (p2) is the one evicted");
+    void rePutRefreshesTileAgeSoTheReputTileSurvivesEviction() {
+        // Tile world (D0): eviction ranks TILES by lastTouch. A re-put on the oldest
+        // tile refreshes it, so the eviction victim is the genuinely-least-recent tile.
+        long pA = dev.vox.lss.common.PositionUtil.packPosition(0, 0);
+        long pB = dev.vox.lss.common.PositionUtil.packPosition(40, 0);
+        long pC = dev.vox.lss.common.PositionUtil.packPosition(80, 0);
+        var small = new ColumnTimestampCache(2L * 4352, 0); // budget: 2 tiles
+        small.put(LSSConstants.DIM_STR_OVERWORLD, pA, ts(10L), 1L);
+        small.put(LSSConstants.DIM_STR_OVERWORLD, pB, ts(20L), 2L);
+        small.put(LSSConstants.DIM_STR_OVERWORLD, pA, ts(11L), 10L); // refresh tile A
+        small.put(LSSConstants.DIM_STR_OVERWORLD, pC, ts(30L), 11L); // 3 tiles, budget 2
+        assertEquals(1, small.evictIfOversized(), "one excess tile (one entry) evicted");
+        assertEquals(ts(11L), small.get(LSSConstants.DIM_STR_OVERWORLD, pA),
+                "the re-put refreshed tile A's age, so it survives");
+        assertEquals(0L, small.get(LSSConstants.DIM_STR_OVERWORLD, pB),
+                "the genuinely-oldest tile (B) is the one evicted");
     }
 
     @Test
     void evictionIsScopedToTheOversizedDimension() {
-        var small = new ColumnTimestampCache(2, 0);
-        small.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 10L, 1L);
-        small.put(LSSConstants.DIM_STR_OVERWORLD, 2L, 20L, 2L);
-        small.put(LSSConstants.DIM_STR_OVERWORLD, 3L, 30L, 3L); // overworld over its cap
-        small.put(LSSConstants.DIM_STR_THE_NETHER, 9L, 90L, 1L); // nether within cap
+        // Budget: 1 tile per dimension. Overworld holds two tiles (over budget), the
+        // nether one (within) — eviction must only touch the oversized dimension.
+        var small = new ColumnTimestampCache(1, 0); // floors to one TILE_HEAP_BYTES
+        small.put(LSSConstants.DIM_STR_OVERWORLD,
+                dev.vox.lss.common.PositionUtil.packPosition(0, 0), ts(10L), 1L);
+        small.put(LSSConstants.DIM_STR_OVERWORLD,
+                dev.vox.lss.common.PositionUtil.packPosition(40, 0), ts(30L), 3L);
+        small.put(LSSConstants.DIM_STR_THE_NETHER, 9L, ts(90L), 1L);
         small.evictIfOversized();
-        assertEquals(90L, small.get(LSSConstants.DIM_STR_THE_NETHER, 9L),
+        assertEquals(ts(90L), small.get(LSSConstants.DIM_STR_THE_NETHER, 9L),
                 "a within-cap dimension is untouched by another dimension's eviction");
     }
 
@@ -417,7 +460,7 @@ class ColumnTimestampCacheTest {
     void saveToAPathThatIsAFileFailsGracefullyLeavingNoTempFile(@TempDir Path tempDir) throws IOException {
         var blocker = tempDir.resolve("blocker"); // a regular file where save expects a directory
         Files.writeString(blocker, "x");
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 100L, now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(100L), now);
         assertDoesNotThrow(() -> cache.save(blocker), "the IO failure is swallowed, not thrown");
         try (var files = Files.list(tempDir)) {
             assertTrue(files.noneMatch(f -> f.getFileName().toString().startsWith("lss-timestamps.bin.tmp")),
@@ -427,11 +470,11 @@ class ColumnTimestampCacheTest {
 
     @Test
     void snapshotForSaveIsUnaffectedByLaterMutation() {
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 100L, now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(100L), now);
         var snap = cache.snapshotForSave();
         cache.invalidate(LSSConstants.DIM_STR_OVERWORLD, new long[]{1L}); // mutate the original after snapshotting
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 2L, 200L, now);
-        assertEquals(100L, snap.get(LSSConstants.DIM_STR_OVERWORLD, 1L),
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 2L, ts(200L), now);
+        assertEquals(ts(100L), snap.get(LSSConstants.DIM_STR_OVERWORLD, 1L),
                 "the snapshot keeps the entry the original invalidated");
         assertEquals(0L, snap.get(LSSConstants.DIM_STR_OVERWORLD, 2L),
                 "the snapshot excludes a put made after it was taken");
@@ -526,12 +569,12 @@ class ColumnTimestampCacheTest {
     @Test
     void missesNeverSurviveSaveLoadOrSnapshot(@TempDir Path tempDir) {
         var c = memoCache();
-        c.put(OW, 1L, 100L, now);
+        c.put(OW, 1L, ts(100L), now);
         c.putMiss(OW, 5L, 1_000L);
         c.save(tempDir);
         var reloaded = memoCache();
         reloaded.load(tempDir);
-        assertEquals(100L, reloaded.get(OW, 1L), "stamps persist");
+        assertEquals(ts(100L), reloaded.get(OW, 1L), "stamps persist");
         assertFalse(reloaded.isFreshMiss(OW, 5L, 1_000L),
                 "misses are seconds-fresh info and must not survive a process boundary");
         assertFalse(c.snapshotForSave().isFreshMiss(OW, 5L, 1_000L),
@@ -540,18 +583,21 @@ class ColumnTimestampCacheTest {
 
     @Test
     void oversizedMissMemoIsEvictedWholesaleBeforeStampEviction() {
-        var c = new ColumnTimestampCache(3, TTL);
-        for (long p = 0; p < 5; p++) c.putMiss(OW, p, 1_000L);
-        c.put(OW, 100L, 1L, now); // within the stamp cap
+        // Memo overflow cap = bytes/64 (the retired mbToEntries value): a 200-byte
+        // budget (floored to one tile for STAMPS) gives a memo cap of 4352/64 = 68 —
+        // exceed it and the map clears wholesale while the stamp tile survives.
+        var c = new ColumnTimestampCache(200, TTL);
+        for (long p = 0; p < 100; p++) c.putMiss(OW, p, 1_000L);
+        c.put(OW, 100L, ts(1L), now); // within the stamp budget (one tile)
         c.evictIfOversized();
         assertEquals(0, c.missCount(),
                 "an over-cap miss map clears wholesale — a miss is always cheaper to lose than a stamp");
-        assertEquals(1L, c.get(OW, 100L), "the within-cap stamp survives");
+        assertEquals(ts(1L), c.get(OW, 100L), "the within-cap stamp survives");
     }
 
     @Test
     void loadSweepsOrphanedOldTmpFilesButKeepsFreshOnes(@TempDir Path dir) throws IOException {
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, 100L, now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(100L), now);
         cache.save(dir);
 
         // A process killed mid-write (kill -9, OOM, power loss) leaves its unique-named tmp
@@ -570,7 +616,130 @@ class ColumnTimestampCacheTest {
 
         assertFalse(Files.exists(orphan), "an old orphaned tmp is swept at load");
         assertTrue(Files.exists(fresh), "a fresh tmp (possible in-flight /reload writer) survives the sweep");
-        assertEquals(100L, reloaded.get(LSSConstants.DIM_STR_OVERWORLD, 1L),
+        assertEquals(ts(100L), reloaded.get(LSSConstants.DIM_STR_OVERWORLD, 1L),
                 "the sweep does not disturb the load itself");
+    }
+
+    // ---- D0 §8: the semantics-preservation proof + v2 persistence hardening ----
+
+    @Test
+    void modelDifferentialFuzzMatchesAReferenceMapExactly() {
+        // Random put/get/invalidate/invalidateStamps sequences (no eviction) against a
+        // reference Long2LongOpenHashMap — the tile structure must be semantically
+        // invisible for in-range stamps. THE proof the redesign changed no router-visible
+        // behavior (design §8); a fixed seed keeps it deterministic.
+        var rng = new java.util.Random(0x20260808L);
+        var reference = new it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap();
+        var tiles = new ColumnTimestampCache(1024L * 1024 * 1024, 0);
+        String dim = LSSConstants.DIM_STR_OVERWORLD;
+        for (int op = 0; op < 20_000; op++) {
+            long pos = dev.vox.lss.common.PositionUtil.packPosition(
+                    rng.nextInt(200) - 100, rng.nextInt(200) - 100);
+            switch (rng.nextInt(4)) {
+                case 0 -> {
+                    long stamp = ts(rng.nextInt(1_000_000) + 1);
+                    tiles.put(dim, pos, stamp, now);
+                    reference.put(pos, stamp);
+                }
+                case 1 -> assertEquals(reference.getOrDefault(pos, 0L),
+                        tiles.get(dim, pos), "op " + op + " get " + pos);
+                case 2 -> {
+                    tiles.invalidate(dim, new long[]{pos});
+                    reference.remove(pos);
+                }
+                case 3 -> {
+                    tiles.invalidateStamps(dim, new long[]{pos});
+                    reference.remove(pos);
+                }
+            }
+        }
+        assertEquals(reference.size(), tiles.size(), "final size parity");
+        for (var e : reference.long2LongEntrySet()) {
+            assertEquals(e.getLongValue(), tiles.get(dim, e.getLongKey()));
+        }
+    }
+
+    @Test
+    void v1MigrationGoldenLoadsExactStampsAndTileShapes(@TempDir Path tempDir) throws IOException {
+        // A hand-written RELEASED-format v1 stream (design §6's migration golden):
+        // entries across two dimensions and two regions must land in the right tiles
+        // with exact stamps, and the NEXT save must write v2 (round-trip re-load pins
+        // it — an accidental v1 re-write would warn-discard here).
+        long pA = dev.vox.lss.common.PositionUtil.packPosition(5, 7);
+        long pB = dev.vox.lss.common.PositionUtil.packPosition(-40, 100);
+        try (var out = cacheFileOut(tempDir)) {
+            out.writeInt(1); // released FORMAT_VERSION
+            out.writeInt(2);
+            out.writeUTF(LSSConstants.DIM_STR_OVERWORLD);
+            out.writeInt(2);
+            out.writeLong(pA); out.writeLong(ts(123L));
+            out.writeLong(pB); out.writeLong(ts(456L));
+            out.writeUTF(LSSConstants.DIM_STR_THE_NETHER);
+            out.writeInt(1);
+            out.writeLong(pA); out.writeLong(ts(789L));
+        }
+        var migrated = new ColumnTimestampCache(DEFAULT_MAX, 0);
+        migrated.load(tempDir);
+        assertEquals(ts(123L), migrated.get(LSSConstants.DIM_STR_OVERWORLD, pA));
+        assertEquals(ts(456L), migrated.get(LSSConstants.DIM_STR_OVERWORLD, pB));
+        assertEquals(ts(789L), migrated.get(LSSConstants.DIM_STR_THE_NETHER, pA));
+        assertEquals(3, migrated.size());
+
+        migrated.save(tempDir); // must write v2
+        var reloaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
+        reloaded.load(tempDir);
+        assertEquals(ts(123L), reloaded.get(LSSConstants.DIM_STR_OVERWORLD, pA),
+                "the post-migration save must be a loadable v2 file");
+        assertEquals(3, reloaded.size());
+    }
+
+    @Test
+    void v2CorruptTileCountDiscardsCleanly(@TempDir Path tempDir) throws IOException {
+        try (var out = cacheFileOut(tempDir)) {
+            out.writeInt(2);
+            out.writeInt(1);
+            out.writeUTF(LSSConstants.DIM_STR_OVERWORLD);
+            out.writeInt(1_000_000); // tiles the file cannot possibly hold
+        }
+        var loaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
+        assertDoesNotThrow(() -> loaded.load(tempDir));
+        assertEquals(0, loaded.size());
+        loaded.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(5L), now);
+        assertEquals(ts(5L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, 1L),
+                "usable after the discarded load");
+    }
+
+    @Test
+    void v2LiveCountDisagreementDiscardsTheRest(@TempDir Path tempDir) throws IOException {
+        // liveCount is the tile's own integrity claim: a mismatch against the scanned
+        // slots means the stream is unreliable — stop, keep what loaded.
+        try (var out = cacheFileOut(tempDir)) {
+            out.writeInt(2);
+            out.writeInt(1);
+            out.writeUTF(LSSConstants.DIM_STR_OVERWORLD);
+            out.writeInt(1);
+            out.writeLong(0L);   // region key
+            out.writeInt(7);     // claims 7 live...
+            for (int s = 0; s < 1024; s++) out.writeInt(s == 3 ? 55 : 0); // ...has 1
+        }
+        var loaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
+        assertDoesNotThrow(() -> loaded.load(tempDir));
+        assertEquals(0, loaded.size(), "the lying tile is not admitted");
+    }
+
+    @Test
+    void v2LiveCountOutOfRangeDiscardsTheRest(@TempDir Path tempDir) throws IOException {
+        try (var out = cacheFileOut(tempDir)) {
+            out.writeInt(2);
+            out.writeInt(1);
+            out.writeUTF(LSSConstants.DIM_STR_OVERWORLD);
+            out.writeInt(1);
+            out.writeLong(0L);
+            out.writeInt(4096); // outside 1..1024
+            for (int s = 0; s < 1024; s++) out.writeInt(0);
+        }
+        var loaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
+        assertDoesNotThrow(() -> loaded.load(tempDir));
+        assertEquals(0, loaded.size());
     }
 }
