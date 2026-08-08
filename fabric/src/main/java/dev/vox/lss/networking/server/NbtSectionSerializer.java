@@ -928,6 +928,21 @@ final class NbtSectionSerializer {
                 biomeIdentityLookup(registryAccess));
     }
 
+    /** The C2 egress inverse of {@link #toV20} (XVER §4.2): v20 body → native section
+     *  layout against this server's OWN registries — exact and lossless same-version
+     *  (every identity this server emitted exists in its registry; the inverses are the
+     *  emit tables inverted, bijective by construction). Throws {@code
+     *  WireFormatException} on any malformed body or unresolvable identity — a table
+     *  bug must fail loudly, never serve wrong blocks. */
+    static byte[] fromV20(byte[] v20Body, RegistryAccess registryAccess) {
+        var blockIds = IdentityTables.blockIdsByIdentity();
+        return dev.vox.lss.common.wire.V20ToNativeTranslator.translate(v20Body,
+                identity -> blockIds.getOrDefault(identity, -1),
+                biomeIdLookup(registryAccess),
+                Block.BLOCK_STATE_REGISTRY.size(),
+                biomeIdCount(registryAccess));
+    }
+
     private static java.util.function.IntFunction<String> buildBiomeIdentities(IdMap<Holder<Biome>> idMap) {
         var table = new String[idMap.size()];
         for (int id = 0; id < table.length; id++) {

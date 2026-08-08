@@ -118,120 +118,67 @@ public class PaperRequestProcessingService {
     private boolean v16SpliceWarned;
     /** Warn-once latch for the v18 egress splice guard (pump thread only). */
     private boolean v18SpliceWarned;
-    /** Warn-once latch for legacy egress translation failures (PUMP only). */
-    private boolean legacyTranslateWarned;
-
-    /** Test seam for the C2 legacy egress body translation: production translates
-     *  against the server's own registries + the live zstd codec; ladder tests inject
-     *  stubs so the dialect switch, splice composition, and failure containment are
-     *  drivable without a real registry. */
-    @FunctionalInterface
-    interface LegacyColumnTranslator {
-        byte[] toNative(byte[] frame) throws Exception;
-    }
-
-    private LegacyColumnTranslator legacyColumnTranslator = frame -> {
-        // Via the accessor, not this.server: javac's definite-assignment analysis
-        // rejects a blank-final field read inside a field-initializer lambda.
-        var registryAccess = serverRegistryAccess();
-        var blockIds = PaperIdentityTables.blockIdsByIdentity();
-        return PaperPayloadHandler.translateColumnFrameToNative(frame,
-                identity -> blockIds.getOrDefault(identity, -1),
-                PaperNbtSectionSerializer.biomeIdLookup(registryAccess),
-                net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(),
-                PaperNbtSectionSerializer.biomeIdCount(registryAccess),
-                dev.vox.lss.common.store.StoreCodec.zstdOrNull());
-    };
-
-    void setLegacyColumnTranslator(LegacyColumnTranslator translator) {
-        this.legacyColumnTranslator = translator;
-    }
-
-    private net.minecraft.core.RegistryAccess serverRegistryAccess() {
-        return this.server.registryAccess();
-    }
 
     /** The per-player column egress (PUMP): {@link #routeColumnFrame} over the real
      *  NMS send. The routing itself is package-private so the Tier-1 twin can drive
-     *  the dialect ladder with a capturing sender + stub translator. */
+     *  the dialect ladder with a capturing sender. */
     private ColumnPayloadSender columnPayloadSender = (state, data) ->
             routeColumnFrame(state, data, bytes -> PaperPayloadHandler.sendRawNmsPayload(
                     state.getPlayer().getBukkitEntity(), PaperPayloadHandler.ID_VOXEL_COLUMN, bytes));
 
-    /** The column egress routing (PUMP). A legacy (v19/v18/v16) session first gets
-     *  its v20 BODY translated back to the native section layout (C2, XVER §4.2 — the
-     *  v18/v16 splices only rewrite headers, so an untranslated body would ship v20
-     *  dictionary strings a legacy decoder reads as garbage), then v16 splices to the
-     *  source-less shape and prunes the synthetic want-set (satisfied-by-data;
-     *  load-bearing, design §4.4), v18 strips the codec byte, and v19 ships at the
-     *  CURRENT header (identical layout — only the body differs). Every failure shape
-     *  is a warn-once DROP (design §5): letting the exception propagate would make
-     *  flushSendQueue drop the player's WHOLE queue, and honest re-resolution would
-     *  re-enqueue the same frame forever. A translation failure also clears the
-     *  done-bit so the state never claims delivery. */
+    /** The column egress routing (PUMP). Legacy (v19/v18/v16) sessions' BODIES are
+     *  already native: the C2 translation runs at the per-recipient ENQUEUE choke point
+     *  ({@code PaperOffThreadProcessor.buildAndEnqueueColumnPayload}) so every queued
+     *  size — gauges, bandwidth budget, diag books, soak law A2 — matches what the
+     *  legacy client decodes. This seam applies only the HEADER shapes: v16 splices to
+     *  the source-less layout and prunes the synthetic want-set (satisfied-by-data;
+     *  load-bearing, design §4.4), v18 strips the codec byte, v19 IS the current
+     *  header. Every failure shape is a warn-once DROP (design §5): letting the
+     *  exception propagate would make flushSendQueue drop the player's WHOLE queue,
+     *  and honest re-resolution would re-enqueue the same frame forever. */
     void routeColumnFrame(PaperPlayerRequestState state, byte[] data,
                           java.util.function.Consumer<byte[]> rawSend) {
         var uuid = state.getPlayerUUID();
-        var dialect = this.dialects.dialectOf(uuid);
-        if (dialect != dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT) {
-            byte[] translated;
+        if (this.dialects.isV16(uuid)) {
+            byte[] legacy;
+            long packedPos;
             try {
-                translated = this.legacyColumnTranslator.toNative(data);
+                legacy = PaperPayloadHandler.rewriteColumnToV16(data);
+                packedPos = PaperPayloadHandler.readColumnPackedPos(data);
             } catch (Exception e) {
-                if (!this.legacyTranslateWarned) {
-                    this.legacyTranslateWarned = true;
-                    LSSLogger.error(dialect + "-compat: column body translation failed for "
-                            + state.getPlayerName() + " — dropping (further drops are silent)", e);
-                }
-                try {
-                    state.clearDiskReadDone(PaperPayloadHandler.readColumnPackedPos(data));
-                } catch (Exception pos) {
-                    // Unparseable frame position: nothing to clear; the drop stands.
+                if (!this.v16SpliceWarned) {
+                    this.v16SpliceWarned = true;
+                    LSSLogger.error("v16-compat: dropping unspliceable column frame for "
+                            + state.getPlayerName() + " (further drops are silent)", e);
                 }
                 return;
             }
-            if (dialect == dev.vox.lss.common.HandshakeGate.WireDialect.V16) {
-                byte[] legacy;
-                long packedPos;
-                try {
-                    legacy = PaperPayloadHandler.rewriteColumnToV16(translated);
-                    packedPos = PaperPayloadHandler.readColumnPackedPos(translated);
-                } catch (Exception e) {
-                    if (!this.v16SpliceWarned) {
-                        this.v16SpliceWarned = true;
-                        LSSLogger.error("v16-compat: dropping unspliceable column frame for "
-                                + state.getPlayerName() + " (further drops are silent)", e);
-                    }
-                    return;
-                }
-                rawSend.accept(legacy);
-                this.v16Compat.onColumnSent(uuid, packedPos);
-                return;
-            }
-            if (dialect == dev.vox.lss.common.HandshakeGate.WireDialect.V18) {
-                // v18 egress (v18-compat design §2.6): strip the codec byte, keep the
-                // source byte. No prune — there is no synthetic want-set; the client's
-                // own re-declaration heals any drop. The splice THROWS on a non-RAW
-                // codec (the narrow cross-dialect downgrade window); the warn-drop
-                // contains it, mirroring the v16 branch above.
-                byte[] v18Frame;
-                try {
-                    v18Frame = PaperPayloadHandler.rewriteColumnToV18(translated);
-                } catch (Exception e) {
-                    if (!this.v18SpliceWarned) {
-                        this.v18SpliceWarned = true;
-                        LSSLogger.error("v18-compat: dropping unspliceable column frame for "
-                                + state.getPlayerName() + " (further drops are silent)", e);
-                    }
-                    return;
-                }
-                rawSend.accept(v18Frame);
-                return;
-            }
-            // V19: the header is the CURRENT layout — only the body translated.
-            rawSend.accept(translated);
+            rawSend.accept(legacy);
+            this.v16Compat.onColumnSent(uuid, packedPos);
             return;
         }
+        if (this.dialects.isV18(uuid)) {
+            // v18 egress (v18-compat design §2.6): strip the codec byte, keep the
+            // source byte. No prune — there is no synthetic want-set; the client's
+            // own re-declaration heals any drop. The splice THROWS on a non-RAW
+            // codec (the narrow cross-dialect downgrade window); the warn-drop
+            // contains it, mirroring the v16 branch above.
+            byte[] v18Frame;
+            try {
+                v18Frame = PaperPayloadHandler.rewriteColumnToV18(data);
+            } catch (Exception e) {
+                if (!this.v18SpliceWarned) {
+                    this.v18SpliceWarned = true;
+                    LSSLogger.error("v18-compat: dropping unspliceable column frame for "
+                            + state.getPlayerName() + " (further drops are silent)", e);
+                }
+                return;
+            }
+            rawSend.accept(v18Frame);
+            return;
+        }
+        // CURRENT and V19 ship verbatim — the v19 header IS the current header, and a
+        // v19 session's body was translated at enqueue.
         rawSend.accept(data);
     }
 
@@ -397,6 +344,11 @@ public class PaperRequestProcessingService {
         // manager this service actually published.
         this.xrayMasks = wiring.xrayMasks();
         this.wireCompressionLive = wiring.wireCompressionLive();
+        // C2: the per-recipient enqueue consults the session dialect to translate
+        // legacy (v19/v18/v16) column bodies to the native layout at build time.
+        if (this.offThreadProcessor != null) {
+            this.offThreadProcessor.attachDialectTracker(this.dialects);
+        }
     }
 
     private static Wiring productionWiring(MinecraftServer server, Plugin plugin, PaperConfig config) {

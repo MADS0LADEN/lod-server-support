@@ -50,6 +50,18 @@ public class PaperOffThreadProcessor extends OffThreadProcessor<PaperPlayerReque
         this.diskReader = diskReader;
     }
 
+    // The session-dialect source for the C2 legacy egress translation (XVER §4.2, placed
+    // at the ENQUEUE choke point — twin of the Fabric processor's field). Attached by the
+    // service after construction; null (test rigs) = every session CURRENT. Volatile:
+    // written at service init, read on the processing thread.
+    private volatile dev.vox.lss.common.compat.WireDialectTracker dialects;
+    /** Warn-once latch for legacy egress translation failures (processing thread only). */
+    private boolean legacyTranslateWarned;
+
+    public void attachDialectTracker(dev.vox.lss.common.compat.WireDialectTracker dialects) {
+        this.dialects = dialects;
+    }
+
     public void updateDimensionContext(String dimension, ServerLevel level) {
         this.dimensionLevelMap.put(dimension, level);
     }
@@ -92,6 +104,46 @@ public class PaperOffThreadProcessor extends OffThreadProcessor<PaperPlayerReque
                     + dimension.length() + " chars > " + LSSConstants.MAX_DIMENSION_STRING_LENGTH + ")");
             return false;
         }
+        // C2 legacy egress translation (XVER §4.2), at THIS per-recipient choke point —
+        // twin of the Fabric build, same rationale: every queued size (gauges, bandwidth
+        // budget, diag books, soak law A2) must derive from the bytes the legacy client
+        // actually decodes, and the CPU lands on the processing thread. The pump's
+        // routeColumnFrame keeps only the v18/v16 HEADER splices.
+        var dialectTracker = this.dialects;
+        boolean legacySession = dialectTracker != null && dialectTracker.dialectOf(
+                state.getPlayerUUID()) != dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT;
+        if (legacySession) {
+            var level = this.dimensionLevelMap.get(dimension);
+            LegacyColumnBuild build;
+            try {
+                if (level == null) {
+                    throw new IllegalStateException("no dimension context for " + dimension);
+                }
+                build = buildLegacyColumn(bytes.raw(), level.registryAccess(),
+                        state.wantsCompressedColumns(), wireCodec());
+            } catch (Exception e) {
+                if (!this.legacyTranslateWarned) {
+                    this.legacyTranslateWarned = true;
+                    LSSLogger.error("legacy-compat: column body translation failed for "
+                            + state.getPlayerName() + " — resolving up_to_date so the client "
+                            + "keeps what it has (a persistent failure here is a registry-table "
+                            + "bug; further failures are silent)", e);
+                }
+                // false = the oversized-column semantics: the caller answers up_to_date,
+                // never a fabricated clear.
+                return false;
+            }
+            byte[] legacyEncoded = PaperPayloadHandler.encodeVoxelColumnPreEncoded(
+                    cx, cz, dimension, columnTimestamp, source, build.codecTag(), build.shipped());
+            state.addReadyPayload(new QueuedPayload<>(legacyEncoded,
+                    build.rawSize() + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                    build.shipped().length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                    submissionOrder, PositionUtil.packPosition(cx, cz)));
+            getDiagnostics().incrementColumnCodec(build.codecTag() == LSSConstants.COLUMN_CODEC_ZSTD);
+            if (PaperSoakProbeBridge.armed()) PaperSoakProbeBridge.recordServed(cx, cz, bytes.raw());
+            return true;
+        }
+
         // Per-recipient codec choice off the shared holder — twin of the Fabric build:
         // frame() only for capable sessions, memoized across the dedup fan-out; a v16
         // session's flag is derived false at registration, so its frames encode raw and
@@ -111,6 +163,31 @@ public class PaperOffThreadProcessor extends OffThreadProcessor<PaperPlayerReque
         // materializing raw for it. Twin of the Fabric hook.
         if (PaperSoakProbeBridge.armed()) PaperSoakProbeBridge.recordServed(cx, cz, bytes.raw());
         return true;
+    }
+
+    /** The translated-body build for one legacy recipient (textual twin of the Fabric build): shipped bytes + codec tag +
+     *  the re-derived rawSize — the legacy client's charge rule reads the bytes IT
+     *  receives. */
+    record LegacyColumnBuild(byte[] shipped, byte codecTag, int rawSize) {}
+
+    /** Translate a v20 raw body for a legacy session and choose its codec: v19 sessions
+     *  keep their compression capability (recompress, shrink-gated like the shared
+     *  holder's frame()); v18/v16 sessions arrive forced-RAW. Throws on any
+     *  malformed/unresolvable body — the caller contains it. */
+    static LegacyColumnBuild buildLegacyColumn(byte[] v20Raw,
+                                                     net.minecraft.core.RegistryAccess registryAccess,
+                                                     boolean wantsCompressed,
+                                                     dev.vox.lss.common.store.StoreCodec zstd) {
+        byte[] nativeBody = PaperNbtSectionSerializer.fromV20(v20Raw, registryAccess);
+        if (wantsCompressed && zstd != null) {
+            byte[] frame = zstd.compress(nativeBody);
+            if (frame.length < nativeBody.length) {
+                return new LegacyColumnBuild(frame, LSSConstants.COLUMN_CODEC_ZSTD,
+                        nativeBody.length);
+            }
+        }
+        return new LegacyColumnBuild(nativeBody, LSSConstants.COLUMN_CODEC_RAW,
+                nativeBody.length);
     }
 
     @Override

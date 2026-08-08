@@ -155,6 +155,9 @@ public class RequestProcessingService {
                 config.effectiveTimestampCacheMB(), config.missMemoTtlSeconds,
                 config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
                         + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS);
+        // C2: the per-recipient enqueue consults the session dialect to translate
+        // legacy (v19/v18/v16) column bodies to the native layout at build time.
+        this.offThreadProcessor.attachDialectTracker(this.dialects);
         // Right after the constructor's cache load — see the field's javadoc.
         this.timestampCacheBootedEmpty = this.offThreadProcessor.isTimestampCacheEmpty();
 
@@ -607,103 +610,21 @@ public class RequestProcessingService {
 
     /** Warn-once latch for the v18 egress guard (MAIN thread only). */
     private boolean v18UnconvertibleWarned;
-    /** Warn-once latch for legacy egress translation failures (MAIN thread only). */
-    private boolean legacyTranslateWarned;
-
-    /**
-     * The C2 legacy egress body translation (XVER §4.2): with v20 as the canonical
-     * internal form, EVERY legacy dialect needs its BODY translated back to the native
-     * (v19) section layout before the header shape applies — the v18/v16 splices only
-     * rewrite headers and would ship v20 dictionary bodies a legacy decoder reads as
-     * garbage (review C1-1). The translation is EXACT and lossless on the same MC
-     * version: every identity this server emitted exists in its own registry, so the
-     * injected inverses never fall back. Codec is preserved: a zstd frame decompresses
-     * → translates → RECOMPRESSES (v19 sessions keep the codec byte and their
-     * compression capability); a raw body translates in place. {@code rawSize} is
-     * re-derived from the translated body — the legacy client's charge rule reads the
-     * bytes IT receives. Throws on any malformed body, unresolvable identity, or
-     * missing zstd codec — {@link #translateForLegacy}'s warn-drop contains it.
-     */
-    static dev.vox.lss.networking.payloads.VoxelColumnS2CPayload translateColumnToNative(
-            dev.vox.lss.networking.payloads.VoxelColumnS2CPayload col,
-            java.util.function.ToIntFunction<String> blockIdResolver,
-            java.util.function.ToIntFunction<String> biomeIdResolver,
-            int blockRegistrySize, int biomeRegistrySize,
-            dev.vox.lss.common.store.StoreCodec zstd) {
-        byte[] shipped = col.shippedSections();
-        boolean framed = col.codec() == LSSConstants.COLUMN_CODEC_ZSTD;
-        byte[] v20Body = shipped;
-        if (framed) {
-            if (zstd == null) {
-                // Unreachable in production (a codec-1 payload only exists because the
-                // probe succeeded at service start) — but the throw keeps the invariant
-                // local instead of an NPE.
-                throw new IllegalStateException("codec-1 column with no zstd codec available");
-            }
-            v20Body = zstd.decompress(shipped, col.rawSize());
-        }
-        byte[] nativeBody = dev.vox.lss.common.wire.V20ToNativeTranslator.translate(
-                v20Body, blockIdResolver, biomeIdResolver, blockRegistrySize, biomeRegistrySize);
-        byte[] out = framed ? zstd.compress(nativeBody) : nativeBody;
-        return new dev.vox.lss.networking.payloads.VoxelColumnS2CPayload(
-                col.chunkX(), col.chunkZ(), col.dimension(), col.columnTimestamp(),
-                col.source(), col.codec(), out, nativeBody.length);
-    }
-
-    /** {@link #translateColumnToNative} against this server's own registries, with the
-     *  C2 failure containment: a translation failure warn-drops ONCE and clears the
-     *  done-bit so the state never claims delivery — the client re-declares and the
-     *  next serve retries (a persistent failure here is a registry-table bug, not a
-     *  per-column condition). Returns null on the contained failure. */
-    private dev.vox.lss.networking.payloads.VoxelColumnS2CPayload translateForLegacy(
-            PlayerRequestState state, dev.vox.lss.networking.payloads.VoxelColumnS2CPayload col,
-            String dialect) {
-        try {
-            var registryAccess = this.server.registryAccess();
-            var blockIds = IdentityTables.blockIdsByIdentity();
-            return translateColumnToNative(col,
-                    identity -> blockIds.getOrDefault(identity, -1),
-                    NbtSectionSerializer.biomeIdLookup(registryAccess),
-                    net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(),
-                    NbtSectionSerializer.biomeIdCount(registryAccess),
-                    dev.vox.lss.common.store.StoreCodec.zstdOrNull());
-        } catch (Exception e) {
-            if (!this.legacyTranslateWarned) {
-                this.legacyTranslateWarned = true;
-                LSSLogger.error(dialect + "-compat: column body translation failed for "
-                        + state.getPlayerName() + " — dropping (further drops are silent)", e);
-            }
-            state.clearDiskReadDone(PositionUtil.packPosition(col.chunkX(), col.chunkZ()));
-            return null;
-        }
-    }
 
     /** The per-player column egress (MAIN) — every producer (probe/disk/generation/
      *  ghost-clear/store-hit) funnels through here, so no producer can leak a
-     *  wrong-dialect frame. Since C2 a legacy (v19/v18/v16) session first gets its v20
-     *  BODY translated back to the native section layout ({@link #translateForLegacy});
-     *  v16 then splices to the source-less shape and prunes the synthetic want-set
-     *  (satisfied-by-data; the prune is load-bearing, design §4.4), v18 strips the codec
-     *  byte, v19 ships at the CURRENT header (identical layout — only the body differs).
-     *  Every failure shape is a warn-once DROP (design §5): a dropped frame self-heals
-     *  by re-declaration, a wrong-shaped one kicks the client. */
+     *  wrong-dialect frame. Legacy (v19/v18/v16) sessions' BODIES are already native:
+     *  the C2 translation runs at the per-recipient ENQUEUE choke point
+     *  ({@code FabricOffThreadProcessor.buildAndEnqueueColumnPayload}) so every queued
+     *  size — gauges, bandwidth budget, diag books, soak law A2 — matches what the
+     *  legacy client decodes. This seam applies only the HEADER shapes: v16 splices to
+     *  the source-less layout and prunes the synthetic want-set (satisfied-by-data; the
+     *  prune is load-bearing, design §4.4), v18 strips the codec byte, v19 IS the
+     *  current header. Every failure shape is a warn-once DROP (design §5): a dropped
+     *  frame self-heals by re-declaration, a wrong-shaped one kicks the client. */
     private void sendColumnPayload(PlayerRequestState state, CustomPacketPayload payload)
             throws Exception {
         var uuid = state.getPlayerUUID();
-        if (this.dialects.isV19(uuid)) {
-            // v19 egress (C2, XVER §4.2): the v19 header IS the current header — only
-            // the body translates (v20 dictionary form → native global-id palettes).
-            if (payload instanceof dev.vox.lss.networking.payloads.VoxelColumnS2CPayload col) {
-                var translated = translateForLegacy(state, col, "v19");
-                if (translated == null) {
-                    return;
-                }
-                ServerPlayNetworking.send(state.getPlayer(), translated);
-                return;
-            }
-            ServerPlayNetworking.send(state.getPlayer(), payload);
-            return;
-        }
         if (this.dialects.isV16(uuid)) {
             if (!(payload instanceof dev.vox.lss.networking.payloads.VoxelColumnS2CPayload col)) {
                 if (!this.v16UnconvertibleWarned) {
@@ -733,11 +654,7 @@ public class RequestProcessingService {
                 }
                 return;
             }
-            var translated = translateForLegacy(state, col, "v16");
-            if (translated == null) {
-                return;
-            }
-            ServerPlayNetworking.send(state.getPlayer(), translated.asV16());
+            ServerPlayNetworking.send(state.getPlayer(), col.asV16());
             this.v16Compat.onColumnSent(uuid,
                     PositionUtil.packPosition(col.chunkX(), col.chunkZ()));
             return;
@@ -763,11 +680,7 @@ public class RequestProcessingService {
                 }
                 return;
             }
-            var translated = translateForLegacy(state, col, "v18");
-            if (translated == null) {
-                return;
-            }
-            ServerPlayNetworking.send(state.getPlayer(), translated.asV18());
+            ServerPlayNetworking.send(state.getPlayer(), col.asV18());
             return;
         }
         ServerPlayNetworking.send(state.getPlayer(), payload);

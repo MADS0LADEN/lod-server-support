@@ -16,7 +16,6 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
-import java.util.function.ToIntFunction;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -27,14 +26,14 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Paper twin of the Fabric {@code LegacyColumnEgressTest} at FRAME level
- * ({@link PaperPayloadHandler#translateColumnFrameToNative} — XVER plan §4.2/§9): the
- * corpus-driven translation chain (translate(v20 golden) must byte-equal the frozen
- * native golden, one deliberate palette-collapse carve-out), codec handling over whole
- * encoded frames (raw in place, zstd decompress → translate → recompress with the
- * frame's own declared content size), splice composition (the v18/v16 header rewrites
- * over a TRANSLATED frame must equal the rewrites over a natively-built frame), and
- * the loud failure shapes the sender's warn-drop contains.
+ * Paper twin of the Fabric {@code LegacyColumnEgressTest}: the C2 legacy egress body
+ * translation ({@code PaperOffThreadProcessor.buildLegacyColumn} over
+ * {@code PaperNbtSectionSerializer.fromV20} — XVER plan §4.2/§9) at the per-recipient
+ * ENQUEUE choke point. The corpus-driven translation chain (fromV20(v20 golden) must
+ * byte-equal the frozen native golden through the production registry tables, one
+ * deliberate palette-collapse carve-out), the codec choice (v19 recompress
+ * shrink-gated), splice composition over translated frames, and the loud failure
+ * shape the enqueue containment catches.
  */
 class PaperLegacyEgressTest {
 
@@ -44,17 +43,10 @@ class PaperLegacyEgressTest {
     }
 
     private static RegistryAccess REGISTRY_ACCESS;
-    private static ToIntFunction<String> BLOCK_IDS;
-    private static ToIntFunction<String> BIOME_IDS;
-    private static int BIOME_ID_COUNT;
 
     @BeforeAll
     static void setup() {
         REGISTRY_ACCESS = CorpusRegistryAccess.build();
-        var blockInverse = PaperIdentityTables.blockIdsByIdentity();
-        BLOCK_IDS = identity -> blockInverse.getOrDefault(identity, -1);
-        BIOME_IDS = PaperNbtSectionSerializer.biomeIdLookup(REGISTRY_ACCESS);
-        BIOME_ID_COUNT = PaperNbtSectionSerializer.biomeIdCount(REGISTRY_ACCESS);
     }
 
     // ---- fixtures ----
@@ -89,24 +81,14 @@ class PaperLegacyEgressTest {
         }
     }
 
-    private static byte[] frameFor(byte codec, byte[] body) {
-        return PaperPayloadHandler.encodeVoxelColumnPreEncoded(7, -3, "minecraft:overworld",
-                1234567L, LSSConstants.COLUMN_SOURCE_DISK, codec, body);
-    }
-
-    private static byte[] translateFrame(byte[] frame, StoreCodec zstd) {
-        return PaperPayloadHandler.translateColumnFrameToNative(frame,
-                BLOCK_IDS, BIOME_IDS, Block.BLOCK_STATE_REGISTRY.size(), BIOME_ID_COUNT, zstd);
-    }
-
-    // ---- the §9 translation chain over the committed corpus, frame-level ----
+    // ---- the §9 translation chain over the committed corpus ----
 
     /** Same deliberate divergence as the Fabric twin: the fixture's duplicate palette
      *  entries collapse through the identity dictionary; content pinned below. */
     private static final String COLLAPSED_FIXTURE = "duplicate-air.bin";
 
     @Test
-    void everyCorpusGoldenTranslatesBackToItsExactNativeFrame() throws IOException {
+    void everyCorpusGoldenTranslatesBackToItsExactNativeBytes() throws IOException {
         var names = corpusNames();
         assertTrue(names.size() >= 14, "premise: the committed corpus has at least 14 fixtures, found " + names);
         assertTrue(names.contains(COLLAPSED_FIXTURE),
@@ -115,25 +97,24 @@ class PaperLegacyEgressTest {
             if (name.equals(COLLAPSED_FIXTURE)) continue;
             byte[] nativeGolden = readCorpus("nbt-corpus", name);
             byte[] v20Golden = readCorpus("v20-corpus", name);
-            assertArrayEquals(frameFor(LSSConstants.COLUMN_CODEC_RAW, nativeGolden),
-                    translateFrame(frameFor(LSSConstants.COLUMN_CODEC_RAW, v20Golden), null),
-                    "the translated frame must byte-equal a natively-built frame (header "
-                            + "preserved, body the frozen native bytes) for " + name);
+            assertArrayEquals(nativeGolden,
+                    PaperNbtSectionSerializer.fromV20(v20Golden, REGISTRY_ACCESS),
+                    "fromV20 must reproduce the frozen native bytes through the "
+                            + "production registry tables for " + name);
         }
     }
 
     @Test
     void duplicatePaletteFixtureCollapsesToContentIdenticalBytes() {
         byte[] nativeGolden = readCorpus("nbt-corpus", COLLAPSED_FIXTURE);
-        byte[] translatedFrame = translateFrame(
-                frameFor(LSSConstants.COLUMN_CODEC_RAW, readCorpus("v20-corpus", COLLAPSED_FIXTURE)), null);
-        byte[] translatedBody = readFrameBody(translatedFrame);
-        assertFalse(java.util.Arrays.equals(nativeGolden, translatedBody),
+        byte[] translated = PaperNbtSectionSerializer.fromV20(
+                readCorpus("v20-corpus", COLLAPSED_FIXTURE), REGISTRY_ACCESS);
+        assertFalse(java.util.Arrays.equals(nativeGolden, translated),
                 "premise: the collapse actually diverges — if this starts passing "
                         + "byte-equal, fold the fixture back into the chain test");
 
         var expected = WireSectionCursor.parse(nativeGolden, WireSectionCursor.Layout.NATIVE);
-        var actual = WireSectionCursor.parse(translatedBody, WireSectionCursor.Layout.NATIVE);
+        var actual = WireSectionCursor.parse(translated, WireSectionCursor.Layout.NATIVE);
         assertEquals(expected.sections().size(), actual.sections().size());
         for (int i = 0; i < expected.sections().size(); i++) {
             var e = expected.sections().get(i);
@@ -167,105 +148,86 @@ class PaperLegacyEgressTest {
         return out;
     }
 
-    /** The length-prefixed section byte array at the tail of an encoded column frame. */
-    private static byte[] readFrameBody(byte[] frame) {
-        var decoded = new byte[][] { null };
-        // Reuse the packed-pos reader's buffer discipline via the public decode surface:
-        // skip the fixed header exactly as the splices do.
-        var buf = new net.minecraft.network.FriendlyByteBuf(
-                io.netty.buffer.Unpooled.wrappedBuffer(frame));
-        try {
-            buf.readInt();
-            buf.readInt();
-            buf.readUtf(LSSConstants.MAX_DIMENSION_STRING_LENGTH);
-            buf.readLong();
-            buf.readByte(); // source
-            buf.readByte(); // codec
-            decoded[0] = buf.readByteArray(LSSConstants.MAX_SECTIONS_SIZE);
-        } finally {
-            buf.release();
-        }
-        return decoded[0];
-    }
-
-    // ---- codec handling ----
+    // ---- the per-recipient build (codec choice + re-derived rawSize) ----
 
     @Test
-    void zstdFrameDecompressesTranslatesAndRecompresses() {
+    void rawBuildTranslatesInPlaceAndRederivesRawSize() {
+        byte[] v20 = readCorpus("v20-corpus", "multi-section.bin");
+        byte[] nativeGolden = readCorpus("nbt-corpus", "multi-section.bin");
+
+        var build = PaperOffThreadProcessor.buildLegacyColumn(v20, REGISTRY_ACCESS, false, null);
+
+        assertArrayEquals(nativeGolden, build.shipped());
+        assertEquals(LSSConstants.COLUMN_CODEC_RAW, build.codecTag());
+        assertEquals(nativeGolden.length, build.rawSize(),
+                "rawSize must be re-derived from the TRANSLATED body — the legacy client's "
+                        + "charge rule (and law A2's server book) read the bytes it receives");
+    }
+
+    @Test
+    void compressedSessionBuildRecompressesTheNativeBody() {
         StoreCodec zstd = StoreCodec.zstdOrNull();
         assertNotNull(zstd, "the zstd natives ship on the test classpath (the store suite "
                 + "requires them) — a null here is an environment regression, not a skip");
         byte[] v20 = readCorpus("v20-corpus", "multi-palette.bin");
         byte[] nativeGolden = readCorpus("nbt-corpus", "multi-palette.bin");
 
-        byte[] out = translateFrame(frameFor(LSSConstants.COLUMN_CODEC_ZSTD, zstd.compress(v20)), zstd);
+        var build = PaperOffThreadProcessor.buildLegacyColumn(v20, REGISTRY_ACCESS, true, zstd);
 
-        byte[] outBody = readFrameBody(out);
-        assertEquals(LSSConstants.COLUMN_CODEC_ZSTD, frameCodec(out),
-                "a v19 session keeps its compression capability — the codec must survive");
-        assertArrayEquals(nativeGolden, zstd.decompress(outBody, nativeGolden.length),
+        assertEquals(LSSConstants.COLUMN_CODEC_ZSTD, build.codecTag(),
+                "a v19 session keeps its compression capability — the recompress must fire");
+        assertEquals(nativeGolden.length, build.rawSize());
+        assertArrayEquals(nativeGolden, zstd.decompress(build.shipped(), build.rawSize()),
                 "the recompressed frame must decompress to the exact native bytes");
     }
 
-    private static byte frameCodec(byte[] frame) {
-        var buf = new net.minecraft.network.FriendlyByteBuf(
-                io.netty.buffer.Unpooled.wrappedBuffer(frame));
-        try {
-            buf.readInt();
-            buf.readInt();
-            buf.readUtf(LSSConstants.MAX_DIMENSION_STRING_LENGTH);
-            buf.readLong();
-            buf.readByte(); // source
-            return buf.readByte();
-        } finally {
-            buf.release();
-        }
+    @Test
+    void tinyBodyShipsRawUnderTheShrinkGate() {
+        StoreCodec zstd = StoreCodec.zstdOrNull();
+        assertNotNull(zstd);
+        var build = PaperOffThreadProcessor.buildLegacyColumn(
+                new byte[] {0, 0}, REGISTRY_ACCESS, true, zstd);
+        assertEquals(LSSConstants.COLUMN_CODEC_RAW, build.codecTag());
+        assertArrayEquals(new byte[] {0}, build.shipped(),
+                "the ghost-clear column must translate to the native single-byte clear");
+        assertEquals(1, build.rawSize());
     }
 
-    // ---- splice composition ----
+    // ---- splice composition over translated frames ----
 
     @Test
     void v18AndV16SplicesOverTheTranslatedFrameEqualTheNativeBuiltRewrites() {
-        byte[] v20 = readCorpus("v20-corpus", "waterlogged.bin");
+        byte[] nativeBody = PaperNbtSectionSerializer.fromV20(
+                readCorpus("v20-corpus", "waterlogged.bin"), REGISTRY_ACCESS);
         byte[] nativeGolden = readCorpus("nbt-corpus", "waterlogged.bin");
-        byte[] translated = translateFrame(frameFor(LSSConstants.COLUMN_CODEC_RAW, v20), null);
-        byte[] nativeFrame = frameFor(LSSConstants.COLUMN_CODEC_RAW, nativeGolden);
+        byte[] translatedFrame = PaperPayloadHandler.encodeVoxelColumnPreEncoded(7, -3,
+                "minecraft:overworld", 1234567L, LSSConstants.COLUMN_SOURCE_DISK,
+                LSSConstants.COLUMN_CODEC_RAW, nativeBody);
+        byte[] nativeFrame = PaperPayloadHandler.encodeVoxelColumnPreEncoded(7, -3,
+                "minecraft:overworld", 1234567L, LSSConstants.COLUMN_SOURCE_DISK,
+                LSSConstants.COLUMN_CODEC_RAW, nativeGolden);
 
         assertArrayEquals(PaperPayloadHandler.rewriteColumnToV18(nativeFrame),
-                PaperPayloadHandler.rewriteColumnToV18(translated),
+                PaperPayloadHandler.rewriteColumnToV18(translatedFrame),
                 "the v18 splice must compose on the translated frame");
         assertArrayEquals(PaperPayloadHandler.rewriteColumnToV16(nativeFrame),
-                PaperPayloadHandler.rewriteColumnToV16(translated),
+                PaperPayloadHandler.rewriteColumnToV16(translatedFrame),
                 "the v16 splice must compose on the translated frame");
     }
 
-    // ---- the loud failure shapes ----
+    // ---- the loud failure shape (contained at the enqueue as an up_to_date answer) ----
 
     @Test
     void unresolvableIdentityThrowsTheTranslatorsPinnedFailure() {
-        byte[] frame = frameFor(LSSConstants.COLUMN_CODEC_RAW, readCorpus("v20-corpus", "multi-section.bin"));
+        byte[] v20 = readCorpus("v20-corpus", "multi-section.bin");
         assertThrows(WireFormatException.class,
-                () -> PaperPayloadHandler.translateColumnFrameToNative(frame,
-                        identity -> -1, BIOME_IDS,
-                        Block.BLOCK_STATE_REGISTRY.size(), BIOME_ID_COUNT, null),
+                () -> dev.vox.lss.common.wire.V20ToNativeTranslator.translate(v20,
+                        identity -> -1,
+                        PaperNbtSectionSerializer.biomeIdLookup(REGISTRY_ACCESS),
+                        Block.BLOCK_STATE_REGISTRY.size(),
+                        PaperNbtSectionSerializer.biomeIdCount(REGISTRY_ACCESS)),
                 "an identity missing from the server's own registry is a table bug and "
-                        + "must fail loudly, never serve wrong blocks");
-    }
-
-    @Test
-    void zstdFrameWithNoCodecAvailableThrows() {
-        byte[] frame = frameFor(LSSConstants.COLUMN_CODEC_ZSTD, readCorpus("v20-corpus", "multi-section.bin"));
-        assertThrows(IllegalStateException.class,
-                () -> translateFrame(frame, null));
-    }
-
-    @Test
-    void zstdFrameWithAnInvalidDeclaredContentSizeThrows() {
-        StoreCodec zstd = StoreCodec.zstdOrNull();
-        assertNotNull(zstd);
-        // Garbage bytes are not a zstd frame: declaredContentSize is negative/invalid and
-        // the guard must refuse BEFORE any allocation-sized-by-wire-content happens.
-        byte[] frame = frameFor(LSSConstants.COLUMN_CODEC_ZSTD, new byte[] {1, 2, 3, 4, 5});
-        assertThrows(IllegalStateException.class, () -> translateFrame(frame, zstd));
+                        + "must fail loudly (a WireFormatException the enqueue containment "
+                        + "resolves as up_to_date), never serve wrong blocks");
     }
 }

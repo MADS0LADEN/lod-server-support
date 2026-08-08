@@ -773,6 +773,19 @@ final class PaperNbtSectionSerializer {
                 biomeIdentityLookup(registryAccess));
     }
 
+    /** The C2 egress inverse of {@link #toV20} (XVER §4.2) — Fabric's
+     *  {@code NbtSectionSerializer.fromV20} twin: v20 body → native section layout
+     *  against this server's OWN registries, exact and lossless same-version. Throws
+     *  {@code WireFormatException} on any malformed body or unresolvable identity. */
+    static byte[] fromV20(byte[] v20Body, RegistryAccess registryAccess) {
+        var blockIds = PaperIdentityTables.blockIdsByIdentity();
+        return dev.vox.lss.common.wire.V20ToNativeTranslator.translate(v20Body,
+                identity -> blockIds.getOrDefault(identity, -1),
+                biomeIdLookup(registryAccess),
+                net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(),
+                biomeIdCount(registryAccess));
+    }
+
     // PalettedContainerFactory.create builds two strategies + codecs per call — measurable
     // allocation churn when every disk read pays it (review 2026-07-27). The registry access
     // is stable for a server's lifetime; a single-slot memo (atomic pair via one volatile)

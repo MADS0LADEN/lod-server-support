@@ -3,6 +3,7 @@ package dev.vox.lss.networking.server;
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.store.StoreCodec;
 import dev.vox.lss.common.wire.WireFormatException;
+import dev.vox.lss.common.wire.WireSectionCursor;
 import dev.vox.lss.networking.payloads.VoxelColumnS2CPayload;
 import io.netty.buffer.Unpooled;
 import net.minecraft.SharedConstants;
@@ -19,7 +20,6 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
-import java.util.function.ToIntFunction;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -30,17 +30,18 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The C2 legacy egress body translation ({@link RequestProcessingService#translateColumnToNative}
- * — XVER plan §4.2/§9): with v20 as the canonical internal form, every legacy dialect's
- * column body must translate back to EXACTLY the native bytes the v19 era shipped. The
- * headline is the corpus-driven translation chain: for every committed fixture pair,
- * {@code translate(v20-corpus golden)} must BYTE-EQUAL the frozen {@code nbt-corpus}
- * native golden — the §9 bijection on one registry, driven by the same fixtures the
- * emit direction is pinned against (so the two suites cannot drift apart silently).
- * Payload-level cases pin the codec handling (raw in place; zstd decompress → translate
- * → RECOMPRESS), the re-derived rawSize, header preservation, splice composition
- * (v18/v16 are "v19 minus header bytes" — the splices must ride the TRANSLATED body),
- * and the two loud failure shapes the sender's warn-drop contains.
+ * The C2 legacy egress body translation (XVER plan §4.2/§9), which runs at the
+ * per-recipient ENQUEUE choke point ({@code FabricOffThreadProcessor.buildLegacyColumn}
+ * over {@code NbtSectionSerializer.fromV20}) so every queued size — gauges, bandwidth
+ * budget, diag books, soak law A2 — derives from the bytes the legacy client decodes.
+ * The headline is the corpus-driven translation chain: for every committed fixture
+ * pair, {@code fromV20(v20-corpus golden)} must BYTE-EQUAL the frozen {@code
+ * nbt-corpus} native golden through the PRODUCTION registry tables — the §9 bijection
+ * on one registry, driven by the same fixtures the emit direction is pinned against.
+ * Build-level cases pin the codec choice (v19 recompress shrink-gated, forced-RAW
+ * otherwise), the re-derived rawSize, splice composition (v18/v16 are "the translated
+ * v19 minus header bytes"), and the loud failure shape the enqueue containment
+ * catches.
  */
 class LegacyColumnEgressTest {
 
@@ -50,17 +51,10 @@ class LegacyColumnEgressTest {
     }
 
     private static RegistryAccess REGISTRY_ACCESS;
-    private static ToIntFunction<String> BLOCK_IDS;
-    private static ToIntFunction<String> BIOME_IDS;
-    private static int BIOME_ID_COUNT;
 
     @BeforeAll
     static void setup() {
         REGISTRY_ACCESS = CorpusRegistryAccess.build();
-        var blockInverse = IdentityTables.blockIdsByIdentity();
-        BLOCK_IDS = identity -> blockInverse.getOrDefault(identity, -1);
-        BIOME_IDS = NbtSectionSerializer.biomeIdLookup(REGISTRY_ACCESS);
-        BIOME_ID_COUNT = NbtSectionSerializer.biomeIdCount(REGISTRY_ACCESS);
     }
 
     // ---- fixtures ----
@@ -97,11 +91,6 @@ class LegacyColumnEgressTest {
         }
     }
 
-    private static byte[] translateBody(byte[] v20Body) {
-        return dev.vox.lss.common.wire.V20ToNativeTranslator.translate(v20Body,
-                BLOCK_IDS, BIOME_IDS, Block.BLOCK_STATE_REGISTRY.size(), BIOME_ID_COUNT);
-    }
-
     // ---- the §9 translation chain over the committed corpus ----
 
     /** The one deliberate byte divergence in the chain: this fixture's native palette
@@ -122,23 +111,24 @@ class LegacyColumnEgressTest {
             if (name.equals(COLLAPSED_FIXTURE)) continue;
             byte[] nativeGolden = readCorpus("nbt-corpus", name);
             byte[] v20Golden = readCorpus("v20-corpus", name);
-            assertArrayEquals(nativeGolden, translateBody(v20Golden),
-                    "egress translation must reproduce the frozen native bytes for " + name);
+            assertArrayEquals(nativeGolden,
+                    NbtSectionSerializer.fromV20(v20Golden, REGISTRY_ACCESS),
+                    "fromV20 must reproduce the frozen native bytes through the "
+                            + "production registry tables for " + name);
         }
     }
 
     @Test
     void duplicatePaletteFixtureCollapsesToContentIdenticalBytes() {
         byte[] nativeGolden = readCorpus("nbt-corpus", COLLAPSED_FIXTURE);
-        byte[] translated = translateBody(readCorpus("v20-corpus", COLLAPSED_FIXTURE));
+        byte[] translated = NbtSectionSerializer.fromV20(
+                readCorpus("v20-corpus", COLLAPSED_FIXTURE), REGISTRY_ACCESS);
         assertFalse(java.util.Arrays.equals(nativeGolden, translated),
                 "premise: the collapse actually diverges — if this starts passing "
                         + "byte-equal, fold the fixture back into the chain test");
 
-        var expected = dev.vox.lss.common.wire.WireSectionCursor.parse(
-                nativeGolden, dev.vox.lss.common.wire.WireSectionCursor.Layout.NATIVE);
-        var actual = dev.vox.lss.common.wire.WireSectionCursor.parse(
-                translated, dev.vox.lss.common.wire.WireSectionCursor.Layout.NATIVE);
+        var expected = WireSectionCursor.parse(nativeGolden, WireSectionCursor.Layout.NATIVE);
+        var actual = WireSectionCursor.parse(translated, WireSectionCursor.Layout.NATIVE);
         assertEquals(expected.sections().size(), actual.sections().size());
         for (int i = 0; i < expected.sections().size(); i++) {
             var e = expected.sections().get(i);
@@ -156,14 +146,13 @@ class LegacyColumnEgressTest {
     }
 
     /** Per-entry resolved ids of a native container (single-value / indexed / DIRECT). */
-    private static int[] resolvedValues(dev.vox.lss.common.wire.WireSectionCursor.WireContainer c,
-                                        int entries) {
+    private static int[] resolvedValues(WireSectionCursor.WireContainer c, int entries) {
         if (c.bits() == 0) {
             int[] out = new int[entries];
             java.util.Arrays.fill(out, c.palette()[0]);
             return out;
         }
-        int[] values = dev.vox.lss.common.wire.WireSectionCursor.unpack(c.data(), c.bits(), entries);
+        int[] values = WireSectionCursor.unpack(c.data(), c.bits(), entries);
         if (c.palette() == null) {
             return values; // DIRECT: the packed values ARE the ids
         }
@@ -174,58 +163,70 @@ class LegacyColumnEgressTest {
         return out;
     }
 
-    // ---- payload-level codec handling ----
-
-    private static VoxelColumnS2CPayload rawPayload(byte[] v20Body) {
-        return new VoxelColumnS2CPayload(7, -3, Level.OVERWORLD, 1234567L,
-                LSSConstants.COLUMN_SOURCE_DISK, LSSConstants.COLUMN_CODEC_RAW,
-                v20Body, v20Body.length);
-    }
+    // ---- the per-recipient build (codec choice + re-derived rawSize) ----
 
     @Test
-    void rawPayloadTranslatesInPlaceAndRederivesRawSize() {
+    void rawBuildTranslatesInPlaceAndRederivesRawSize() {
         byte[] v20 = readCorpus("v20-corpus", "multi-section.bin");
         byte[] nativeGolden = readCorpus("nbt-corpus", "multi-section.bin");
 
-        var out = RequestProcessingService.translateColumnToNative(rawPayload(v20),
-                BLOCK_IDS, BIOME_IDS, Block.BLOCK_STATE_REGISTRY.size(), BIOME_ID_COUNT, null);
+        var build = FabricOffThreadProcessor.buildLegacyColumn(v20, REGISTRY_ACCESS, false, null);
 
-        assertArrayEquals(nativeGolden, out.shippedSections());
-        assertEquals(LSSConstants.COLUMN_CODEC_RAW, out.codec());
-        assertEquals(nativeGolden.length, out.rawSize(),
+        assertArrayEquals(nativeGolden, build.shipped());
+        assertEquals(LSSConstants.COLUMN_CODEC_RAW, build.codecTag());
+        assertEquals(nativeGolden.length, build.rawSize(),
                 "rawSize must be re-derived from the TRANSLATED body — the legacy client's "
-                        + "charge rule reads the bytes it receives");
-        assertEquals(7, out.chunkX());
-        assertEquals(-3, out.chunkZ());
-        assertEquals(Level.OVERWORLD, out.dimension());
-        assertEquals(1234567L, out.columnTimestamp());
-        assertEquals(LSSConstants.COLUMN_SOURCE_DISK, out.source());
+                        + "charge rule (and law A2's server book) read the bytes it receives");
     }
 
     @Test
-    void zstdPayloadDecompressesTranslatesAndRecompresses() {
+    void compressedSessionBuildRecompressesTheNativeBody() {
         StoreCodec zstd = StoreCodec.zstdOrNull();
         assertNotNull(zstd, "the zstd natives ship on the test classpath (the store suite "
                 + "requires them) — a null here is an environment regression, not a skip");
         byte[] v20 = readCorpus("v20-corpus", "multi-palette.bin");
         byte[] nativeGolden = readCorpus("nbt-corpus", "multi-palette.bin");
-        var in = new VoxelColumnS2CPayload(2, 5, Level.END, 42L,
-                LSSConstants.COLUMN_SOURCE_STORE, LSSConstants.COLUMN_CODEC_ZSTD,
-                zstd.compress(v20), v20.length);
 
-        var out = RequestProcessingService.translateColumnToNative(in,
-                BLOCK_IDS, BIOME_IDS, Block.BLOCK_STATE_REGISTRY.size(), BIOME_ID_COUNT, zstd);
+        var build = FabricOffThreadProcessor.buildLegacyColumn(v20, REGISTRY_ACCESS, true, zstd);
 
-        assertEquals(LSSConstants.COLUMN_CODEC_ZSTD, out.codec(),
-                "a v19 session keeps its compression capability — the codec must survive");
-        assertEquals(nativeGolden.length, out.rawSize());
-        assertArrayEquals(nativeGolden, zstd.decompress(out.shippedSections(), out.rawSize()),
+        assertEquals(LSSConstants.COLUMN_CODEC_ZSTD, build.codecTag(),
+                "a v19 session keeps its compression capability — the recompress must fire");
+        assertEquals(nativeGolden.length, build.rawSize());
+        assertArrayEquals(nativeGolden, zstd.decompress(build.shipped(), build.rawSize()),
                 "the recompressed frame must decompress to the exact native bytes");
-        assertFalse(java.util.Arrays.equals(out.shippedSections(), in.shippedSections()),
-                "premise: the shipped frame actually changed (recompressed native, not v20)");
+    }
+
+    @Test
+    void tinyBodyShipsRawUnderTheShrinkGate() {
+        StoreCodec zstd = StoreCodec.zstdOrNull();
+        assertNotNull(zstd);
+        // The v20 clear column {0,0} translates to the native clear {0} — one byte,
+        // which no zstd frame can undercut, so the shrink gate must ship raw.
+        var build = FabricOffThreadProcessor.buildLegacyColumn(
+                new byte[] {0, 0}, REGISTRY_ACCESS, true, zstd);
+        assertEquals(LSSConstants.COLUMN_CODEC_RAW, build.codecTag());
+        assertArrayEquals(new byte[] {0}, build.shipped(),
+                "the ghost-clear column must translate to the native single-byte clear");
+        assertEquals(1, build.rawSize());
+    }
+
+    @Test
+    void missingCodecDegradesToRawNotThrow() {
+        // wantsCompressed with a null codec cannot happen in production (the flag
+        // requires the live probe), but the build must stay total: raw is legal per
+        // frame, so degrade, never throw.
+        byte[] v20 = readCorpus("v20-corpus", "multi-palette.bin");
+        var build = FabricOffThreadProcessor.buildLegacyColumn(v20, REGISTRY_ACCESS, true, null);
+        assertEquals(LSSConstants.COLUMN_CODEC_RAW, build.codecTag());
     }
 
     // ---- splice composition: v18/v16 are "the translated v19 minus header bytes" ----
+
+    private static VoxelColumnS2CPayload payloadOf(byte[] nativeBody) {
+        return new VoxelColumnS2CPayload(7, -3, Level.OVERWORLD, 1234567L,
+                LSSConstants.COLUMN_SOURCE_DISK, LSSConstants.COLUMN_CODEC_RAW,
+                nativeBody, nativeBody.length);
+    }
 
     private static byte[] encodePayload(VoxelColumnS2CPayload payload) {
         var buf = new FriendlyByteBuf(Unpooled.buffer());
@@ -241,12 +242,12 @@ class LegacyColumnEgressTest {
 
     @Test
     void v18SpliceComposesOnTheTranslatedBody() {
-        byte[] v20 = readCorpus("v20-corpus", "waterlogged.bin");
+        byte[] nativeBody = NbtSectionSerializer.fromV20(
+                readCorpus("v20-corpus", "waterlogged.bin"), REGISTRY_ACCESS);
         byte[] nativeGolden = readCorpus("nbt-corpus", "waterlogged.bin");
-        var translated = RequestProcessingService.translateColumnToNative(rawPayload(v20),
-                BLOCK_IDS, BIOME_IDS, Block.BLOCK_STATE_REGISTRY.size(), BIOME_ID_COUNT, null);
 
-        var buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(encodePayload(translated.asV18())));
+        var buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(
+                encodePayload(payloadOf(nativeBody).asV18())));
         try {
             assertEquals(7, buf.readInt());
             assertEquals(-3, buf.readInt());
@@ -265,12 +266,12 @@ class LegacyColumnEgressTest {
 
     @Test
     void v16SpliceComposesOnTheTranslatedBody() {
-        byte[] v20 = readCorpus("v20-corpus", "negative-y.bin");
+        byte[] nativeBody = NbtSectionSerializer.fromV20(
+                readCorpus("v20-corpus", "negative-y.bin"), REGISTRY_ACCESS);
         byte[] nativeGolden = readCorpus("nbt-corpus", "negative-y.bin");
-        var translated = RequestProcessingService.translateColumnToNative(rawPayload(v20),
-                BLOCK_IDS, BIOME_IDS, Block.BLOCK_STATE_REGISTRY.size(), BIOME_ID_COUNT, null);
 
-        var buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(encodePayload(translated.asV16())));
+        var buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(
+                encodePayload(payloadOf(nativeBody).asV16())));
         try {
             assertEquals(7, buf.readInt());
             assertEquals(-3, buf.readInt());
@@ -285,27 +286,19 @@ class LegacyColumnEgressTest {
         }
     }
 
-    // ---- the loud failure shapes (contained by the sender's warn-drop) ----
+    // ---- the loud failure shape (contained at the enqueue as an up_to_date answer) ----
 
     @Test
     void unresolvableIdentityThrowsTheTranslatorsPinnedFailure() {
         byte[] v20 = readCorpus("v20-corpus", "multi-section.bin");
         assertThrows(WireFormatException.class,
-                () -> RequestProcessingService.translateColumnToNative(rawPayload(v20),
-                        identity -> -1, BIOME_IDS,
-                        Block.BLOCK_STATE_REGISTRY.size(), BIOME_ID_COUNT, null),
+                () -> dev.vox.lss.common.wire.V20ToNativeTranslator.translate(v20,
+                        identity -> -1,
+                        NbtSectionSerializer.biomeIdLookup(REGISTRY_ACCESS),
+                        Block.BLOCK_STATE_REGISTRY.size(),
+                        NbtSectionSerializer.biomeIdCount(REGISTRY_ACCESS)),
                 "an identity missing from the server's own registry is a table bug and "
-                        + "must fail loudly, never serve wrong blocks");
-    }
-
-    @Test
-    void zstdPayloadWithNoCodecAvailableThrows() {
-        byte[] v20 = readCorpus("v20-corpus", "multi-section.bin");
-        var framed = new VoxelColumnS2CPayload(0, 0, Level.OVERWORLD, 1L,
-                LSSConstants.COLUMN_SOURCE_DISK, LSSConstants.COLUMN_CODEC_ZSTD, v20, v20.length);
-        assertThrows(IllegalStateException.class,
-                () -> RequestProcessingService.translateColumnToNative(framed,
-                        BLOCK_IDS, BIOME_IDS,
-                        Block.BLOCK_STATE_REGISTRY.size(), BIOME_ID_COUNT, null));
+                        + "must fail loudly (a WireFormatException the enqueue containment "
+                        + "resolves as up_to_date), never serve wrong blocks");
     }
 }

@@ -32,6 +32,18 @@ public class FabricOffThreadProcessor extends OffThreadProcessor<PlayerRequestSt
     // Cache parsed ResourceKeys to avoid Identifier.parse per column payload (3 entries for vanilla)
     private final ConcurrentHashMap<String, ResourceKey<Level>> dimensionKeyCache = new ConcurrentHashMap<>();
 
+    // The session-dialect source for the C2 legacy egress translation (XVER §4.2, placed
+    // at the ENQUEUE choke point — see buildAndEnqueueColumnPayload). Attached by the
+    // service after construction; null (test rigs) = every session CURRENT. Volatile:
+    // written main-thread at service init, read on the processing thread.
+    private volatile dev.vox.lss.common.compat.WireDialectTracker dialects;
+    /** Warn-once latch for legacy egress translation failures (processing thread only). */
+    private boolean legacyTranslateWarned;
+
+    public void attachDialectTracker(dev.vox.lss.common.compat.WireDialectTracker dialects) {
+        this.dialects = dialects;
+    }
+
     public FabricOffThreadProcessor(Map<UUID, PlayerRequestState> players,
                                      ChunkDiskReader diskReader,
                                      boolean generationAvailable,
@@ -101,6 +113,52 @@ public class FabricOffThreadProcessor extends OffThreadProcessor<PlayerRequestSt
         }
         var dimensionKey = this.dimensionKeyCache.computeIfAbsent(dimension,
                 d -> ResourceKey.create(Registries.DIMENSION, Identifier.parse(d)));
+
+        // C2 legacy egress translation (XVER §4.2), placed at THIS per-recipient choke
+        // point rather than the flush seam so every downstream size — queue gauges,
+        // bandwidth budget, diag books, soak law A2 — derives from the bytes the legacy
+        // client actually decodes (the first dialect-19 soak redded A2 by exactly the
+        // v20-vs-native rawSize delta when translation ran at flush), and the CPU lands
+        // on the processing thread instead of main. The flush ladder keeps only the
+        // v18/v16 HEADER splices. A dialect flip between enqueue and flush ships one
+        // queue of wrong-layout bodies — client decode fails, ingest-failure re-declares,
+        // the retranslated serves heal it (the same bounded window as the codec-1
+        // downgrade guard at the splices).
+        var dialectTracker = this.dialects;
+        boolean legacySession = dialectTracker != null && dialectTracker.dialectOf(
+                state.getPlayerUUID()) != dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT;
+        if (legacySession) {
+            var level = this.dimensionLevelMap.get(dimension);
+            LegacyColumnBuild build;
+            try {
+                if (level == null) {
+                    throw new IllegalStateException("no dimension context for " + dimension);
+                }
+                build = buildLegacyColumn(bytes.raw(), level.registryAccess(),
+                        state.wantsCompressedColumns(), wireCodec());
+            } catch (Exception e) {
+                if (!this.legacyTranslateWarned) {
+                    this.legacyTranslateWarned = true;
+                    LSSLogger.error("legacy-compat: column body translation failed for "
+                            + state.getPlayerName() + " — resolving up_to_date so the client "
+                            + "keeps what it has (a persistent failure here is a registry-table "
+                            + "bug; further failures are silent)", e);
+                }
+                // false = the oversized-column semantics: the caller answers up_to_date,
+                // never a fabricated clear.
+                return false;
+            }
+            var legacyPayload = new VoxelColumnS2CPayload(cx, cz, dimensionKey,
+                    columnTimestamp, source, build.codecTag(), build.shipped(), build.rawSize());
+            state.addReadyPayload(new QueuedPayload<>(legacyPayload,
+                    build.rawSize() + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                    build.shipped().length + LSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES,
+                    submissionOrder, PositionUtil.packPosition(cx, cz)));
+            getDiagnostics().incrementColumnCodec(build.codecTag() == LSSConstants.COLUMN_CODEC_ZSTD);
+            if (SoakProbeBridge.armed()) SoakProbeBridge.recordServed(cx, cz, bytes.raw());
+            return true;
+        }
+
         // Per-recipient codec choice off the shared holder (plan §0.3/§0.4): frame() is
         // asked only for capable sessions and memoizes across the dedup fan-out; null
         // means "ship raw" (no codec, below threshold, or the frame didn't shrink).
@@ -119,6 +177,31 @@ public class FabricOffThreadProcessor extends OffThreadProcessor<PlayerRequestSt
         // gate keeps the unarmed production path from ever materializing raw for it.
         if (SoakProbeBridge.armed()) SoakProbeBridge.recordServed(cx, cz, bytes.raw());
         return true;
+    }
+
+    /** The translated-body build for one legacy recipient: shipped bytes + codec tag +
+     *  the re-derived rawSize (the legacy client's charge rule reads the bytes IT
+     *  receives — booking the v20 sizes was the first dialect-19 soak's A2 red). */
+    record LegacyColumnBuild(byte[] shipped, byte codecTag, int rawSize) {}
+
+    /** Translate a v20 raw body for a legacy session and choose its codec: v19 sessions
+     *  keep their compression capability (recompress, shrink-gated like the shared
+     *  holder's frame()); v18/v16 sessions arrive forced-RAW. Throws on any
+     *  malformed/unresolvable body — the caller contains it. */
+    static LegacyColumnBuild buildLegacyColumn(byte[] v20Raw,
+                                               net.minecraft.core.RegistryAccess registryAccess,
+                                               boolean wantsCompressed,
+                                               dev.vox.lss.common.store.StoreCodec zstd) {
+        byte[] nativeBody = NbtSectionSerializer.fromV20(v20Raw, registryAccess);
+        if (wantsCompressed && zstd != null) {
+            byte[] frame = zstd.compress(nativeBody);
+            if (frame.length < nativeBody.length) {
+                return new LegacyColumnBuild(frame, LSSConstants.COLUMN_CODEC_ZSTD,
+                        nativeBody.length);
+            }
+        }
+        return new LegacyColumnBuild(nativeBody, LSSConstants.COLUMN_CODEC_RAW,
+                nativeBody.length);
     }
 
     @Override
