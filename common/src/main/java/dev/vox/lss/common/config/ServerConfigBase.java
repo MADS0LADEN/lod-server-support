@@ -235,6 +235,21 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public boolean enableV19Compat = true;
     /**
+     * When true (default), a legacy-protocol handshake (19/18/16) from a client that
+     * ViaVersion/ViaFabric POSITIVELY reports as running a different MC version is
+     * answered with silence instead of a compat session
+     * (docs/planning/cross-version-identity-encoding-plan.md §7): legacy column bytes
+     * are native-id formats for THIS MC version's registries, so a cross-MC legacy
+     * client would receive garbage it cannot decode. One INFO line names the versions.
+     * Fail-open — without Via, or when Via has no signal for the player, behavior is
+     * unchanged. This is the operator override: the guard denies registration off a
+     * third-party reflective API, and a Via API drift that misreported protocols would
+     * otherwise lock out legitimate same-MC legacy clients with no recourse — set
+     * false to disarm. Current-protocol (v20) clients are never affected (their
+     * handshake carries the MC data version). No clamp: boolean.
+     */
+    public boolean enableViaMismatchGuard = true;
+    /**
      * The LOD store switch (docs/planning/lod-store-implementation-plan.md):
      * "off" (no store — the kill switch every store gate A/Bs against) and
      * <b>"full" (the SQLite disk store — the DEFAULT since 2026-08-02)</b>, alone since the

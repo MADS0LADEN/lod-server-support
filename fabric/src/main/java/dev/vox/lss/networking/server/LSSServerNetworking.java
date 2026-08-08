@@ -13,6 +13,7 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
+import net.minecraft.SharedConstants;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -199,6 +200,28 @@ public class LSSServerNetworking {
     public static void handleHandshake(HandshakeC2SPayload payload, ServerPlayer player,
                                        RequestProcessingService service,
                                        SessionConfigResponder responder) {
+        // XVER §7: consult Via for the client's REAL protocol (a legacy LSS handshake
+        // carries no MC version). Captured once so the log line and the gate see the
+        // same number; the ternary keeps a disabled guard from ever triggering
+        // resolution. Deliberately consulted for v20 handshakes too (the gate discards
+        // it there) — the answer is future diagnostics, and the probe is one cached
+        // MethodHandle invoke per join (review m12, kept with rationale).
+        var config = LSSServerConfig.CONFIG;
+        int viaProtocol = config.enableViaMismatchGuard
+                ? dev.vox.lss.common.compat.ViaProbe.playerProtocol(player.getUUID())
+                : dev.vox.lss.common.compat.ViaProbe.NO_SIGNAL;
+        handleHandshake(payload, player, service, responder,
+                viaProtocol, SharedConstants.getProtocolVersion());
+    }
+
+    /** The Via-signal seam (review MAJOR-2, mirroring the Paper overload pair): the
+     *  probe read happens in the caller above, so a gametest can force a mismatch
+     *  through the PRODUCTION ladder — without this seam no test JVM can produce a
+     *  VIA_MISMATCH on Fabric at all (no real Via in any tier). */
+    public static void handleHandshake(HandshakeC2SPayload payload, ServerPlayer player,
+                                       RequestProcessingService service,
+                                       SessionConfigResponder responder,
+                                       int viaProtocol, int nativeProtocol) {
         LSSLogger.info(Brand.shortName() + " handshake received from " + player.getName().getString()
                 + " (protocol v" + payload.protocolVersion()
                 + ", capabilities=" + payload.capabilities() + ")");
@@ -206,8 +229,25 @@ public class LSSServerNetworking {
         var config = LSSServerConfig.CONFIG;
         var decision = HandshakeGate.evaluate(payload.protocolVersion(),
                 payload.capabilities(), config.enabled, service != null,
-                config.enableV16Compat, config.enableV18Compat, config.enableV19Compat);
+                config.enableV16Compat, config.enableV18Compat, config.enableV19Compat,
+                dev.vox.lss.common.compat.ViaProbe.isMismatch(viaProtocol, nativeProtocol));
 
+        if (decision.outcome() == HandshakeGate.Outcome.VIA_MISMATCH) {
+            // Silent deny; "Minecraft protocol" because the handshake INFO one line up
+            // prints an LSS protocol number and the two spaces must not be conflated
+            // (review m5). Like VERSION_MISMATCH's early return below, an EXISTING
+            // registration deliberately survives (review m1): the reachable window is
+            // a no-signal FIRST handshake (Via mid-init) that registered legacy, then
+            // a later re-handshake denying — bounded to that race, healed by rejoin;
+            // shedding here would add remove-path surface for a corner Via itself
+            // closes seconds later.
+            LSSLogger.info("LOD unavailable for " + player.getName().getString()
+                    + ": Via reports client Minecraft protocol " + viaProtocol
+                    + " vs server " + nativeProtocol + " (cross-MC legacy session"
+                    + " cannot be served) — the client must update "
+                    + Brand.shortName());
+            return;
+        }
         if (!decision.sendSessionConfig()) {
             // See HandshakeGate.Outcome.VERSION_MISMATCH: replying would kick the player.
             // An EXISTING registration deliberately survives this rung (and NO_CONSUMER

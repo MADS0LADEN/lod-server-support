@@ -102,7 +102,13 @@ Since 2026-07 `build.yml` contains the flakes automatically: docs-only changes (
 # test-server/fabric/logs/lss-move-trace.jsonl — default 0, marker removed when unset);
 # LSS_LOD_DISTANCE (unset = shipped default 256 — the rig used to
 # hardcode 64, and 256 is 16x the area, so set 64/96 on a small box or when running all
-# three servers). run-fabric-store / run-paper-store FORCE the store on (immune to
+# three servers); LSS_VIA=1 stages ViaFabric+ViaBackwards (Fabric) / ViaVersion+ViaBackwards
+# (Paper) via Modrinth-API resolution — the C5 Via mismatch guard's live rig (run-fabric-via
+# = the convenience case; old-MC clients live in the lss-multi-test Prism profiles), with
+# LSS_VIA_GUARD=0 as the guard's kill-switch A/B (writes enableViaMismatchGuard=false into
+# the staged config — hand-edits get clobbered, use the knob; default 1). Every non-via run
+# parks the Via jars so the baseline stays Via-free.
+# run-fabric-store / run-paper-store FORCE the store on (immune to
 # LSS_LODSTORE=off) and otherwise match plain run-fabric / run-paper now that full is default.
 ```
 

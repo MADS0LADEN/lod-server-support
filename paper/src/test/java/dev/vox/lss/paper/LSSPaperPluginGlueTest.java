@@ -295,6 +295,29 @@ class LSSPaperPluginGlueTest {
     }
 
     @Test
+    void viaMismatchOnALegacyHandshakeSendsNothingAndRegistersNobody() {
+        // C5 (XVER §7): the seam's 8-arg overload with a POSITIVE foreign Via answer
+        // must stay silent for a legacy client — no reply frame (each legacy ladder
+        // reads silence as "no LSS here"), no registration. The v20 client case and
+        // the no-signal equivalence ride the gate suite; this drives the PRODUCTION
+        // glue path.
+        var config = config(true);
+        var sender = new RecordingSender();
+        var registrar = new RecordingRegistrar();
+        LSSPaperPlugin.handleHandshake(handshakeFrame(19, VOXEL_CAPS),
+                "vx9m", config, true, 763, 774, sender, registrar);
+        assertEquals(List.of(), sender.replies, "a Via-mismatched legacy client gets silence");
+        assertEquals(List.of(), registrar.caps);
+
+        // The no-signal overload is the pre-C5 ladder verbatim: same frame registers.
+        LSSPaperPlugin.handleHandshake(handshakeFrame(19, VOXEL_CAPS),
+                "vx9m", config, true, sender, registrar);
+        registrar.runDeferredReplies();
+        assertEquals(List.of(VOXEL_CAPS), registrar.caps,
+                "no Via signal must leave the ladder untouched (fail-open)");
+    }
+
+    @Test
     void v19HandshakeWithCompatDisabledSendsNothing() {
         var config = config(true);
         config.enableV19Compat = false;

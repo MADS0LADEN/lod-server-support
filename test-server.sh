@@ -79,6 +79,21 @@ esac
 # when unset, so a previous session's tracer never lingers). Output:
 # test-server/fabric/logs/lss-move-trace.jsonl; validate with scripts/check_move_trace.py.
 LSS_MOVE_TRACE="${LSS_MOVE_TRACE:-0}"
+
+# Via variant (XVER plan §7 / mega plan R-8): LSS_VIA=1 stages ViaFabric+ViaBackwards on
+# the Fabric server (ViaVersion+ViaBackwards on Paper) so the C5 cross-MC mismatch guard
+# has something to fire against — the guard is DEAD CODE on a rig without Via. Old-MC
+# clients for the denial test live in the lss-multi-test Prism profiles (v0.8.0-era jars).
+# Watch for the "LOD unavailable for <name>: Via reports client protocol X vs server Y"
+# INFO line; enableViaMismatchGuard=false in the staged config is the kill-switch A/B.
+# Default off — every non-via run parks the jars so the baseline stays Via-free.
+# Version resolution rides the Modrinth API (latest for this MC line) rather than pinned
+# URLs, so the variant keeps working as Via ships new builds.
+LSS_VIA="${LSS_VIA:-0}"
+# The guard's rig kill switch (review MAJOR-1): the staging REWRITES the config each
+# run, so a hand-edited enableViaMismatchGuard=false would be silently clobbered before
+# the JVM starts — this knob is the supported A/B lever. Default 1 (the shipped default).
+LSS_VIA_GUARD="${LSS_VIA_GUARD:-1}"
 stage_move_trace_marker() {
     # Called just before each Fabric launch; the tracer reads the marker once at
     # SERVER_STARTING, so staging at launch time is race-free by operation.
@@ -198,6 +213,37 @@ print(stable[0]['downloads']['server:default']['url']) if stable else print('')
     curl -fsSL -o "$dest" "$url"
 }
 
+# Resolve the newest Modrinth version file for a project/loader/MC-line and download it.
+# Used by the Via variant (no pinned URLs — Via ships frequently and any MC-26.2 build
+# works for the guard's live pull).
+download_modrinth_latest() {
+    local slug="$1" loader="$2" mc_version="$3" dest="$4"
+    if [ -f "$dest" ] || [ -f "$dest.disabled" ]; then
+        echo "  Already present: $(basename "$dest")"
+        return 0
+    fi
+    echo "  Resolving ${slug} (${loader}, MC ${mc_version}) via Modrinth..."
+    local url
+    url=$(curl -fsSL -A "lod-server-support/test-server"         "https://api.modrinth.com/v2/project/${slug}/version?loaders=%5B%22${loader}%22%5D&game_versions=%5B%22${mc_version}%22%5D"         | python3 -c "
+import sys, json
+versions = json.load(sys.stdin)
+for v in versions:
+    files = v.get('files', [])
+    primary = next((f for f in files if f.get('primary')), files[0] if files else None)
+    if primary:
+        print(primary['url'])
+        break
+")
+    if [ -z "$url" ]; then
+        echo "ERROR: no ${slug} build for ${loader}/MC ${mc_version} on Modrinth" >&2
+        return 1
+    fi
+    echo "  Downloading: $(basename "$url")"
+    # .part + mv (review m8): a truncated curl must not leave a file the
+    # already-present early-return then trusts forever.
+    curl -fsSL -o "$dest.part" "$url" && mv "$dest.part" "$dest"
+}
+
 # build_*_jar: build only when the jar is missing (first-time setup). Pass force=1 to
 # always run gradle — `update` promises a REBUILD, and skipping it silently reinstalls
 # whatever stale jar a previous build left (gradle's up-to-date check keeps no-ops cheap).
@@ -281,7 +327,7 @@ EOF
 # LSS_LOD_DISTANCE to dial it back on a small box.
 write_lss_config() {
     local dir="$1"
-    echo "  Writing lss-server-config.json (shipped defaults; lodStore=${LSS_LODSTORE}, backfill=${LSS_LODSTORE_BACKFILL}${LSS_LOD_DISTANCE:+, lodDistance=${LSS_LOD_DISTANCE}})"
+    echo "  Writing lss-server-config.json (shipped defaults; lodStore=${LSS_LODSTORE}, backfill=${LSS_LODSTORE_BACKFILL}${LSS_LOD_DISTANCE:+, lodDistance=${LSS_LOD_DISTANCE}}$([ "$LSS_VIA_GUARD" = 0 ] && echo ', viaGuard=OFF'))"
     mkdir -p "$dir"
     cat > "$dir/lss-server-config.json" << EOF
 {
@@ -294,6 +340,9 @@ write_lss_config() {
     fi)$(
     if [ -n "$LSS_LOD_DISTANCE" ]; then
         printf ',\n  "lodDistanceChunks": %s' "$LSS_LOD_DISTANCE"
+    fi)$(
+    if [ "$LSS_VIA_GUARD" = 0 ]; then
+        printf ',\n  "enableViaMismatchGuard": false'
     fi)
 }
 EOF
@@ -332,6 +381,8 @@ setup_fabric() {
     rm -f "$mods_dir"/lod-server-support-fabric*.jar
     cp "$lss_jar" "$mods_dir/"
     echo "  Installed: $(basename "$lss_jar")"
+
+    stage_via_fabric
 }
 
 run_fabric() {
@@ -411,6 +462,61 @@ else:
 EOF
 }
 
+# Park/unpark Paper plugin jars by filename prefix (the set_mod_enabled twin — Paper
+# only loads *.jar, so .jar.disabled is ignored the same way).
+set_paper_plugin_enabled() {
+    local prefix="$1" enabled="$2" f
+    mkdir -p "$PAPER_DIR/plugins"
+    if [ "$enabled" = true ]; then
+        for f in "$PAPER_DIR/plugins/$prefix"*.jar.disabled; do
+            [ -e "$f" ] || continue
+            mv "$f" "${f%.disabled}"
+            echo "  Re-enabled: $(basename "${f%.disabled}")"
+        done
+    else
+        for f in "$PAPER_DIR/plugins/$prefix"*.jar; do
+            [ -e "$f" ] || continue
+            mv "$f" "$f.disabled"
+            echo "  Disabled: $(basename "$f")"
+        done
+    fi
+}
+
+# Stage or park the Via pair per LSS_VIA on both platforms (called from each setup).
+stage_via_fabric() {
+    if [ "$LSS_VIA" = 1 ]; then
+        echo "=== Staging Via (Fabric): ViaFabric + ViaBackwards ==="
+        # Non-fatal (review m9): a Modrinth outage must not abort the whole setup —
+        # but a rig run whose entire point is Via needs to hear about it loudly.
+        if download_modrinth_latest viafabric fabric "$FABRIC_MC_VERSION" "$FABRIC_DIR/mods/viafabric.jar" \
+            && download_modrinth_latest viabackwards fabric "$FABRIC_MC_VERSION" "$FABRIC_DIR/mods/viabackwards.jar"; then
+            set_mod_enabled viafabric true
+            set_mod_enabled viabackwards true
+        else
+            echo "WARNING: Via staging FAILED — the server will run WITHOUT Via and the" >&2
+            echo "         mismatch guard will be no-signal (nothing to test)." >&2
+        fi
+    else
+        set_mod_enabled viafabric false
+        set_mod_enabled viabackwards false
+    fi
+}
+
+stage_via_paper() {
+    if [ "$LSS_VIA" = 1 ]; then
+        echo "=== Staging Via (Paper): ViaVersion + ViaBackwards ==="
+        download_modrinth_latest viaversion paper "$PAPER_MC_VERSION" "$PAPER_DIR/plugins/viaversion.jar" \
+            || download_modrinth_latest viaversion bukkit "$PAPER_MC_VERSION" "$PAPER_DIR/plugins/viaversion.jar"
+        download_modrinth_latest viabackwards paper "$PAPER_MC_VERSION" "$PAPER_DIR/plugins/viabackwards.jar" \
+            || download_modrinth_latest viabackwards bukkit "$PAPER_MC_VERSION" "$PAPER_DIR/plugins/viabackwards.jar"
+        set_paper_plugin_enabled viaversion true
+        set_paper_plugin_enabled viabackwards true
+    else
+        set_paper_plugin_enabled viaversion false
+        set_paper_plugin_enabled viabackwards false
+    fi
+}
+
 setup_paper() {
     echo "=== Setting up Paper server ==="
     local plugins_dir="$PAPER_DIR/plugins"
@@ -426,6 +532,7 @@ setup_paper() {
     write_ops_json "$PAPER_DIR"
     write_lss_config "$PAPER_DIR/plugins/LodServerSupport"
     enable_paper_antixray
+    stage_via_paper
 
     echo "=== Installing Paper plugins ==="
     echo "  Installing LSS..."
@@ -640,6 +747,22 @@ case "${1:-run}" in
         echo ""
         run_fabric
         ;;
+    run-fabric-via)
+        LSS_VIA=1
+        setup_fabric
+        set_mod_enabled c2me true       # same baseline as run-fabric, only Via differs
+        set_mod_enabled antixray false
+        echo ""
+        echo "=== Starting Fabric server (ViaFabric + ViaBackwards enabled) ==="
+        echo "  The C5 mismatch guard's live rig: join with an OLD-MC client (lss-multi-test"
+        echo "  Prism profiles) running a v0.8.x/v0.9.x LSS build and watch for the"
+        echo "  'LOD unavailable for <name>: Via reports client protocol X vs server Y' INFO."
+        echo "  Kill-switch A/B: LSS_VIA_GUARD=0 $0 run-fabric-via (the staging rewrites"
+        echo "  the config each run, so a hand-edit would be clobbered — use the knob)."
+        echo "  Connect to: localhost:25564"
+        echo ""
+        run_fabric
+        ;;
     run-fabric-antixray)
         setup_fabric
         set_mod_enabled c2me true       # same baseline as run-fabric, only AntiXray differs
@@ -734,7 +857,8 @@ case "${1:-run}" in
         echo "Done."
         ;;
     *)
-        echo "Usage: $0 {setup|run|run-fabric|run-fabric-no-c2me|run-fabric-antixray|run-fabric-store|run-paper|run-paper-store|run-folia|run-legacy|update|clean}"
+        echo "Usage: $0 {setup|run|run-fabric|run-fabric-no-c2me|run-fabric-antixray|run-fabric-via|run-fabric-store|run-paper|run-paper-store|run-folia|run-legacy|update|clean}"
+        echo "  (LSS_VIA=1 stages ViaVersion+ViaBackwards on run-paper too; LSS_VIA_GUARD=0 = guard kill-switch A/B)"
         echo ""
         echo "  setup      - Download and set up all servers"
         echo "  run        - Set up and start all servers (default)"

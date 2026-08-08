@@ -135,6 +135,20 @@ class PluginYmlContractTest {
     }
 
     @Test
+    void viaVersionIsASoftdependForTheClassloaderWarning() {
+        // C5 (review m7): without the softdepend, Spigot's PluginClassLoader still
+        // resolves com.viaversion... through the global group (the probe works), but
+        // logs the "not a depend, softdepend or loadbefore" warning on the first
+        // handshake with Via installed. A HARD depend would be wrong: the guard is
+        // fail-open and the plugin must load without Via.
+        var softdepend = yml.getStringList("softdepend");
+        org.junit.jupiter.api.Assertions.assertTrue(softdepend.contains("ViaVersion"),
+                "ViaVersion must be a softdepend (never a depend)");
+        org.junit.jupiter.api.Assertions.assertNull(yml.get("depend"),
+                "no hard depends — the plugin loads standalone");
+    }
+
+    @Test
     void pluginYmlShipsOnTheClasspath() {
         assertNotNull(LSSPaperPlugin.class.getResource("/plugin.yml"),
                 "plugin.yml must be packaged at the jar root or Paper will not recognize the plugin");

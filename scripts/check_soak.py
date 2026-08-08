@@ -171,7 +171,13 @@ SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBac
                                      # an armed soak is expected-identical — the S-8
                                      # same-commit allowlist rule (the twice-shipped
                                      # R4-class defect).
-                                     "lodYieldsToVanillaTransport"})
+                                     "lodYieldsToVanillaTransport",
+                                     # Via cross-MC mismatch guard (v0.10.0 C5, XVER §7)
+                                     # — listed at introduction per the same-commit
+                                     # allowlist rule. Soaks run without Via, so the
+                                     # probe is no-signal and either value is provably
+                                     # inert (an A/B pins exactly that).
+                                     "enableViaMismatchGuard"})
 SERVER_CONFIG_INT_KEYS = frozenset({
     "lodDistanceChunks", "bytesPerSecondLimitPerPlayer", "diskReaderThreads",
     "sendQueueLimitPerPlayer", "bytesPerSecondLimitGlobal",

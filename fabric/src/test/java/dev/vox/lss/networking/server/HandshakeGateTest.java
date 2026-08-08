@@ -309,4 +309,68 @@ class HandshakeGateTest {
                 HandshakeGate.evaluate(LSSConstants.PROTOCOL_VERSION,
                         LSSConstants.CAPABILITY_ZSTD_COLUMNS, true, true).outcome());
     }
+
+    // ---- C5: the Via cross-MC mismatch rung (XVER §7) ----
+
+    @Test
+    void viaMismatchDeniesEveryLegacyDialectSilently() {
+        // A cross-MC legacy client cannot be served (native-id bytes for another
+        // registry set). Deny BEFORE the register/reply rungs, with NO reply —
+        // silence is each legacy ladder's native "no LSS here" signal.
+        for (int version : new int[]{19, 18, 16}) {
+            var d = HandshakeGate.evaluate(version, VOXEL_CAPS, true, true,
+                    true, true, true, true);
+            assertEquals(Outcome.VIA_MISMATCH, d.outcome(), "protocol " + version);
+            assertFalse(d.sendSessionConfig(), "protocol " + version + " must stay silent");
+            assertFalse(d.registerPlayer());
+            assertFalse(d.effectiveEnabled());
+        }
+    }
+
+    @Test
+    void viaMismatchNeverTouchesACurrentClient() {
+        // A v20 client carries mcDataVersion in its handshake and is servable on any
+        // MC version — the flag must be ignored for CURRENT.
+        var d = HandshakeGate.evaluate(V, VOXEL_CAPS, true, true, true, true, true, true);
+        assertEquals(Outcome.REGISTER, d.outcome());
+        assertTrue(d.registerPlayer());
+    }
+
+    @Test
+    void viaMismatchFalseIsByteIdenticalToTheSevenArgLadder() {
+        // viaMismatch=false IS the guard-off / probe-no-signal behavior; every 7-arg
+        // pin in this file rides the delegation, and this pins the equivalence.
+        for (int version : new int[]{V, 19, 18, 16, 17, V + 1}) {
+            for (int caps : new int[]{VOXEL_CAPS, 0}) {
+                assertEquals(
+                        HandshakeGate.evaluate(version, caps, true, true, true, true, true),
+                        HandshakeGate.evaluate(version, caps, true, true, true, true, true,
+                                false),
+                        "version " + version + " caps " + caps);
+            }
+        }
+    }
+
+    @Test
+    void versionMismatchOutranksTheViaRung() {
+        // A rung-disabled or foreign version never reaches the Via check: the silent
+        // VERSION_MISMATCH classification (and its call-site warn) must not be
+        // re-labeled as a Via denial.
+        var foreign = HandshakeGate.evaluate(17, VOXEL_CAPS, true, true,
+                true, true, true, true);
+        assertEquals(Outcome.VERSION_MISMATCH, foreign.outcome());
+        var rungOff = HandshakeGate.evaluate(19, VOXEL_CAPS, true, true,
+                true, true, false, true);
+        assertEquals(Outcome.VERSION_MISMATCH, rungOff.outcome(),
+                "v19 with the rung disabled is a version mismatch, not a Via denial");
+    }
+
+    @Test
+    void viaMismatchPreservesTheSelectedDialect() {
+        // The decision carries the selected dialect even on the deny — diagnostic
+        // truth about WHICH rung matched (the call sites' early return runs before
+        // any shed logic, same as VERSION_MISMATCH — see the m1 note at both sites).
+        var d = HandshakeGate.evaluate(19, VOXEL_CAPS, true, true, true, true, true, true);
+        assertEquals(HandshakeGate.WireDialect.V19, d.dialect());
+    }
 }
