@@ -146,11 +146,12 @@ public final class LSSConstants {
      *  ServerConfigBase.effectiveTimestampCacheMB — so validate() clamps only nonzero. */
     public static final int MIN_TIMESTAMP_CACHE_SIZE_MB = 1;
     public static final int MAX_TIMESTAMP_CACHE_SIZE_MB = 512;
-    /** Approximate LIVE heap per timestamp-cache entry — mirrors
-     *  The tile cache's honest per-COLUMN heap at dense fill (D0,
-     *  timestamp-cache-tile-redesign.md §5: ~4.25 B dense, 5 covers ≥75% fill), used by
-     *  the config's AUTO sizing (ServerConfigBase.effectiveTimestampCacheMB). Replaced
-     *  the per-entry 64 B model when the two parallel hash maps became flat tiles. */
+    /** The tile cache's per-COLUMN heap budget for AUTO sizing (D0,
+     *  timestamp-cache-tile-redesign.md §5: a full tile costs ~4.25 B/column, so 5 is
+     *  honest for fills of ~85% and above; at 75% fill the true figure is ~5.67 B),
+     *  used by ServerConfigBase.effectiveTimestampCacheMB. Replaced the per-entry 64 B
+     *  model when the two parallel hash maps became flat tiles; the honest-fill bound
+     *  is pinned by autoSizingPerColumnConstantCoversTheRealTileCost. */
     public static final int TIMESTAMP_CACHE_HEAP_BYTES_PER_COLUMN = 5;
     /** AUTO provisions this multiple of the lodDistance disc's area (D0, user decision
      *  2026-08-08): part of the tile win is spent on COVERAGE (~5.3x the old tracked

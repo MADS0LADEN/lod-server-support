@@ -15,6 +15,8 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -100,6 +102,11 @@ public class ColumnTimestampCache {
     private final Map<String, Integer> liveSizes = new ConcurrentHashMap<>();
     private final AtomicLong evictionCount = new AtomicLong();
 
+    // §2.2 visibility latch: the pre-epoch clamp permanently costs affected columns
+    // their up_to_date resolution — accepted, but never silently. Processing-thread
+    // written like all cache state.
+    private boolean preEpochWarned;
+
     public ColumnTimestampCache(long maxBytesPerDimension, long missTtlNanos) {
         this.maxBytesPerDimension = Math.max(TILE_HEAP_BYTES, maxBytesPerDimension);
         this.missTtlNanos = Math.max(0, missTtlNanos);
@@ -121,20 +128,33 @@ public class ColumnTimestampCache {
     }
 
     public void put(String dimension, long packed, long timestamp, long now) {
-        var tiles = caches.computeIfAbsent(dimension, k -> new Long2ObjectOpenHashMap<>());
         long region = PositionUtil.packRegionOf(packed);
         int slot = PositionUtil.tileSlotOf(packed);
         if (timestamp <= 0) {
             // Never store a fabricated claim (design §2.2): a non-positive stamp CLEARS.
             // Router-equivalent to the old map (which stored it and get() reported it,
             // but the router requires cachedTs > 0 so it always read as absent).
-            Tile tile = tiles.get(region);
+            // get(), not computeIfAbsent: a clear must not mint a dimension map (it
+            // would flip save()'s never-touched guard for a cache that holds nothing).
+            var tiles = caches.get(dimension);
+            Tile tile = tiles == null ? null : tiles.get(region);
             if (tile != null && tile.slots[slot] != 0) {
                 tile.slots[slot] = 0;
                 if (--tile.liveCount == 0) tiles.remove(region);
                 bumpLiveSize(dimension, -1);
             }
         } else {
+            if (timestamp <= TS_EPOCH_SECONDS && !preEpochWarned) {
+                // §2.2: the pre-epoch clamp permanently costs those columns their
+                // up_to_date resolution (the wire still carries the unclamped stamp, so
+                // equality never holds) — an accepted regression, but it must be VISIBLE.
+                preEpochWarned = true;
+                LSSLogger.warn("Timestamp " + timestamp + " predates 2025-01-01 (skewed "
+                        + "system clock, or pre-2025 world files) — clamping; affected "
+                        + "columns re-serve instead of resolving up_to_date. "
+                        + "Warned once per session.");
+            }
+            var tiles = caches.computeIfAbsent(dimension, k -> new Long2ObjectOpenHashMap<>());
             Tile tile = tiles.get(region);
             if (tile == null) {
                 tile = new Tile();
@@ -151,6 +171,11 @@ public class ColumnTimestampCache {
         // success, generation delivery, resync) lands here, so a served column can never
         // stay memoized absent.
         clearMiss(dimension, packed);
+    }
+
+    /** Latched by the first pre-epoch clamp (§2.2's visibility requirement). */
+    public boolean preEpochWarnedForTest() {
+        return preEpochWarned;
     }
 
     private void bumpLiveSize(String dimension, int delta) {
@@ -258,23 +283,26 @@ public class ColumnTimestampCache {
         for (var entry : caches.entrySet()) {
             var tiles = entry.getValue();
             long budgetTiles = this.maxBytesPerDimension / TILE_HEAP_BYTES;
+            long excess = tiles.size() - budgetTiles;
+            if (excess <= 0) continue;
+            // ONE sorted pass, oldest lastTouch first — never a rescan per victim. A
+            // per-victim linear scan is O(tiles²) exactly where eviction runs in bulk
+            // (load() deliberately admits an over-budget file, so a config shrink from
+            // distance 1024 to 256 evicts ~38k tiles on the processing thread) — the
+            // multi-second freeze the deleted per-entry evictOldest was rewritten for.
+            // Snapshot to plain values first: fastutil entries are LIVE VIEWS whose
+            // getValue() nulls once their key is removed.
+            record Victim(long key, int liveCount, long lastTouch) {}
+            var victims = new ArrayList<Victim>(tiles.size());
+            for (var e : tiles.long2ObjectEntrySet()) {
+                victims.add(new Victim(e.getLongKey(),
+                        e.getValue().liveCount, e.getValue().lastTouchEpochSeconds));
+            }
+            victims.sort(Comparator.comparingLong(Victim::lastTouch));
             int dimEvicted = 0;
-            while (tiles.size() > budgetTiles) {
-                // Oldest-lastTouch victim by linear scan: tile counts are
-                // hundreds-to-thousands, and this replaces the O(n log n) per-entry
-                // threshold selection (deleted with the insertionTimes map).
-                long victimKey = 0;
-                Tile victim = null;
-                for (var e : tiles.long2ObjectEntrySet()) {
-                    if (victim == null
-                            || e.getValue().lastTouchEpochSeconds < victim.lastTouchEpochSeconds) {
-                        victimKey = e.getLongKey();
-                        victim = e.getValue();
-                    }
-                }
-                if (victim == null) break;
-                tiles.remove(victimKey);
-                dimEvicted += victim.liveCount;
+            for (int i = 0; i < excess; i++) {
+                tiles.remove(victims.get(i).key());
+                dimEvicted += victims.get(i).liveCount();
             }
             if (dimEvicted > 0) {
                 evicted += dimEvicted;
@@ -285,7 +313,9 @@ public class ColumnTimestampCache {
         return evicted;
     }
 
-    /** Total entries across all dimensions (running live counts — never a scan). */
+    /** Total entries across all dimensions. Sums per-tile live counts — a scan over the
+     *  tile maps, so confined callers only (service ctor pre-start, the save executor's
+     *  debug line over a snapshot); cross-thread readers use {@link #sizesPerDimension}. */
     public int size() {
         int total = 0;
         for (var tiles : caches.values()) {
@@ -326,7 +356,7 @@ public class ColumnTimestampCache {
         if (caches.isEmpty()) return;
         int liveDims = 0;
         for (var tiles : caches.values()) {
-            if (!tiles.isEmpty()) liveDims++;
+            if (liveTileCount(tiles) > 0) liveDims++;
         }
 
         var file = dataDir.resolve(FILE_NAME);
@@ -344,12 +374,18 @@ public class ColumnTimestampCache {
                 out.writeInt(liveDims);
                 for (var entry : caches.entrySet()) {
                     var tiles = entry.getValue();
-                    if (tiles.isEmpty()) continue;
+                    int liveTiles = liveTileCount(tiles);
+                    if (liveTiles == 0) continue;
                     out.writeUTF(entry.getKey());
-                    out.writeInt(tiles.size());
+                    out.writeInt(liveTiles);
                     for (var e : tiles.long2ObjectEntrySet()) {
-                        out.writeLong(e.getLongKey());
                         Tile tile = e.getValue();
+                        // Writer-side belt (§2): the decrement sites remove empty tiles,
+                        // but a liveCount-0 record slipping through would make the
+                        // loader's reject branch discard the REST OF THE FILE — one
+                        // leaked tile must never cost every later dimension's warm boot.
+                        if (tile.liveCount == 0) continue;
+                        out.writeLong(e.getLongKey());
                         out.writeInt(tile.liveCount);
                         for (int slot : tile.slots) out.writeInt(slot);
                     }
@@ -374,6 +410,15 @@ public class ColumnTimestampCache {
                 LSSLogger.warn("Failed to clean up temporary timestamp cache file " + tmpFile, e2);
             }
         }
+    }
+
+    /** Tiles with at least one live slot — what save() actually persists. */
+    private static int liveTileCount(Long2ObjectOpenHashMap<Tile> tiles) {
+        int n = 0;
+        for (Tile tile : tiles.values()) {
+            if (tile.liveCount > 0) n++;
+        }
+        return n;
     }
 
     /** Orphaned-tmp sweep age floor (tests stage older/fresher mtimes directly). */
@@ -450,6 +495,12 @@ public class ColumnTimestampCache {
             // Sanity-bound the declared tile counts by what the file can physically hold,
             // mirroring the v1 loader's defense; a liveCount outside 1..1024 or
             // disagreeing with the scanned slots aborts the rest ("discarding rest").
+            // The +1 slop is DELIBERATE (review-verified): header/dimension-name bytes
+            // mean a truncated file can legitimately declare N tiles while
+            // fileSize/TILE_RECORD_BYTES reads N-1 — an exact bound would discard the
+            // whole dimension at this rung instead of letting the tile loop keep every
+            // COMPLETE tile and stop at the EOF. The bound only exists to reject absurd
+            // counts before allocation.
             long maxPlausibleTiles = fileSize / TILE_RECORD_BYTES + 1;
             int dimCount = in.readInt();
             int totalLoaded = 0;
@@ -462,14 +513,12 @@ public class ColumnTimestampCache {
                     return;
                 }
                 var tiles = caches.computeIfAbsent(dimension, k -> new Long2ObjectOpenHashMap<>());
-                int dimLoaded = 0;
                 for (int t = 0; t < tileCount; t++) {
                     long regionKey = in.readLong();
                     int liveCount = in.readInt();
                     if (liveCount < 1 || liveCount > 1024) {
                         LSSLogger.warn("Timestamp cache " + file + " has invalid tile liveCount "
                                 + liveCount + ", discarding rest");
-                        bumpLiveSize(dimension, dimLoaded);
                         return;
                     }
                     Tile tile = new Tile();
@@ -481,16 +530,33 @@ public class ColumnTimestampCache {
                     if (nonzero != liveCount) {
                         LSSLogger.warn("Timestamp cache " + file + " tile liveCount " + liveCount
                                 + " disagrees with " + nonzero + " nonzero slots, discarding rest");
-                        bumpLiveSize(dimension, dimLoaded);
                         return;
                     }
                     tile.liveCount = liveCount;
                     tile.lastTouchEpochSeconds = now;
-                    Tile previous = tiles.put(regionKey, tile);
-                    dimLoaded += liveCount - (previous == null ? 0 : previous.liveCount);
+                    // Additive merge at SLOT granularity (the documented load contract:
+                    // loaded entries add/overwrite, in-memory-only entries survive) — a
+                    // whole-tile put would silently delete live stamps sharing a region
+                    // with any file tile.
+                    Tile previous = tiles.get(regionKey);
+                    if (previous != null) {
+                        for (int s = 0; s < 1024; s++) {
+                            if (tile.slots[s] == 0 && previous.slots[s] != 0) {
+                                tile.slots[s] = previous.slots[s];
+                                tile.liveCount++;
+                            }
+                        }
+                    }
+                    tiles.put(regionKey, tile);
+                    // Mirror bump PER TILE, inside the loop: a mid-tile EOF throws to the
+                    // outer catch, and a batched end-of-dimension bump would leave every
+                    // already-inserted tile invisible to liveSizes — the next invalidation
+                    // then drives the exporter's per-dimension gauge negative for the rest
+                    // of the session.
+                    int delta = tile.liveCount - (previous == null ? 0 : previous.liveCount);
+                    if (delta != 0) bumpLiveSize(dimension, delta);
+                    totalLoaded += liveCount;
                 }
-                bumpLiveSize(dimension, dimLoaded);
-                totalLoaded += dimLoaded;
             }
             LSSLogger.info("Loaded " + totalLoaded + " timestamp cache entries from " + file);
         } catch (IOException e) {
@@ -515,11 +581,15 @@ public class ColumnTimestampCache {
             for (int i = 0; i < entryCount; i++) {
                 long packed = in.readLong();
                 long timestamp = in.readLong();
-                // put() applies the §2.2 clamps (a released v1 file can legitimately
-                // carry 0-stamps — they load as absent, exactly as the router read them).
+                // §6 rule (1): a non-positive v1 record is SKIPPED entirely, never
+                // streamed through put() — put's ts<=0 branch CLEARS, which on an
+                // additive-merge load would delete a live in-memory stamp the file
+                // knows nothing about. (The router read stored 0-stamps as absent, so
+                // skipping loses nothing.) Positive records ride put()'s §2.2 clamps.
+                if (timestamp <= 0) continue;
                 put(dimension, packed, timestamp, now);
+                totalLoaded++;
             }
-            totalLoaded += entryCount;
         }
         int tileTotal = 0;
         for (var tiles : caches.values()) tileTotal += tiles.size();

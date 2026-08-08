@@ -381,8 +381,9 @@ public abstract class ServerConfigBase extends JsonConfig {
      * {@code (2*(lodDistanceChunks + LOD_DISTANCE_BUFFER) + 1)^2} positions; AUTO provisions
      * TIMESTAMP_CACHE_AUTO_COVERAGE_FACTOR (8x) that area at the tile cache's ~5 B/column
      * (D0 — part of the ~13x tile win is spent on coverage, so roaming and multi-player
-     * spread stop thrashing eviction; net at the default distance: ~3x less RAM tracking
-     * ~5.3x more columns than the pre-tile 1.5x/64 B model). Clamped into the same band an
+     * spread stop thrashing eviction; net at the default distance: ~2.5x less RAM (~30 MB
+     * -> ~12 MB) tracking ~5.3x more columns than the pre-tile 1.5x/64 B model). Clamped
+     * into the same band an
      * explicit value gets — the 512 MB ceiling now clears distance 1024 at full coverage.
      */
     public int effectiveTimestampCacheMB() {

@@ -306,10 +306,13 @@ public final class MemoryLodStore implements LodStoreService {
                             + " further failures are silent)", t);
                 }
             } finally {
+                // Drain-side gauge update (the check_soak SERVER_DRAINS batcher
+                // contract). BEFORE the retire increment: awaitQuiesceForTest's
+                // happens-before edge is the increment, so the gauge write must precede
+                // it or a quiesced test can still read the previous depth.
+                this.diag.setQueueDepth(this.queue.size());
                 this.retiredForTest.incrementAndGet();
             }
-            // Drain-side gauge update (the check_soak SERVER_DRAINS batcher contract).
-            this.diag.setQueueDepth(this.queue.size());
         }
     }
 
@@ -422,7 +425,11 @@ public final class MemoryLodStore implements LodStoreService {
      *  re-check; the old fixed 20 ms post-empty beat flaked under full-suite load. */
     public void awaitQuiesceForTest(long timeoutMs) throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMs;
-        while (this.retiredForTest.get() < this.offeredForTest.get()
+        // Also exits on shutdown: a producer parked between its shutdown check and its
+        // offered increment can land the bump after shutdown()'s counter resync, and
+        // without this a post-shutdown quiesce would spin to its full deadline.
+        while (!this.shutdown.get()
+                && this.retiredForTest.get() < this.offeredForTest.get()
                 && System.currentTimeMillis() < deadline) {
             Thread.sleep(5);
         }

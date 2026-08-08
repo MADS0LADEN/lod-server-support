@@ -10,6 +10,7 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -87,7 +88,7 @@ class ColumnTimestampCacheTest {
         assertEquals(3, cache.size());
     }
 
-    // ---- mbToEntries ----
+    // ---- The §2.2 clamp truth table ----
 
     @Test
     void clampTruthTableEveryDirectionIsUpOrAbsent() {
@@ -107,16 +108,54 @@ class ColumnTimestampCacheTest {
         assertEquals(0, cache.get(DIM, 3L), "ts 0 stores NOTHING (no fabricated claim)");
         cache.put(DIM, 4L, -5L, now);
         assertEquals(0, cache.get(DIM, 4L), "negative ts stores nothing");
+        int sizeBefore = cache.size();
         cache.put(DIM, 5L, ts(100L), now);
+        assertEquals(sizeBefore + 1, cache.size(), "a fresh in-range put counts");
         cache.put(DIM, 5L, 0L, now);
         assertEquals(0, cache.get(DIM, 5L),
                 "a ts<=0 put CLEARS an existing slot (router-equivalent to the old map)");
+        assertEquals(sizeBefore, cache.size(),
+                "the clear decrements size — the §8 ts<=0 delta assertion");
         cache.put(DIM, 6L, epoch + 0xFFFF_FFFFL + 99, now);
         assertEquals(epoch + 0xFFFF_FFFFL, cache.get(DIM, 6L),
                 "offset overflow (~year 2161) clamps to the u32 max — documented unreachable");
         long real = epoch + 50_000_000;
         cache.put(DIM, 7L, real, now);
         assertEquals(real, cache.get(DIM, 7L), "every in-range stamp is LOSSLESS");
+    }
+
+    @Test
+    void tsZeroPutStillFiresTheMissClearChokePoint() {
+        // §8's "clearMiss still fires" row needs a memo-ENABLED cache (the shared
+        // fixture runs ttl 0). clearMiss sits OUTSIDE put's if/else by design: a
+        // clearing put is still a statement about the position, and a refactor moving
+        // it into the positive branch would leave an authoritative miss memoized for a
+        // position the server just cleared.
+        var memoCache = new ColumnTimestampCache(DEFAULT_MAX, 60_000_000_000L);
+        String DIM = LSSConstants.DIM_STR_OVERWORLD;
+        memoCache.putMiss(DIM, 9L, 0L);
+        assertTrue(memoCache.isFreshMiss(DIM, 9L, 1L));
+        memoCache.put(DIM, 9L, 0L, now);
+        assertFalse(memoCache.isFreshMiss(DIM, 9L, 1L),
+                "a ts<=0 put must clear the miss memo exactly like a positive stamp");
+    }
+
+    @Test
+    void skewedClockPreEpochClampLatchesTheWarnOnce() {
+        // §2.2's visibility requirement: the pre-epoch clamp permanently costs affected
+        // columns their up_to_date resolution (the wire carries the unclamped stamp, so
+        // equality never holds) — accepted ONLY on condition it is visible. The latch
+        // is the observable; in-range traffic must never trip it.
+        String DIM = LSSConstants.DIM_STR_OVERWORLD;
+        cache.put(DIM, 1L, ts(100L), now);
+        assertFalse(cache.preEpochWarnedForTest(), "in-range stamps never warn");
+        cache.put(DIM, 2L, 0L, now);
+        assertFalse(cache.preEpochWarnedForTest(), "a clear is not a clamp — no warn");
+        cache.put(DIM, 3L, 1_000L, now);
+        assertTrue(cache.preEpochWarnedForTest(), "the first pre-epoch clamp warns");
+        cache.put(DIM, 4L, ColumnTimestampCache.TS_EPOCH_SECONDS, now);
+        assertTrue(cache.preEpochWarnedForTest(),
+                "the epoch-collision clamp shares the latch — once per session, not per stamp");
     }
 
     // ---- Size-based eviction ----
@@ -134,18 +173,32 @@ class ColumnTimestampCacheTest {
         // Tile-granular eviction (D0): budget = 2 tiles (the ctor floors bytes at one
         // TILE_HEAP_BYTES, so 2*4352 buys exactly two). Four regions, oldest-touched
         // first — the victims are whole tiles, ranked by lastTouch (the put's now arg).
+        // The OLDEST tile holds THREE entries: the return value and the mirror must
+        // report the SUMMED liveCount (a per-tile count would under-report the soak's
+        // tscache.evictions by up to 1024x).
         var smallCache = new ColumnTimestampCache(2L * 4352, 0);
+        smallCache.put(LSSConstants.DIM_STR_OVERWORLD,
+                dev.vox.lss.common.PositionUtil.packPosition(1, 1), ts(2L), now);
+        smallCache.put(LSSConstants.DIM_STR_OVERWORLD,
+                dev.vox.lss.common.PositionUtil.packPosition(2, 2), ts(3L), now);
         for (int i = 0; i < 4; i++) {
             long pos = dev.vox.lss.common.PositionUtil.packPosition(i * 40, 0);
             smallCache.put(LSSConstants.DIM_STR_OVERWORLD, pos, ts(i * 100L + 1), now + i);
         }
-        assertEquals(4, smallCache.size());
+        assertEquals(6, smallCache.size());
 
         int evicted = smallCache.evictIfOversized();
-        assertEquals(2, evicted, "two oldest-touched tiles = two entries here");
+        assertEquals(4, evicted,
+                "two oldest-touched tiles: the 3-entry region-(0,0) tile + the 1-entry "
+                        + "region-(1,0) tile — the count is the SUMMED liveCount");
+        assertEquals(4L, smallCache.getEvictionCount(), "the cumulative counter sums too");
         assertEquals(2, smallCache.size());
+        assertEquals(Map.of(LSSConstants.DIM_STR_OVERWORLD, 2), smallCache.sizesPerDimension(),
+                "the cross-thread mirror drops by the summed liveCount");
         assertEquals(0L, smallCache.get(LSSConstants.DIM_STR_OVERWORLD,
                 dev.vox.lss.common.PositionUtil.packPosition(0, 0)));
+        assertEquals(0L, smallCache.get(LSSConstants.DIM_STR_OVERWORLD,
+                dev.vox.lss.common.PositionUtil.packPosition(1, 1)));
         assertEquals(0L, smallCache.get(LSSConstants.DIM_STR_OVERWORLD,
                 dev.vox.lss.common.PositionUtil.packPosition(40, 0)));
         assertEquals(ts(301L), smallCache.get(LSSConstants.DIM_STR_OVERWORLD,
@@ -178,9 +231,10 @@ class ColumnTimestampCacheTest {
 
     @Test
     void saveAndLoadRoundTripLargeCrossesBufferBoundaries(@TempDir Path tempDir) {
-        // 12k entries × 16 B/record ≈ 192 KB: the 64 KB stream buffer holds exactly 4096
-        // records, so this forces multiple flushes on save and multiple refills on load —
-        // a smaller "few thousand" corpus can fit in ONE buffer and never cross a boundary.
+        // 12k columns spread across raw packed keys 0..5999 land in ~189 v2 tiles per
+        // dimension (~4108 B each, ~15.9 per 64 KB buffer), so the save flushes and the
+        // load refills the stream buffer many times, with tile records straddling every
+        // buffer edge — a small corpus fits ONE buffer and never crosses a boundary.
         var big = new ColumnTimestampCache(DEFAULT_MAX, 0);
         for (long i = 0; i < 6000; i++) {
             big.put(LSSConstants.DIM_STR_OVERWORLD, i, ts(i + 1_000_000L), now);
@@ -191,7 +245,7 @@ class ColumnTimestampCacheTest {
         var loaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
         loaded.load(tempDir);
         assertEquals(12000, loaded.size());
-        for (long i : new long[]{0, 1, 4095, 4096, 4097, 5999}) { // straddle the 4096-record buffer edge
+        for (long i : new long[]{0, 1, 4095, 4096, 4097, 5999}) {
             assertEquals(ts(i + 1_000_000L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, i));
             assertEquals(ts(i + 2_000_000L), loaded.get(LSSConstants.DIM_STR_THE_NETHER, i));
         }
@@ -251,18 +305,69 @@ class ColumnTimestampCacheTest {
 
     @Test
     void loadPreservesExistingEntries(@TempDir Path tempDir) {
-        // Save one entry
-        cache.put(LSSConstants.DIM_STR_OVERWORLD, 1L, ts(100L), now);
+        // The additive-merge contract at SLOT granularity: (0,0) and (1,1) share a
+        // REGION TILE, so a whole-tile put on load would silently delete the in-memory
+        // stamp — the merge must go slot by slot. (5,5) pins the file-wins direction
+        // for a slot both sides hold; 99L pins the different-tile case.
+        long pFile = dev.vox.lss.common.PositionUtil.packPosition(0, 0);
+        long pMem = dev.vox.lss.common.PositionUtil.packPosition(1, 1);
+        long pBoth = dev.vox.lss.common.PositionUtil.packPosition(5, 5);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, pFile, ts(100L), now);
+        cache.put(LSSConstants.DIM_STR_OVERWORLD, pBoth, ts(300L), now);
         cache.save(tempDir);
 
-        // Load into a cache that already has a different entry
         var loaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
-        loaded.put(LSSConstants.DIM_STR_OVERWORLD, 99L, ts(999L), now);
+        loaded.put(LSSConstants.DIM_STR_OVERWORLD, pMem, ts(999L), now);
+        loaded.put(LSSConstants.DIM_STR_OVERWORLD, pBoth, ts(111L), now);
+        loaded.put(LSSConstants.DIM_STR_OVERWORLD, 99L, ts(888L), now);
         loaded.load(tempDir);
 
-        assertEquals(2, loaded.size());
-        assertEquals(ts(100L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, 1L));
-        assertEquals(ts(999L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, 99L));
+        assertEquals(4, loaded.size());
+        assertEquals(ts(100L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, pFile));
+        assertEquals(ts(999L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, pMem),
+                "an in-memory stamp sharing a tile with file entries survives the load");
+        assertEquals(ts(300L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, pBoth),
+                "a slot both sides hold takes the FILE's stamp (loaded entries overwrite)");
+        assertEquals(ts(888L), loaded.get(LSSConstants.DIM_STR_OVERWORLD, 99L));
+        assertEquals(Map.of(LSSConstants.DIM_STR_OVERWORLD, 4), loaded.sizesPerDimension(),
+                "the mirror agrees after a merging load");
+    }
+
+    @Test
+    void v2TruncatedFileKeepsCompleteTilesAndTheMirrorAgrees(@TempDir Path tempDir) throws IOException {
+        // §8's v2-truncation pin: power loss mid-tile keeps every COMPLETE tile — and
+        // the liveSizes mirror must account for them (the mirror is bumped per tile,
+        // inside the loop; a batched end-of-dimension bump left truncation-survivor
+        // tiles invisible, and the next invalidation drove the exporter's
+        // per-dimension gauge negative for the rest of the session).
+        // Hand-written v2 so the tile ORDER is deterministic (a save()'s map iteration
+        // order is not): one complete 2-entry tile, then a second tile chopped mid-slots.
+        try (var out = cacheFileOut(tempDir)) {
+            out.writeInt(2); // v2
+            out.writeInt(1);
+            out.writeUTF(LSSConstants.DIM_STR_OVERWORLD);
+            out.writeInt(2); // declares two tiles...
+            out.writeLong(0L); // region (0,0)
+            out.writeInt(2);
+            for (int s = 0; s < 1024; s++) out.writeInt(s == 0 ? 100 : s == 1 ? 150 : 0);
+            out.writeLong(1L << 32); // region (1,0)...
+            out.writeInt(1);
+            for (int s = 0; s < 500; s++) out.writeInt(0); // ...power loss mid-slots
+        }
+
+        var loaded = new ColumnTimestampCache(DEFAULT_MAX, 0);
+        assertDoesNotThrow(() -> loaded.load(tempDir));
+        assertEquals(2, loaded.size(), "the complete first tile (2 entries) survives");
+        assertEquals(ts(100L), loaded.get(LSSConstants.DIM_STR_OVERWORLD,
+                dev.vox.lss.common.PositionUtil.packPosition(0, 0)));
+        assertEquals(Map.of(LSSConstants.DIM_STR_OVERWORLD, 2), loaded.sizesPerDimension(),
+                "the mirror sees truncation survivors — size() and the gauge must agree");
+        int removed = loaded.invalidate(LSSConstants.DIM_STR_OVERWORLD,
+                new long[]{dev.vox.lss.common.PositionUtil.packPosition(0, 0),
+                        dev.vox.lss.common.PositionUtil.packPosition(0, 1)});
+        assertEquals(2, removed);
+        assertEquals(Map.of(LSSConstants.DIM_STR_OVERWORLD, 0), loaded.sizesPerDimension(),
+                "post-truncation invalidation lands at zero, never negative");
     }
 
     // ---- Corrupt-file load guards ----
@@ -357,14 +462,18 @@ class ColumnTimestampCacheTest {
         }
 
         // Budget = ONE tile (the ctor floors at TILE_HEAP_BYTES): the six entries span
-        // two regions below, so the load must ACCEPT them all and the next eviction
-        // pass trims the oldest-touched tile — the same load-then-trim contract the
-        // per-entry cap had.
+        // SIX regions (i*40 → region x 0,1,2,3,5,6), so the load must ACCEPT all six
+        // tiles and the next eviction pass trims EXACTLY back to the byte budget — the
+        // §8 trim-to-byte-budget re-expression of the old exact-trim-to-cap arm (a loop
+        // that stops one tile early leaves the dimension permanently over budget, the
+        // store-cap history's vacuous-pin lesson).
         var small = new ColumnTimestampCache(1, 0);
         assertDoesNotThrow(() -> small.load(tempDir));
         assertEquals(6, small.size(), "a valid over-cap count must load, not be discarded");
-        assertTrue(small.evictIfOversized() > 0, "the next eviction pass trims the overshoot");
-        assertTrue(small.size() < 6);
+        assertEquals(5, small.evictIfOversized(),
+                "five of the six one-entry tiles must go — trimmed exactly to the one-tile budget");
+        assertEquals(1, small.size(), "exactly the budgeted tile survives");
+        assertEquals(0, small.evictIfOversized(), "at budget: a second pass evicts nothing");
     }
 
     @Test
@@ -421,22 +530,30 @@ class ColumnTimestampCacheTest {
     // ---- SP-052: eviction refreshes age on re-put and evicts per dimension ----
 
     @Test
-    void rePutRefreshesTileAgeSoTheReputTileSurvivesEviction() {
-        // Tile world (D0): eviction ranks TILES by lastTouch. A re-put on the oldest
-        // tile refreshes it, so the eviction victim is the genuinely-least-recent tile.
-        long pA = dev.vox.lss.common.PositionUtil.packPosition(0, 0);
-        long pB = dev.vox.lss.common.PositionUtil.packPosition(40, 0);
-        long pC = dev.vox.lss.common.PositionUtil.packPosition(80, 0);
+    void rePutProtectsItsWholeTileIncludingColdTileMatesFromEviction() {
+        // The DELIBERATE §5 weakening, stated as a pin: eviction age is per-TILE
+        // lastTouch, and per-entry age is GONE. Touching one column therefore keeps its
+        // 1023 tile-mates resident — including a column older than everything in the
+        // evicted tile — and conversely a hot column's cold tile-mates ride its
+        // protection. A future "fix" back toward per-entry age must red HERE.
+        long pA1 = dev.vox.lss.common.PositionUtil.packPosition(0, 0);   // tile A
+        long pA2 = dev.vox.lss.common.PositionUtil.packPosition(1, 1);   // tile A (cold mate)
+        long pB = dev.vox.lss.common.PositionUtil.packPosition(40, 0);   // tile B
+        long pC = dev.vox.lss.common.PositionUtil.packPosition(80, 0);   // tile C
         var small = new ColumnTimestampCache(2L * 4352, 0); // budget: 2 tiles
-        small.put(LSSConstants.DIM_STR_OVERWORLD, pA, ts(10L), 1L);
+        small.put(LSSConstants.DIM_STR_OVERWORLD, pA2, ts(5L), 1L);  // the OLDEST column
+        small.put(LSSConstants.DIM_STR_OVERWORLD, pA1, ts(10L), 1L);
         small.put(LSSConstants.DIM_STR_OVERWORLD, pB, ts(20L), 2L);
-        small.put(LSSConstants.DIM_STR_OVERWORLD, pA, ts(11L), 10L); // refresh tile A
-        small.put(LSSConstants.DIM_STR_OVERWORLD, pC, ts(30L), 11L); // 3 tiles, budget 2
+        small.put(LSSConstants.DIM_STR_OVERWORLD, pA1, ts(11L), 10L); // refresh: tile A, not pA1
+        small.put(LSSConstants.DIM_STR_OVERWORLD, pC, ts(30L), 11L);  // 3 tiles, budget 2
         assertEquals(1, small.evictIfOversized(), "one excess tile (one entry) evicted");
-        assertEquals(ts(11L), small.get(LSSConstants.DIM_STR_OVERWORLD, pA),
+        assertEquals(ts(11L), small.get(LSSConstants.DIM_STR_OVERWORLD, pA1),
                 "the re-put refreshed tile A's age, so it survives");
+        assertEquals(ts(5L), small.get(LSSConstants.DIM_STR_OVERWORLD, pA2),
+                "pA2 is the OLDEST column in the cache yet survives — tile-mate protection "
+                        + "is the accepted cost of tile-granular age");
         assertEquals(0L, small.get(LSSConstants.DIM_STR_OVERWORLD, pB),
-                "the genuinely-oldest tile (B) is the one evicted");
+                "the oldest TILE (B) is the victim, though its column is younger than pA2");
     }
 
     @Test
@@ -654,6 +771,12 @@ class ColumnTimestampCacheTest {
             }
         }
         assertEquals(reference.size(), tiles.size(), "final size parity");
+        // The cross-thread liveSizes MIRROR is a second, independently-maintained
+        // accounting path (incremental merges, not a recount) — the fuzz must prove it
+        // too, or a single wrong bump delta ships as a permanently-skewed exporter
+        // gauge (§8: size()/sizesPerDimension parity with the model).
+        assertEquals(Map.of(dim, reference.size()), tiles.sizesPerDimension(),
+                "mirror parity after 20k mixed ops");
         for (var e : reference.long2LongEntrySet()) {
             assertEquals(e.getLongValue(), tiles.get(dim, e.getLongKey()));
         }

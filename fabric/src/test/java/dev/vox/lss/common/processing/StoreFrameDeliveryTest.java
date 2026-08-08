@@ -30,7 +30,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class StoreFrameDeliveryTest {
 
     private static final String DIM = "minecraft:overworld";
-    private static final long TS = 1_700_000_000L;
+    private static final long TS = 1_750_000_000L; // post-TS_EPOCH_SECONDS: pre-epoch stamps clamp in the timestamp cache (tile redesign §2.2)
     private static StoreCodec codec;
 
     @BeforeAll

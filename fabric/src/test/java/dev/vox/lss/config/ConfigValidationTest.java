@@ -250,8 +250,9 @@ class ConfigValidationTest {
         // that is ~12 MB — a third of the pre-tile 32 MB while covering 5.3x the columns
         // (timestamp-cache-tile-redesign.md §6); pin the exact derivation, not a band.
         long side = 2L * (256 + LSSConstants.LOD_DISTANCE_BUFFER) + 1;
-        long want = side * side
-                * (long) LSSConstants.TIMESTAMP_CACHE_AUTO_COVERAGE_FACTOR
+        // Same cast shape as production (double area product, then long bytes): a
+        // fractional coverage factor must not silently diverge the pin.
+        long want = (long) (side * side * LSSConstants.TIMESTAMP_CACHE_AUTO_COVERAGE_FACTOR)
                 * LSSConstants.TIMESTAMP_CACHE_HEAP_BYTES_PER_COLUMN / (1024 * 1024);
         assertEquals(want, at256, "AUTO at the 256 default follows the tile-cost derivation");
         assertTrue(at256 >= 10 && at256 <= 16,
