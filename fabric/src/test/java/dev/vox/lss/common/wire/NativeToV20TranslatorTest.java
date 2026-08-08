@@ -473,4 +473,72 @@ class NativeToV20TranslatorTest {
             assertTrue(s.blocks().bits() == 0 || s.blocks().bits() >= 4);
         }
     }
+
+    @Test
+    void convertIndexedByteMatchesTranslateAcrossIndexedShapes() {
+        // The direct-emit rung's identity pin (review finding 4): for every indexed
+        // shape the NBT transcoder can produce — single (bits 0), 4-bit linear with a
+        // DUPLICATE palette entry (the air-substitution shape), the 8-bit block /
+        // 3-bit biome boundary one short of the fallback — building the column via
+        // convertIndexed must byte-equal translate() on the equivalent native body.
+        var rng = new Random(11);
+        int[] fourBit = new int[4096];
+        for (int i = 0; i < 4096; i++) fourBit[i] = rng.nextInt(4);
+        int[] eightBit = new int[4096];
+        for (int i = 0; i < 4096; i++) eightBit[i] = rng.nextInt(256);
+        int[] biome2 = new int[64];
+        for (int i = 0; i < 64; i++) biome2[i] = rng.nextInt(3);
+        int[] biome3 = new int[64];
+        for (int i = 0; i < 64; i++) biome3[i] = rng.nextInt(8);
+        int[] pal256 = new int[256];
+        for (int i = 0; i < 256; i++) pal256[i] = i;
+        int[] biomePal8 = new int[8];
+        for (int i = 0; i < 8; i++) biomePal8[i] = i;
+        byte[] blockLight = new byte[2048];
+        blockLight[7] = 0x5A;
+
+        var shapes = List.of(
+                new WireSection(-4, 100, 5,
+                        new WireContainer(0, new int[]{9}, new long[0]),
+                        new WireContainer(0, new int[]{2}, new long[0]), null, null),
+                new WireSection(0, 42, 0,
+                        new WireContainer(4, new int[]{0, 9, 0, 130}, packed(fourBit, 4)),
+                        new WireContainer(2, new int[]{2, 5, 7}, packed(biome2, 2)),
+                        blockLight, null),
+                new WireSection(7, 4096, 12,
+                        new WireContainer(8, pal256, packed(eightBit, 8)),
+                        new WireContainer(3, biomePal8, packed(biome3, 3)), null, null));
+
+        byte[] viaTranslate = NativeToV20Translator.translate(
+                nativeBody(shapes.toArray(new WireSection[0])), BLOCKS, BIOMES);
+
+        var dict = new IdentityDictionary();
+        var sections = new java.util.ArrayList<WireSection>();
+        for (var s : shapes) {
+            sections.add(new WireSection(s.sectionY(), s.nonEmptyBlockCount(), s.fluidCount(),
+                    NativeToV20Translator.convertIndexed(s.blocks().bits(), s.blocks().palette(),
+                            s.blocks().data(), true, dict, BLOCKS),
+                    NativeToV20Translator.convertIndexed(s.biomes().bits(), s.biomes().palette(),
+                            s.biomes().data(), false, dict, BIOMES),
+                    s.blockLight(), s.skyLight()));
+        }
+        byte[] direct = WireSectionCursor.emit(
+                new WireColumn(dict.entries(), sections), Layout.V20);
+        assertArrayEquals(viaTranslate, direct,
+                "convertIndexed must be translate()'s indexed branch, byte for byte");
+    }
+
+    @Test
+    void convertIndexedRejectsWidthsBeyondTheNativeIndexedThresholds() {
+        // Beyond the native indexed thresholds, parse would classify the same bytes
+        // DIRECT and the two routes diverge — the width guard makes the transcoder's
+        // fallback-gate coupling enforced instead of assumed (review finding 3).
+        var dict = new IdentityDictionary();
+        assertThrows(IllegalArgumentException.class, () ->
+                NativeToV20Translator.convertIndexed(9, new int[512], new long[576], true,
+                        dict, BLOCKS));
+        assertThrows(IllegalArgumentException.class, () ->
+                NativeToV20Translator.convertIndexed(4, new int[16], new long[32], false,
+                        dict, BIOMES));
+    }
 }

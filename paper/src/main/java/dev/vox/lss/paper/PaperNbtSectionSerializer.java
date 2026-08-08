@@ -179,6 +179,10 @@ final class PaperNbtSectionSerializer {
     static final AtomicLong SIZE_MISMATCH_FALLBACKS = new AtomicLong();
     private static final AtomicBoolean SIZE_MISMATCH_WARNED = new AtomicBoolean();
 
+    /** Direct-emit routing telemetry (C6 follow-up) — see the Fabric twin: byte-equal
+     *  outputs make silent re-routing invisible to goldens; tests pin the routing. */
+    static final AtomicLong DIRECT_V20_EMITS = new AtomicLong();
+
     /**
      * Serialize a chunk's NBT (as read from a region file) into MC-native wire format.
      * Returns {@code null} if the chunk is not FULL or has no sections, an empty array if every
@@ -302,6 +306,21 @@ final class PaperNbtSectionSerializer {
                     if (manager != null) manager.countMaskedSection();
                 }
             }
+        }
+
+        // Direct v20 emit (the C6-triggered follow-up, 2026-08-08) — see the Fabric
+        // twin: all-transcoded columns build the v20 column straight from the
+        // descriptors (global ids + verbatim longs), skipping the native emit +
+        // whole-column translator re-parse; byte-identical by the indexed rule.
+        boolean allTranscoded = true;
+        for (var p : parsed) {
+            if (p.transcoded() == null) {
+                allTranscoded = false;
+                break;
+            }
+        }
+        if (allTranscoded) {
+            return emitV20Direct(parsed, registryAccess);
         }
 
         // Second pass: serialize to wire format, into an EXACTLY-sized buffer — see the
@@ -766,11 +785,43 @@ final class PaperNbtSectionSerializer {
 
     /** The C1 produce-path v20 hook (progress-doc decision 2026-08-07): every producer
      *  emits its NATIVE body exactly as before and translates at the return boundary —
-     *  ONE corpus-proven encoder, byte-determinism across paths by construction. */
+     *  ONE corpus-proven encoder, byte-determinism across paths by construction. Since
+     *  the C6-gated follow-up, all-transcoded disk columns bypass this via
+     *  {@link #emitV20Direct}; this route remains for live/mixed/masked columns. */
     static byte[] toV20(byte[] nativeBody, RegistryAccess registryAccess) {
         return dev.vox.lss.common.wire.NativeToV20Translator.translate(nativeBody,
                 PaperIdentityTables::blockIdentityFor,
                 biomeIdentityLookup(registryAccess));
+    }
+
+    /** The direct transcode-path v20 emit (C6 follow-up) — Fabric's
+     *  {@code NbtSectionSerializer.emitV20Direct} twin: the descriptors already carry
+     *  global ids in wire order + verbatim disk longs, so the dictionary walk runs on
+     *  them directly and the native intermediate disappears. Callers guarantee every
+     *  section is transcoded (the assembly's allTranscoded gate). */
+    private static byte[] emitV20Direct(java.util.List<ParsedSection> parsed,
+                                        RegistryAccess registryAccess) {
+        DIRECT_V20_EMITS.incrementAndGet();
+        var dict = new dev.vox.lss.common.wire.IdentityDictionary();
+        java.util.function.IntFunction<String> blockIdentity = PaperIdentityTables::blockIdentityFor;
+        var biomeIdentity = biomeIdentityLookup(registryAccess);
+        var sections = new java.util.ArrayList<dev.vox.lss.common.wire.WireSectionCursor.WireSection>(parsed.size());
+        for (var p : parsed) {
+            var t = p.transcoded();
+            sections.add(new dev.vox.lss.common.wire.WireSectionCursor.WireSection(
+                    // (byte) cast — see the Fabric twin: the native route's writeByte
+                    // truncates out-of-range sectionY; the direct route must match.
+                    (byte) p.sectionY(), p.nonEmptyCount(), p.fluidCount(),
+                    dev.vox.lss.common.wire.NativeToV20Translator.convertIndexed(
+                            t.blockBits(), t.blockIds(), t.blockData(), true, dict, blockIdentity),
+                    dev.vox.lss.common.wire.NativeToV20Translator.convertIndexed(
+                            t.biomeBits(), t.biomeIds(), t.biomeData(), false, dict, biomeIdentity),
+                    p.litByBlock() ? p.blockLight() : null,
+                    p.litBySky() ? p.skyLight() : null));
+        }
+        return dev.vox.lss.common.wire.WireSectionCursor.emit(
+                new dev.vox.lss.common.wire.WireSectionCursor.WireColumn(dict.entries(), sections),
+                dev.vox.lss.common.wire.WireSectionCursor.Layout.V20);
     }
 
     /** The C2 egress inverse of {@link #toV20} (XVER §4.2) — Fabric's

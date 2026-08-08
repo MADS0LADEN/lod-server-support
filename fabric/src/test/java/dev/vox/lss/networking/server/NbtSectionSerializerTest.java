@@ -1089,6 +1089,7 @@ class NbtSectionSerializerTest {
                 Biomes.SWAMP, Biomes.TAIGA, Biomes.SAVANNA, Biomes.BADLANDS, Biomes.BEACH,
                 Biomes.RIVER);
         var rng = new java.util.Random(20260730L);
+        long directBefore = NbtSectionSerializer.DIRECT_V20_EMITS.get();
         for (int round = 0; round < 32; round++) {
             var pool = round % 8 < 6 ? narrowPool : widePool;
             int placements = switch (round % 4) {
@@ -1116,6 +1117,10 @@ class NbtSectionSerializerTest {
                     null, Integer.MIN_VALUE, Integer.MAX_VALUE, false);
             assertArrayEquals(object, transcoded, "round " + round);
         }
+        assertTrue(NbtSectionSerializer.DIRECT_V20_EMITS.get() > directBefore,
+                "the fuzz must actually drive the direct emit — a pre-gate widening that"
+                        + " pushed every round to the object path would leave the"
+                        + " direct-vs-translate comparison vacuous");
     }
 
     /**
@@ -1290,6 +1295,52 @@ class NbtSectionSerializerTest {
     }
 
     @Test
+    void directEmitRoutesExactlyTheAllTranscodedColumns() {
+        // The C6 follow-up's routing pin. Direct-emit output is BYTE-IDENTICAL to the
+        // native-emit + translate route (the fuzz above proves it), so without this
+        // counter pin a regression silently re-routing everything through the native
+        // intermediate — re-paying the measured +18.5% serve cost — would pass every
+        // golden in the tree.
+        long before = NbtSectionSerializer.DIRECT_V20_EMITS.get();
+        NbtSectionSerializer.serializeChunkNbt(
+                chunkNbt("minecraft:full", sectionNbt(0, true, true, null, null)), REGISTRY_ACCESS);
+        assertEquals(before + 1, NbtSectionSerializer.DIRECT_V20_EMITS.get(),
+                "an all-transcoded column must take the direct v20 emit");
+
+        // A >256-entry palette is the transcoder's Global fallback: the object-path
+        // section makes the WHOLE column keep the translate route.
+        var pool = new ArrayList<net.minecraft.world.level.block.state.BlockState>();
+        for (var block : List.of(Blocks.OAK_STAIRS, Blocks.SPRUCE_STAIRS, Blocks.BIRCH_STAIRS,
+                Blocks.JUNGLE_STAIRS)) {
+            pool.addAll(block.getStateDefinition().getPossibleStates());
+        }
+        var globalStates = FACTORY.createForBlockStates();
+        int i = 0;
+        for (int y = 0; y < 16; y++)
+            for (int z = 0; z < 16; z++)
+                for (int x = 0; x < 16; x++)
+                    globalStates.set(x, y, z, pool.get(i++ % pool.size()));
+        long beforeMixed = NbtSectionSerializer.DIRECT_V20_EMITS.get();
+        byte[] mixed = NbtSectionSerializer.serializeChunkNbt(
+                chunkNbt("minecraft:full",
+                        sectionNbt(0, true, true, null, null),
+                        sectionFrom(1, globalStates, FACTORY.createForBiomes())),
+                REGISTRY_ACCESS);
+        assertEquals(2, decode(mixed).size(),
+                "premise: the mixed column still SERVES both sections via translate");
+        assertEquals(beforeMixed, NbtSectionSerializer.DIRECT_V20_EMITS.get(),
+                "a column with any fallback section keeps the translate route wholesale");
+
+        // The flag-off rollback path must never route direct either.
+        byte[] flagOff = NbtSectionSerializer.serializeChunkNbt(
+                chunkNbt("minecraft:full", sectionNbt(0, true, true, null, null)),
+                REGISTRY_ACCESS, null, Integer.MIN_VALUE, Integer.MAX_VALUE, false);
+        assertEquals(1, decode(flagOff).size(), "premise: the flag-off column still serves");
+        assertEquals(beforeMixed, NbtSectionSerializer.DIRECT_V20_EMITS.get(),
+                "useNbtTranscode=false is the object path — no direct emit");
+    }
+
+    @Test
     void maskedColumnMixesTranscodedAndFallbackSectionsByteIdentically() {
         // Under a mask, sections split by the pre-gate: ore-bearing below the cutoff go
         // to the object fallback and get masked; ore-free or above-cutoff sections
@@ -1341,6 +1392,27 @@ class NbtSectionSerializerTest {
                 sectionNbt(4, false, true, light(0, (byte) 1), null)), REGISTRY_ACCESS);
         NbtSectionSerializer.serializeChunkNbt(chunkNbt("minecraft:full",
                 sectionNbt(2, true, true, null, null)), REGISTRY_ACCESS);
+        // Since the direct v20 emit, ALL-transcoded columns never reach the sized
+        // buffer (the two above route direct) — a MIXED column (a >256-palette Global
+        // section alongside a transcoded one) is the shape that still exercises the
+        // exact-sizing arithmetic, so the pin needs one or it holds by non-execution.
+        var pool = new ArrayList<net.minecraft.world.level.block.state.BlockState>();
+        for (var block : List.of(Blocks.OAK_STAIRS, Blocks.SPRUCE_STAIRS, Blocks.BIRCH_STAIRS,
+                Blocks.JUNGLE_STAIRS)) {
+            pool.addAll(block.getStateDefinition().getPossibleStates());
+        }
+        var globalStates = FACTORY.createForBlockStates();
+        int gi = 0;
+        for (int y = 0; y < 16; y++)
+            for (int z = 0; z < 16; z++)
+                for (int x = 0; x < 16; x++)
+                    globalStates.set(x, y, z, pool.get(gi++ % pool.size()));
+        long directBefore = NbtSectionSerializer.DIRECT_V20_EMITS.get();
+        NbtSectionSerializer.serializeChunkNbt(chunkNbt("minecraft:full",
+                sectionNbt(0, true, true, light(3, (byte) 9), null),
+                sectionFrom(1, globalStates, FACTORY.createForBiomes())), REGISTRY_ACCESS);
+        assertEquals(directBefore, NbtSectionSerializer.DIRECT_V20_EMITS.get(),
+                "premise: the mixed column took the sized-buffer route, not the direct emit");
         assertEquals(before, NbtSectionSerializer.SIZE_MISMATCH_FALLBACKS.get(),
                 "exact sizing fell back to the copy path — getSerializedSize drifted from write");
     }
