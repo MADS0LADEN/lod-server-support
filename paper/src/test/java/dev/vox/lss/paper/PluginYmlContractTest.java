@@ -24,9 +24,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * is invisible until a real Paper server refuses to load — or silently mis-loads — the
  * plugin: an unresolvable {@code main} or wrong {@code api-version} aborts plugin load, a
  * renamed plugin moves the {@code plugins/LodServerSupport/} data folder the config and
- * soak staging rely on, and {@code folia-supported} must stay ABSENT on the 26.2 line —
- * declaring it would auto-load the plugin on a future Folia 26.2 with live-unvalidated
- * Folia paths (the Folia soaks are pending upstream; re-add the flag with that validation).
+ * soak staging rely on, and {@code folia-supported} must stay DECLARED on the 26.2 line —
+ * Folia ships a real 26.2 build (26.2-1, 2026-07-28) and all four Folia soak scenarios
+ * passed against it (2026-08-01), so the guarded failure is now a jar that silently
+ * STOPS loading on Folia. (The flag was absent while no Folia 26.2 existed; that
+ * direction inverts on fresh re-ports to lines Folia does not publish for.)
  */
 class PluginYmlContractTest {
 
