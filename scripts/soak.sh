@@ -152,6 +152,7 @@ case "$SCENARIO" in
     dirty-during-backfill|dirty-while-offline|clearcache-mid-session|dimension-rejoin-warm) ;;
     store-second-join) ;;
     store-offline-populate|store-offline-mutate|store-offline-verify) ;;
+    store-migration-join) ;;
     store-save-storm|store-save-storm-off) ;;
     paper-dirty-falling-block|paper-store-unfired-event) ;;
     *)
@@ -230,6 +231,7 @@ case "$SCENARIO" in
                                 SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
     store-offline-verify)       CLIENT_RUNS=1; EXPECTED_SECONDS=280
                                 SERVER_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
+    store-migration-join)       CLIENT_RUNS=1; EXPECTED_SECONDS=280 ;;
     paper-dirty-falling-block)  CLIENT_RUNS=1; EXPECTED_SECONDS=300 ;;
     paper-store-unfired-event)  CLIENT_RUNS=1; EXPECTED_SECONDS=320
                                 # Backfill charges the store; the un-evented setblock +
