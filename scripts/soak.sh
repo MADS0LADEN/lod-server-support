@@ -365,6 +365,15 @@ printf '%s' "$SOAK_PLATFORM" > "$CACHE_PLATFORM_MARKER"
 # Step 6a: Stage server config override (fabric: config/; paper: the plugin data folder)
 mkdir -p "$SERVER_CONFIG_DIR"
 cp "$SCENARIO_CONFIG" "$SERVER_CONFIG_DIR/lss-server-config.json"
+# C2 legacy-dialect lever: SOAK_DIALECT=19 makes the soak CLIENT emulate a
+# protocol-19 install (announce 19, accept the 19 echo, skip the v20 decode
+# translation) so the run exercises the server's legacy egress translators
+# end-to-end — every conservation law then runs against translated bodies.
+if [[ -n "${SOAK_DIALECT:-}" ]]; then
+    CLIENT_EXTRA_ARGS+=("-Psoak.dialect=${SOAK_DIALECT}")
+    echo "[soak] SOAK_DIALECT=${SOAK_DIALECT}: client emulates a protocol-${SOAK_DIALECT} install"
+fi
+
 # Phase 5 burn-in lever: SOAK_LODSTORE_OVERRIDE=full merges the store into EVERY
 # scenario's staged config (the laws are store-aware; named checks are engine-blind).
 # SOAK_LODSTORE_BACKFILL_OVERRIDE independently forces the backfill, because every

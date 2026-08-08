@@ -271,6 +271,19 @@ store migration) and a `V20ToNativeTranslator`:
 
 Seam wiring (all four dialects flow through one choke point per platform):
 
+> **AMENDED at C2 (2026-08-08, deviation record in the progress doc):** the BODY
+> translation runs at the per-recipient **enqueue** choke point
+> (`buildAndEnqueueColumnPayload` → `fromV20` + `buildLegacyColumn`, both platforms),
+> NOT the flush seam this section originally named. The flush seam books every size
+> (bandwidth budget, queue gauges, diag `bytes_sent`) from the enqueue-time
+> `QueuedPayload`, so flush-time translation shipped native bodies while booking v20
+> sizes — the first live dialect-19 soak redded conservation law A2 by exactly that
+> delta. Enqueue-time translation makes every downstream size derive from the bytes
+> the legacy client decodes, and lands the CPU on the processing thread instead of
+> main. The flush seams below keep ONLY the header shapes (v16/v18 splices; v19 ships
+> verbatim). Translation failure = warn-once + the oversized-column `up_to_date`
+> semantics.
+
 - Fabric `RequestProcessingService.sendColumnPayload` (`:602-664`): dialect switch
   becomes V20-native / V19 (translate) / V18 (translate + `asV18()` splice) / V16
   (translate + `asV16()` splice). The existing `WireShape` byte-splice machinery

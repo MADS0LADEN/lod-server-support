@@ -1,5 +1,6 @@
 package dev.vox.lss.networking.client;
 
+import dev.vox.lss.networking.payloads.SoakDialectOverride;
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.networking.payloads.ZstdWireSupport;
 import dev.vox.lss.common.LSSLogger;
@@ -40,6 +41,9 @@ public class LSSClientNetworking {
      *  channel. Best-effort — legacy servers discard the unregistered channel, and a
      *  send failure must never take the announce down with it. */
     private static void sendClientInfoSidecar() {
+        // A real protocol-19 client has no lss:client_info channel — the soak harness's
+        // legacy-dialect emulation must not send one either (C2 lever fidelity).
+        if (SoakDialectOverride.isV19()) return;
         try {
             ClientPlayNetworking.send(new dev.vox.lss.networking.payloads.ClientInfoC2SPayload(
                     net.minecraft.SharedConstants.getCurrentVersion().dataVersion().version()));

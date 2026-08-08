@@ -90,7 +90,16 @@ public record SessionConfigS2CPayload(
                         // whether the SUBSEQUENT VoxelColumn frames omit the source byte —
                         // true only for a v16 server. See V16ClientWire.
                         V16ClientWire.observeSessionConfigVersion(version);
-                        if (version == LSSConstants.PROTOCOL_VERSION) {
+                        // The soak harness's legacy-dialect emulation (C2): a lever client
+                        // announced 19 and must decode the server's 19 echo exactly as a
+                        // real v0.9.x client would — the same 4-field layout this arm
+                        // reads (the data-version append is version-20-only, so
+                        // isReadable() is false and it decodes 0). Without this the echo
+                        // fell to the foreign arm below and read as a disabled server.
+                        // Inert in production: the property is never set there.
+                        boolean soakV19 = SoakDialectOverride.isV19()
+                                && version == LSSConstants.V19_COMPAT_PROTOCOL_VERSION;
+                        if (version == LSSConstants.PROTOCOL_VERSION || soakV19) {
                             boolean enabled = buf.readBoolean();
                             int lodDist = buf.readVarInt();
                             boolean genEnabled = buf.readBoolean();

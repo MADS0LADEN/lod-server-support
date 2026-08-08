@@ -113,19 +113,14 @@ class SectionLightDefaultsTest {
     private List<VoxelColumnData.SectionData> decodeAsConsumerSections(byte[] v20Wire) {
         // C1: the produce path emits v20 — translate back with exact inverse resolvers
         // over the same registries, then the native consumer-view decode is unchanged.
+        // C2 (review C1-15): the exact inverses are production statics now — decode
+        // through the same tables the legacy egress translators use.
         var blockInverse = IdentityTables.blockIdsByIdentity();
-        var biomeIdentity = NbtSectionSerializer.biomeIdentityLookup(REGISTRY_ACCESS);
-        var biomeInverse = new java.util.HashMap<String, Integer>();
-        for (int id = 0; ; id++) {
-            String identity = biomeIdentity.apply(id);
-            if (identity == null) break;
-            biomeInverse.put(identity, id);
-        }
         byte[] wire = dev.vox.lss.common.wire.V20ToNativeTranslator.translate(v20Wire,
                 ident -> blockInverse.getOrDefault(ident, -1),
-                ident -> biomeInverse.getOrDefault(ident, -1),
+                NbtSectionSerializer.biomeIdLookup(REGISTRY_ACCESS),
                 net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(),
-                biomeInverse.size());
+                NbtSectionSerializer.biomeIdCount(REGISTRY_ACCESS));
         var buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(wire));
         try {
             int count = buf.readVarInt();

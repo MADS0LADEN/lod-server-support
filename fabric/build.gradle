@@ -152,9 +152,12 @@ loom {
             programArg "SoakPlayer"
             // Per-scenario client instrumentation (soak.sh passes these as -P properties):
             // probes = per-position timestamp probes "x:z,..."; clientActionAt = one
-            // scripted client-side action "SECONDS:ACTION" (e.g. "60:clearcache")
+            // scripted client-side action "SECONDS:ACTION" (e.g. "60:clearcache");
+            // dialect = legacy-client emulation (C2 — "19" announces protocol 19 and
+            // skips the v20 decode translation, exercising the server's egress rungs)
             vmArg "-Dlss.soak.probes=${findProperty('soak.probes') ?: ''}"
             vmArg "-Dlss.soak.clientActionAt=${findProperty('soak.clientActionAt') ?: ''}"
+            vmArg "-Dlss.soak.dialect=${findProperty('soak.dialect') ?: ''}"
             programArg "--quickPlayMultiplayer"
             programArg "localhost:25565"
         }

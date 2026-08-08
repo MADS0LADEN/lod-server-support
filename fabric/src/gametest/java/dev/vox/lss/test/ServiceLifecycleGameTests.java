@@ -70,6 +70,10 @@ public class ServiceLifecycleGameTests {
      *  the positive-offset chunks SerializerParityGameTests edits and from spawn-loaded chunks. */
     private static final int PROBE_CHUNK_OFFSET = 80;
     private static final int GEN_CHUNK_OFFSET = 120;
+    // C2 legacy-egress delivery legs (bands disjoint from every other gametest class:
+    // TwoPlayer 180-210, RegionFault 220, Command 240).
+    private static final int V18_DELIVERY_CHUNK_OFFSET = 130;
+    private static final int V19_DELIVERY_CHUNK_OFFSET = 140;
 
     /** Deprecated upstream without a replacement; it is the only factory that places a real
      *  ServerPlayer (player list entry + embedded-channel connection) inside a gametest. */
@@ -775,88 +779,104 @@ public class ServiceLifecycleGameTests {
      * compiles clean and drops v18 clients to the v16 fallback, the exact symptom the rung
      * removes). The reply must be exactly one CURRENT-layout SessionConfig echoing 18 (the
      * v0.8.x gate hard-requires its own version), the player must register with v18
-     * membership, and the session must be forced codec-RAW.
+     * membership, and the session must be forced codec-RAW. Since C2 the test also runs a
+     * DELIVERY leg: a probe serve must translate at the enqueue choke point
+     * ({@code buildAndEnqueueColumnPayload} → {@code fromV20}) and flush through the
+     * {@code asV18()} splice — a translation failure there answers up_to_date and never
+     * enqueues, so {@code getTotalSectionsSent()} reaching 1 plus the surviving done-bit
+     * is the deliver-vs-contain distinguisher.
      */
-    @GameTest(structure = "fabric-gametest-api-v1:empty")
+    @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 1200)
     public void v18HandshakeRegistersNativelyAndEchoesProtocol18(GameTestHelper helper) {
-        var server = helper.getLevel().getServer();
-        var playerList = server.getPlayerList();
-        var mock = placeMockServerPlayer(helper);
-        var uuid = mock.getUUID();
-        var service = new RequestProcessingService(server);
-        var replies = new ArrayList<SessionConfigS2CPayload>();
-        try {
-            // caps=3 (the HOSTILE shape — a real v0.8.x client hardcodes caps=1): with the
-            // zstd bit set, the forced-RAW assertion below actually exercises the v18 term
-            // of the derivation instead of passing vacuously off the missing bit.
-            LSSServerNetworking.handleHandshake(
-                    new HandshakeC2SPayload(LSSConstants.V18_COMPAT_PROTOCOL_VERSION,
-                            LSSConstants.CAPABILITY_VOXEL_COLUMNS
-                                    | LSSConstants.CAPABILITY_ZSTD_COLUMNS),
-                    mock, service, replies::add);
-            helper.assertTrue(replies.size() == 1,
-                    "a v18 handshake on default config must be answered, got " + replies.size());
-            helper.assertTrue(replies.get(0).protocolVersion()
-                            == LSSConstants.V18_COMPAT_PROTOCOL_VERSION,
-                    "the reply must echo protocol 18 — the v0.8.x client disables itself on "
-                            + "any other version, got " + replies.get(0).protocolVersion());
-            var state = service.getPlayers().get(uuid);
-            helper.assertTrue(state != null,
-                    "a v18 handshake must register natively (not fall to the v16 shim)");
-            helper.assertTrue(service.getDialectTracker().isV18(uuid),
-                    "the session must carry v18 membership (the egress strips the codec byte off it)");
-            helper.assertTrue(!service.getV16CompatManager().isV16(uuid),
-                    "a v18 session is NOT a v16 compat session");
-            helper.assertTrue(!state.wantsCompressedColumns(),
-                    "a v18 session must be forced codec-RAW even when the handshake "
-                            + "(hostilely) declares the zstd capability bit");
-            // C1 INTERMEDIATE NOTE: this pin covers registration/echo/membership ONLY —
-            // column DELIVERY for v18 sessions is deliberately dropped until C2's body
-            // translator (the v18 splice would ship v20 dictionary bodies otherwise);
-            // C2 extends this case with a delivery assertion when it restores egress.
-        } finally {
-            service.shutdown();
-            playerList.remove(mock);
-        }
-        helper.succeed();
+        legacyDialectHandshakeAndDelivery(helper, LSSConstants.V18_COMPAT_PROTOCOL_VERSION,
+                V18_DELIVERY_CHUNK_OFFSET);
     }
 
     /** The v19 rung through the PRODUCTION receiver (protocol 20, XVER §4.2): a v0.9.x
-     *  client registers natively with the V19 dialect, the reply echoes 19, and the
-     *  session keeps compression OFF-limits only via the C1 egress drop (v19 columns
-     *  await the C2 body translator — this pins registration + echo + membership). */
-    @GameTest(structure = "fabric-gametest-api-v1:empty")
+     *  client registers natively with the V19 dialect, the reply echoes 19, and since C2
+     *  a probe serve must translate at enqueue and ship at the CURRENT header — same
+     *  sectionsSent + done-bit distinguisher as the v18 twin above. */
+    @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 1200)
     public void v19HandshakeRegistersNativelyAndEchoesProtocol19(GameTestHelper helper) {
-        var server = helper.getLevel().getServer();
+        legacyDialectHandshakeAndDelivery(helper, LSSConstants.V19_COMPAT_PROTOCOL_VERSION,
+                V19_DELIVERY_CHUNK_OFFSET);
+    }
+
+    /** The shared handshake + C2 delivery body of the two dialect rung tests above. */
+    private static void legacyDialectHandshakeAndDelivery(GameTestHelper helper,
+                                                          int announcedVersion, int chunkOffset) {
+        ServerLevel level = helper.getLevel();
+        var server = level.getServer();
         var playerList = server.getPlayerList();
         var mock = placeMockServerPlayer(helper);
         var uuid = mock.getUUID();
         var service = new RequestProcessingService(server);
         var replies = new ArrayList<SessionConfigS2CPayload>();
-        try {
-            LSSServerNetworking.handleHandshake(
-                    new HandshakeC2SPayload(LSSConstants.V19_COMPAT_PROTOCOL_VERSION,
-                            LSSConstants.CAPABILITY_VOXEL_COLUMNS
-                                    | LSSConstants.CAPABILITY_ZSTD_COLUMNS),
-                    mock, service, replies::add);
-            helper.assertTrue(replies.size() == 1,
-                    "a v19 handshake on default config must be answered, got " + replies.size());
-            helper.assertTrue(replies.get(0).protocolVersion()
-                            == LSSConstants.V19_COMPAT_PROTOCOL_VERSION,
-                    "the reply must echo protocol 19 — the v0.9.x client disables itself on "
-                            + "any other version, got " + replies.get(0).protocolVersion());
-            var state = service.getPlayers().get(uuid);
-            helper.assertTrue(state != null,
-                    "a v19 handshake must register natively (not fall to the v16 shim)");
-            helper.assertTrue(service.getDialectTracker().isV19(uuid),
-                    "the session must carry v19 membership (the egress gates on it)");
-            helper.assertTrue(!service.getV16CompatManager().isV16(uuid),
-                    "a v19 session is NOT a v16 compat session");
-        } finally {
+        // caps=3 (the HOSTILE shape for v18 — a real v0.8.x client hardcodes caps=1): with
+        // the zstd bit set, the v18 forced-RAW assertion actually exercises the dialect
+        // term of the derivation instead of passing vacuously off the missing bit.
+        LSSServerNetworking.handleHandshake(
+                new HandshakeC2SPayload(announcedVersion,
+                        LSSConstants.CAPABILITY_VOXEL_COLUMNS
+                                | LSSConstants.CAPABILITY_ZSTD_COLUMNS),
+                mock, service, replies::add);
+        helper.assertTrue(replies.size() == 1,
+                "a v" + announcedVersion + " handshake on default config must be answered, got "
+                        + replies.size());
+        helper.assertTrue(replies.get(0).protocolVersion() == announcedVersion,
+                "the reply must echo protocol " + announcedVersion + " — the legacy client "
+                        + "disables itself on any other version, got "
+                        + replies.get(0).protocolVersion());
+        // The echo must carry the REAL config, not zeroes (the dialect-19 soak lever
+        // caught a decode-side flavor of this — pin the encode side too).
+        helper.assertTrue(replies.get(0).enabled(),
+                "the legacy echo must carry the real enabled flag");
+        helper.assertTrue(replies.get(0).lodDistanceChunks() == LSSServerConfig.CONFIG.lodDistanceChunks,
+                "the legacy echo must carry the real LOD distance, got "
+                        + replies.get(0).lodDistanceChunks());
+        var state = service.getPlayers().get(uuid);
+        helper.assertTrue(state != null,
+                "a v" + announcedVersion + " handshake must register natively (not fall to "
+                        + "the v16 shim)");
+        boolean v18 = announcedVersion == LSSConstants.V18_COMPAT_PROTOCOL_VERSION;
+        helper.assertTrue(v18 ? service.getDialectTracker().isV18(uuid)
+                        : service.getDialectTracker().isV19(uuid),
+                "the session must carry its dialect membership (the egress gates on it)");
+        helper.assertTrue(!service.getV16CompatManager().isV16(uuid),
+                "a v" + announcedVersion + " session is NOT a v16 compat session");
+        if (v18) {
+            helper.assertTrue(!state.wantsCompressedColumns(),
+                    "a v18 session must be forced codec-RAW even when the handshake "
+                            + "(hostilely) declares the zstd capability bit");
+        }
+
+        // ---- C2 delivery leg: one probe-servable column through the legacy egress ----
+        int pcx = mock.getBlockX() >> 4;
+        int pcz = mock.getBlockZ() >> 4;
+        int cx = pcx - chunkOffset;
+        int cz = pcz - chunkOffset;
+        var chunkPos = new ChunkPos(cx, cz);
+        var chunkSource = level.getChunkSource();
+        // Loaded for the whole test: the serve must come from the in-memory probe.
+        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+        level.getChunk(cx, cz);
+        service.handleBatchRequest(mock, new BatchChunkRequestC2SPayload(
+                new long[]{PositionUtil.packPosition(cx, cz)}, new long[]{-1L}, 1));
+        helper.assertTrue(state.getTotalRequestsReceived() == 1,
+                "premise: the delivery-leg request must pass the distance guard");
+
+        helper.succeedWhen(() -> {
+            service.tick();
+            helper.assertTrue(state.getTotalSectionsSent() >= 1,
+                    "waiting for the probe serve to flush through the legacy egress — a "
+                            + "translation failure at enqueue answers up_to_date and never "
+                            + "sends a section, so this wait times out on one");
+            helper.assertTrue(state.hasDiskReadDone(cx, cz),
+                    "the done-bit must SURVIVE the flush (no drop path fired)");
+            chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
             service.shutdown();
             playerList.remove(mock);
-        }
-        helper.succeed();
+        });
     }
 
     /**

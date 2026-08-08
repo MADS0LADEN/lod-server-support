@@ -47,6 +47,11 @@ public final class WireDialectTracker {
     /** The session's dialect, or {@code CURRENT} when untracked (an unknown session can
      *  only be served canonical shapes — never a legacy strip/translation). */
     public WireDialect dialectOf(UUID uuid) {
+        // Null-tolerant: no identity = no session = CURRENT. Production states always
+        // carry a UUID; bare-mock test rigs may not, and a CHM get(null) throws.
+        if (uuid == null) {
+            return WireDialect.CURRENT;
+        }
         return this.sessions.getOrDefault(uuid, WireDialect.CURRENT);
     }
 

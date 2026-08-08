@@ -1,5 +1,6 @@
 package dev.vox.lss.networking.client;
 
+import dev.vox.lss.networking.payloads.SoakDialectOverride;
 import dev.vox.lss.common.Brand;
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.LSSLogger;
@@ -140,8 +141,11 @@ final class ClientSessionGate {
             // Mark-before-send: the wire's sourceless-column arming keys on the LAST version
             // this client announced (V16ClientWire.markAnnouncedVersion), and the mark must be
             // visible to the netty thread before any reply can arrive (wire causality).
-            V16ClientWire.markAnnouncedVersion(LSSConstants.PROTOCOL_VERSION);
-            this.handshakeSender.accept(LSSConstants.PROTOCOL_VERSION);
+            // announceVersion() is PROTOCOL_VERSION in every production launch; only the
+            // soak harness's -Dlss.soak.dialect legacy-emulation lever lowers it (C2).
+            int announce = SoakDialectOverride.announceVersion();
+            V16ClientWire.markAnnouncedVersion(announce);
+            this.handshakeSender.accept(announce);
             // Arm the discovery fallback only after the v18 handshake actually went out. On a
             // send throw (vanilla / no-LSS server) there is nothing to re-discover, so leave it
             // disarmed — otherwise tickV16Discovery() would fire a second, equally-doomed v16
@@ -189,9 +193,13 @@ final class ClientSessionGate {
 
         int version = payload.protocolVersion();
         boolean v16 = version == LSSConstants.V16_COMPAT_PROTOCOL_VERSION && enableV16ServerCompat;
-        if (version != LSSConstants.PROTOCOL_VERSION && !v16) {
+        // The accepted echo is whatever this client announced: PROTOCOL_VERSION in
+        // production, 19 under the soak harness's legacy-emulation lever (which must
+        // REJECT a 20 echo exactly like the real v19 client it emulates would).
+        if (version != SoakDialectOverride.announceVersion() && !v16) {
             LSSLogger.warn("Server has incompatible " + Brand.shortName() + " protocol version " + version
-                    + " (client: " + LSSConstants.PROTOCOL_VERSION + "), LOD distribution disabled");
+                    + " (client: " + SoakDialectOverride.announceVersion()
+                    + "), LOD distribution disabled");
             this.serverEnabled = false;
             return;
         }
@@ -210,12 +218,13 @@ final class ClientSessionGate {
                     + "(a raced discovery reply, or a server plugin reload prompting us to "
                     + "re-attach) — re-announcing v18.");
             try {
-                // Mark-before-send: re-asserting v18 also retires any leftover v16 announce
-                // (a raced discovery earlier this connection), so a LATER unsolicited v16
-                // frame — e.g. a second /reload prompt — can never arm sourceless decode
-                // against the re-established v18 stream.
-                V16ClientWire.markAnnouncedVersion(LSSConstants.PROTOCOL_VERSION);
-                this.handshakeSender.accept(LSSConstants.PROTOCOL_VERSION);
+                // Mark-before-send: re-asserting the current dialect also retires any
+                // leftover v16 announce (a raced discovery earlier this connection), so a
+                // LATER unsolicited v16 frame — e.g. a second /reload prompt — can never
+                // arm sourceless decode against the re-established session's stream.
+                int reAnnounce = SoakDialectOverride.announceVersion();
+                V16ClientWire.markAnnouncedVersion(reAnnounce);
+                this.handshakeSender.accept(reAnnounce);
             } catch (Exception e) {
                 LSSLogger.debug("v18 re-assert handshake send failed: " + e.getMessage());
             }

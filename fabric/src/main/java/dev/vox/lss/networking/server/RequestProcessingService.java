@@ -155,6 +155,9 @@ public class RequestProcessingService {
                 config.effectiveTimestampCacheMB(), config.missMemoTtlSeconds,
                 config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
                         + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS);
+        // C2: the per-recipient enqueue consults the session dialect to translate
+        // legacy (v19/v18/v16) column bodies to the native layout at build time.
+        this.offThreadProcessor.attachDialectTracker(this.dialects);
         // Right after the constructor's cache load — see the field's javadoc.
         this.timestampCacheBootedEmpty = this.offThreadProcessor.isTimestampCacheEmpty();
 
@@ -593,14 +596,6 @@ public class RequestProcessingService {
     /** Warn-once latch for the v16 egress guard (MAIN thread only). */
     private boolean v16UnconvertibleWarned;
 
-    /** The per-player column egress (MAIN). For a v16 session, converts UNCONDITIONALLY to
-     *  the legacy source-less shape — every producer (probe/disk/generation/ghost-clear)
-     *  funnels through here, so no producer can leak a v18 frame that would hard-kick the
-     *  old client — and prunes the position from the synthetic want-set after the send
-     *  (satisfied-by-data; the prune is load-bearing, see the design §4.4). A payload the
-     *  guard cannot convert is DROPPED with a warn-once (design §5): a dropped frame
-     *  self-heals by re-declaration, a wrong-shaped one kicks the client. Unreachable
-     *  today — only buildAndEnqueueColumnPayload feeds this queue. */
     /** Whether a column may be converted to a legacy (v16 OR v18) shape. Extracted so the
      *  guard's decision is pinnable: {@code sendColumnPayload} is private and needs a
      *  live server, so this — the only thing standing between a codec-1 payload and a
@@ -615,50 +610,22 @@ public class RequestProcessingService {
 
     /** Warn-once latch for the v18 egress guard (MAIN thread only). */
     private boolean v18UnconvertibleWarned;
-    /** Warn-once latch for the C1-intermediate legacy-egress drop (MAIN thread only). */
-    private boolean legacyDropWarned;
 
-    /**
-     * C1 INTERMEDIATE (restored at C2): with v20 as the canonical internal form, EVERY
-     * legacy dialect needs a BODY translation before its header shape applies — the
-     * v18/v16 splices only rewrite headers, so they would ship v20 dictionary bodies a
-     * legacy decoder reads as garbage (review C1-1). Until the C2 translators land,
-     * column egress for ALL THREE legacy dialects is dropped behind this latch. The
-     * done-bit is cleared so the state never claims delivery; the client re-declares at
-     * 1 Hz and the loop is bounded by the same bandwidth accounting a healthy session
-     * gets (NOT "healthy-idle" — a real legacy client against a C1-window build churns
-     * one want-set of reads per second until C2; acceptable only because no such client
-     * exists in CI and C1–C5 merge to main together).
-     */
-    private boolean dropLegacyColumn(PlayerRequestState state, CustomPacketPayload payload,
-                                     String dialect) {
-        if (!(payload instanceof dev.vox.lss.networking.payloads.VoxelColumnS2CPayload col)) {
-            return false;
-        }
-        if (!this.legacyDropWarned) {
-            this.legacyDropWarned = true;
-            LSSLogger.warn(dialect + "-compat: column egress not yet translated (C1"
-                    + " intermediate) — dropping columns for legacy session "
-                    + state.getPlayerName() + " (further drops are silent)");
-        }
-        state.clearDiskReadDone(PositionUtil.packPosition(col.chunkX(), col.chunkZ()));
-        return true;
-    }
-
+    /** The per-player column egress (MAIN) — every producer (probe/disk/generation/
+     *  ghost-clear/store-hit) funnels through here, so no producer can leak a
+     *  wrong-dialect frame. Legacy (v19/v18/v16) sessions' BODIES are already native:
+     *  the C2 translation runs at the per-recipient ENQUEUE choke point
+     *  ({@code FabricOffThreadProcessor.buildAndEnqueueColumnPayload}) so every queued
+     *  size — gauges, bandwidth budget, diag books, soak law A2 — matches what the
+     *  legacy client decodes. This seam applies only the HEADER shapes: v16 splices to
+     *  the source-less layout and prunes the synthetic want-set (satisfied-by-data; the
+     *  prune is load-bearing, design §4.4), v18 strips the codec byte, v19 IS the
+     *  current header. Every failure shape is a warn-once DROP (design §5): a dropped
+     *  frame self-heals by re-declaration, a wrong-shaped one kicks the client. */
     private void sendColumnPayload(PlayerRequestState state, CustomPacketPayload payload)
             throws Exception {
         var uuid = state.getPlayerUUID();
-        if (this.dialects.isV19(uuid)) {
-            if (dropLegacyColumn(state, payload, "v19")) {
-                return;
-            }
-            ServerPlayNetworking.send(state.getPlayer(), payload);
-            return;
-        }
         if (this.dialects.isV16(uuid)) {
-            if (dropLegacyColumn(state, payload, "v16")) {
-                return;
-            }
             if (!(payload instanceof dev.vox.lss.networking.payloads.VoxelColumnS2CPayload col)) {
                 if (!this.v16UnconvertibleWarned) {
                     this.v16UnconvertibleWarned = true;
@@ -693,9 +660,6 @@ public class RequestProcessingService {
             return;
         }
         if (this.dialects.isV18(uuid)) {
-            if (dropLegacyColumn(state, payload, "v18")) {
-                return;
-            }
             // v18 egress (v18-compat design §2.6): strip the codec byte, keep the source
             // byte. No prune bookkeeping — there is no synthetic want-set; the client's
             // own re-declaration heals any drop. The RAW guard mirrors the v16 one and is

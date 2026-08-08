@@ -118,46 +118,69 @@ public class PaperRequestProcessingService {
     private boolean v16SpliceWarned;
     /** Warn-once latch for the v18 egress splice guard (pump thread only). */
     private boolean v18SpliceWarned;
-    /** Warn-once latch for the C1-intermediate legacy-egress drop (PUMP only). */
-    private boolean legacyDropWarned;
 
-    /** The per-player column egress (PUMP). For a v16 session, splices the frame
-     *  UNCONDITIONALLY into the legacy source-less shape — every producer
-     *  (probe/disk/generation/ghost-clear) funnels through here, so no producer can leak a
-     *  v18 frame that would hard-kick the old client — and prunes the position from the
-     *  synthetic want-set after the send (satisfied-by-data; load-bearing, design §4.4).
-     *  A frame the splice cannot parse is DROPPED with a warn-once (design §5): letting
-     *  the exception propagate would make flushSendQueue drop the player's WHOLE queue,
-     *  and honest re-resolution would re-enqueue the same frame forever. Unreachable
-     *  today — every frame comes from encodeVoxelColumnPreEncoded. */
-    private ColumnPayloadSender columnPayloadSender = (state, data) -> {
+    /** The per-player column egress (PUMP): {@link #routeColumnFrame} over the real
+     *  NMS send. The routing itself is package-private so the Tier-1 twin can drive
+     *  the dialect ladder with a capturing sender. */
+    private ColumnPayloadSender columnPayloadSender = (state, data) ->
+            routeColumnFrame(state, data, bytes -> PaperPayloadHandler.sendRawNmsPayload(
+                    state.getPlayer().getBukkitEntity(), PaperPayloadHandler.ID_VOXEL_COLUMN, bytes));
+
+    /** The column egress routing (PUMP). Legacy (v19/v18/v16) sessions' BODIES are
+     *  already native: the C2 translation runs at the per-recipient ENQUEUE choke point
+     *  ({@code PaperOffThreadProcessor.buildAndEnqueueColumnPayload}) so every queued
+     *  size — gauges, bandwidth budget, diag books, soak law A2 — matches what the
+     *  legacy client decodes. This seam applies only the HEADER shapes: v16 splices to
+     *  the source-less layout and prunes the synthetic want-set (satisfied-by-data;
+     *  load-bearing, design §4.4), v18 strips the codec byte, v19 IS the current
+     *  header. Every failure shape is a warn-once DROP (design §5): letting the
+     *  exception propagate would make flushSendQueue drop the player's WHOLE queue,
+     *  and honest re-resolution would re-enqueue the same frame forever. */
+    void routeColumnFrame(PaperPlayerRequestState state, byte[] data,
+                          java.util.function.Consumer<byte[]> rawSend) {
         var uuid = state.getPlayerUUID();
-        var dialect = this.dialects.dialectOf(uuid);
-        if (dialect != dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT) {
-            // C1 INTERMEDIATE (restored at C2): every legacy dialect needs a BODY
-            // translation before its header shape applies — the v18/v16 splices only
-            // rewrite headers and would ship v20 dictionary bodies a legacy decoder
-            // reads as garbage (review C1-1). All legacy column egress drops behind a
-            // once-warn latch; the done-bit is cleared so the state never claims
-            // delivery. The 1 Hz re-declare loop this leaves is bounded by the same
-            // bandwidth accounting a healthy session gets, and no legacy client exists
-            // in CI — C1–C5 merge to main together.
-            if (!this.legacyDropWarned) {
-                this.legacyDropWarned = true;
-                LSSLogger.warn(dialect + "-compat: column egress not yet translated (C1"
-                        + " intermediate) — dropping columns for legacy session "
-                        + state.getPlayerName() + " (further drops are silent)");
-            }
+        if (this.dialects.isV16(uuid)) {
+            byte[] legacy;
+            long packedPos;
             try {
-                state.clearDiskReadDone(PaperPayloadHandler.readColumnPackedPos(data));
+                legacy = PaperPayloadHandler.rewriteColumnToV16(data);
+                packedPos = PaperPayloadHandler.readColumnPackedPos(data);
             } catch (Exception e) {
-                // Unparseable frame position: nothing to clear; the drop stands.
+                if (!this.v16SpliceWarned) {
+                    this.v16SpliceWarned = true;
+                    LSSLogger.error("v16-compat: dropping unspliceable column frame for "
+                            + state.getPlayerName() + " (further drops are silent)", e);
+                }
+                return;
             }
+            rawSend.accept(legacy);
+            this.v16Compat.onColumnSent(uuid, packedPos);
             return;
         }
-        PaperPayloadHandler.sendRawNmsPayload(state.getPlayer().getBukkitEntity(),
-                PaperPayloadHandler.ID_VOXEL_COLUMN, data);
-    };
+        if (this.dialects.isV18(uuid)) {
+            // v18 egress (v18-compat design §2.6): strip the codec byte, keep the
+            // source byte. No prune — there is no synthetic want-set; the client's
+            // own re-declaration heals any drop. The splice THROWS on a non-RAW
+            // codec (the narrow cross-dialect downgrade window); the warn-drop
+            // contains it, mirroring the v16 branch above.
+            byte[] v18Frame;
+            try {
+                v18Frame = PaperPayloadHandler.rewriteColumnToV18(data);
+            } catch (Exception e) {
+                if (!this.v18SpliceWarned) {
+                    this.v18SpliceWarned = true;
+                    LSSLogger.error("v18-compat: dropping unspliceable column frame for "
+                            + state.getPlayerName() + " (further drops are silent)", e);
+                }
+                return;
+            }
+            rawSend.accept(v18Frame);
+            return;
+        }
+        // CURRENT and V19 ship verbatim — the v19 header IS the current header, and a
+        // v19 session's body was translated at enqueue.
+        rawSend.accept(data);
+    }
 
     private LoadedColumnProbe loadedColumnProbe = (level, cx, cz) -> {
         LevelChunk chunk = level.getChunkSource().getChunkNow(cx, cz);
@@ -321,6 +344,11 @@ public class PaperRequestProcessingService {
         // manager this service actually published.
         this.xrayMasks = wiring.xrayMasks();
         this.wireCompressionLive = wiring.wireCompressionLive();
+        // C2: the per-recipient enqueue consults the session dialect to translate
+        // legacy (v19/v18/v16) column bodies to the native layout at build time.
+        if (this.offThreadProcessor != null) {
+            this.offThreadProcessor.attachDialectTracker(this.dialects);
+        }
     }
 
     private static Wiring productionWiring(MinecraftServer server, Plugin plugin, PaperConfig config) {
