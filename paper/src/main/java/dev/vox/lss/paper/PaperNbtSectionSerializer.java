@@ -721,7 +721,23 @@ final class PaperNbtSectionSerializer {
     /** The registry-scoped pair the single-slot memo holds: the container factory and
      *  the transcoder's biome resolver share one lifetime (both die with their key). */
     private record RegistryScoped(PalettedContainerFactory factory, BiomeIdResolver biomeResolver,
-                                  java.util.function.IntFunction<String> biomeIdentityFor) {}
+                                  java.util.function.IntFunction<String> biomeIdentityFor,
+                                  java.util.function.ToIntFunction<String> biomeIdFor,
+                                  int biomeIdCount) {}
+
+    /** The C2 egress inverse: bare biome identity → this registry's holder id, -1 when
+     *  unknown (the translator turns -1 into its pinned loud failure). Built by
+     *  inverting the SAME id→identity table the emit uses, so the pair is bijective
+     *  by construction on one registry. */
+    static java.util.function.ToIntFunction<String> biomeIdLookup(RegistryAccess registryAccess) {
+        return scopedFor(registryAccess).biomeIdFor();
+    }
+
+    /** The biome id-space size for the translator's DIRECT width (the same idMap the
+     *  native containers encode against). */
+    static int biomeIdCount(RegistryAccess registryAccess) {
+        return scopedFor(registryAccess).biomeIdCount();
+    }
 
     /** The v20 biome identity lookup for this registry access (C1): wire biome ids are
      *  the factory strategy's {@code globalMap} HOLDER ids — the identity table must be
@@ -774,10 +790,18 @@ final class PaperNbtSectionSerializer {
         if (memo != null && memo.getKey().get() == registryAccess) return memo.getValue();
         var factory = PalettedContainerFactory.create(registryAccess);
         var idMap = factory.biomeStrategy().globalMap();
+        var identityFor = buildBiomeIdentities(idMap);
+        var inverse = new java.util.HashMap<String, Integer>(idMap.size() * 2);
+        for (int id = 0; id < idMap.size(); id++) {
+            inverse.put(identityFor.apply(id), id);
+        }
+        var frozenInverse = java.util.Map.copyOf(inverse);
         var scoped = new RegistryScoped(factory, new BiomeIdResolver(
                 registryAccess.lookupOrThrow(Registries.BIOME), idMap,
                 idMap.getId(factory.defaultBiome()), new ConcurrentHashMap<>()),
-                buildBiomeIdentities(idMap));
+                identityFor,
+                identity -> frozenInverse.getOrDefault(identity, -1),
+                idMap.size());
         factoryMemo = java.util.Map.entry(new java.lang.ref.WeakReference<>(registryAccess), scoped);
         return scoped;
     }

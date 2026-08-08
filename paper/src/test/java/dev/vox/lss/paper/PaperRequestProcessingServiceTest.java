@@ -1163,4 +1163,116 @@ class PaperRequestProcessingServiceTest {
         assertFalse(service.getV16CompatManager().isV16(uuid),
                 "…and the v16 session with it (review H2 — the leaked twin)");
     }
+
+    // ---- C2 legacy egress routing (routeColumnFrame — XVER §4.2) ----
+    //
+    // The dialect ladder over an injected stub translator + capturing sender: what gets
+    // translated, what composes with which splice, and how failures contain. The
+    // translation CORE (real registries, corpus goldens, zstd) is PaperLegacyEgressTest;
+    // these pin only the routing.
+
+    private static byte[] ladderFrame(byte codec, byte[] body) {
+        return PaperPayloadHandler.encodeVoxelColumnPreEncoded(3, 4, "minecraft:overworld",
+                99L, LSSConstants.COLUMN_SOURCE_DISK, codec, body);
+    }
+
+    @Test
+    void routeColumnFrameShipsCurrentSessionsVerbatimWithoutTranslating() {
+        var state = service.registerPlayer(playerIn(UUID.randomUUID(), level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        service.setLegacyColumnTranslator(frame -> {
+            throw new AssertionError("a CURRENT session must never pay the translation");
+        });
+        byte[] frame = ladderFrame(LSSConstants.COLUMN_CODEC_RAW, new byte[] {0, 0});
+        var sent = new ArrayList<byte[]>();
+        service.routeColumnFrame(state, frame, sent::add);
+        assertEquals(1, sent.size());
+        assertSame(frame, sent.get(0), "verbatim — the same array, no re-encode");
+    }
+
+    @Test
+    void routeColumnFrameShipsV19SessionsTheTranslatedFrameAtTheCurrentHeader() {
+        var uuid = UUID.randomUUID();
+        service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V19);
+        var state = service.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        byte[] translated = ladderFrame(LSSConstants.COLUMN_CODEC_RAW, new byte[] {0});
+        service.setLegacyColumnTranslator(frame -> translated);
+        var sent = new ArrayList<byte[]>();
+        service.routeColumnFrame(state, ladderFrame(LSSConstants.COLUMN_CODEC_RAW, new byte[] {0, 0}),
+                sent::add);
+        assertEquals(1, sent.size());
+        assertSame(translated, sent.get(0),
+                "v19's header IS the current header — the translated frame ships as-is");
+    }
+
+    @Test
+    void routeColumnFrameComposesTheV18SpliceOnTheTranslatedFrame() {
+        var uuid = UUID.randomUUID();
+        service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V18);
+        var state = service.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        byte[] translated = ladderFrame(LSSConstants.COLUMN_CODEC_RAW, new byte[] {0});
+        service.setLegacyColumnTranslator(frame -> translated);
+        var sent = new ArrayList<byte[]>();
+        service.routeColumnFrame(state, ladderFrame(LSSConstants.COLUMN_CODEC_RAW, new byte[] {0, 0}),
+                sent::add);
+        assertEquals(1, sent.size());
+        assertArrayEquals(PaperPayloadHandler.rewriteColumnToV18(translated), sent.get(0),
+                "the v18 splice must ride the TRANSLATED frame, not the v20 original");
+    }
+
+    @Test
+    void routeColumnFrameComposesTheV16SpliceAndPrunesTheSyntheticWantSet() {
+        var uuid = UUID.randomUUID();
+        service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V16);
+        service.getV16CompatManager().onHandshake(uuid);
+        var state = service.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        byte[] translated = ladderFrame(LSSConstants.COLUMN_CODEC_RAW, new byte[] {0});
+        service.setLegacyColumnTranslator(frame -> translated);
+        var sent = new ArrayList<byte[]>();
+        service.routeColumnFrame(state, ladderFrame(LSSConstants.COLUMN_CODEC_RAW, new byte[] {0, 0}),
+                sent::add);
+        assertEquals(1, sent.size());
+        assertArrayEquals(PaperPayloadHandler.rewriteColumnToV16(translated), sent.get(0),
+                "the v16 splice must ride the TRANSLATED frame");
+    }
+
+    @Test
+    void routeColumnFrameContainsTranslationFailuresAndClearsTheDoneBit() {
+        var uuid = UUID.randomUUID();
+        service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V19);
+        var state = service.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        service.setLegacyColumnTranslator(frame -> {
+            throw new IllegalStateException("boom");
+        });
+        state.markDiskReadDone(3, 4);
+        var sent = new ArrayList<byte[]>();
+        // Must not throw: a propagated exception would make flushSendQueue drop the
+        // player's WHOLE queue.
+        service.routeColumnFrame(state, ladderFrame(LSSConstants.COLUMN_CODEC_RAW, new byte[] {0, 0}),
+                sent::add);
+        assertTrue(sent.isEmpty(), "a failed translation must drop, never ship the v20 frame");
+        assertFalse(state.hasDiskReadDone(3, 4),
+                "the done-bit must clear so the state never claims delivery (the client's "
+                        + "re-declaration re-resolves honestly)");
+    }
+
+    @Test
+    void routeColumnFrameDropsWhenTheLegacySpliceRefusesTheFrame() {
+        // The cross-dialect downgrade window: a codec-1 frame reaching a v18 session's
+        // splice throws (nowhere to carry a codec) — contained as a warn-drop.
+        var uuid = UUID.randomUUID();
+        service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V18);
+        var state = service.registerPlayer(playerIn(uuid, level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        service.setLegacyColumnTranslator(frame -> ladderFrame(LSSConstants.COLUMN_CODEC_ZSTD,
+                new byte[] {1, 2, 3}));
+        var sent = new ArrayList<byte[]>();
+        service.routeColumnFrame(state, ladderFrame(LSSConstants.COLUMN_CODEC_ZSTD, new byte[] {1, 2, 3}),
+                sent::add);
+        assertTrue(sent.isEmpty());
+    }
 }

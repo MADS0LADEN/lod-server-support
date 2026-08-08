@@ -190,19 +190,14 @@ class PaperSerializerParityTest {
         // C1: both paths emit v20 — translate back with exact inverse resolvers before
         // the native structural decode below (byte-level parity is asserted on the v20
         // bytes upstream; this decode only feeds content assertions).
+        // C2 (review C1-15): the exact inverses are production statics now — decode
+        // through the same tables the legacy egress translators use.
         var blockInverse = PaperIdentityTables.blockIdsByIdentity();
-        var biomeIdentity = PaperNbtSectionSerializer.biomeIdentityLookup(REGISTRY_ACCESS);
-        var biomeInverse = new java.util.HashMap<String, Integer>();
-        for (int id = 0; ; id++) {
-            String identity = biomeIdentity.apply(id);
-            if (identity == null) break;
-            biomeInverse.put(identity, id);
-        }
         wire = dev.vox.lss.common.wire.V20ToNativeTranslator.translate(wire,
                 ident -> blockInverse.getOrDefault(ident, -1),
-                ident -> biomeInverse.getOrDefault(ident, -1),
+                PaperNbtSectionSerializer.biomeIdLookup(REGISTRY_ACCESS),
                 net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(),
-                biomeInverse.size());
+                PaperNbtSectionSerializer.biomeIdCount(REGISTRY_ACCESS));
         var buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(wire));
         try {
             int count = buf.readVarInt();

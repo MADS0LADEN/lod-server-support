@@ -68,26 +68,13 @@ class NbtSectionSerializerTest {
     }
 
     /**
-     * Twin of the Fabric builder: the golden corpus bytes embed biome palette ids, so ids must
-     * be platform- and version-independent — register exactly the corpus biomes in this fixed
-     * order (full-vanilla listElements() order differs between the Fabric and Paper test
-     * runtimes and skewed the fixtures). Never reorder; if this list changes, regenerate all
-     * goldens on BOTH modules.
+     * The corpus-fixed biome RegistryAccess — extracted to {@link CorpusRegistryAccess}
+     * at C2 (twin of the Fabric extraction) so the translation-chain suite
+     * ({@code PaperLegacyEgressTest}) provably decodes against the same registry these
+     * fixtures were generated with. The append-only discipline lives on the helper.
      */
     private static RegistryAccess buildRegistryAccess() {
-        HolderLookup.Provider provider = VanillaRegistries.createLookup();
-        HolderLookup.RegistryLookup<Biome> src = provider.lookupOrThrow(Registries.BIOME);
-        MappedRegistry<Biome> biomes = new MappedRegistry<>(Registries.BIOME, Lifecycle.stable());
-        for (var key : List.of(Biomes.PLAINS, Biomes.DESERT, Biomes.JUNGLE, Biomes.SNOWY_TAIGA,
-                // Appended for the round-2 transcode goldens (the biome 3-bit-linear and
-                // global tiers need >4 and >8 distinct biomes). APPEND-ONLY: ids are
-                // assigned in list order and the committed goldens bake them.
-                Biomes.SWAMP, Biomes.TAIGA, Biomes.SAVANNA, Biomes.BADLANDS, Biomes.BEACH,
-                Biomes.RIVER)) {
-            biomes.register(key, src.getOrThrow(key).value(), RegistrationInfo.BUILT_IN);
-        }
-        biomes.freeze();
-        return new RegistryAccess.ImmutableRegistryAccess(List.of(biomes));
+        return CorpusRegistryAccess.build();
     }
 
     private CompoundTag chunkNbt(String status, CompoundTag... sections) {
@@ -126,19 +113,14 @@ class NbtSectionSerializerTest {
     /** v20 wire -> the native view every assertion below predates (exact inverse
      *  resolvers over the SAME registries the emit used). */
     private static byte[] toNativeForTest(byte[] v20Wire) {
+        // C2 (review C1-15): the exact inverses are production statics now — decode
+        // through the same tables the legacy egress translators use.
         var blockInverse = PaperIdentityTables.blockIdsByIdentity();
-        var biomeIdentity = PaperNbtSectionSerializer.biomeIdentityLookup(REGISTRY_ACCESS);
-        var biomeInverse = new java.util.HashMap<String, Integer>();
-        for (int id = 0; ; id++) {
-            String identity = biomeIdentity.apply(id);
-            if (identity == null) break;
-            biomeInverse.put(identity, id);
-        }
         return dev.vox.lss.common.wire.V20ToNativeTranslator.translate(v20Wire,
                 ident -> blockInverse.getOrDefault(ident, -1),
-                ident -> biomeInverse.getOrDefault(ident, -1),
+                PaperNbtSectionSerializer.biomeIdLookup(REGISTRY_ACCESS),
                 net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(),
-                biomeInverse.size());
+                PaperNbtSectionSerializer.biomeIdCount(REGISTRY_ACCESS));
     }
 
     private List<DecodedSection> decode(byte[] v20Wire) {

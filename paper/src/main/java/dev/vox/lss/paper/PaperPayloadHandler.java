@@ -222,6 +222,57 @@ public final class PaperPayloadHandler {
     }
 
     /**
+     * The C2 legacy egress body translation (XVER §4.2), frame-level twin of Fabric's
+     * {@code RequestProcessingService.translateColumnToNative}: decode a CURRENT-layout
+     * column frame, translate its v20 BODY back to the native (v19) section layout
+     * against the injected resolvers, and re-encode with the header (incl. codec)
+     * preserved. A zstd body decompresses → translates → RECOMPRESSES (v19 sessions
+     * keep their compression capability); a raw body translates in place. The v18/v16
+     * header splices ({@link #rewriteColumnToV18}/{@link #rewriteColumnToV16}) compose
+     * ON TOP of the returned frame — they only remove header bytes. Frames carry no
+     * rawSize, so the zstd uncompressed size comes from the frame's own declared
+     * content size, bounds-checked against {@code MAX_SECTIONS_SIZE} (self-produced
+     * frames declare honestly; the check keeps a corrupt frame a loud contained drop).
+     * Throws on any malformed/unresolvable body — the sender's warn-drop contains it.
+     */
+    public static byte[] translateColumnFrameToNative(byte[] frame,
+            java.util.function.ToIntFunction<String> blockIdResolver,
+            java.util.function.ToIntFunction<String> biomeIdResolver,
+            int blockRegistrySize, int biomeRegistrySize,
+            dev.vox.lss.common.store.StoreCodec zstd) {
+        return withReadBuffer(frame, buf -> {
+            int chunkX = buf.readInt();
+            int chunkZ = buf.readInt();
+            String dimensionStr = buf.readUtf(LSSConstants.MAX_DIMENSION_STRING_LENGTH);
+            long columnTimestamp = buf.readLong();
+            byte source = buf.readByte();
+            byte codec = buf.readByte();
+            byte[] shipped = buf.readByteArray(LSSConstants.MAX_SECTIONS_SIZE);
+            boolean framed = codec == LSSConstants.COLUMN_CODEC_ZSTD;
+            byte[] v20Body = shipped;
+            if (framed) {
+                if (zstd == null) {
+                    // Unreachable in production (a codec-1 frame only exists because
+                    // the probe succeeded at service start).
+                    throw new IllegalStateException("codec-1 column with no zstd codec available");
+                }
+                long declared = zstd.declaredContentSize(shipped);
+                if (declared < 0 || declared > LSSConstants.MAX_SECTIONS_SIZE) {
+                    throw new IllegalStateException(
+                            "zstd column frame declares invalid content size " + declared);
+                }
+                v20Body = zstd.decompress(shipped, (int) declared);
+            }
+            byte[] nativeBody = dev.vox.lss.common.wire.V20ToNativeTranslator.translate(
+                    v20Body, blockIdResolver, biomeIdResolver,
+                    blockRegistrySize, biomeRegistrySize);
+            byte[] out = framed ? zstd.compress(nativeBody) : nativeBody;
+            return encodeVoxelColumnPreEncoded(chunkX, chunkZ, dimensionStr,
+                    columnTimestamp, source, codec, out);
+        });
+    }
+
+    /**
      * Encode a DirtyColumnsS2CPayload. Wire format: VarInt length + long[] positions.
      * Identical to Fabric's DirtyColumnsS2CPayload.CODEC.
      */
