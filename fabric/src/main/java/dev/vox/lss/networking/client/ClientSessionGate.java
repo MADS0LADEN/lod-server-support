@@ -38,26 +38,45 @@ final class ClientSessionGate {
         LodRequestManager create(SessionConfigS2CPayload config);
     }
 
-    /** Ticks (client tick = 1/20 s) to wait for a SessionConfig after the v18 handshake
-     *  before re-handshaking as v16 — the discovery fallback for an old server that silently
-     *  drops a version-18 handshake. Generous (5 s): a healthy v18 server replies in well under
-     *  a second, and the extra margin keeps a briefly-stalled v18 server (a join-time freeze on
-     *  a heavy modded server) from tripping the fallback. Should one slip through anyway, the
-     *  downgrade guard in {@link #onSessionConfig} re-asserts v18 rather than degrading. */
+    /** Ticks (client tick = 1/20 s) of SessionConfig silence before the discovery ladder
+     *  advances one rung (C3, XVER §6: announce 20 → 19 → 16). Generous (5 s per rung): a
+     *  healthy same-version server replies in well under a second, and the margin keeps a
+     *  briefly-stalled server (a join-time freeze on a heavy modded server) from tripping
+     *  the fallback. Should a rung slip through anyway, the downgrade guard in
+     *  {@link #onSessionConfig} re-asserts the established version rather than degrading.
+     *  Worst case to a v16 session: ~10 s of silence after the first announce. */
     static final int V16_DISCOVERY_DELAY_TICKS = 100;
 
     private final ClientColumnProcessor columnProcessor;
     // Sends the C2S handshake announcing the given protocol version; injected so tests can
-    // drive both the discovery fallback and the send-failure swallow.
+    // drive both the discovery ladder and the send-failure swallow.
     private final IntConsumer handshakeSender;
     private final ManagerFactory managerFactory;
 
-    // ---- v16 server backward-compat discovery (main thread) ----
-    // Armed at JOIN when a v18 handshake was sent and compat is enabled; disarmed the instant
-    // any SessionConfig arrives. If it expires with no config, we announce version 16 once.
-    private boolean v16DiscoveryArmed = false;
+    // ---- legacy-server discovery ladder (main thread; C3, XVER §6) ----
+    // Armed at JOIN when a handshake went out and a lower enabled rung exists; disarmed the
+    // instant any SessionConfig arrives, on a send throw, and at the terminal rung. Each
+    // V16_DISCOVERY_DELAY_TICKS of silence advances one rung: 20 → 19 (enableV19ServerCompat)
+    // → 16 (enableV16ServerCompat). NO v18 rung (§6 decision: every v0.7.x-v0.8.x server
+    // carries the server-side v16 rung, so the ladder still lands every legacy server).
+    private boolean discoveryArmed = false;
     private int ticksSinceHandshake = 0;
-    private boolean v16FallbackSent = false;
+    /** The rung this connection last announced (JOIN or a ladder advance). The downgrade
+     *  guard re-announces {@link #sessionVersion}, never this. */
+    private int currentAnnounce = 0;
+    /** This connection announced 19 at some point — the acceptance gate for a 19 echo
+     *  (an unsolicited 19 config on a never-announced-19 connection stays foreign). */
+    private boolean announced19ThisConnection = false;
+    /** The version JOIN announced first (the acceptance primary — review m7: a
+     *  per-connection field, not the static lever read; 0 before any join falls back
+     *  to the static, keeping direct-drive test rigs meaningful). */
+    private int primaryAnnounce = 0;
+    // Captured at JOIN (the ladder advance needs them at tick time).
+    private boolean v19CompatEnabled = true;
+    private boolean v16CompatEnabled = true;
+    /** The ESTABLISHED session's protocol version (0 = none) — the downgrade guard's
+     *  reference and the re-announce value. */
+    private volatile int sessionVersion = 0;
     private volatile boolean isV16Server = false;
 
     private volatile boolean serverEnabled = false;
@@ -115,6 +134,11 @@ final class ClientSessionGate {
      */
     void onJoin(boolean receiveServerLods, boolean localIntegratedServer, boolean hasConsumers,
                 boolean enableV16ServerCompat) {
+        onJoin(receiveServerLods, localIntegratedServer, hasConsumers, enableV16ServerCompat, true);
+    }
+
+    void onJoin(boolean receiveServerLods, boolean localIntegratedServer, boolean hasConsumers,
+                boolean enableV16ServerCompat, boolean enableV19ServerCompat) {
         // Defensive: under Fabric's lifecycle DISCONNECT always precedes the next JOIN,
         // but if a manager ever survived to here, dropping it without teardown would lose
         // its cache save. Self-sufficiency over the lifecycle assumption.
@@ -125,11 +149,16 @@ final class ClientSessionGate {
         this.sessionConfigReceived = false;
         this.serverLodDistance = 0;
         this.requestManager = null;
-        // Clear v16 discovery + decode state so nothing survives from a prior connection.
-        this.v16DiscoveryArmed = false;
+        // Clear ladder + decode state so nothing survives from a prior connection.
+        this.discoveryArmed = false;
         this.ticksSinceHandshake = 0;
-        this.v16FallbackSent = false;
+        this.currentAnnounce = 0;
+        this.primaryAnnounce = 0;
+        this.announced19ThisConnection = false;
+        this.sessionVersion = 0;
         this.isV16Server = false;
+        this.v16CompatEnabled = enableV16ServerCompat;
+        this.v19CompatEnabled = enableV19ServerCompat;
         V16ClientWire.reset();
 
         if (!receiveServerLods) return;
@@ -138,54 +167,91 @@ final class ClientSessionGate {
         if (!hasConsumers) return;
 
         try {
-            // Mark-before-send: the wire's sourceless-column arming keys on the LAST version
+            // Mark-before-send: the wire's legacy-dialect arming keys on the LAST version
             // this client announced (V16ClientWire.markAnnouncedVersion), and the mark must be
             // visible to the netty thread before any reply can arrive (wire causality).
             // announceVersion() is PROTOCOL_VERSION in every production launch; only the
-            // soak harness's -Dlss.soak.dialect legacy-emulation lever lowers it (C2).
+            // soak harness's -Dlss.soak.dialect legacy-emulation lever lowers it (C2/C3 —
+            // under the lever the ladder simply STARTS at rung 19).
             int announce = SoakDialectOverride.announceVersion();
+            this.currentAnnounce = announce;
+            this.primaryAnnounce = announce;
+            this.announced19ThisConnection = announce == LSSConstants.V19_COMPAT_PROTOCOL_VERSION;
             V16ClientWire.markAnnouncedVersion(announce);
             this.handshakeSender.accept(announce);
-            // Arm the discovery fallback only after the v18 handshake actually went out. On a
-            // send throw (vanilla / no-LSS server) there is nothing to re-discover, so leave it
-            // disarmed — otherwise tickV16Discovery() would fire a second, equally-doomed v16
-            // handshake from the client tick.
-            this.v16DiscoveryArmed = enableV16ServerCompat;
+            // Arm the ladder only after the handshake actually went out AND a lower enabled
+            // rung exists. On a send throw (vanilla / no-LSS server) there is nothing to
+            // discover — every further rung is equally doomed.
+            this.discoveryArmed = nextRung(announce) != 0;
         } catch (Exception e) {
             LSSLogger.debug("Handshake send failed (server likely doesn't have " + Brand.shortName() + "): " + e.getMessage());
         }
     }
 
+    /** The next enabled discovery rung below {@code from}, or 0 at the ladder's end
+     *  (C3, XVER §6: 20 → 19 → 16, no v18 rung). */
+    private int nextRung(int from) {
+        if (from > LSSConstants.V19_COMPAT_PROTOCOL_VERSION && this.v19CompatEnabled) {
+            return LSSConstants.V19_COMPAT_PROTOCOL_VERSION;
+        }
+        if (from > LSSConstants.V16_COMPAT_PROTOCOL_VERSION && this.v16CompatEnabled) {
+            return LSSConstants.V16_COMPAT_PROTOCOL_VERSION;
+        }
+        return 0;
+    }
+
     /**
-     * Main-thread discovery tick (runs every client tick, even before a session). No-op on
-     * the v18 happy path: a v18 server's SessionConfig disarms it well before the delay, so
-     * the v16 handshake never sends. Fires exactly once — if the delay elapses with no
-     * SessionConfig, announce version 16 (the old server accepts that where it dropped v18).
+     * Main-thread discovery-ladder tick (runs every client tick, even before a session).
+     * No-op on the same-version happy path: the server's SessionConfig disarms it well
+     * before the delay. Each {@link #V16_DISCOVERY_DELAY_TICKS} of silence advances one
+     * rung (20 → 19 → 16); the terminal rung disarms.
      */
-    void tickV16Discovery() {
-        if (!this.v16DiscoveryArmed) return;
-        if (this.sessionConfigReceived || this.v16FallbackSent) return;
+    void tickDiscoveryLadder() {
+        if (!this.discoveryArmed) return;
+        if (this.sessionConfigReceived) {
+            this.discoveryArmed = false;
+            return;
+        }
         if (++this.ticksSinceHandshake < V16_DISCOVERY_DELAY_TICKS) return;
-        this.v16FallbackSent = true;
-        LSSLogger.debug("No v18 session config after " + V16_DISCOVERY_DELAY_TICKS
-                + " ticks — retrying handshake as protocol " + LSSConstants.V16_COMPAT_PROTOCOL_VERSION
-                + " (legacy-server discovery)");
+        int next = nextRung(this.currentAnnounce);
+        if (next == 0) {
+            this.discoveryArmed = false;
+            return;
+        }
+        this.ticksSinceHandshake = 0;
+        LSSLogger.debug("No session config after " + V16_DISCOVERY_DELAY_TICKS
+                + " ticks at announce v" + this.currentAnnounce
+                + " — retrying handshake as protocol " + next + " (legacy-server discovery)");
+        int previous = this.currentAnnounce;
         try {
-            // Mark-before-send: only this announce enables the wire's sourceless-column
-            // arming for the v16 reply that follows (see V16ClientWire).
-            V16ClientWire.markAnnouncedVersion(LSSConstants.V16_COMPAT_PROTOCOL_VERSION);
-            this.handshakeSender.accept(LSSConstants.V16_COMPAT_PROTOCOL_VERSION);
+            // Mark-before-send: only this announce enables the wire's per-rung decode
+            // arming for the reply that follows (see V16ClientWire). The gate's own rung
+            // state commits only AFTER a successful send (review m4): a thrown send must
+            // not widen the acceptance surface to an announce the server never saw.
+            V16ClientWire.markAnnouncedVersion(next);
+            this.handshakeSender.accept(next);
         } catch (Exception e) {
-            LSSLogger.debug("v16 fallback handshake send failed: " + e.getMessage());
+            LSSLogger.debug("discovery-ladder handshake send failed: " + e.getMessage());
+            V16ClientWire.retractAnnounce(next, previous);
+            this.discoveryArmed = false;
+            return;
+        }
+        this.currentAnnounce = next;
+        if (next == LSSConstants.V19_COMPAT_PROTOCOL_VERSION) {
+            this.announced19ThisConnection = true;
+        }
+        if (nextRung(this.currentAnnounce) == 0) {
+            // Terminal rung announced — nothing further to try; stop ticking.
+            this.discoveryArmed = false;
         }
     }
 
     /** SessionConfig reply ladder. Main client thread. */
     void onSessionConfig(SessionConfigS2CPayload payload, boolean hasConsumers,
                          boolean enableV16ServerCompat) {
-        // Any SessionConfig — even an incompatible one — disarms the discovery fallback: the
+        // Any SessionConfig — even an incompatible one — disarms the discovery ladder: the
         // server answered, so there is nothing to re-discover.
-        this.v16DiscoveryArmed = false;
+        this.discoveryArmed = false;
 
         LSSLogger.info("Server session config received (protocol v" + payload.protocolVersion()
                 + ", LOD distance: " + payload.lodDistanceChunks() + " chunks"
@@ -193,48 +259,63 @@ final class ClientSessionGate {
 
         int version = payload.protocolVersion();
         boolean v16 = version == LSSConstants.V16_COMPAT_PROTOCOL_VERSION && enableV16ServerCompat;
-        // The accepted echo is whatever this client announced: PROTOCOL_VERSION in
-        // production, 19 under the soak harness's legacy-emulation lever (which must
-        // REJECT a 20 echo exactly like the real v19 client it emulates would).
-        if (version != SoakDialectOverride.announceVersion() && !v16) {
+        // A 19 echo is accepted only when THIS CONNECTION announced 19 (the ladder rung, or
+        // the soak lever's initial rung) — an unsolicited 19 config stays foreign.
+        boolean v19 = version == LSSConstants.V19_COMPAT_PROTOCOL_VERSION
+                && this.announced19ThisConnection;
+        // The primary is whatever JOIN announced first: PROTOCOL_VERSION in production, 19
+        // under the soak lever (which must REJECT a 20 echo exactly like the real v19
+        // client it emulates would). The SLOW-ECHO race is load-bearing here: a late
+        // primary echo arriving after the ladder advanced must still be ACCEPTED —
+        // rejecting would disable LOD against a healthy current server on a slow join.
+        int primary = this.primaryAnnounce != 0
+                ? this.primaryAnnounce : SoakDialectOverride.announceVersion();
+        if (version != primary && !v19 && !v16) {
             LSSLogger.warn("Server has incompatible " + Brand.shortName() + " protocol version " + version
-                    + " (client: " + SoakDialectOverride.announceVersion()
-                    + "), LOD distribution disabled");
+                    + " (client: " + primary + "), LOD distribution disabled");
             this.serverEnabled = false;
             return;
         }
 
-        // Downgrade guard. A v16 config arriving once a v18 session already exists on this
-        // connection is never a real legacy server (a server is one dialect or the other) — it
-        // is either the reply to a discovery fallback that raced a slow v18 SessionConfig, or
-        // a Paper server's RE-ATTACH PROMPT after a plugin /reload orphaned this session
-        // (the server deliberately prompts in the v16 dialect: this guard's re-announce IS
-        // the re-registration heal, and the 6-field shape is the one every dialect of client
-        // parses safely). Do NOT downgrade the working v18 session; re-announce v18 so the
-        // server (re-)registers us and sheds any spurious compat session. Bounded: the reply
-        // to this is a v18 config, which never re-enters this branch, so no handshake ping-pong.
-        if (v16 && this.sessionConfigReceived && !this.isV16Server) {
-            LSSLogger.info("Late protocol-16 session config on an established v18 session "
-                    + "(a raced discovery reply, or a server plugin reload prompting us to "
-                    + "re-attach) — re-announcing v18.");
+        // Downgrade guard, per rung (C3 generalization of the v16-on-current guard). A
+        // LOWER-rung config arriving once a higher session is established on this
+        // connection is never a real legacy server (a server is one dialect or the other):
+        // it is a raced ladder reply (our fallback announce crossed the slow echo — the
+        // server now considers this session legacy, so the re-announce ALSO heals the
+        // server-side dialect flip), or a Paper /reload RE-ATTACH PROMPT (deliberately
+        // spoken in the v16 dialect). Do NOT downgrade the working session; re-announce
+        // the ESTABLISHED version so the server (re-)registers us and sheds any spurious
+        // compat session. Bounded: the reply echoes the established version, which never
+        // re-enters this branch — no handshake ping-pong. A HIGHER-rung config on an
+        // established lower session is the UPGRADE path and rides the normal re-sent
+        // config establishment below.
+        if (this.sessionConfigReceived && rungOrder(version) < rungOrder(this.sessionVersion)) {
+            LSSLogger.info("Late protocol-" + version + " session config on an established v"
+                    + this.sessionVersion + " session (a raced discovery reply, or a server "
+                    + "plugin reload prompting us to re-attach) — re-announcing v"
+                    + this.sessionVersion + ".");
             try {
-                // Mark-before-send: re-asserting the current dialect also retires any
-                // leftover v16 announce (a raced discovery earlier this connection), so a
-                // LATER unsolicited v16 frame — e.g. a second /reload prompt — can never
-                // arm sourceless decode against the re-established session's stream.
-                int reAnnounce = SoakDialectOverride.announceVersion();
+                // Mark-before-send: re-asserting the established dialect also retires any
+                // leftover legacy announce (a raced ladder rung earlier this connection),
+                // so a LATER unsolicited legacy frame — e.g. a second /reload prompt — can
+                // never arm legacy decode against the re-established session's stream.
+                int reAnnounce = this.sessionVersion;
                 V16ClientWire.markAnnouncedVersion(reAnnounce);
                 this.handshakeSender.accept(reAnnounce);
             } catch (Exception e) {
-                LSSLogger.debug("v18 re-assert handshake send failed: " + e.getMessage());
+                LSSLogger.debug("re-assert handshake send failed: " + e.getMessage());
             }
             return;
         }
 
         this.isV16Server = v16;
+        this.sessionVersion = version;
         if (v16) {
             LSSLogger.info("Connected to a legacy (protocol " + version + ") server — using "
                     + "v16 backward-compat wire (load-only: already-generated terrain)");
+        } else if (v19) {
+            LSSLogger.info("Connected to a legacy (protocol " + version + ") server — native "
+                    + "section bodies at the current frame layout (C3 ladder rung 19)");
         }
 
         // Clamp the server-supplied LOD distance to the same bounds the server enforces on
@@ -265,6 +346,15 @@ final class ClientSessionGate {
             this.connectionStartMs = System.currentTimeMillis();
             this.requestManager = this.managerFactory.create(config);
         }
+    }
+
+    /** Ladder ordering for the downgrade guard: 20 above 19 above 16; anything else
+     *  (incl. the pre-establishment {@code sessionVersion} 0) bottoms out. */
+    private static int rungOrder(int version) {
+        if (version == LSSConstants.PROTOCOL_VERSION) return 3;
+        if (version == LSSConstants.V19_COMPAT_PROTOCOL_VERSION) return 2;
+        if (version == LSSConstants.V16_COMPAT_PROTOCOL_VERSION) return 1;
+        return 0;
     }
 
     /**
@@ -314,10 +404,13 @@ final class ClientSessionGate {
         this.wireBytesReceived.set(0);
         this.connectionStartMs = 0;
         this.requestManager = null;
-        // Clear v16 discovery + decode state so nothing leaks into the next connection.
-        this.v16DiscoveryArmed = false;
+        // Clear ladder + decode state so nothing leaks into the next connection.
+        this.discoveryArmed = false;
         this.ticksSinceHandshake = 0;
-        this.v16FallbackSent = false;
+        this.currentAnnounce = 0;
+        this.primaryAnnounce = 0;
+        this.announced19ThisConnection = false;
+        this.sessionVersion = 0;
         this.isV16Server = false;
         V16ClientWire.reset();
         // A trace belongs to the session it was started in. It used to survive

@@ -62,6 +62,14 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
     enum WireShape { CURRENT, V18, V16 }
 
     private final WireShape wireShape;
+    /** CLIENT-decode-only (C3 review MAJOR-2): whether this frame's BODY was produced
+     *  under a native-body session dialect (v16 or the ladder's 19 rung), captured at
+     *  NETTY DECODE — the only frame-ordered authority. The drain thread reads an
+     *  arbitrary time later, when the live {@code V16ClientWire} flag may describe a
+     *  NEWER dialect (the ladder makes mid-connection flips routine); this stamp keeps
+     *  each queued column decoding under the dialect its bytes were produced for.
+     *  Server-built payloads always stamp false (never consulted server-side). */
+    private final boolean nativeBodyAtDecode;
 
     /** Source-less convenience (tests/legacy rigs): tags the column with source -1
      *  ("unknown"), a legal wire value the client passes through verbatim. Production
@@ -95,6 +103,14 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
                                   ResourceKey<Level> dimension, long columnTimestamp,
                                   byte source, byte codec, byte[] sectionBytes, int rawSize,
                                   WireShape wireShape) {
+        this(chunkX, chunkZ, dimension, columnTimestamp, source, codec, sectionBytes,
+                rawSize, wireShape, false);
+    }
+
+    private VoxelColumnS2CPayload(int chunkX, int chunkZ,
+                                  ResourceKey<Level> dimension, long columnTimestamp,
+                                  byte source, byte codec, byte[] sectionBytes, int rawSize,
+                                  WireShape wireShape, boolean nativeBodyAtDecode) {
         this.chunkX = chunkX;
         this.chunkZ = chunkZ;
         this.dimension = dimension;
@@ -104,7 +120,11 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         this.sectionBytes = sectionBytes;
         this.rawSize = rawSize;
         this.wireShape = wireShape;
+        this.nativeBodyAtDecode = nativeBodyAtDecode;
     }
+
+    /** See the field doc: the decode-time native-body dialect stamp (client only). */
+    public boolean nativeBodyAtDecode() { return this.nativeBodyAtDecode; }
 
     /** The v16 compat copy: same column, legacy source-less/codec-less wire layout.
      *  Section bytes are shared, not copied — the payload is immutable after
@@ -206,8 +226,10 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
             rawSize = (int) Math.max(sectionBytes.length, clamped);
         }
 
+        // The C3 dialect stamp (see the field doc): captured HERE, on the netty thread
+        // in frame order, where the preceding SessionConfig's observe has already run.
         return new VoxelColumnS2CPayload(cx, cz, dim, columnTimestamp, source, codec,
-                sectionBytes, rawSize, WireShape.CURRENT);
+                sectionBytes, rawSize, WireShape.CURRENT, V16ClientWire.isNativeBodySession());
     }
 
     @Override

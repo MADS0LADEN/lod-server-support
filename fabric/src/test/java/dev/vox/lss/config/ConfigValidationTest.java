@@ -521,6 +521,9 @@ class ConfigValidationTest {
         var c = clientConfig();
         assertTrue(c.enableV16ServerCompat, "v16 server backward-compat must default ON");
         assertTrue(c.enableV16Generation, "Tier B generation-drive must default ON");
+        assertTrue(c.enableV19ServerCompat,
+                "the C3 ladder's 19 rung must default ON (a v0.10.0 client on a v0.9.x "
+                        + "server gets a native 19 session, not the v16 degrade)");
     }
 
     @Test
