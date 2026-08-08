@@ -127,6 +127,10 @@ loom {
             client()
             runDir "build/run/benchmark-client"
             vmArg "-Dlss.benchmark=true"
+            // C6 legacy-dialect benchmark arm (XVER §12 translation cost): same lever
+            // as the soak client — "19" announces protocol 19, exercising the server's
+            // per-recipient egress translation on every served column.
+            vmArg "-Dlss.soak.dialect=${findProperty('soak.dialect') ?: ''}"
             vmArg "-XX:StartFlightRecording=filename=client-benchmark.jfr,settings=profile,disk=true"
             programArg "--quickPlayMultiplayer"
             programArg "localhost:25565"

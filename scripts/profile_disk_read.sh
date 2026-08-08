@@ -122,6 +122,11 @@ cmd_run() {
     case "$arm" in
         vanilla) ;;
         c2me) extra_args="-Pbenchmark.c2me=true" ;;
+        # C6 legacy-dialect arm pair (XVER §12): SAME tree, arm variable = the client's
+        # announced protocol. dialect19 exercises the server's per-recipient egress
+        # translation (v20 -> native + zstd recompress) on every served column.
+        native) ;;
+        dialect19) export BENCHMARK_CLIENT_GRADLE_ARGS="-Psoak.dialect=19" ;;
         base|change)
             [[ -n "$BASE_REF" ]] || die "arm '$arm' needs PROFILE_BASE_REF (ref-vs-ref mode)"
             root="$(root_for_arm "$arm")"
@@ -130,7 +135,7 @@ cmd_run() {
             # whatever the stale worktree happens to hold (B0 review N7).
             [[ "$arm" == "change" ]] || ensure_base_worktree
             ;;
-        *) die "unknown arm '$arm' (want vanilla | c2me | base | change)" ;;
+        *) die "unknown arm '$arm' (want vanilla | c2me | base | change | native | dialect19)" ;;
     esac
 
     [[ -d "$MAIN_ROOT/benchmark-worlds/base/world" ]] || die "no base world — build one first"
@@ -252,7 +257,10 @@ EOF
 cmd_matrix() {
     local reps="${1:?reps}" duration="${2:?duration}" lod_r="${3:?lod-distance}"
     local arm_a="vanilla" arm_b="c2me"
-    if [[ -n "$BASE_REF" ]]; then
+    if [[ -n "${PROFILE_DIALECT_MATRIX:-}" ]]; then
+        # C6 legacy-dialect matrix: same tree, client dialect is the arm variable.
+        arm_a="native"; arm_b="dialect19"
+    elif [[ -n "$BASE_REF" ]]; then
         arm_a="base"; arm_b="change"
         cmd_setup
     fi
