@@ -322,6 +322,13 @@ public class LSSServerNetworking {
             // so this is also the cross-dialect shed for the tracker).
             service.getDialectTracker().onHandshake(player.getUUID(), decision.dialect());
             service.registerPlayer(player, payload.capabilities());
+            // Far players (E1): subscription identity lands at handshake, next to the
+            // dialect mark — a CURRENT-dialect session only (legacy layouts predate the
+            // bit, so a legacy handshake setting it is noise, not a subscription).
+            if ((payload.capabilities() & LSSConstants.CAPABILITY_FAR_PLAYERS) != 0
+                    && decision.dialect() == HandshakeGate.WireDialect.CURRENT) {
+                service.getFarPlayerService().subscribeViewer(player.getUUID());
+            }
             LSSLogger.info("Player " + player.getName().getString()
                     + " registered for " + Brand.shortName() + " LOD request processing (caps="
                     + payload.capabilities()
@@ -341,6 +348,27 @@ public class LSSServerNetworking {
                 dev.vox.lss.networking.payloads.ClientInfoC2SPayload.TYPE,
                 (payload, context) -> CLIENT_DATA_VERSIONS.put(
                         context.player().getUUID(), payload.dataVersion())
+        );
+
+        // Far players (E1): prefs ingress. Fabric receivers run on the server thread —
+        // the broadcast core's single-threaded contract holds without marshaling. A
+        // malformed frame is contained to a warn (the sidecar-guard doctrine): prefs
+        // are additive, and a bad frame must never cost the session.
+        ServerPlayNetworking.registerGlobalReceiver(
+                dev.vox.lss.networking.payloads.FarPlayerPrefsC2SPayload.TYPE,
+                (payload, context) -> {
+                    var service = requestService;
+                    if (service == null) return;
+                    try {
+                        var prefs = dev.vox.lss.common.farplayers.FarPlayerWire
+                                .decodePrefs(payload.body());
+                        service.getFarPlayerService().onPrefs(context.player().getUUID(), prefs);
+                    } catch (Exception e) {
+                        LSSLogger.warn("Malformed far-player prefs from "
+                                + context.player().getName().getString() + " — ignored ("
+                                + e + ")");
+                    }
+                }
         );
 
         ServerPlayNetworking.registerGlobalReceiver(
@@ -392,6 +420,9 @@ public class LSSServerNetworking {
                 // membership — dim changes reuse that path and must keep both).
                 service.getV16CompatManager().onDisconnect(handler.getPlayer().getUUID());
                 service.getDialectTracker().onDisconnect(handler.getPlayer().getUUID());
+                // Far players: the subscription dies with the CONNECTION, never with the
+                // dimension-change remove+register cycle (the v18-rung checklist).
+                service.getFarPlayerService().removeViewer(handler.getPlayer().getUUID());
             }
             // Service-independent: the sidecar fact is recorded at the network level
             // (possibly before any service exists) and must die with the connection.
