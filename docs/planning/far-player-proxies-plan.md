@@ -338,7 +338,10 @@ system).
   like every LSS compat surface).
 - 26.2's `LevelRenderContext`/submit API is what SeeU targets today; MC rendering
   APIs churn per version — the renderer needs the same per-MC-line porting budget as
-  the rest of the client (support-line backports likely skip Phase B initially).
+  the rest of the client. **SUPERSEDED (mega plan R-7 v1.4, §6.1 pair — this pointer
+  edit rides E1's PR): far players ship on ALL THREE lines**, backed by the measured
+  SeeU per-line diffs (26.2→26.1.2 = 6 lines; 26.2→1.21.11 = 60/43 lines of symbol
+  renames, same render architecture); "backports likely skip Phase B" no longer holds.
 - Folia cross-region position reads from the pump are stale-tolerant by design
   (positions are plain fields; a 1-tick-stale snapshot is invisible at 500 ms
   cadence) — document rather than synchronize, matching the Folia experimental

@@ -1361,4 +1361,72 @@ public class ServiceLifecycleGameTests {
         }
         return false;
     }
+
+    /**
+     * Far players E1 (FARP §7-A): the SERVER EGRESS surface through the production
+     * handshake — a crafted handshake WITH the capability bit subscribes (one without
+     * it does not), and a broadcast pass sends a roster + updates for an in-range far
+     * target while an out-of-range one is filtered. Client tracker state is Tier 3 /
+     * live territory. The compiled-off client arm never reaches here — this test
+     * crafts the bit the way an E2 client will.
+     */
+    @GameTest(structure = "fabric-gametest-api-v1:empty")
+    public void farPlayerSubscriberGetsRosterAndUpdatesForInRangeTargetsOnly(GameTestHelper helper) {
+        ServerLevel level = helper.getLevel();
+        var server = level.getServer();
+        var viewer = placeMockServerPlayer(helper);
+        var farTarget = placeMockServerPlayer(helper);
+        var beyondCap = placeMockServerPlayer(helper);
+        var service = new RequestProcessingService(server);
+        var config = dev.vox.lss.config.LSSServerConfig.CONFIG;
+        String savedMode = config.farPlayers;
+        int savedInterval = config.farPlayersUpdateIntervalTicks;
+        try {
+            // In-range far target (~500 blocks out); the third mock sits beyond the
+            // 2048-block server cap and must be filtered.
+            farTarget.setPos(viewer.getX() + 500, viewer.getY(), viewer.getZ());
+            beyondCap.setPos(viewer.getX() + 3000, viewer.getY(), viewer.getZ());
+
+            LSSServerNetworking.handleHandshake(
+                    new HandshakeC2SPayload(LSSConstants.PROTOCOL_VERSION,
+                            LSSConstants.CAPABILITY_VOXEL_COLUMNS
+                                    | LSSConstants.CAPABILITY_FAR_PLAYERS),
+                    viewer, service, reply -> { });
+            helper.assertTrue(service.getFarPlayerService().isSubscribed(viewer.getUUID()),
+                    "the capability bit on a CURRENT-dialect handshake subscribes");
+
+            LSSServerNetworking.handleHandshake(
+                    new HandshakeC2SPayload(LSSConstants.PROTOCOL_VERSION,
+                            LSSConstants.CAPABILITY_VOXEL_COLUMNS),
+                    farTarget, service, reply -> { });
+            helper.assertTrue(!service.getFarPlayerService().isSubscribed(farTarget.getUUID()),
+                    "no bit -> no subscription");
+
+            service.getFarPlayerService().onPrefs(viewer.getUUID(),
+                    new dev.vox.lss.common.farplayers.FarPlayerWire.Prefs(true, 0, 0, true, 0));
+            config.farPlayers = "on";
+            config.farPlayersUpdateIntervalTicks = 2; // the clamp floor — 2 service ticks
+            service.tick();
+            service.tick();
+
+            var fp = service.getFarPlayerService();
+            helper.assertTrue(fp.rosterFramesSent() >= 1,
+                    "a full roster must have gone out, sent=" + fp.rosterFramesSent());
+            helper.assertTrue(fp.updateFramesSent() >= 1,
+                    "an updates frame must have gone out, sent=" + fp.updateFramesSent());
+            // Entry-count isolation is impossible on the shared gametest server (other
+            // tests' mock players are online concurrently and may fall in range) — the
+            // exact ring/filter arithmetic is Tier 1's job
+            // (FarPlayerBroadcastServiceTest); this tier pins the real egress.
+            helper.assertTrue(fp.entriesSent() >= 1,
+                    "at least the in-range target is served, entries=" + fp.entriesSent());
+            helper.assertTrue(fp.bytesSent() > 0, "the dedicated lane counted its bytes");
+        } finally {
+            config.farPlayers = savedMode;
+            config.farPlayersUpdateIntervalTicks = savedInterval;
+            config.validate();
+            service.shutdown();
+        }
+        helper.succeed();
+    }
 }
