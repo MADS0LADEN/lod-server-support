@@ -93,6 +93,11 @@ public final class FarPlayerBroadcastService {
         UUID vehicleUuid;
         String vehicleType;
         boolean equipmentEverSent;
+        // False until a frame carrying this target DELIVERED (commit-on-success):
+        // a row created on a withheld tick is blank, and without this flag a target
+        // whose real state happens to equal the blank row (exact origin, zero angles)
+        // would read "unchanged" forever.
+        boolean everSent;
         int tierPhase;
     }
 
@@ -307,11 +312,11 @@ public final class FarPlayerBroadcastService {
         var rowCommits = new ArrayList<Runnable>();
         for (var t : visible) {
             var row = state.rows.get(t.uuid());
-            boolean firstSend = row == null;
-            if (firstSend) {
+            if (row == null) {
                 row = new TargetRow();
                 state.rows.put(t.uuid(), row);
             }
+            boolean firstSend = !row.everSent;
             int qx = FarPlayerWire.quantizePos(t.x());
             int qy = FarPlayerWire.quantizePos(t.y());
             int qz = FarPlayerWire.quantizePos(t.z());
@@ -366,6 +371,7 @@ public final class FarPlayerBroadcastService {
             final byte pose = t.poseFlags();
             final long equipHash = t.equipmentHash();
             rowCommits.add(() -> {
+                rowRef.everSent = true;
                 rowRef.quantX = qx;
                 rowRef.quantY = qy;
                 rowRef.quantZ = qz;
