@@ -19,8 +19,19 @@ public final class DiagnosticsFormatter {
             int pendingSync, int pendingGen,
             long sent, long bytes,
             long outboundPending, long outboundHighWater, long sendDeferrals,
-            long yielded, long ceilBytes, double pingFactor
+            long yielded, long ceilBytes, double pingFactor, long paced
     ) {
+        /** Pre-send-pacing shape — keeps existing constructions/tests intact
+         *  (paced renders 0). */
+        public PlayerDiag(String name, int sendQueue, int maxSendQueue, int pendingSync,
+                          int pendingGen, long sent, long bytes, long outboundPending,
+                          long outboundHighWater, long sendDeferrals, long yielded,
+                          long ceilBytes, double pingFactor) {
+            this(name, sendQueue, maxSendQueue, pendingSync, pendingGen, sent, bytes,
+                    outboundPending, outboundHighWater, sendDeferrals, yielded, ceilBytes,
+                    pingFactor, 0L);
+        }
+
         /** Pre-ping-backstop shape — keeps existing constructions/tests intact
          *  (pingf renders 1.00). */
         public PlayerDiag(String name, int sendQueue, int maxSendQueue, int pendingSync,
@@ -29,7 +40,7 @@ public final class DiagnosticsFormatter {
                           long ceilBytes) {
             this(name, sendQueue, maxSendQueue, pendingSync, pendingGen, sent, bytes,
                     outboundPending, outboundHighWater, sendDeferrals, yielded, ceilBytes,
-                    1.0);
+                    1.0, 0L);
         }
 
         /** No-ceiling shape — keeps existing constructions/tests intact
@@ -38,7 +49,8 @@ public final class DiagnosticsFormatter {
                           int pendingGen, long sent, long bytes, long outboundPending,
                           long outboundHighWater, long sendDeferrals, long yielded) {
             this(name, sendQueue, maxSendQueue, pendingSync, pendingGen, sent, bytes,
-                    outboundPending, outboundHighWater, sendDeferrals, yielded, -1L, 1.0);
+                    outboundPending, outboundHighWater, sendDeferrals, yielded, -1L, 1.0,
+                    0L);
         }
 
         /** Pre-transport-yield shape — keeps existing constructions/tests intact. */
@@ -283,7 +295,7 @@ public final class DiagnosticsFormatter {
         for (var p : d.players) {
             double pRate = d.uptimeSec > 0 ? (double) p.sent / d.uptimeSec : 0;
             lines.add(String.format(
-                    "  %s: sq=%d/%d, psync=%d, pgen=%d, sent=%d (%s), rate=%s/s, obuf=%s/%s, ceil=%s, pingf=%.2f, deferred=%d, yielded=%d",
+                    "  %s: sq=%d/%d, psync=%d, pgen=%d, sent=%d (%s), rate=%s/s, obuf=%s/%s, ceil=%s, pingf=%.2f, deferred=%d, yielded=%d, paced=%d",
                     p.name, p.sendQueue, p.maxSendQueue,
                     p.pendingSync, p.pendingGen,
                     p.sent, formatBytes(p.bytes),
@@ -294,7 +306,9 @@ public final class DiagnosticsFormatter {
                     p.ceilBytes >= 0 ? formatBytes(p.ceilBytes) : "off",
                     // pingf= : Mechanism B's receipt — 1.00 = no cut.
                     p.pingFactor,
-                    p.sendDeferrals, p.yielded
+                    // paced= : the send pacer's receipt (budget-stopped partial
+                    // flush ticks — a mechanism counter, never a loss signal).
+                    p.sendDeferrals, p.yielded, p.paced
             ));
         }
 
@@ -369,7 +383,8 @@ public final class DiagnosticsFormatter {
                     // Operator-FIXED ceiling from config, or -1 = off (the AUTO ceiling
                     // was deleted — adaptive-transfer-rate-plan.md).
                     fixedCeilingBytes > 0 ? fixedCeilingBytes : -1L,
-                    state.getPingBackstop().factor()
+                    state.getPingBackstop().factor(),
+                    state.getPacedTicks()
             ));
         }
 

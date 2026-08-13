@@ -124,6 +124,17 @@ public class TickDiagnostics {
         this.yieldBytesWithheldTotal += queuedBytes;
     }
 
+    private volatile long pacedTicksTotal = 0;
+
+    /** One budget-stopped partial flush tick (send-pacing-plan.md v3) — the
+     *  service-scoped twin of the per-player paced= counter, so soak recordings and
+     *  armed-then-departed sessions keep their evidence (the yield counters' rule). */
+    public void recordPacedTick() {
+        this.pacedTicksTotal++;
+    }
+
+    public long getPacedTicksTotal() { return this.pacedTicksTotal; }
+
     public long getYieldTicksTotal() { return this.yieldTicksTotal; }
     public long getYieldBytesWithheldTotal() { return this.yieldBytesWithheldTotal; }
     public long getTotalWireBytesSent() { return this.totalWireBytesSent; }

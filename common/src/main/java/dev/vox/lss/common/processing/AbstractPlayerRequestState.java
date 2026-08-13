@@ -89,6 +89,24 @@ public abstract class AbstractPlayerRequestState<T> {
     /** Ticks on which the deference gate skipped the column flush. */
     private volatile long sendDeferrals = 0;
 
+    // ---- Send pacing (enableSendPacing, send-pacing-plan.md v3) ----
+    /** Refill-floored proportional drain: an over-floor backlog spreads over this many
+     *  ticks (exponentially — each tick ships Q/HORIZON of what remains, clamped). */
+    static final int PACE_HORIZON_TICKS = 10;
+    /** Ceiling on the proportional term, in refill shares (the impl-review clamp): a
+     *  DEEP backlog (real-terrain waves reach ~2.5x allocation queued) would otherwise
+     *  let Q/HORIZON meet the bank and unbound the very first tick this mechanism
+     *  exists to bound — while the term itself stays load-bearing BELOW 20 TPS (the
+     *  floor is tick-denominated, the limiter wall-clock-denominated, so on a slow
+     *  server the queue term is what restores cap-rate delivery; 2 shares covers full
+     *  rate down to 10 TPS, and a server below that is degraded everywhere). Bounds:
+     *  bank-sized waves pace at ONE share (a ~5-tick slope — bank = 5 shares = the
+     *  client's fast-fire floor, cadence-neutral); deep backlogs at most TWO. */
+    static final int PACE_MAX_BURST_SHARES = 2;
+    /** Ticks the pace budget stopped a PARTIAL flush — the `paced=` diag receipt (a
+     *  mechanism counter beside deferred=/yielded=, never a loss signal). */
+    private volatile long pacedTicks = 0;
+
     // ---- Transport yield (lodYieldsToVanillaTransport, yield plan v2.1) ----
     /** 100 ticks = 5 s: the §1.4 starvation floor — bounds worst-case LOD at ~1 column/5 s
      *  and distinguishes "yielding hard" from "dead". Yield starvation only; the ceiling
@@ -634,6 +652,27 @@ public abstract class AbstractPlayerRequestState<T> {
                                   TickDiagnostics diag, PayloadSender<T> sender,
                                   long outboundCeilingBytes, boolean yieldToTransport,
                                   int pruneRadiusChunks) {
+        return flushSendQueue(allocationBytes, globalLimiter, diag, sender,
+                outboundCeilingBytes, yieldToTransport, pruneRadiusChunks, false);
+    }
+
+    /**
+     * Fullest overload adding send pacing (send-pacing-plan.md v2:
+     * {@code enableSendPacing}, default true — the refill-floored proportional drain).
+     * While enabled, a tick's column flush writes at most
+     * {@code max(allocation/20, queuedRawBytes/PACE_HORIZON_TICKS)} RAW bytes (one
+     * payload minimum — the presence gate), so the bandwidth bank's burst ships as a
+     * ~5-tick slope instead of a one-tick cliff, and vanilla packets interleave every
+     * tick. The floor is the allocation's own refill share, so NOTHING is ever paced
+     * below the configured cap rate; the pingf-cut allocation shrinks the floor with
+     * it, and a backlog's {@code Q/HORIZON} above the cut share is merely non-binding
+     * (the limiter stays the authority — the budget only vetoes). Short overloads pin
+     * pacing OFF (the S-9a defaults pin).
+     */
+    public long[] flushSendQueue(long allocationBytes, SharedBandwidthLimiter globalLimiter,
+                                  TickDiagnostics diag, PayloadSender<T> sender,
+                                  long outboundCeilingBytes, boolean yieldToTransport,
+                                  int pruneRadiusChunks, boolean sendPacing) {
         QueuedPayload<T> ready;
         while ((ready = this.readyPayloads.poll()) != null) {
             this.sendQueue.add(ready);
@@ -750,8 +789,45 @@ public abstract class AbstractPlayerRequestState<T> {
             this.yieldNoSendTicks = 0;
         }
 
+        // Send pacing (send-pacing-plan.md v3): the budget is a pure function of the
+        // queue and the allocation — no probe input, no arming state. Computed lazily
+        // only when armed and non-empty (zero drift risk vs a running counter; the
+        // O(queue) walk is bounded by sendQueueLimitPerPlayer and runs at most once
+        // per tick per player). RAW-denominated to match the limiter and the
+        // allocation the floor derives from (wire <= raw, so the socket-facing
+        // amplitude is bounded a fortiori). The clamp: bank-sized waves (Q <= the
+        // bank) pace at the refill-share floor — the ~5-tick slope; deep backlogs at
+        // most PACE_MAX_BURST_SHARES shares (the ceiling that keeps the first tick
+        // bounded on real-terrain waves, while still compensating a sub-20-TPS
+        // server's tick-denominated floor down to ~10 TPS).
+        long paceBudget = 0;
+        if (sendPacing && !this.sendQueue.isEmpty() && !floorSendThisTick) {
+            long queuedRawBytes = 0;
+            for (var entry : this.sendQueue) {
+                queuedRawBytes += entry.estimatedBytes();
+            }
+            long share = allocationBytes / LSSConstants.TICKS_PER_SECOND;
+            paceBudget = Math.clamp(queuedRawBytes / PACE_HORIZON_TICKS,
+                    share, Math.max(share, PACE_MAX_BURST_SHARES * share));
+        }
+        long paceWritten = 0;
+
         while (!this.sendQueue.isEmpty()) {
             if (!this.bandwidth.canSend(allocationBytes)) break;
+            // The pace budget vetoes sends 2+ once this tick's RAW bytes reach it —
+            // never the first payload (the presence gate: a legal oversized column
+            // ships whole — and at a degenerate budget of 0, the gate is what keeps
+            // one payload per tick flowing), and never the starvation-floor tick
+            // (structurally exempt — it breaks after one send; the budget is not even
+            // computed there). A budget-stopped tick is by construction PARTIAL (the
+            // loop condition holds), which is exactly what paced= counts; a
+            // limiter-stopped tick books nothing here.
+            if (sendPacing && !floorSendThisTick
+                    && paceWritten > 0 && paceWritten >= paceBudget) {
+                this.pacedTicks++;
+                diag.recordPacedTick();
+                break;
+            }
 
             var queued = this.sendQueue.peek();
             try {
@@ -768,6 +844,7 @@ public abstract class AbstractPlayerRequestState<T> {
                 decrementEnqueued(queued.packedPos());
                 this.bandwidth.recordSend(queued.estimatedBytes());
                 globalLimiter.recordSend(queued.estimatedBytes());
+                paceWritten += queued.estimatedBytes();
                 diag.recordSectionSent(queued.estimatedBytes());
                 // Shipped size (frame for codec-1 payloads) — the wire_bytes gauge that
                 // makes /lsslod diag match observed bandwidth (design §5: the limiter
@@ -857,6 +934,8 @@ public abstract class AbstractPlayerRequestState<T> {
     }
 
     /** Cumulative ticks the transport yield withheld this player's column flush. */
+    public long getPacedTicks() { return this.pacedTicks; }
+
     public long getYieldedTicks() {
         return this.yieldedTicks;
     }

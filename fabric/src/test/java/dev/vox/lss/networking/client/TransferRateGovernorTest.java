@@ -479,4 +479,33 @@ class TransferRateGovernorTest {
         assertTrue(PingBackstop.RECOVER_EXCESS_MS < PingBackstop.CUT_EXCESS_MS,
                 "B recovers below where it cuts");
     }
+
+    @Test
+    void pacerFloorClearsAGovernedQuarterBatchAtDefaults() {
+        // send-pacing-plan.md §4 (the m7 coupling invariant, static over compiled
+        // defaults — the runtime allocation is a variable): the send pacer's refill
+        // floor at the DEFAULT per-player cap must deliver a governed quarter-batch
+        // (≤ ENGAGE_BELOW/4 bytes/s worth) within the client's 5-tick fast-fire
+        // floor, or pacing would slow the governor's own loop. Documented
+        // NON-guarantee under deep pingf cuts / heavy global dilution — the degrade
+        // path there is the offer-backing freeze.
+        long defaultCapBytesPerSec =
+                new dev.vox.lss.config.LSSServerConfig().bytesPerSecondPerPlayer();
+        // Both sides are BYTES WITHIN ONE FAST-FIRE WINDOW (5 ticks = 0.25 s at
+        // defaults — the units audit's fix; the old form hardcoded the 4 Hz divisor
+        // and would have RELAXED if the fast-fire floor ever widened):
+        // LHS = what the pace floor delivers in that window; RHS = the byte size of a
+        // governed quarter-batch (desired x window, desired < ENGAGE_BELOW). The RHS
+        // understates the disengage-probe overshoot (desired may legally exceed
+        // ENGAGE_BELOW by DISENGAGE_RATE_INTERVALS x STEP ≈ 2.5 MB/s for a few
+        // intervals) — the ~6x headroom at defaults absorbs it.
+        long window = SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS;
+        long floorBytesPerWindow =
+                (defaultCapBytesPerSec / dev.vox.lss.common.LSSConstants.TICKS_PER_SECOND)
+                        * window;
+        long quarterBatchBytes = TransferRateGovernor.ENGAGE_BELOW_BYTES_PER_SEC
+                * window / dev.vox.lss.common.LSSConstants.TICKS_PER_SECOND;
+        assertTrue(floorBytesPerWindow >= quarterBatchBytes,
+                "the pace floor must clear a governed quarter-batch inside the fast-fire floor");
+    }
 }

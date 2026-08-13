@@ -45,6 +45,7 @@ class PaperConfigValidationTest {
         // The ping backstop ships ON (adaptive-transfer-rate-plan.md Mechanism B —
         // it protects ANY client on a congested link, including pre-governor ones).
         assertTrue(new PaperConfig().enablePingBackstop);
+        assertTrue(new PaperConfig().enableSendPacing);
     }
 
     @Test

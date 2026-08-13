@@ -167,7 +167,7 @@ class RuntimeSettingsTest {
                 "generationConcurrencyLimitPerPlayer", "mbPerSecondLimitPerPlayer",
                 "mbPerSecondLimitGlobal", "dirtyBroadcastIntervalSeconds",
                 "maxConcurrentDiskReads", "farPlayers", "farPlayersMaxDistanceBlocks",
-                "outboundBufferCeilingKB", "enablePingBackstop")));
+                "outboundBufferCeilingKB", "enablePingBackstop", "enableSendPacing")));
         var c = new TestServerConfig();
         assertEquals(names.size(), RuntimeSettings.listLines(c).size());
     }
@@ -186,6 +186,20 @@ class RuntimeSettingsTest {
                 () -> apply(c, "enablePingBackstop", "yes"),
                 "anything but true/false is a parse error");
         assertEquals(true, c.enablePingBackstop, "a rejected value changes nothing");
+    }
+
+    /** The send pacer's row (send-pacing-plan.md v2): strict boolean like its sibling. */
+    @Test
+    void sendPacingRowParsesStrictBooleans() {
+        var c = new TestServerConfig();
+        apply(c, "enableSendPacing", "false");
+        assertEquals(false, c.enableSendPacing, "false applies");
+        assertThrows(IllegalArgumentException.class,
+                () -> apply(c, "enableSendPacing", "off"),
+                "anything but true/false is a parse error");
+        assertEquals(false, c.enableSendPacing, "a rejected value changes nothing");
+        apply(c, "enableSendPacing", "true");
+        assertEquals(true, c.enableSendPacing, "true applies");
     }
 
     /** The fixed outbound ceiling row (the AUTO mode was deleted —

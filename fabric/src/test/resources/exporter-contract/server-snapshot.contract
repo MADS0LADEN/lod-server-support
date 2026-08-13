@@ -64,6 +64,7 @@ service.gen_drained=long
 service.grace_skipped=long
 service.in_memory=long
 service.miss_dropped=long
+service.paced_ticks=long
 service.queue_full=long
 service.range_filtered=long
 service.re_resolved=long

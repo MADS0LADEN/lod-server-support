@@ -160,6 +160,13 @@ SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBac
                                      # NBT->wire transcode kill switch (round 2, 2026-07-29):
                                      # scenarios may pin it off for object-path A/Bs.
                                      "useNbtTranscode",
+                                     # The ping backstop's kill switch (Mechanism B) and the
+                                     # send pacer's (send-pacing-plan.md) — both structurally
+                                     # inert on loopback; listed so live-shaped A/B scenarios
+                                     # can pin them (the S-8 same-commit rule; enablePingBackstop
+                                     # was briefly MISFILED in the int set — a bool here would
+                                     # have failed --validate as "must be a JSON integer").
+                                     "enablePingBackstop", "enableSendPacing",
                                      # LOD-store backfill opt-in (Phase 4) — the key was
                                      # missing from this allowlist, so a backfill soak
                                      # scenario could not be written (4-agent round R4).
@@ -215,10 +222,6 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     # gate — the AUTO mode was deleted, adaptive-transfer-rate-plan.md). Listed so
     # an A/B scenario can pin it — the R4 lesson below is exactly this omission.
     "outboundBufferCeilingKB",
-    # The ping backstop's kill switch (adaptive-transfer-rate-plan.md Mechanism B) —
-    # structurally inert on loopback (latency 0 never seeds a baseline), listed so a
-    # live-shaped A/B scenario can pin it (the S-8 same-commit allowlist rule).
-    "enablePingBackstop",
     "generationConcurrencyLimitGlobal", "generationTimeoutSeconds",
     "dirtyBroadcastIntervalSeconds",
     "generationConcurrencyLimitPerPlayer", "perDimensionTimestampCacheSizeMB",
