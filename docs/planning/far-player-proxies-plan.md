@@ -2,8 +2,10 @@
 
 **Status: PLANNED, unimplemented** (2026-08-12). Design for rendering distant players
 beyond vanilla entity-tracking range as a native LSS feature — the player-entity
-complement to LOD terrain. Informed by a full source read of SeeU 0.7.3 (clone at the
-session scratchpad; upstream https://github.com/cat4blep/SeeU) and a live compat test
+complement to LOD terrain. Informed by a full source read of SeeU 0.7.3 (vendored at
+`research/seeu/`, commit `8d79f9a` = the 0.7.3 version bump, upstream
+https://github.com/cat4blep/SeeU — the `research/voxy` gitignored-checkout
+precedent, re-cloned at E1 per the mega plan's prerequisite) and a live compat test
 on the LSS rig (2026-08-12: both mods coexist cleanly — so this feature competes on
 merit, not necessity; shipping it must also play nice with SeeU installed, see §6).
 
