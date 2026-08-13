@@ -907,7 +907,9 @@ class ConfigValidationTest {
     @Test
     void farPlayersModeNormalizesAndMinRingDragsUnderTheConfiguredMax() {
         var c = serverConfig();
-        assertEquals("off", c.farPlayers, "E1 ships INERT — the compiled default is off");
+        assertEquals("on", c.farPlayers,
+                "E2 flips the compiled default ON for fresh AND upgrading installs"
+                        + " (user decision 2026-08-12)");
         c.farPlayers = "ON";
         c.validate();
         assertEquals("on", c.farPlayers, "case-insensitive canonical spelling");

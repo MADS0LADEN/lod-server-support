@@ -573,10 +573,11 @@ public abstract class ServerConfigBase extends JsonConfig {
      * authoritative privacy mode (the ESP-oracle fix over SeeU): {@code opt-in} serves
      * only targets whose own client sent shareSelf=true; {@code on} serves everyone
      * minus the exclude list / permission node / shareSelf opt-outs. COMPILED DEFAULT
-     * {@code "off"} at E1 (ships inert); E2 flips it to {@code "on"} for fresh AND
-     * upgrading installs (user decision 2026-08-12).
+     * {@code "on"} since E2 for fresh AND upgrading installs (user decision
+     * 2026-08-12; E1 shipped it {@code "off"}/inert). Unknown values still fail SAFE
+     * to {@code off} — for a position-sharing feature the safe direction is private.
      */
-    public String farPlayers = "off";
+    public String farPlayers = "on";
     /** Broadcast cadence in ticks (default 10 = 2 Hz full-rate tier; far tiers halve). */
     public int farPlayersUpdateIntervalTicks = 10;
     /** Server cap on the visibility ring, blocks (client prefs intersect it). Default

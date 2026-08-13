@@ -9,10 +9,10 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 
 /**
  * The client half of far players, phase A (E1, FARP §3.3 — tracker + prefs, no
- * rendering). SHIPS INERT: {@link #CLIENT_ARMED} is compiled {@code false}, so the
- * capability bit is never sent and every path below is dead until E2 flips it (the
- * v0.10.0 transport-yield default-FALSE pattern — E1's inert shipping deliberately
- * overrides FARP §3.3's "active from Phase A" wording, per the mega plan's E1 row).
+ * rendering at E1; the E2 renderer consumes the tracker). ARMED since E2 (the
+ * defaults flip, user decision 2026-08-12): the capability bit composes when the
+ * config enables it and the soak/benchmark property gate passes. E1 shipped this
+ * compiled false (the v0.10.0 transport-yield default-FALSE pattern).
  *
  * <p>R-5 (decided at E1): the tracker lives HERE, outside the request-manager
  * lifecycle — a mid-session SessionConfig re-push (stage C's {@code /lsslod set})
@@ -22,9 +22,9 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
  */
 public final class FarPlayerClientSupport {
 
-    /** E2 flips this to true (with the defaults decision); until then the bit is never
-     *  composed and the prefs sender never fires. Package-visible for the pin test. */
-    static final boolean CLIENT_ARMED = false;
+    /** Flipped true at E2 (the defaults decision — E1 shipped false/inert).
+     *  Package-visible for the pin test. */
+    static final boolean CLIENT_ARMED = true;
 
     private static final FarPlayerClientTracker TRACKER = new FarPlayerClientTracker();
     private static volatile FarPlayerWire.Prefs lastSentPrefs;

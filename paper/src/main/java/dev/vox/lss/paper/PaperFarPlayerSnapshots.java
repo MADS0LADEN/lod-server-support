@@ -73,8 +73,27 @@ final class PaperFarPlayerSnapshots {
                 // per-player privacy lever the exclude LIST can't express for LuckPerms
                 // groups. Read on the pump via the Bukkit entity (thread-fine: Folia
                 // permission reads are region-safe for online players).
-                p.getBukkitEntity().hasPermission("lss.farplayers.hidden"),
+                // OR the vanish bridge (E2, decisions log entry 5 — landed WITH the
+                // default flip): SuperVanish/PremiumVanish/EssentialsX all publish the
+                // "vanished" metadata key; a vanished staff member must not leak a
+                // position through the LOD view. Pair-wise Player#hideEntity remains
+                // uncovered (documented: per-viewer filtering would break the
+                // once-per-tick snapshot inversion) — target-level vanish is the
+                // staff-invisibility case.
+                p.getBukkitEntity().hasPermission("lss.farplayers.hidden")
+                        || isVanished(p.getBukkitEntity()),
                 hash, equipmentIds, equipmentCounts, vehicle);
+    }
+
+    private static boolean isVanished(org.bukkit.entity.Player bukkit) {
+        try {
+            for (var meta : bukkit.getMetadata("vanished")) {
+                if (meta.asBoolean()) return true;
+            }
+        } catch (Exception ignored) {
+            // A plugin's broken MetadataValue must not cost the snapshot pass.
+        }
+        return false;
     }
 
     private PaperFarPlayerSnapshots() {}

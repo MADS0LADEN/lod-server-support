@@ -15,12 +15,12 @@ import static org.junit.jupiter.api.Assertions.*;
 class FarPlayerClientSupportTest {
 
     @Test
-    void e1ShipsWithTheClientArmCompiledOff() {
-        assertFalse(FarPlayerClientSupport.CLIENT_ARMED,
-                "E1 is INERT by decision (all five review lenses converged) — flipping "
-                        + "this constant is E2's defaults decision, not drift");
+    void e2ShipsWithTheClientArmCompiledOn() {
+        assertTrue(FarPlayerClientSupport.CLIENT_ARMED,
+                "E2's defaults decision (user 2026-08-12) arms the bit — flipping this "
+                        + "back off is a release decision, not drift");
         assertEquals(0, FarPlayerClientSupport.capabilityBitFor(false, true, false, false),
-                "unarmed -> no bit, even with the config enabled");
+                "the unarmed composition stays pinned (support-line backports may ship it)");
     }
 
     @Test
