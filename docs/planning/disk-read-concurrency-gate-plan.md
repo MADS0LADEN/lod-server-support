@@ -91,6 +91,15 @@ drops exceed 5% of a declaration.
 > bounded queue WITHOUT the pool split or in-flight accounting refactor); the
 > pre-submit-retention rejection above stands untouched — parking happens after the
 > store lookup, so store hits are never held back.
+>
+> One documented interplay narrowing (stage-B review B-5): on the C2ME-latched
+> fallback (AdaptiveReadThrottle engaged) WITH a store armed, parking tasks return
+> their pool slot in µs, so `tasksInFlight` — the throttle's `canSubmit` input —
+> undercounts buffered expensive demand, and drains never consult the throttle: the
+> effective read-concurrency floor becomes K (half pool) rather than the AIMD floor
+> of 1. Store-off C2ME (the common case) is bit-identical (K = pool → no parking);
+> K still bounds pressure. Accepted — revisit only if a live C2ME+store server
+> shows IO distress the throttle used to absorb.
 
 ## Ground truth (exploration 2026-08-12, verified file:line)
 

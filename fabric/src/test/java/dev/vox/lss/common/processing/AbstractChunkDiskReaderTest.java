@@ -439,6 +439,67 @@ class AbstractChunkDiskReaderTest {
         }
     }
 
+    /**
+     * Concurrent park/drain hammer (review B-6 — the class of race the poll-null
+     * `continue` fix closes): 4 workers race 1 permit over a few thousand store-miss
+     * submits from concurrent submitters. Conservation envelope: EXACTLY one result per
+     * submit (a stranded parked entry times the await out; a double-drained one
+     * overshoots), and the gate is fully at rest afterwards (no held permit, no parked
+     * entry). Ops are trivially fast so park/drain interleavings churn maximally.
+     */
+    @Test
+    void concurrentParkDrainHammerDeliversExactlyOneResultPerSubmit() throws Exception {
+        var gated = new TestDiskReader(4);
+        gated.registerPlayer(player);
+        try {
+            gated.configureReadGate(1);
+            var store = new GateStubStore(); // every lookup is a miss
+            gated.attachStore(store);
+
+            final int perSubmitter = 600;
+            final int submitters = 3;
+            var submittersDone = new CountDownLatch(submitters);
+            for (int s = 0; s < submitters; s++) {
+                final int base = s * perSubmitter;
+                new Thread(() -> {
+                    try {
+                        for (int i = 0; i < perSubmitter; i++) {
+                            long spin = System.nanoTime() + 10_000_000_000L;
+                            while (!gated.hasHeadroom() && System.nanoTime() < spin) {
+                                Thread.onSpinWait();
+                            }
+                            gated.submit(player, base + i, 7, base + i, () -> new byte[]{3});
+                        }
+                    } finally {
+                        submittersDone.countDown();
+                    }
+                }).start();
+            }
+            assertTrue(submittersDone.await(30, TimeUnit.SECONDS), "submitters finished");
+
+            int expected = submitters * perSubmitter;
+            var q = gated.getPlayerQueue(player);
+            int got = 0;
+            long deadline = System.nanoTime() + 30_000_000_000L;
+            while (got < expected && System.nanoTime() < deadline) {
+                if (q.poll() != null) got++;
+                else Thread.onSpinWait();
+            }
+            assertEquals(expected, got, "exactly one result per submit — no strand, no double");
+            // Let any trailing drain step settle, then assert the gate is at rest.
+            deadline = System.nanoTime() + 5_000_000_000L;
+            while (System.nanoTime() < deadline
+                    && !gated.getDiagnostics().contains("read_gate=0/1, gate_parked=0")) {
+                Thread.onSpinWait();
+            }
+            assertTrue(gated.getDiagnostics().contains("read_gate=0/1, gate_parked=0"),
+                    "gate at rest after the hammer: " + gated.getDiagnostics());
+            assertNull(q.poll(), "no extra results after the count");
+        } finally {
+            gated.shutdown();
+        }
+    }
+
     /** Release-at-triage: a read that THROWS TimeoutException (the future.get shape)
      *  releases its permit at error triage — the next read must acquire it, even though
      *  a real orphaned fetch would still be running downstream OUTSIDE the permit. */

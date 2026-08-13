@@ -51,9 +51,13 @@ public final class DiskReadGate {
 
     /** Reconfigure K. Raising binds immediately; lowering lets held permits drain (see
      *  the class contract). Stage B calls this once at service init (post-store-attach);
-     *  stage C adds the runtime path. */
+     *  stage C adds the runtime path. The ≥1 floor is stage-C insurance (review B-3): a
+     *  zero capacity would park every miss with no holder ever releasing to drain them —
+     *  a permanent strand, not a tight gate. Note a capacity RAISE does not proactively
+     *  kick a drain — parked work waits for the next release/park event (acceptable at
+     *  boot configure; worth revisiting if stage C wants instant-raise semantics). */
     public void updateCapacity(int newCapacity) {
-        this.capacity = newCapacity;
+        this.capacity = Math.max(1, newCapacity);
     }
 
     public int capacity() {

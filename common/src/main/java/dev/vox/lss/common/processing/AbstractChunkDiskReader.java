@@ -250,6 +250,11 @@ public abstract class AbstractChunkDiskReader {
                     // are deliberately untouched (state unknown — identity drift only on
                     // OOM-class events); a duplicate result for the Error path resolves
                     // as the documented ghost (pending already gone, silent drop).
+                    // Since the gate's park drain, an OOM-class throw ESCAPING a DRAINED
+                    // parked entry lands here with the ORIGINAL task's coords: the
+                    // original gets the duplicate-ghost above while the drained entry's
+                    // pending wedges uncontained — the same accepted OOM-class residual,
+                    // now two positions wide (review B-4).
                     LSSLogger.error("Unexpected failure delivering disk read at "
                             + chunkX + ", " + chunkZ, t);
                     addResult(playerUuid, ChunkReadResult.notFoundFromError(
@@ -473,7 +478,10 @@ public abstract class AbstractChunkDiskReader {
         // routes it to the silent superseded drop with dedup fan-out, no memo seed, no
         // generation escalation, no wire answer — healed by re-declaration ≤1 s.
         if (!this.readGate.tryAcquire()) {
-            if (this.gateParkedCount.get() >= this.gateParkCapacity) {
+            // Claim-then-back-out makes the park bound EXACT (review B-2: a get()-then-add
+            // check let N workers pass at cap-1 concurrently, admitting up to N-1 extras).
+            if (this.gateParkedCount.incrementAndGet() > this.gateParkCapacity) {
+                this.gateParkedCount.decrementAndGet();
                 this.diag.recordGated();
                 long refused = this.gateWarn.recordAndTryAcquire(System.nanoTime() / 1_000_000);
                 if (refused > 0) {
@@ -487,7 +495,6 @@ public abstract class AbstractChunkDiskReader {
                 addResult(playerUuid, ChunkReadResult.saturated(playerUuid, chunkX, chunkZ, dimension, submissionOrder));
                 return;
             }
-            this.gateParkedCount.incrementAndGet();
             this.gateParked.add(new ParkedRead(playerUuid, chunkX, chunkZ, dimension,
                     submissionOrder, operation));
             // Missed-wakeup guard: a release between our failed acquire and the add
@@ -524,8 +531,14 @@ public abstract class AbstractChunkDiskReader {
             if (!this.readGate.tryAcquire()) return;
             var parked = this.gateParked.poll();
             if (parked == null) {
+                // Another drainer stole the last entry between our isEmpty and poll.
+                // Release and RE-CHECK (review B-MAJOR-1): returning here was the one
+                // exit that dropped the permit without re-observing the list — a parker
+                // whose own self-drain raced into our sub-µs hold would strand its entry
+                // with zero holders left to drain it (a session-length IN_FLIGHT wedge,
+                // not a drop-heal). The loop's isEmpty re-check closes the window.
                 this.readGate.release();
-                return;
+                continue;
             }
             this.gateParkedCount.decrementAndGet();
             try {

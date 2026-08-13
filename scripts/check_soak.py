@@ -195,7 +195,11 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     # Disk-read concurrency gate K (disk-read-concurrency-gate-plan.md; 0 = AUTO,
     # store-conditional). Registered WITH the knob (the R4 lesson): every pre-existing
     # scenario pins it to a no-op (its diskReaderThreads value / the resolved default
-    # pool) so their law baselines stay gate-free; disk-read-gate arms it.
+    # pool) so their law baselines stay gate-free; disk-read-gate arms it. Precision
+    # note (stage-B review ACC-5): store-offline-mutate's pin of 3 equals the FABRIC
+    # vanilla AUTO pool; a >=8-core Paper standalone run of that phase resolves a
+    # larger prioritized pool, where 3 would nominally bind — inert there
+    # (enabled=false, no read traffic) and the A7 gated arm flags any leak.
     "maxConcurrentDiskReads",
     "sendQueueLimitPerPlayer", "bytesPerSecondLimitGlobal",
     # Transport deference (0 = off, the shipped default). Listed so an A/B scenario can
