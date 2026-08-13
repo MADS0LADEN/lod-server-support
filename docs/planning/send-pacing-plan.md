@@ -1,7 +1,7 @@
 # Server-side send pacing — spread the burst, never govern the rate — plan
 
-**Status: PLANNED, unreviewed** (2026-08-13, the adaptive-transfer-rate program's
-shelved follow-up, resolved into a concrete design; companion to
+**Status: PLANNED v2, post 2-Fable review** (2026-08-13, the
+adaptive-transfer-rate program's shelved follow-up; companion to
 `adaptive-transfer-rate-plan.md`). User direction: spreading the client's
 requested work over time a bit is good enough to stop spikes from totally
 blocking vanilla messages — it does not need to be perfect, it must NOT
@@ -9,7 +9,14 @@ artificially rate-limit send throughput (rate ownership is the CLIENT's, via
 want-set sizing), and it needs only a very rough target. All options
 considered below, including the user's own alternative (pace on the current
 send queue length + send rate instead of inferring from want-set size) —
-which, refined, is the recommendation.
+which, refined, is the recommendation. **v2 (both review verdicts folded):
+v1's evidence-arming was deleted wholesale — its pending-bytes term was
+arithmetically dead (the netty gauge caps at the 64 KiB high-water while
+writable), its netty-only remainder missed the first tick of exactly the
+store-warm rejoin/teleport waves the plan opens with, and successful pacing
+destroyed its own evidence (the disarm-dump sawtooth). The replacement floors
+the drain at the operator's own per-tick refill share, which achieves v1's
+goals without any arming state at all — see §3 and the review log.**
 
 ## 1. The role this fills (the four-mechanism synthesis)
 
@@ -105,111 +112,176 @@ links that could take megabytes. Unpredictable, and it is precisely the
 netty-gauge-driven pacing family the AUTO ceiling's falsifications closed.
 Rejected; the ENTRY-check yield gate stays the only writability consumer.
 
-## 3. The chosen design: evidence-armed proportional drain
+## 3. The chosen design: refill-floored proportional drain (always on)
 
-All in `AbstractPlayerRequestState.flushSendQueue` (common — both
-platforms), column-payload lane only (BatchResponse/far-player lanes are
-tiny and latency-sensitive; they already ride separate paths).
+All in `AbstractPlayerRequestState.flushSendQueue` (common — both platforms),
+column-payload lane only (BatchResponse/far-player lanes are tiny and
+latency-sensitive; they already ride separate paths). No arming, no evidence,
+no probe input — the budget is a pure function of the send queue and the
+allocation the flush already receives:
 
-- **Arming (the fast-link exemption, and the CI-inertness property):**
-  per-player countdown `paceArmedTicks`, set to `PACE_ARM_WINDOW_TICKS`
-  (100 ≈ 5 s) whenever this tick's probe snapshot reads NOT_WRITABLE **or**
-  `pendingBytes > PACE_ARM_PENDING_BYTES` (256 KB — catches modest links
-  whose writability rarely flips but whose socket queue visibly grows),
-  decremented otherwise. Pacing applies only while `paceArmedTicks > 0`.
-  A genuinely fast link never arms and never pays a tick of latency; a
-  modest link arms on the first sign of pressure and stays armed while
-  pressure recurs. Loopback never goes unwritable and pending reads ~0
-  (both already pinned for the yield gate), so **harness inertness is
-  structural** — same property, same pin pattern.
-  Known accepted corner: the very FIRST spike of a session lands before
-  any evidence exists and dumps like today; every subsequent spike is
-  paced. "Does not need to be perfect."
-- **The budget:** while armed, this tick's column flush writes at most
-  `paceBudget = max(PACE_FLOOR_BYTES, queuedWireBytes / PACE_HORIZON_TICKS)`
-  wire bytes — checked in-loop before each send EXCEPT the first (the
-  one-payload presence gate: a legal oversized column ships whole, the
-  next flush waits — the deleted AUTO budget's proven shape). Leftover
-  stays queued (ordinary retention; nothing is dropped, nothing bounces).
-  `PACE_HORIZON_TICKS = 10` (~500 ms), `PACE_FLOOR_BYTES = 96 KB`.
-- **Denomination:** WIRE bytes (`QueuedPayload.wireBytes`) — this
-  mechanism is about the socket, unlike the limiter's deliberate
-  raw-byte denomination. `queuedWireBytes` is a running counter maintained
-  at add/poll/prune/drop (an O(queue) per-tick sum would also work — the
-  yield byte-integral precedent — but the counter is cheaper and exact).
-- **Composition order** (top of flush unchanged): fixed ceiling entry gate
-  → yield gate (unwritable ticks still book `yielded=`, pacing never
-  evaluates) → pace budget bounds the writable tick's loop → bandwidth
-  limiter charges per payload as today. The pingf-cut allocation and the
-  pace budget MIN-compose implicitly (the loop stops at whichever binds
-  first). The starvation floor path is exempt (a floor tick ships exactly
-  one payload by contract already).
-- **Observability:** per-player `paced=` counter (ticks where the pace
-  budget stopped a PARTIAL flush — a mechanism counter like `yielded=`,
-  never a loss signal), rendered in the per-player diag line after
-  `pingf=`. One more `PlayerDiag` field + golden re-pin.
+- **The budget:** every tick with a non-empty queue,
+  `paceBudget = max(allocationBytes / TICKS_PER_SECOND, queuedRawBytes / PACE_HORIZON_TICKS)`
+  — checked in-loop before each send EXCEPT the first (the one-payload
+  presence gate: a legal oversized column ships whole, the next flush waits —
+  the deleted AUTO budget's proven shape, minus the falsified estimator).
+  Leftover stays queued (ordinary retention; nothing dropped, nothing
+  bounced). `PACE_HORIZON_TICKS = 10`.
+- **Why the refill-share floor is the whole trick** (the v2 insight, from the
+  review round's triangle): `allocation/20` is the per-tick share of the
+  operator's CONFIGURED cap — the declared intent for sustained rate. A
+  budget floored there **cannot pace any flow below the cap rate, ever** —
+  sustained-throughput neutrality is structural, not equilibrium math. What
+  it removes is exactly and only the BANK dump: the bandwidth bucket banks
+  allocation/4 (five refill ticks), so today an idle gap plus a resolution
+  wave ships ~5 s of link time in one tick; floored pacing ships the same
+  wave at one refill share per tick — and since the bank IS five refill
+  shares, **no bank-sized wave is ever stretched beyond ~5 ticks**, which is
+  the client's own fast-fire floor (§4). The `Q/HORIZON` term lets genuinely
+  oversized backlogs (Q > allocation/2) drain ABOVE the refill share,
+  exponentially decaying toward it — the bank still serves catch-up, just as
+  a slope instead of a cliff.
+- **First-tick coverage** (v1's fatal corner, closed): the budget needs no
+  evidence, so the store-warm rejoin/teleport wave — the growing flagship
+  case, store default-on since v0.11.0 — is bounded on its FIRST tick at one
+  refill share (~1.25 MB raw at the default 25 MB/s cap) instead of the full
+  ~6.25 MB bank. The kernel send buffer below the gauge (~0.5-0.7 MB
+  measured on the rig path) still absorbs its own depth at memory speed —
+  **~0.5-1 s of head-of-line at 10 Mbps is the irreducible floor of ANY
+  server-side mechanism in this family** (the companion program's structural
+  finding); pacing lands the first-tick dump at that floor instead of ~5×
+  above it.
+- **Denomination: RAW bytes** (`QueuedPayload.estimatedBytes`), matching the
+  limiter and the allocation the floor derives from. Wire ≤ raw, so the
+  socket-facing amplitude is bounded a fortiori; no raw/wire mixing anywhere
+  in the formula. `queuedRawBytes` is a lazy per-tick sum over the send queue
+  (≤ `sendQueueLimitPerPlayer` entries, main-thread, only when non-empty —
+  the yield byte-integral precedent; zero drift risk, no conservation test
+  needed — the review round preferred this over a running counter).
+- **Composition order** (top of flush unchanged): fixed ceiling entry gate →
+  yield gate (unwritable ticks book `yielded=`, the budget never evaluates) →
+  pace budget bounds the writable tick's send loop → bandwidth limiter
+  charges per payload as today. The pingf-cut allocation composes
+  automatically: the floor derives from the CUT allocation, so a backstop cut
+  shrinks the pace floor with it — same direction, no interaction term. The
+  starvation-floor tick is structurally exempt (it breaks after exactly one
+  send, and the budget skips the first payload) — an explicit guard
+  documents it.
+- **Observability:** per-player `paced=` counter (ticks where the pace budget
+  stopped a PARTIAL flush — a mechanism counter beside `deferred=`/`yielded=`
+  at line end, never a loss signal). One more `PlayerDiag` field (a fourth
+  compat ctor) + golden re-pins.
 - **Config:** `enableSendPacing` (server, default true) — a `/lsslod set`
-  boolean row (the `enablePingBackstop` precedent; the rig A/B lever).
-  The three constants stay constants; no numeric knobs.
+  boolean row (the `enablePingBackstop` precedent; the rig A/B lever), filed
+  in check_soak.py's `SERVER_CONFIG_BOOL_KEYS` same-commit (done — the
+  review round also found `enablePingBackstop` MISFILED in the int set and
+  fixed it). `PACE_HORIZON_TICKS` stays a constant.
 
-## 4. Interaction with the fast want-set cadence (worked through)
+## 4. Interaction with the fast want-set cadence (worked through, v2)
 
+- **The bank/floor alignment is the load-bearing identity**: bank =
+  allocation/4 = 5 × refill share, and the client's fast re-scan floor is
+  5 ticks. Any wave the bank could have dumped in one tick now ships in ≤ 5
+  ticks — at or inside the client's own minimum re-scan period, so the
+  ≥95%-answered fast trigger fires on the same schedule it would have. The
+  cadence-loss concern that killed the naive always-on drain does not apply
+  to the floored version, on ANY link speed: the pacer never delivers slower
+  than the cap, and the cap was already the limiter's law.
+- **Sub-cap links** (the honest scope the v1 draft overclaimed): a link
+  slower than the cap (e.g. 100 Mbps against the 25 MB/s default) queues at
+  the SOCKET regardless of pacing — delivery there is the link's honest
+  cost, the yield gate holds what netty can't take, and pacing's refill-share
+  ticks simply stop LSS from deepening the dump beyond one share per tick.
 - **Governed sessions (4 Hz quarter-batches):** a governed burst is
-  ~desired/4 ≈ 100-150 KB — at or under one floor quantum, so pacing ships
-  it in 1-2 ticks: inert. No double-throttling of the governor's loop (the
-  governor owns rate; pacing sees only what the governor already shaped).
-- **Ungoverned warm backfill on a fast link (the 4 Hz showcase):** never
-  ARMS (no pressure evidence), so the full bank still ships at once and
-  the ≥95%-answered fast trigger fires exactly as today. This is the case
-  a naive always-on drain would have slowed ~2-4×; evidence-arming is what
-  keeps the brief's "never artificially rate-limit" true.
-- **Ungoverned spike on a modest link (the target case):** first pressure
-  evidence arms pacing; a 6.25 MB bank thereafter ships ≤ max(96 KB,
-  Q/10) ≈ 640 KB on the worst tick, decaying exponentially — and after
-  tick one the yield gate holds the rest, so total in-flight ahead of
-  vanilla is bounded at ~one paced tick (~0.5 s of a 10 Mbps link) instead
-  of ~5 s. The client's 1 Hz fallback re-declares regardless; the fast
-  cadence degrades only as much as delivery actually slows — on a link
-  this size that is the honest cost of the link, not the pacer.
-- **The cadence-floor alignment:** HORIZON (10 ticks) spans two client
-  fast-fire floors (5 ticks) — a paced batch is still mostly delivered
-  within one client re-scan period, so the loop never starves; and because
-  the floor exempts sub-96 KB/tick flows, steady paced delivery adds zero
-  latency below ~1.9 MB/s.
+  ~desired/4 ≈ 100-250 KB — under one refill share, shipped tick-1: inert.
+  No double-throttling; and the m7 trace from the review round closes safely:
+  if pacing ever slowed a governed session's delivery, the governor's
+  offer-backing reads the under-offer and FREEZES (never ratchets), and the
+  refill floor clears any governed quarter-batch within 1-3 ticks so the
+  cadence recovers immediately. The coupling invariant worth pinning:
+  the pace floor at the governor's engage-boundary allocation must clear a
+  quarter-batch inside the fast-fire floor (true by orders of magnitude at
+  defaults; the pin keeps constant drift honest).
+- **The 1 Hz fallback** is untouched by construction (it is time-based, not
+  delivery-based) — the want-set's self-heal never waits on the pacer.
 - **v16/legacy sessions:** no interaction — pacing is below the dialect
   layer entirely (it shapes the send queue, whatever filled it).
 
 ## 5. Test plan
 
-- T1 (common flush suite, the TransportYieldFlushTest pattern): budget
-  math (floor binds small queues, Q/HORIZON binds big ones), the presence
-  gate (oversized payload ships whole), leftover retained not dropped,
-  arming truth table (unwritable arms, pending>threshold arms, decrement
-  disarms, never-pressured never paces — the CI-inertness pin), yield
-  composes (unwritable ticks book yielded= and never evaluate the budget),
-  the floor-tick exemption, `paced=` counts partial stops only, the
-  queuedWireBytes counter's add/poll/prune/drop conservation, kill switch.
-- Contract pins: both platforms pass the config gate into the flush (the
-  ChannelAccessorContractTest pattern); `paced=` diag golden; config
-  default-ON pins both suites; registry row.
-- Guard soaks: fresh-backfill + disk-saturation + rate-limit-storm —
-  expected UNCHANGED baselines (structural inertness via the arming
-  evidence; a moved baseline is a finding, not a re-baseline).
+- T1 (common flush suite, the TransportYieldFlushTest pattern): the budget
+  truth table (refill floor binds when Q < HORIZON × share; Q/HORIZON binds
+  above; empty queue = no evaluation), the presence gate (oversized payload
+  ships whole), leftover retained not dropped, the starvation-floor-tick
+  exemption guard, `paced=` counts budget-stopped PARTIAL ticks only,
+  MIN-composition with the limiter (whichever binds first stops the loop —
+  incl. a pingf-cut allocation shrinking the floor), RAW denomination pin,
+  kill switch OFF = bit-identical flush, short overloads pin pacing off
+  (S-9a), the m7 constants-coupling pin (a governed quarter-batch at the
+  engage boundary clears within the fast-fire floor at the floored budget).
+- Contract pins (the ChannelAccessorContractTest pattern): both platforms
+  pass the config gate into the flush; the diag builder reads the live
+  `paced=` counter; `PlayerDiag` golden re-pins (full line + a value-branch
+  pin); config default-ON pins in both suites; the registry row (containsAll
+  + apply test); the move-tracer boot-row echo (`enableSendPacing` joins
+  `enablePingBackstop` — same partition-the-collections rationale).
+- Guard soaks: fresh-backfill + disk-saturation + rate-limit-storm.
+  Inertness is NOT structural in v2 (the budget binds exactly where the bank
+  used to burst — wave-completion ticks stretch from 1 to ≤5 ticks): the
+  expectation is UNCHANGED verdicts because every law is conservation- or
+  quiescence-based at 5 s scale and the churn ceilings carry 2× headroom —
+  but a moved baseline is a FINDING to diagnose, not a re-baseline.
 - Live gate (the rig, proxy at a MEDIUM rate ~4-10 Mbps): client governor
-  kill-switched off to isolate the pacer; join and watch the first-spike
-  dump (unpaced, accepted) then subsequent waves paced (`paced=` climbing,
-  ping bounded, no multi-second action freezes); then governor back on to
-  confirm no double-throttle (governed rate unchanged, `paced=` ~flat).
+  kill-switched off to isolate the pacer; the SPECIFIC measurement is the
+  store-warm rejoin first seconds (v1's uncovered corner): expect the join
+  freeze bounded at ~the kernel-buffer floor (~0.5-1 s) instead of ~5 s,
+  `paced=` climbing through the wave, ping recovering within a few seconds;
+  then governor back on to confirm no double-throttle (`paced=` ~flat while
+  governed). A/B via `/lsslod set enableSendPacing`.
 
 ## 6. Open questions (decide at implementation)
 
-- Whether `paced=` earns a place in the soak exporter (schema addition +
-  check_soak allowlist) or stays diag-only. Lean: diag-only until a
-  scenario needs it.
-- Whether the arming pending-threshold (256 KB) should scale with the
-  fixed ceiling when an operator sets one. Lean: no — constants until
-  evidence.
-- Whether the first-spike-ever corner deserves closing (pre-arm pacing for
-  the first N ticks after registration?). Lean: no — it re-introduces
-  latency on fast-link joins, the exact tradeoff evidence-arming exists to
-  avoid.
+- Whether `paced=` earns a soak-exporter field (schema + allowlist) or stays
+  diag-only. Lean: diag-only until a scenario needs it.
+- Whether the Q/HORIZON term should also bound how much of the BANK a
+  backlog may consume per tick beyond the floor (today: limiter still allows
+  bank+refill; the budget max() lets Q/10 exceed the floor for huge queues).
+  Lean: keep — it is the "bank as slope" half of the design.
+
+## 7. Review log
+
+**2-Fable plan review (2026-08-13), both IMPLEMENT WITH FIXES — folded as v2:**
+
+*Control lens*: M1 v1's "every subsequent spike is paced" was false — arming
+evidence decays across exactly the minutes-long calm that separates the spike
+events, netty evidence is structurally post-dump (probe read precedes writes),
+and the store-warm rejoin/teleport wave (the growing flagship case) dumped its
+whole bank on tick 1 unpaced; kernel-absorbed waves (< socket buffer) never
+generate evidence at all. M2 the 256 KB pending arming term was DEAD CODE —
+`OutboundBufferMath.pendingBytes` is arithmetically capped at the 64 KiB
+high-water while writable; values above it are representable only after
+NOT_WRITABLE already fired. M3 successful pacing destroyed its own evidence
+(disarm-with-nonempty-queue → ~0.2 Hz dump/re-arm sawtooth on mid-band
+links). ALL THREE resolved by v2's arming deletion: the refill-share floor
+needs no evidence, covers every tick of every wave, and cannot flap. m4
+honest numbers folded (the ~0.5-1 s kernel floor at 10 Mbps is irreducible
+by any mechanism in this family). m5/m6 overclaims re-scoped (§4). m7 the
+governor-starvation trace closes safely via offer-backing; the constants-
+coupling invariant is now a planned pin. n10's bank-clamp alternative is
+absorbed INTO v2 (the refill floor IS the bank bound, expressed inside the
+pacer where it composes with Q/HORIZON and the kill switch instead of
+touching the limiter's constants). n11 option F's rejection re-grounded on
+the watermark-ceiling argument.
+
+*Integration lens*: MAJOR-1 same dead-term finding (independent arithmetic —
+convergent). MAJOR-2 `enablePingBackstop` found MISFILED in check_soak.py's
+INT key set (a bool pin would have failed --validate) — fixed same-branch,
+with `enableSendPacing` filed correctly beside it. MINOR-1 the UNKNOWN-
+writability arming rule became moot in v2 (the pacer consumes no probe
+input at all). MINOR-2 the full config/diag surface enumerated (registry
+containsAll + apply test, the fourth PlayerDiag compat ctor + golden lines,
+the boot-row echo with the check_move_trace REQUIRED-KEYS exclusion noted).
+MINOR-3 the lazy per-tick sum chosen over the running counter (zero drift
+risk; cost negligible). MINOR-4 moot in v2 (no arming state to place across
+the early returns); the surgery-placement, counter-mutation, composition,
+and column-lane-only claims all verified TRUE against the live tree.
