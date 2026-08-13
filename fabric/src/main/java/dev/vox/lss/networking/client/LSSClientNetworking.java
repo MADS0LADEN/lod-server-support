@@ -31,7 +31,8 @@ public class LSSClientNetworking {
             version -> {
                 ClientPlayNetworking.send(new HandshakeC2SPayload(
                         version, LSSConstants.CAPABILITY_VOXEL_COLUMNS
-                                | ZstdWireSupport.capabilityBit()));
+                                | ZstdWireSupport.capabilityBit()
+                                | FarPlayerClientSupport.capabilityBit()));
                 sendClientInfoSidecar();
             },
             LSSClientNetworking::createRequestManager);
@@ -140,7 +141,8 @@ public class LSSClientNetworking {
             try {
                 ClientPlayNetworking.send(new HandshakeC2SPayload(
                         LSSConstants.PROTOCOL_VERSION, LSSConstants.CAPABILITY_VOXEL_COLUMNS
-                                | ZstdWireSupport.capabilityBit()));
+                                | ZstdWireSupport.capabilityBit()
+                                | FarPlayerClientSupport.capabilityBit()));
                 sendClientInfoSidecar();
             } catch (Exception e) {
                 LSSLogger.debug("LAN host handshake send failed: " + e.getMessage());
@@ -196,8 +198,14 @@ public class LSSClientNetworking {
         ClientPlayNetworking.registerGlobalReceiver(
                 SessionConfigS2CPayload.TYPE,
                 (payload, context) -> context.client().execute(
-                        () -> sessionGate.onSessionConfig(payload, LSSApi.hasVoxelConsumers(),
-                                LSSClientConfig.CONFIG.enableV16ServerCompat))
+                        () -> {
+                            sessionGate.onSessionConfig(payload, LSSApi.hasVoxelConsumers(),
+                                    LSSClientConfig.CONFIG.enableV16ServerCompat);
+                            // Far players (E1): the prefs frame follows the session
+                            // config (send-once-unless-changed, contained; no-op while
+                            // the capability bit is not composed — all of E1).
+                            FarPlayerClientSupport.maybeSendPrefs();
+                        })
         );
 
         ClientPlayNetworking.registerGlobalReceiver(
@@ -221,6 +229,18 @@ public class LSSClientNetworking {
                         }
                     });
                 }
+        );
+
+        ClientPlayNetworking.registerGlobalReceiver(
+                dev.vox.lss.networking.payloads.FarPlayerRosterS2CPayload.TYPE,
+                (payload, context) -> context.client().execute(
+                        () -> FarPlayerClientSupport.onRosterFrame(payload.body()))
+        );
+
+        ClientPlayNetworking.registerGlobalReceiver(
+                dev.vox.lss.networking.payloads.FarPlayerUpdatesS2CPayload.TYPE,
+                (payload, context) -> context.client().execute(
+                        () -> FarPlayerClientSupport.onUpdatesFrame(payload.body()))
         );
 
         ClientPlayNetworking.registerGlobalReceiver(
@@ -303,7 +323,10 @@ public class LSSClientNetworking {
                     LSSClientConfig.CONFIG.enableV19ServerCompat);
         });
 
-        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> sessionGate.onDisconnect());
+        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+            sessionGate.onDisconnect();
+            FarPlayerClientSupport.onSessionEnd();
+        });
     }
 
     private static void registerTickHandler() {

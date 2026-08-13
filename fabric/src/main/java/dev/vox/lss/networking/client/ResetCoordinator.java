@@ -32,6 +32,7 @@ final class ResetCoordinator {
                 Supplier<ModCompat.VoxyResetOutcome> voxyReset,
                 Runnable lssFlush,
                 Runnable clearAllCaches,
+                Runnable farPlayerResubscribe,
                 Consumer<String> feedback) {}
 
     /** Runs the sequence; returns true when anything was actually reset (false = the
@@ -58,10 +59,10 @@ final class ResetCoordinator {
         deps.drainAndAwaitDecode().run();
         var outcome = voxyResetContained(deps);
         deps.lssFlush().run();
-        // R-3 SEAM (v0.11.0 mega plan): once far players land (stage E1), the reset
-        // coordinator must ALSO clear the far-player tracker + seen-epoch state and
-        // re-send prefs here (after the flush), so the bumped-epoch full roster
-        // repopulates. Absent until E1 — this marker is the wiring point.
+        // R-3 (filled at E1): clear the far-player tracker + seen-epoch state and
+        // re-send prefs AFTER the flush — the server answers ANY prefs receipt with a
+        // bumped-epoch full roster, which repopulates. Inert while unsubscribed.
+        deps.farPlayerResubscribe().run();
         deps.feedback().accept(voxyLine(outcome) + Brand.shortName()
                 + " cache cleared — re-requesting everything from the server.");
         return true;

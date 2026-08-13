@@ -91,6 +91,7 @@ public class LSSClientCommands {
                     if (manager != null) manager.flushCache();
                 },
                 ColumnCacheStore::clearAll,
+                FarPlayerClientSupport::resetAndResubscribe,
                 line -> source.sendFeedback(Component.literal(line).withStyle(ChatFormatting.GOLD))),
                 confirmed);
         return Command.SINGLE_SUCCESS;
@@ -172,6 +173,14 @@ public class LSSClientCommands {
         // discriminator for weak-client reports)
         int budget = manager.getLastBudget();
         int lastQueued = manager.getLastQueued();
+        // Far players (E1, conditional slot — rendered once any far-player state
+        // exists; inert sessions never see it).
+        var farTracker = FarPlayerClientSupport.tracker();
+        if (farTracker.rostersApplied() > 0 || farTracker.trackedCount() > 0) {
+            source.sendFeedback(Component.literal(farTracker.diagLine())
+                    .withStyle(ChatFormatting.GRAY));
+        }
+
         source.sendFeedback(Component.literal(String.format(
                 "Budget: used=%d/%d, ingest_backlog=%d, rate_cap=%d, rate_gated=%d",
                 lastQueued, budget, manager.getLastIngestBacklog(),

@@ -81,6 +81,23 @@ public class LSSClientConfig extends JsonConfig {
     // bit-identical to pre-cap behavior.
     public int lodColumnsPerSecondLimit = 0;
 
+    // ---- Far players (v0.11.0 stage E1, FARP §3.3 — INERT until E2 arms the client
+    // ---- capability bit; these keys exist so upgrading users can pre-configure).
+
+    /** Receive far-player proxies (the capability bit's config term). E1 ships the bit
+     *  compiled OFF regardless; E2 arms it. */
+    public boolean farPlayersEnabled = true;
+    /** Client-side visibility ring overrides in blocks (0 = server-controlled). */
+    public int farPlayersMaxDistanceBlocks = 0;
+    public int farPlayersMinDistanceBlocks = 0;
+    /** Render name tags over proxies (consumed by the E2 renderer). */
+    public boolean farPlayersNameTags = true;
+    /** Allow OTHER players to see me as a far player (target-side privacy — the server
+     *  honors it in every mode; opt-in mode REQUIRES it). */
+    public boolean farPlayersShareSelf = true;
+    /** Cap the distance others may see me at, blocks (0 = no extra cap). */
+    public int farPlayersShareDistanceBlocks = 0;
+
     @Override
     protected String getFileName() {
         return CANDIDATES[0]; // brand-primary (creation target / default when not loaded via load())
@@ -112,6 +129,10 @@ public class LSSClientConfig extends JsonConfig {
         // [50, 100000]: below 50 the scanner still functions but starves the frontier to a
         // near-wedge cadence for no plausible use; the ceiling is inert (the mechanism no-ops
         // above ~3200) but bounds what a typo can store.
+        farPlayersMaxDistanceBlocks = Math.clamp(farPlayersMaxDistanceBlocks, 0, 16384);
+        farPlayersMinDistanceBlocks = Math.clamp(farPlayersMinDistanceBlocks, 0,
+                farPlayersMaxDistanceBlocks > 0 ? farPlayersMaxDistanceBlocks : 16384);
+        farPlayersShareDistanceBlocks = Math.clamp(farPlayersShareDistanceBlocks, 0, 16384);
         if (lodColumnsPerSecondLimit <= 0) {
             lodColumnsPerSecondLimit = 0;
         } else {
