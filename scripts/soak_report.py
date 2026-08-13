@@ -76,11 +76,17 @@ SERVER_MECHANISM = {
     # (cap full / capacity reject / ghost delivery) — a transient silent drop, re-declared
     # at 1 Hz until a slot frees. The dedicated law-A5 term (subset of superseded events).
     "gen-miss drops": "service.miss_dropped",
-    # DiskReadGate refusals (disk-read-concurrency-gate-plan.md): an expensive read
-    # bounced at the permit check — a silent superseded drop healed by re-declaration.
-    # Mechanism, not concern: nonzero is expected exactly where the gate binds (K < pool
-    # under cold-region load); every no-op-pinned scenario holds it at 0 via A7.
+    # DiskReadGate park-overflow bounces (disk-read-concurrency-gate-plan.md, Amendment
+    # 2): RACE ARMOR — submissions already in flight when the park filled. The router's
+    # retention conjunct holds sustained pressure upstream, so expect ~0 even where the
+    # gate binds; every no-op-pinned scenario holds it at 0 via A7.
     "gate-refused reads": "disk.gated",
+    # Router passes stopped by gate saturation (Amendment 2 retention): work HELD in the
+    # backlog and re-prioritized by the next declaration — the gate binding as designed,
+    # the exact family of want-set supersession above. Mechanism, not concern: nonzero
+    # is expected exactly where the gate binds (K < pool under cold-region load); the
+    # checker's A7 arm holds every no-op-pinned scenario at 0.
+    "router gate stops": "disk.gate_stops",
     # Declared positions outside the server's lodDistance (client/server distance-config
     # mismatch or a teleport mid-declaration) — dropped at backlog replace, healed like any
     # supersession. Persistent growth means a config mismatch, not data loss.

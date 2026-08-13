@@ -39,8 +39,10 @@ byte-denominated bandwidth keys are gone in favor of the new defaults.
 
 ## 3. After restart — verification (RCON, ~/rcon.py; no leading slash)
 
-1. `lsslod diag` — expect the v0.11.0 shape: `read_gate=<in>/<K>` always rendered
-   (K = half the reader pool — the store is on), `Dialects:` line, `store=full`,
+1. `lsslod diag` — expect the v0.11.0 shape: `read_gate=<in>/<K>, gate_parked=,
+   gate_stops=, gated=` always rendered (K = half the reader pool — the store is
+   on; `gate_stops` is the retention counter since Amendment 2), `Dialects:`
+   line, `store=full`,
    NO `FarPlayers:` line while nobody is subscribed (the conditional slot).
 2. `lsslod store status` — `state=ok`, counters climbing on a warm rejoin.
 3. `lsslod set` — lists 7 keys incl. `farPlayers` + `farPlayersMaxDistanceBlocks`.
@@ -53,7 +55,9 @@ byte-denominated bandwidth keys are gone in favor of the new defaults.
 
 - **Warm-join LOD flow at the new defaults** — join with a Voxy+LSS client;
   store serves at full rate; `read_gate=` behaves under real play (in-use low on
-  warm terrain, K-bounded on cold flights, `gated=` only under cold flood).
+  warm terrain, K-bounded on cold flights, `gate_stops=` climbing only under cold
+  flood — `gated=` stays ~0, it counts rare overflow races since Amendment 2's
+  router retention).
 - **`/lsslod set` round-trips** — `set lodDistanceChunks 96` (live re-push —
   LODs shrink), back to 300; `set farPlayers off` then `on`; values persist in
   the config file; `/lsslod help` renders.

@@ -193,6 +193,20 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
                     retained.add(req);
                     stopPass = true;
                 }
+                case GATE_SATURATED -> {
+                    // The disk-read gate is saturated (Amendment 2): retain and STOP this
+                    // player's pass exactly like the headroom stop — pending asks stay in
+                    // the backlog and the next declaration replaces/re-prioritizes them
+                    // wholesale, instead of burning park-overflow drop-and-re-ask cycles.
+                    // ONE gate_stops per stopped player-pass (this arm is reachable at
+                    // most once per pass — stopPass ends the drain); routeAll continues
+                    // to the NEXT player (probe/timestamp/duplicate resolution stays
+                    // live for everyone, M4 rotation keeps admission fair).
+                    if (retained == null) retained = new ArrayList<>();
+                    retained.add(req);
+                    stopPass = true;
+                    this.processor.recordGateStop();
+                }
             }
         }
 
@@ -345,7 +359,7 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
         return false;
     }
 
-    private enum AdmitResult { SUBMITTED, SLOT_FULL, NO_DISK_HEADROOM }
+    private enum AdmitResult { SUBMITTED, SLOT_FULL, NO_DISK_HEADROOM, GATE_SATURATED }
 
     /** Admit into the slot for the route and submit — disk-first always: the disk-read
      *  result is where the server decides generation (a miss escalates in
@@ -386,6 +400,21 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
                 this.dedupTracker.removeGroup(packed, dimension);
                 state.removePendingByPosition(req.cx(), req.cz());
                 return AdmitResult.NO_DISK_HEADROOM;
+            }
+            // Gate-saturation retention (Amendment 2): permits exhausted AND the park
+            // plus permit-less in-flight work would fill it — a submit here is a certain
+            // park-overflow drop (a wasted admit→pool→store-lookup→drop→re-declare
+            // cycle, the live 767/min WARN storm). Retain instead, same unwind as the
+            // headroom stop. Checked AFTER hasDiskHeadroom so gate_stops counts only
+            // gate-attributable stops (pool-full behavior stays byte-identical), and
+            // PER ENTRY so a mid-pass saturation flip stops admission at the flip while
+            // a park refill mid-drain is seen by the very next entry. Attached requests
+            // ride through saturation — they cost the gate nothing (the dedup argument
+            // at the headroom check applies verbatim).
+            if (!attached && this.processor.gateSaturated()) {
+                this.dedupTracker.removeGroup(packed, dimension);
+                state.removePendingByPosition(req.cx(), req.cz());
+                return AdmitResult.GATE_SATURATED;
             }
             if (!attached && !this.processor.submitDiskRead(playerUuid, dimension, req.cx(), req.cz(), order)) {
                 // Submit was a no-op (e.g. the dimension's level isn't registered yet) — a

@@ -203,6 +203,7 @@ public final class PaperSoakMetricsExporter {
             // DiskReadGate refusals (disk-read-concurrency-gate-plan.md): never part of
             // the submitted/completed partition — its own monotonic counter.
             diskMap.put("gated", dd.getGatedCount());
+            diskMap.put("gate_stops", dd.getGateStopsCount());
             diskMap.put("successful", dd.getSuccessfulReadCount());
             diskMap.put("pending", diskReader.getPendingResultCount());
             diskMap.put("pending_hw", DISK_PENDING_HW.get());

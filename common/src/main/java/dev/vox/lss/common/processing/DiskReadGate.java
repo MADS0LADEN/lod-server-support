@@ -14,7 +14,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  * gate itself.
  *
  * <p>All methods are any-thread (pool workers acquire/release concurrently; CAS loop,
- * never a lock). {@code capacity} is a volatile read at every {@link #tryAcquire} —
+ * never a lock). Since Amendment 2 the SUSTAINED-pressure answer lives ABOVE this
+ * class: the router consults {@code AbstractChunkDiskReader.gateSaturated()} (permits
+ * exhausted AND the park plus permit-less in-flight work at its bound) and RETAINS
+ * entries instead of submitting them into a certain overflow — park overflow is race
+ * armor only. The park's capacity relation ({@code gateParkCapacity >= queueCapacity},
+ * reader ctor) is load-bearing for that predicate's K = pool no-op proof: do not
+ * shrink the park as a "tightening". {@code capacity} is a volatile read at every {@link #tryAcquire} —
  * boot-configured in v0.11.0 stage B, runtime-mutable via {@code /lsslod set} from
  * stage C (R-2). <b>Lowering semantics</b>: in-use may transiently exceed a lowered
  * capacity until held permits drain — new acquisitions refuse meanwhile, {@link #release}

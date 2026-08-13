@@ -375,10 +375,14 @@ class AbstractChunkDiskReaderTest {
     }
 
     /**
-     * Park OVERFLOW is the bounce (the gate-site wiring pin): with the permit held and
-     * the park list full (threads×32 = 64 for this reader), the next miss delivers the
-     * saturated flavor — counted {@code gated}, never {@code submitted}/{@code
-     * saturated} — which the processor's existing silent-superseded routing consumes.
+     * Park OVERFLOW is the RACE-ARMOR bounce (Amendment 2 demoted it from the primary
+     * pressure valve — the router's retention conjunct now holds sustained pressure
+     * upstream, and this direct-submit-past-a-pegged-permit shape is one the router
+     * prevents by construction; it remains reachable by in-flight races): with the
+     * permit held and the park list full (threads×32 = 64 for this reader), the next
+     * miss delivers the saturated flavor — counted {@code gated}, never {@code
+     * submitted}/{@code saturated} — which the processor's existing silent-superseded
+     * routing consumes.
      */
     @Test
     void parkOverflowBouncesAsSaturatedFlavorAndCountsGated() throws Exception {
@@ -533,13 +537,210 @@ class AbstractChunkDiskReaderTest {
     }
 
     /** The read_gate diag token is ALWAYS rendered (the live-deploy log's config-era
-     *  receipt): in-use/K plus the monotonic gated counter. */
+     *  receipt): in-use/K, the park gauge, the retention-stop counter (Amendment 2 —
+     *  mechanism before armor), then the monotonic overflow counter last. */
     @Test
     void getDiagnosticsRendersTheReadGateToken() {
         reader.configureReadGate(3);
         String line = reader.getDiagnostics();
-        assertTrue(line.contains(", read_gate=0/3, gate_parked=0, gated=0"),
+        assertTrue(line.contains(", read_gate=0/3, gate_parked=0, gate_stops=0, gated=0"),
                 "the gate token must render even while the gate is a no-op: " + line);
+    }
+
+    /**
+     * The saturation predicate's live truth table (Amendment 2): pegged permits ALONE
+     * are not saturation (a permit holder in flight contributes nothing permit-less);
+     * a FULL park with the permit held reads saturated; the drain clears it, every
+     * parked read delivers real data, and the overflow counter never moves — retention
+     * has no drop tier of its own.
+     */
+    @Test
+    void gateSaturationPredicateBindsAtParkFullAndClearsOnDrain() throws Exception {
+        var gated = new TestDiskReader(2);
+        gated.registerPlayer(player);
+        try {
+            gated.configureReadGate(1);
+            var store = new GateStubStore(); // answer=null: every lookup is a miss
+            gated.attachStore(store);
+            assertFalse(gated.gateSaturated(), "an idle gate is never saturated");
+
+            var opStarted = new CountDownLatch(1);
+            var holdOpen = new CountDownLatch(1);
+            gated.submit(player, 0, 0, 1L, () -> {
+                opStarted.countDown();
+                if (!holdOpen.await(30, TimeUnit.SECONDS)) throw new IllegalStateException("never released");
+                return new byte[]{1};
+            });
+            assertTrue(opStarted.await(5, TimeUnit.SECONDS), "the permit-holding read must start");
+            assertFalse(gated.gateSaturated(),
+                    "pegged permits with an empty park are NOT saturation — the holder "
+                            + "is not permit-less work");
+
+            // Fill the park exactly to capacity (threads*32 = 64): each miss parks.
+            for (int i = 1; i <= 64; i++) {
+                gated.submit(player, i, 7, 100L + i, () -> new byte[]{2});
+            }
+            long deadline = System.nanoTime() + 30_000_000_000L;
+            while (!gated.gateSaturated() && System.nanoTime() < deadline) Thread.sleep(2);
+            assertTrue(gated.gateSaturated(),
+                    "permit held + park at capacity must read saturated");
+            assertEquals(0, gated.getDiag().getGatedCount(),
+                    "an exactly-full park has overflowed nothing");
+            assertNull(gated.getPlayerQueue(player).poll(),
+                    "parked reads deliver nothing while parked — no drops either");
+
+            // Release: the park drains on the freed permit; saturation self-clears.
+            holdOpen.countDown();
+            var results = new ArrayList<ChunkReadResult>();
+            deadline = System.nanoTime() + 30_000_000_000L;
+            while (results.size() < 65 && System.nanoTime() < deadline) {
+                var r = gated.getPlayerQueue(player).poll();
+                if (r != null) results.add(r); else Thread.sleep(2);
+            }
+            assertEquals(65, results.size(), "the holder AND all 64 parked reads deliver");
+            assertTrue(results.stream().noneMatch(ChunkReadResult::saturated),
+                    "retention has no drop tier — every parked read produced real data");
+            assertFalse(gated.gateSaturated(), "a drained park clears saturation");
+            assertEquals(0, gated.getDiag().getGatedCount());
+        } finally {
+            gated.shutdown();
+        }
+    }
+
+    /**
+     * The K = pool structural-false pin (Amendment 2 revision — the carrier of every
+     * no-op scenario baseline): with the gate at pool size, queued pool work must
+     * never read saturated, because the permit-less term counts only work BEYOND the
+     * permit holders and the park stays pigeonhole-empty (a classifying thread always
+     * finds a permit). A bare tasksInFlight term would flip this true at
+     * queue-nearly-full and shift the disk-saturation baseline.
+     */
+    @Test
+    void gateSaturationIsStructurallyFalseAtPoolK() throws Exception {
+        var r = new TestDiskReader(1); // K = pool = 1 (the ctor default), no store
+        r.registerPlayer(player);
+        try {
+            var opStarted = new CountDownLatch(1);
+            var holdOpen = new CountDownLatch(1);
+            r.submit(player, 0, 0, 1L, () -> {
+                opStarted.countDown();
+                if (!holdOpen.await(30, TimeUnit.SECONDS)) throw new IllegalStateException("never released");
+                return new byte[]{1};
+            });
+            assertTrue(opStarted.await(5, TimeUnit.SECONDS));
+
+            // Queue 31 more (capacity 32): one slot free, so hasHeadroom still passes —
+            // exactly the state the router would consult the gate in.
+            for (int i = 1; i <= 31; i++) {
+                r.submit(player, i, 9, 200L + i, () -> new byte[]{3});
+            }
+            assertTrue(r.hasHeadroom(), "premise: the router would reach the gate check");
+            assertFalse(r.gateSaturated(),
+                    "queued work at K = pool must NEVER read saturated (the permit-less "
+                            + "term excludes the holder; the park is pigeonhole-empty)");
+
+            holdOpen.countDown();
+            var results = new ArrayList<ChunkReadResult>();
+            long deadline = System.nanoTime() + 30_000_000_000L;
+            while (results.size() < 32 && System.nanoTime() < deadline) {
+                var res = r.getPlayerQueue(player).poll();
+                if (res != null) results.add(res); else Thread.sleep(2);
+            }
+            assertEquals(32, results.size(), "everything drains normally");
+            assertEquals(0, r.getDiag().getGatedCount());
+        } finally {
+            r.shutdown();
+        }
+    }
+
+    /**
+     * The multi-thread K = pool discriminator (3-Opus round MINOR-4): all four pool
+     * threads blocked HOLDING permits (inUse == cap) with the queue deep — 124 of 128
+     * — so {@code hasHeadroom()} still passes. The permit-less term (tasksInFlight −
+     * inUse = 124 queued) stays below the park bound (128) → never saturated. A bare
+     * {@code tasksInFlight} term reads 128 ≥ 128 here and flips TRUE — the exact
+     * regression that would shift the disk-saturation baseline.
+     */
+    @Test
+    void gateSaturationStaysFalseAtPoolKWithAllPermitsHeldAndADeepQueue() throws Exception {
+        var r = new TestDiskReader(4); // K = pool = 4 (ctor default)
+        r.registerPlayer(player);
+        try {
+            var started = new CountDownLatch(4);
+            var holdOpen = new CountDownLatch(1);
+            for (int i = 0; i < 4; i++) {
+                r.submit(player, i, 0, 1L + i, () -> {
+                    started.countDown();
+                    if (!holdOpen.await(30, TimeUnit.SECONDS)) throw new IllegalStateException("never released");
+                    return new byte[]{1};
+                });
+            }
+            assertTrue(started.await(5, TimeUnit.SECONDS), "all four holders must start");
+            for (int i = 10; i < 134; i++) { // 124 queued behind the blocked pool
+                r.submit(player, i, 3, 100L + i, () -> new byte[]{2});
+            }
+            assertTrue(r.hasHeadroom(), "premise: 124/128 queued — the router would consult the gate");
+            assertFalse(r.gateSaturated(),
+                    "K = pool with every permit held and a deep queue must stay unsaturated "
+                            + "— only permit-LESS work may count toward the park bound");
+
+            holdOpen.countDown();
+            var results = new ArrayList<ChunkReadResult>();
+            long deadline = System.nanoTime() + 30_000_000_000L;
+            while (results.size() < 128 && System.nanoTime() < deadline) {
+                var res = r.getPlayerQueue(player).poll();
+                if (res != null) results.add(res); else Thread.sleep(2);
+            }
+            assertEquals(128, results.size(), "everything drains normally");
+            assertEquals(0, r.getDiag().getGatedCount());
+        } finally {
+            r.shutdown();
+        }
+    }
+
+    /**
+     * The gate-stop plumbing + episode-detector pins (3-Opus round: the router test
+     * stubs {@code recordGateStop}, so without this the real chain — processor →
+     * reader → diag → diag token — and the WARN latch had zero Tier 1 coverage; a
+     * broken chain would print gate_stops=0 forever while the soak red pointed at
+     * the scenario config).
+     */
+    @Test
+    void recordGateStopFeedsDiagAndLatchesTheWarnOnlyOnASustainedEpisode() {
+        reader.recordGateStop();
+        assertEquals(1, reader.getDiag().getGateStopsCount(),
+                "a recorded stop lands in the reader's diagnostics");
+        assertTrue(reader.getDiagnostics().contains("gate_stops=1"),
+                "and renders in the always-on diag token");
+        assertFalse(reader.gateStopWarnLatchedForTest(), "one stop never latches");
+
+        // Drive the episode detector through the clock seam. A dense sub-second BLIP
+        // (the 10-player 2-tick shape that falsely latched the cumulative counter)
+        // must not latch, however many stops it books.
+        long t = System.nanoTime() + 10_000_000_000L; // fresh episode (>1 s after the real stop)
+        for (int i = 0; i < 50; i++) {
+            reader.recordGateStop(t);
+            t += 10_000_000L; // 10 ms apart — 0.5 s span
+        }
+        assertFalse(reader.gateStopWarnLatchedForTest(),
+                "a dense sub-second blip must NOT latch the sustained-load WARN");
+
+        // A >1 s quiet gap ends the episode; the next one must start from zero.
+        t += 5_000_000_000L;
+        for (int i = 0; i < 25; i++) {
+            reader.recordGateStop(t);
+            t += 100_000_000L; // 100 ms apart — crosses 3 s highly sustained
+        }
+        assertFalse(reader.gateStopWarnLatchedForTest(),
+                "2.4 s of sustained stops is still below the 3 s episode bar");
+        for (int i = 0; i < 10; i++) {
+            reader.recordGateStop(t);
+            t += 100_000_000L;
+        }
+        assertTrue(reader.gateStopWarnLatchedForTest(),
+                "stops spanning >= 3 s with <= 1 s gaps latch the once-per-session WARN");
+        assertEquals(86, reader.getDiag().getGateStopsCount(),
+                "every stop counted regardless of the latch");
     }
 
     /** Minimal concrete config for the reapply seam (only maxConcurrentDiskReads and

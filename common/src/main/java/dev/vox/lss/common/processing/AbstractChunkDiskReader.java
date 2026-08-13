@@ -108,9 +108,14 @@ public abstract class AbstractChunkDiskReader {
         this.threadCount = threadCount;
         this.readGate = new DiskReadGate(threadCount);
         // Mirror the pool queue's bound: parked work is the same kind of buffered
-        // demand, so the two buffers stay the same order of magnitude.
-        this.gateParkCapacity = threadCount * QUEUE_CAPACITY_PER_THREAD;
+        // demand, so the two buffers stay the same order of magnitude. LOAD-BEARING
+        // RELATION (Amendment 2): gateParkCapacity >= queueCapacity is what makes
+        // gateSaturated() structurally false at K = pool — permit-less in-flight work
+        // (bounded by the queue) can never reach the park bound while the park itself
+        // stays pigeonhole-empty. Shrinking the park below the queue reopens the
+        // overflow-drop window the router retention exists to close.
         int queueCapacity = threadCount * QUEUE_CAPACITY_PER_THREAD;
+        this.gateParkCapacity = queueCapacity; // ONE computation — the >= relation by construction
         var workQueue = new ArrayBlockingQueue<Runnable>(queueCapacity);
         this.workQueue = workQueue;
         this.executor = new ThreadPoolExecutor(threadCount, threadCount, 0L, TimeUnit.MILLISECONDS,
@@ -142,6 +147,94 @@ public abstract class AbstractChunkDiskReader {
             if (!t.canSubmit(this.tasksInFlight.get())) return false;
         }
         return true;
+    }
+
+    /**
+     * Gate-saturation predicate for the router's retention conjunct (Amendment 2,
+     * disk-read-concurrency-gate-plan.md): true when every permit is held AND the park
+     * plus the permit-LESS in-flight work (queued tasks + workers still classifying —
+     * the population that will try to park) would fill the park. The router then
+     * RETAINS the entry and stops the player's pass instead of submitting into a
+     * certain overflow drop; the next want-set declaration re-prioritizes it.
+     *
+     * <p>Counting only permit-less work ({@code tasksInFlight - inUse}) is what keeps
+     * this structurally FALSE at K = pool (the no-op configuration every baseline
+     * scenario pins): there the park is pigeonhole-empty — a classifying thread always
+     * finds a permit — and with all permits held every running worker holds one, so the
+     * term reduces to the queued count, which sits below {@code queueCapacity ==
+     * gateParkCapacity} whenever {@link #hasHeadroom} passed (the router checks
+     * headroom FIRST). A bare {@code tasksInFlight} term would read saturated at
+     * queue-nearly-full on K = pool and shift the disk-saturation baseline. Both
+     * comparisons are {@code >=}: in-use may transiently exceed a lowered capacity,
+     * and the park count transiently overshoots via claim-then-back-out.
+     *
+     * <p>Evaluated PER ENTRY on the processing thread (stale reads self-heal within
+     * one classification latency — a park refill mid-drain is seen by the next
+     * entry). Hit-heavy over-conservatism near queue-full is accepted: the stop is
+     * re-evaluated every pass at ~20 Hz. One transient exception to the K = pool
+     * argument: a K LOWERED at runtime parks entries, and raising it back to pool
+     * can read saturated until that residue drains — self-clearing (nothing refills
+     * a held park; every release drains), unreachable in any pinned scenario.
+     */
+    public boolean gateSaturated() {
+        int inUse = this.readGate.inUse();
+        if (inUse < this.readGate.capacity()) return false;
+        return this.gateParkedCount.get() + (this.tasksInFlight.get() - inUse)
+                >= this.gateParkCapacity;
+    }
+
+    /** A saturation EPISODE = gate stops arriving with no quiet gap longer than this.
+     *  Any pass that admits (or any second without a stop) ends the episode. */
+    private static final long GATE_STOP_EPISODE_GAP_NANOS = 1_000_000_000L;
+    /** Episode length that latches the once-per-session capacity WARN: ~3 s of
+     *  repeated stops is sustained load. A cumulative count was the first shape here
+     *  and was wrong both ways (3-Opus round): 20 isolated stops spread over hours
+     *  latched a WARN claiming "sustained load", and one 2-tick blip on a 10-player
+     *  server latched it in ~100 ms (the counter grows ~N players x 20 Hz). */
+    private static final long GATE_STOP_WARN_SUSTAIN_NANOS = 3_000_000_000L;
+    private volatile boolean gateStopWarnLatched = false;
+    // Episode tracking — processing-thread only (recordGateStop's caller contract).
+    private boolean gateStopSeen = false;
+    private long gateStopEpisodeStartNanos;
+    private long gateStopLastNanos;
+
+    /**
+     * Books one gate-stopped router pass (Amendment 2). The capacity WARN is LATCHED
+     * once per session (the store-eviction precedent — a per-minute re-key fired 3-5
+     * times during one legitimate cold join, the exact noise retention removes) and
+     * only on a SUSTAINED episode: running totals live in {@code /lsslod diag}'s
+     * {@code gate_stops=} token either way.
+     */
+    public void recordGateStop() {
+        recordGateStop(System.nanoTime());
+    }
+
+    /** Clock-injectable seam (the latch is time-based). Processing thread only. */
+    void recordGateStop(long nowNanos) {
+        this.diag.recordGateStop();
+        if (this.gateStopWarnLatched) return;
+        if (!this.gateStopSeen
+                || nowNanos - this.gateStopLastNanos > GATE_STOP_EPISODE_GAP_NANOS) {
+            this.gateStopEpisodeStartNanos = nowNanos; // a new episode begins
+            this.gateStopSeen = true;
+        }
+        this.gateStopLastNanos = nowNanos;
+        if (nowNanos - this.gateStopEpisodeStartNanos >= GATE_STOP_WARN_SUSTAIN_NANOS) {
+            this.gateStopWarnLatched = true;
+            LSSLogger.warn("Disk reads are concurrency-gated under sustained load (read_gate="
+                    + this.readGate.capacity() + "/" + this.readGate.capacity()
+                    + ", park full): the request router is deferring cold-region reads to the"
+                    + " next client declaration (running total: gate_stops= in /"
+                    + Brand.serverCommand() + " diag). This is the gate working; raise"
+                    + " maxConcurrentDiskReads in lss-server-config.json if server CPU"
+                    + " headroom allows and you want faster cold backfill. (Logged once per"
+                    + " session.)");
+        }
+    }
+
+    /** Latch observability for the Tier 1 episode-detector pins. */
+    boolean gateStopWarnLatchedForTest() {
+        return this.gateStopWarnLatched;
     }
 
     /** The native→v20 body translator for pre-migration {@code wirefmt=19} store rows
@@ -485,12 +578,14 @@ public abstract class AbstractChunkDiskReader {
                 this.diag.recordGated();
                 long refused = this.gateWarn.recordAndTryAcquire(System.nanoTime() / 1_000_000);
                 if (refused > 0) {
-                    LSSLogger.warn("Disk reads are being concurrency-gated (read_gate="
+                    // Amendment 2: overflow is RACE ARMOR now (submissions already in
+                    // flight when the park filled) — the router's retention conjunct
+                    // holds sustained pressure upstream, so no capacity remedy here;
+                    // that advice lives on the latched gate-stop WARN.
+                    LSSLogger.warn("Disk read gate park overflowed (read_gate="
                             + this.readGate.capacity() + "/" + this.readGate.capacity()
                             + ", park full): " + refused + " read(s) dropped since the last"
-                            + " warning — clients re-request automatically; raise"
-                            + " maxConcurrentDiskReads in lss-server-config.json if server"
-                            + " CPU headroom allows");
+                            + " warning — clients re-request automatically");
                 }
                 addResult(playerUuid, ChunkReadResult.saturated(playerUuid, chunkX, chunkZ, dimension, submissionOrder));
                 return;
@@ -683,10 +778,13 @@ public abstract class AbstractChunkDiskReader {
                 // live-deploy log records this token as the config-era receipt, and an
                 // absent-when-inert token would make "gate not binding" and "build
                 // without the gate" indistinguishable over RCON. gate_parked is a gauge
-                // (diag-only, NEVER exported — the store.queue trap); gated counts park
-                // OVERFLOW bounces only.
+                // (diag-only, NEVER exported — the store.queue trap); gate_stops counts
+                // router passes stopped by saturation (Amendment 2 retention — the
+                // capacity-pressure signal); gated counts park OVERFLOW bounces only
+                // (race armor, expected ~0) — mechanism before armor, gated= last.
                 + ", read_gate=" + this.readGate.inUse() + "/" + this.readGate.capacity()
                 + ", gate_parked=" + this.gateParkedCount.get()
+                + ", gate_stops=" + this.diag.getGateStopsCount()
                 + ", gated=" + this.diag.getGatedCount();
         // The throttle is engaged only on the Fabric A-incompatible fallback path (a chunk-IO mod
         // replaced vanilla IO). On the normal working-A path it is null and the line is unchanged,
