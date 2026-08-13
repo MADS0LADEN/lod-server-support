@@ -130,7 +130,10 @@ eyeballing LOD behavior — the automated gates are the test tiers and the soak 
 
 ### Networking Protocol (wire v20, the v17 design line — declarative want-set, server-owned generation)
 
-Batch model with 6 payload types. Fabric uses `LSSNetworking` with Fabric `StreamCodec`;
+Batch model with 6 core payload types plus the `lss:client_info` sidecar and the three
+`lss:far_player_*` channels (E1 — raw `FarPlayerWire` byte[] bodies, version-neutral, no
+protocol bump; both WireParityTests' channel census pins the full 10-channel surface).
+Fabric uses `LSSNetworking` with Fabric `StreamCodec`;
 Paper uses `PaperPayloadHandler` with raw `FriendlyByteBuf` encoding. Both produce identical wire format.
 
 **C2S:** `HandshakeC2SPayload` (capabilities bitmask) → `BatchChunkRequestC2SPayload` (batch of packed position + clientTimestamp pairs — the client's **complete want-set**, not an increment; ts `>0` = resync "send if newer", `<=0` = "I have nothing" — there is no generate-request shape, the client never classifies)

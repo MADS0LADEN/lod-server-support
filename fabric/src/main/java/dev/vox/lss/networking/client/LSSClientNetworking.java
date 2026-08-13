@@ -33,6 +33,7 @@ public class LSSClientNetworking {
                         version, LSSConstants.CAPABILITY_VOXEL_COLUMNS
                                 | ZstdWireSupport.capabilityBit()
                                 | FarPlayerClientSupport.capabilityBit()));
+                FarPlayerClientSupport.onHandshakeSent();
                 sendClientInfoSidecar();
             },
             LSSClientNetworking::createRequestManager);
@@ -143,6 +144,7 @@ public class LSSClientNetworking {
                         LSSConstants.PROTOCOL_VERSION, LSSConstants.CAPABILITY_VOXEL_COLUMNS
                                 | ZstdWireSupport.capabilityBit()
                                 | FarPlayerClientSupport.capabilityBit()));
+                FarPlayerClientSupport.onHandshakeSent();
                 sendClientInfoSidecar();
             } catch (Exception e) {
                 LSSLogger.debug("LAN host handshake send failed: " + e.getMessage());

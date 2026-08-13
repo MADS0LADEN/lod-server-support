@@ -189,7 +189,11 @@ SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBac
                                      # allowlist rule. Soaks run without Via, so the
                                      # probe is no-signal and either value is provably
                                      # inert (an A/B pins exactly that).
-                                     "enableViaMismatchGuard"})
+                                     "enableViaMismatchGuard",
+                                     # Far players (E1, FARP §3.4) — registered with the
+                                     # knobs (the R4 lesson). E1 soaks stay mode-off;
+                                     # the E2/E3 coexist scenarios arm these.
+                                     "farPlayersSendSpectators"})
 SERVER_CONFIG_INT_KEYS = frozenset({
     "lodDistanceChunks", "bytesPerSecondLimitPerPlayer", "diskReaderThreads",
     # Disk-read concurrency gate K (disk-read-concurrency-gate-plan.md; 0 = AUTO,
@@ -224,15 +228,22 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     # lodStoreBackfillTickCeilingMillis was retired to a constant 2026-08-02: its clamp band
     # was 20..50 and both ends were degenerate by its own documentation.
     "lodStoreBackfillColumnsPerSecond",
+    # Far players (E1): cadence + the distance ring (FARP §3.4).
+    "farPlayersUpdateIntervalTicks", "farPlayersMaxDistanceBlocks",
+    "farPlayersMinDistanceBlocks",
 })
 # X-ray masking tri-state ("auto"/"on"/"off"), the LOD-store switch ("off"/"full" —
 # scenarios A/B store gates against it; "memory" retired 2026-08-02), + hidden-block
 # id list — the only
 # non-bool non-int server config keys; validated loosely (any string / list of strings).
-SERVER_CONFIG_STRING_KEYS = frozenset({"xrayObfuscation", "lodStore"})
+SERVER_CONFIG_STRING_KEYS = frozenset({"xrayObfuscation", "lodStore",
+                                       # Far players mode ("off"/"on"/"opt-in", E1).
+                                       "farPlayers"})
 # updateEvents is Paper-only (the Bukkit event class names driving dirty detection);
 # it was absent here, so no Paper scenario could pin its dirty-detection surface.
-SERVER_CONFIG_STRING_LIST_KEYS = frozenset({"xrayHiddenBlocks", "updateEvents"})
+SERVER_CONFIG_STRING_LIST_KEYS = frozenset({"xrayHiddenBlocks", "updateEvents",
+                                            # Far players per-name/UUID privacy list (E1).
+                                            "farPlayersExclude"})
 SERVER_CONFIG_KEYS = (SERVER_CONFIG_BOOL_KEYS | SERVER_CONFIG_INT_KEYS
                       | SERVER_CONFIG_STRING_KEYS | SERVER_CONFIG_STRING_LIST_KEYS)
 
@@ -1081,18 +1092,24 @@ def evaluate_laws(ctx):
                                     "no client-laws window carried nonzero request deltas — "
                                     "conservation laws never fired on real traffic",
                                     {"client_windows": sum(client_windows.values())}))
-    violations += far_players_inert_violations(ctx.server_snaps[-1])
+    violations += far_players_inert_violations(ctx.server_snaps)
     return violations, windows, sum(client_windows.values())
 
 
-def far_players_inert_violations(last_snapshot):
+def far_players_inert_violations(snapshots):
     """E1 baseline neutrality (FARP §3.3 property gate): soak clients must NEVER
     subscribe to far players — their capability bit is property-gated off — so every
     far_players counter must read zero on every scenario. A nonzero here means the gate
     broke and every soak baseline silently shifted. Presence-tolerant: pre-E1
-    recordings without the block pass vacuously."""
-    fp = last_snapshot.get("far_players", {})
-    moved = {k: v for k, v in fp.items() if isinstance(v, (int, float)) and v != 0}
+    recordings without the block pass vacuously. Scans EVERY snapshot (review NIT):
+    ``subscribers`` is a gauge, so a viewer that subscribed mid-run and quit before
+    scenario end would read 0 in the final snapshot alone."""
+    snaps = snapshots if isinstance(snapshots, list) else [snapshots]
+    moved = {}
+    for snap in snaps:
+        for k, v in snap.get("far_players", {}).items():
+            if isinstance(v, (int, float)) and v != 0:
+                moved[k] = max(moved.get(k, 0), v)
     if moved:
         return [Violation("far-players-inert", "entire run",
                           "far_players counters moved on a soak run — the client "
@@ -3525,9 +3542,12 @@ def selftest():
     hits("disc config missing lod", list(disc(disc_ctx(99999, 0, {}))), "disc-completeness")
 
     # --- Far-players baseline neutrality (E1) ---
-    clean("far players inert", far_players_inert_violations(_srv(1000)))
+    clean("far players inert", far_players_inert_violations([_srv(1000)]))
     hits("far players moved", far_players_inert_violations(
-        _srv(1000, over={"far_players.roster_frames": 3})), "far-players-inert")
+        [_srv(1000, over={"far_players.roster_frames": 3})]), "far-players-inert")
+    hits("far players gauge moved mid-run only", far_players_inert_violations(
+        [_srv(1000, over={"far_players.subscribers": 1}), _srv(2000)]),
+        "far-players-inert")
 
     # --- Window floors (vacuous-pass guard) ---
     clean("floors met", check_window_floors({(1, 0): 3}, {(1, 0): 3}))

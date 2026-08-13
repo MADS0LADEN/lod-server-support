@@ -723,6 +723,12 @@ public class PaperRequestProcessingService {
                                     && !this.dialects.isV18(r.player().getUUID())
                                     && !this.dialects.isV19(r.player().getUUID())) {
                                 this.farPlayerService.subscribeViewer(r.player().getUUID());
+                            } else {
+                                // Re-handshake without the bit / on a legacy dialect
+                                // sheds any prior subscription (review: a same-session
+                                // downgrade must not keep streaming far-player frames
+                                // to a decoder that no longer expects them).
+                                this.farPlayerService.removeViewer(r.player().getUUID());
                             }
                         } finally {
                             if (this.players.containsKey(r.player().getUUID())) {
@@ -995,6 +1001,10 @@ public class PaperRequestProcessingService {
                 // sweep was the one removal path that leaked it).
                 this.dialects.onDisconnect(uuid);
                 this.v16Compat.onDisconnect(uuid);
+                // E1 review M1: the sweep must shed the far-player subscription like
+                // the other two identities, or a swept viewer's roster state leaks and
+                // keeps charging the broadcast loop until a same-UUID rejoin.
+                this.farPlayerService.removeViewer(uuid);
             }
         }
 
@@ -1421,20 +1431,31 @@ public class PaperRequestProcessingService {
         }
         if (++this.farPlayerTickCounter < this.config.farPlayersUpdateIntervalTicks) return;
         this.farPlayerTickCounter = 0;
-        var online = new java.util.ArrayList<dev.vox.lss.common.farplayers
-                .FarPlayerBroadcastService.PlayerSnapshot>();
-        for (var p : this.server.getPlayerList().getPlayers()) {
-            online.add(PaperFarPlayerSnapshots.snapshot(p));
+        try {
+            var online = new java.util.ArrayList<dev.vox.lss.common.farplayers
+                    .FarPlayerBroadcastService.PlayerSnapshot>();
+            for (var p : this.server.getPlayerList().getPlayers()) {
+                online.add(PaperFarPlayerSnapshots.snapshot(p));
+            }
+            this.farPlayerService.tick(System.currentTimeMillis(), online,
+                    new dev.vox.lss.common.farplayers.FarPlayerBroadcastService.Settings(
+                            this.config.farPlayers, this.config.farPlayersMaxDistanceBlocks,
+                            this.config.farPlayersMinDistanceBlocks,
+                            this.config.farPlayersSendSpectators,
+                            this.config.farPlayersExclude,
+                            this.config.farPlayersUpdateIntervalTicks),
+                    this::sendFarPlayerFrame);
+        } catch (Exception e) {
+            // Containment (review): a snapshot/encode bug must degrade far players,
+            // never the pump tick (which owns lifecycle + column serving).
+            if (!this.farPlayerTickErrorWarned) {
+                this.farPlayerTickErrorWarned = true;
+                LSSLogger.error("Far-player broadcast pass failed — contained (once per session)", e);
+            }
         }
-        this.farPlayerService.tick(System.currentTimeMillis(), online,
-                new dev.vox.lss.common.farplayers.FarPlayerBroadcastService.Settings(
-                        this.config.farPlayers, this.config.farPlayersMaxDistanceBlocks,
-                        this.config.farPlayersMinDistanceBlocks,
-                        this.config.farPlayersSendSpectators,
-                        this.config.farPlayersExclude,
-                        this.config.farPlayersUpdateIntervalTicks),
-                this::sendFarPlayerFrame);
     }
+
+    private boolean farPlayerTickErrorWarned;
 
     /** The dedicated far-player send lane — twin of the Fabric sender: writability
      *  consult (NOT_WRITABLE withholds) + bandwidth governor charge; NMS DiscardedPayload
@@ -1449,10 +1470,16 @@ public class PaperRequestProcessingService {
         }
         player.connection.send(new net.minecraft.network.protocol.common.ClientboundCustomPayloadPacket(
                 new net.minecraft.network.protocol.common.custom.DiscardedPayload(
-                        net.minecraft.resources.Identifier.parse(channel), body)));
+                        FAR_PLAYER_CHANNEL_IDS.computeIfAbsent(channel,
+                                net.minecraft.resources.Identifier::parse), body)));
         this.bandwidthLimiter.recordSend(body.length);
         return true;
     }
+
+    // Two entries ever (roster + updates) — parse once, not per frame (review NIT).
+    private static final java.util.concurrent.ConcurrentHashMap<String,
+            net.minecraft.resources.Identifier> FAR_PLAYER_CHANNEL_IDS =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     public dev.vox.lss.common.farplayers.FarPlayerBroadcastService getFarPlayerService() {
         return this.farPlayerService;

@@ -68,6 +68,9 @@ final class FabricFarPlayerSnapshots {
                 pose,
                 delta.x * 20.0, delta.y * 20.0, delta.z * 20.0,
                 p.isSpectator(), p.isInvisible(), p.isAlive() && !p.isRemoved(),
+                // No permission system on plain Fabric — farPlayersExclude is the
+                // per-player privacy lever here (Paper wires lss.farplayers.hidden).
+                false,
                 hash, equipmentIds, equipmentCounts, vehicle);
     }
 

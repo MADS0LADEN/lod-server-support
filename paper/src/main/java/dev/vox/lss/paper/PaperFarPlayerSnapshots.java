@@ -68,6 +68,12 @@ final class PaperFarPlayerSnapshots {
                 pose,
                 delta.x * 20.0, delta.y * 20.0, delta.z * 20.0,
                 p.isSpectator(), p.isInvisible(), p.isAlive() && !p.isRemoved(),
+                // lss.farplayers.hidden (plugin.yml, default false): a permission-held
+                // player is dropped by the visibility ladder on every viewer — the
+                // per-player privacy lever the exclude LIST can't express for LuckPerms
+                // groups. Read on the pump via the Bukkit entity (thread-fine: Folia
+                // permission reads are region-safe for online players).
+                p.getBukkitEntity().hasPermission("lss.farplayers.hidden"),
                 hash, equipmentIds, equipmentCounts, vehicle);
     }
 

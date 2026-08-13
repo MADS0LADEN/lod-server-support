@@ -573,3 +573,14 @@ that run.
   dirty-during-backfill rides these defaults: if a scenario reds on convergence timing
   after this change, the cut is the first suspect (re-baseline, don't chase phantoms).
   The §11.7 cap sweep remains the falsifiable check for both.
+
+- **2026-08-13 erratum (v0.11.0 stage E1 — far players)**: six new server keys join the
+  audited surface, all clamped by the shared static helpers (the stage-C R-2 rule from
+  the outset): `farPlayers` "off"/"opt-in"/"on" (compiled default **off** — E1 ships
+  inert; the E2 defaults decision owns any flip), `farPlayersUpdateIntervalTicks` 10
+  (2..100), `farPlayersMaxDistanceBlocks` 2048 (128..16384),
+  `farPlayersMinDistanceBlocks` 0 (0..; cross-field: dragged under max at validate,
+  excluded from the SHARED_BOUNDS sweep as a derived bound), `farPlayersSendSpectators`
+  false, `farPlayersExclude` empty list. `farPlayers` and `farPlayersMaxDistanceBlocks`
+  are `/lsslod set` rows (R-9) sharing those exact helpers. This file predates the keys;
+  the audit tables above deliberately do NOT enumerate them — this erratum is the record.

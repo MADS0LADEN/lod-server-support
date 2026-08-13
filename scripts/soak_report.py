@@ -426,8 +426,21 @@ def section_identities(rep, d):
         out.append(f"  {label}: {a} vs {b}  {'ok' if ok else 'MISMATCH'}")
 
     audit("disk.successful == service.disk_resolved", "disk.successful", "service.disk_resolved")
-    audit("bandwidth.total_bytes ~ service.bytes_sent", "bandwidth.total_bytes",
-          "service.bytes_sent", tol=0)
+    # Far players (E1): the dedicated send lane charges the shared bandwidth governor,
+    # so the identity is total == column bytes + far-player bytes. All-zero while inert
+    # (check_soak's far-players-inert check pins that), but the audit must carry the
+    # term NOW or the E2 default-flip would red every report (the R-6 same-commit rule).
+    fp_bytes = _get(final, "far_players.bytes") or 0
+    a = _get(final, "bandwidth.total_bytes")
+    b = _get(final, "service.bytes_sent")
+    if a is None or b is None:
+        out.append("  bandwidth.total_bytes ~ service.bytes_sent + far_players.bytes: n/a (missing field)")
+    else:
+        ok = a == b + fp_bytes
+        if not ok:
+            rep["anomalies"] += 1
+        out.append(f"  bandwidth.total_bytes ~ service.bytes_sent + far_players.bytes: "
+                   f"{a} vs {b}+{fp_bytes}  {'ok' if ok else 'MISMATCH'}")
     return out
 
 

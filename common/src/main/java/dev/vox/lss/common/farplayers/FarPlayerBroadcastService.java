@@ -44,8 +44,10 @@ public final class FarPlayerBroadcastService {
     /** R-3's rate bound on client-triggerable full rosters. */
     public static final long FULL_ROSTER_MIN_INTERVAL_MILLIS = 5_000;
 
-    /** Distance-tiered cadence: beyond this fraction of the effective max ring the
-     *  target updates at half rate; beyond twice this, quarter rate. */
+    /** Distance-tiered cadence band edge in ABSOLUTE blocks: beyond this the target
+     *  updates at half rate; beyond twice it, quarter rate. At the default 2048-block
+     *  server cap the tiers are inert by construction (nothing passes the ring beyond
+     *  2048) — they bind only when an admin raises the cap. */
     public static final int TIER_HALF_RATE_BLOCKS = 2048;
 
     /** One online player's per-tick snapshot, built once by the platform adapter.
@@ -57,6 +59,7 @@ public final class FarPlayerBroadcastService {
                                  byte poseFlags,
                                  double velXPerSecond, double velYPerSecond, double velZPerSecond,
                                  boolean spectator, boolean invisible, boolean alive,
+                                 boolean hidden,
                                  long equipmentHash,
                                  String[] equipmentIdentities, int[] equipmentCounts,
                                  FarPlayerWire.Vehicle vehicle) {}
@@ -210,6 +213,17 @@ public final class FarPlayerBroadcastService {
                 visible.add(target);
             }
         }
+        // Encode-side bound (review MAJOR): the decode caps reject oversize frames
+        // WHOLESALE, so the served set is capped nearest-first (the want-set idiom) —
+        // beyond-cap players simply wait for churn, never break the session.
+        if (visible.size() > FarPlayerWire.MAX_UPDATE_ENTRIES) {
+            visible.sort(java.util.Comparator.comparingDouble(t -> {
+                double dx = t.x() - viewer.x();
+                double dz = t.z() - viewer.z();
+                return dx * dx + dz * dz;
+            }));
+            visible.subList(FarPlayerWire.MAX_UPDATE_ENTRIES, visible.size()).clear();
+        }
 
         // Roster maintenance. A pending full roster (subscribe/prefs/dim change) sends
         // at the rate bound; membership diffs are incremental frames otherwise.
@@ -241,36 +255,47 @@ public final class FarPlayerBroadcastService {
             bytesSent.addAndGet(frame.length);
             fullSent = true;
         } else {
-            // Incremental membership diff.
+            // Incremental membership diff. NOTHING mutates until the frame is accepted
+            // (stage-E1 review MAJOR: removals applied before a withheld send were lost
+            // forever — the departed identity was already gone from indexByUuid, so no
+            // later diff could re-emit it and the client kept a ghost roster entry).
             var added = new ArrayList<FarPlayerWire.RosterEntry>();
+            int nextIdx = state.nextIndex;
             for (var t : visible) {
                 if (!state.indexByUuid.containsKey(t.uuid())) {
-                    int idx = state.nextIndex++;
-                    state.indexByUuid.put(t.uuid(), idx);
-                    added.add(new FarPlayerWire.RosterEntry(idx, t.uuid(), t.name()));
+                    added.add(new FarPlayerWire.RosterEntry(nextIdx++, t.uuid(), t.name()));
                 }
             }
+            var removedUuids = new ArrayList<UUID>();
             var removed = new ArrayList<Integer>();
             var visibleUuids = new java.util.HashSet<UUID>(visible.size());
             for (var t : visible) visibleUuids.add(t.uuid());
-            var it = state.indexByUuid.entrySet().iterator();
-            while (it.hasNext()) {
-                var e = it.next();
+            for (var e : state.indexByUuid.entrySet()) {
                 if (!visibleUuids.contains(e.getKey())) {
+                    removedUuids.add(e.getKey());
                     removed.add(e.getValue());
-                    state.rows.remove(e.getKey());
-                    it.remove();
                 }
             }
             if (!added.isEmpty() || !removed.isEmpty()) {
+                // Encode-side bound (review MAJOR): a frame that exceeds the decode caps
+                // is rejected WHOLESALE by the client — cap adds per frame; the overflow
+                // re-diffs next tick (removals are ints, far under any practical bound).
+                var addsThisFrame = added.size() > FarPlayerWire.MAX_ROSTER_ENTRIES
+                        ? added.subList(0, FarPlayerWire.MAX_ROSTER_ENTRIES) : added;
                 int[] removedIdx = removed.stream().mapToInt(Integer::intValue).toArray();
                 byte[] frame = FarPlayerWire.encodeRoster(
-                        new FarPlayerWire.Roster(state.epoch, false, added, removedIdx));
+                        new FarPlayerWire.Roster(state.epoch, false,
+                                new ArrayList<>(addsThisFrame), removedIdx));
                 if (!sender.send(viewerUuid, LSSConstants.CHANNEL_FAR_PLAYER_ROSTER, frame)) {
-                    // Withheld: roll the membership back so the next tick re-diffs.
-                    for (var a : added) state.indexByUuid.remove(a.uuid());
-                    state.nextIndex -= added.size();
-                    return;
+                    return; // withheld: nothing was mutated, next tick re-diffs
+                }
+                for (var a : addsThisFrame) {
+                    state.indexByUuid.put(a.uuid(), a.index());
+                }
+                state.nextIndex += addsThisFrame.size();
+                for (var gone : removedUuids) {
+                    state.indexByUuid.remove(gone);
+                    state.rows.remove(gone);
                 }
                 rosterFramesSent.incrementAndGet();
                 bytesSent.addAndGet(frame.length);
@@ -279,6 +304,7 @@ public final class FarPlayerBroadcastService {
 
         // Updates with tiering + whole-snapshot delta suppression.
         var entries = new ArrayList<FarPlayerWire.UpdateEntry>();
+        var rowCommits = new ArrayList<Runnable>();
         for (var t : visible) {
             var row = state.rows.get(t.uuid());
             boolean firstSend = row == null;
@@ -331,32 +357,70 @@ public final class FarPlayerBroadcastService {
                     equipmentDue ? t.equipmentCounts() : null,
                     equipmentDue ? t.equipmentIdentities() : null,
                     t.vehicle()));
-            row.quantX = qx;
-            row.quantY = qy;
-            row.quantZ = qz;
-            row.yaw = yaw;
-            row.headYaw = headYaw;
-            row.pitch = pitch;
-            row.pose = t.poseFlags();
-            row.vehicleUuid = vehicleUuid;
-            row.vehicleType = vehicleType;
-            if (equipmentDue) {
-                row.equipmentEverSent = true;
-                row.equipmentHash = t.equipmentHash();
-            } else if (t.equipmentIdentities() == null) {
-                row.equipmentHash = t.equipmentHash();
-            }
+            // Row content commits ON SEND SUCCESS only (review: a withheld frame that
+            // carried a target's FIRST entry left the client with an identity and no
+            // position forever if the target stayed still — advance-before-send made
+            // the loss permanent for stationary targets).
+            final var rowRef = row;
+            final boolean equipDue = equipmentDue;
+            final byte pose = t.poseFlags();
+            final long equipHash = t.equipmentHash();
+            rowCommits.add(() -> {
+                rowRef.quantX = qx;
+                rowRef.quantY = qy;
+                rowRef.quantZ = qz;
+                rowRef.yaw = yaw;
+                rowRef.headYaw = headYaw;
+                rowRef.pitch = pitch;
+                rowRef.pose = pose;
+                rowRef.vehicleUuid = vehicleUuid;
+                rowRef.vehicleType = vehicleType;
+                if (equipDue) {
+                    rowRef.equipmentEverSent = true;
+                }
+                rowRef.equipmentHash = equipHash;
+            });
         }
         if (entries.isEmpty() && !fullSent) return;
-        byte[] frame = FarPlayerWire.encodeUpdates(new FarPlayerWire.Updates(
-                state.epoch, viewer.dimension(), settings.updateIntervalTicks(), entries));
-        if (sender.send(viewerUuid, LSSConstants.CHANNEL_FAR_PLAYER_UPDATES, frame)) {
+        // Chunk under the per-payload dictionary bound (review MAJOR: the first frame
+        // after a full roster carries EVERY visible player's equipment — a populated
+        // hub can exceed MAX_DICT_ENTRIES, and encode THROWS on the server tick).
+        int from = 0;
+        while (from < entries.size()) {
+            int to = from;
+            var dict = new java.util.HashSet<String>();
+            while (to < entries.size()) {
+                var e = entries.get(to);
+                int newIds = 0;
+                if (e.equipmentIdentities() != null) {
+                    for (String id : e.equipmentIdentities()) {
+                        if (id != null && !dict.contains(id)) newIds++;
+                    }
+                }
+                if (e.vehicle() != null && !dict.contains(e.vehicle().typeIdentity())) newIds++;
+                if (dict.size() + newIds > FarPlayerWire.MAX_DICT_ENTRIES && to > from) break;
+                if (e.equipmentIdentities() != null) {
+                    for (String id : e.equipmentIdentities()) {
+                        if (id != null) dict.add(id);
+                    }
+                }
+                if (e.vehicle() != null) dict.add(e.vehicle().typeIdentity());
+                to++;
+            }
+            byte[] frame = FarPlayerWire.encodeUpdates(new FarPlayerWire.Updates(
+                    state.epoch, viewer.dimension(), settings.updateIntervalTicks(),
+                    new ArrayList<>(entries.subList(from, to))));
+            if (!sender.send(viewerUuid, LSSConstants.CHANNEL_FAR_PLAYER_UPDATES, frame)) {
+                return; // withheld: un-sent chunks' rows stay uncommitted, next tick re-sends
+            }
             updateFramesSent.incrementAndGet();
-            entriesSent.addAndGet(entries.size());
+            entriesSent.addAndGet(to - from);
             bytesSent.addAndGet(frame.length);
+            for (int i = from; i < to; i++) {
+                rowCommits.get(i).run();
+            }
+            from = to;
         }
-        // A withheld updates frame is simply dropped — rows already advanced, but the
-        // next real change re-sends; pose data at 2 Hz has no loss-recovery need.
     }
 
     /** The filter ladder, in SeeU's proven order plus the LSS privacy additions. */
@@ -385,7 +449,10 @@ public final class FarPlayerBroadcastService {
         if (distSq > (double) max * max) return false;
         if (min > 0 && distSq < (double) min * min) return false;
 
-        // Server-authoritative privacy (the ESP-oracle fix).
+        // Server-authoritative privacy (the ESP-oracle fix). hidden = the platform's
+        // permission lever (Paper: lss.farplayers.hidden) — enforced HERE, not just
+        // declared (stage-E1 review MAJOR).
+        if (target.hidden()) return false;
         if (isExcluded(target, settings.exclude())) return false;
         var targetState = viewers.get(target.uuid());
         var targetPrefs = targetState == null ? null : targetState.prefs;

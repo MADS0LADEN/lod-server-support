@@ -305,6 +305,9 @@ public class LSSServerNetworking {
                                 .dataVersion().version()));
 
         if (decision.outcome() == HandshakeGate.Outcome.NO_CONSUMER) {
+            // A re-handshake that no longer carries a consumer sheds any prior
+            // far-player subscription too (review: same-session downgrade).
+            service.getFarPlayerService().removeViewer(player.getUUID());
             // Visible to admins via this log.
             LSSLogger.info("Player " + player.getName().getString()
                     + " has no LOD consumer (caps=" + payload.capabilities()
@@ -328,6 +331,11 @@ public class LSSServerNetworking {
             if ((payload.capabilities() & LSSConstants.CAPABILITY_FAR_PLAYERS) != 0
                     && decision.dialect() == HandshakeGate.WireDialect.CURRENT) {
                 service.getFarPlayerService().subscribeViewer(player.getUUID());
+            } else {
+                // Bit absent or a legacy dialect on a RE-handshake: shed any stale
+                // subscription rather than keep streaming frames the decoder no
+                // longer expects (review; twin of the Paper Register-drain else).
+                service.getFarPlayerService().removeViewer(player.getUUID());
             }
             LSSLogger.info("Player " + player.getName().getString()
                     + " registered for " + Brand.shortName() + " LOD request processing (caps="
@@ -336,6 +344,8 @@ public class LSSServerNetworking {
                     + (v19 ? ", v19-compat" : "") + ")");
         }
     }
+
+    private static volatile long lastPrefsWarnMillis;
 
     public static void init() {
         ServerPlayNetworking.registerGlobalReceiver(
@@ -364,9 +374,15 @@ public class LSSServerNetworking {
                                 .decodePrefs(payload.body());
                         service.getFarPlayerService().onPrefs(context.player().getUUID(), prefs);
                     } catch (Exception e) {
-                        LSSLogger.warn("Malformed far-player prefs from "
-                                + context.player().getName().getString() + " — ignored ("
-                                + e + ")");
+                        // Throttled (review m5b): a hostile sender must not turn a
+                        // contained decode failure into log spam.
+                        long now = System.currentTimeMillis();
+                        if (now - lastPrefsWarnMillis > 60_000) {
+                            lastPrefsWarnMillis = now;
+                            LSSLogger.warn("Malformed far-player prefs from "
+                                    + context.player().getName().getString() + " — ignored ("
+                                    + e + ")");
+                        }
                     }
                 }
         );

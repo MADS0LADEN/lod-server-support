@@ -41,6 +41,15 @@ public final class FarPlayerClientTracker {
     private long updatesApplied;
     private long entriesApplied;
     private long droppedWrongEpoch;
+    private long identityCapResets;
+
+    /** Hostile/buggy-server armor (review m5): each frame is bounded (decode caps), but
+     *  incremental adds accumulate across frames — a server that never removes could
+     *  grow the maps without bound. Past this, the tracker clears and waits for the
+     *  next full roster (self-healing: the server's roster is epoch'd). 4x the wire's
+     *  per-roster bound; a legitimate hub never approaches it (the serve set caps at
+     *  MAX_UPDATE_ENTRIES). */
+    static final int MAX_TRACKED_IDENTITIES = 4096;
 
     /** Applies a roster frame. A full roster REPLACES everything at the new epoch;
      *  an incremental frame must match the current epoch or it is dropped. */
@@ -57,6 +66,11 @@ public final class FarPlayerClientTracker {
         for (var e : roster.added()) {
             uuidByIndex.put(e.index(), e.uuid());
             nameByUuid.put(e.uuid(), e.name());
+        }
+        if (uuidByIndex.size() > MAX_TRACKED_IDENTITIES) {
+            clear();
+            identityCapResets++;
+            return;
         }
         for (int idx : roster.removedIndices()) {
             UUID gone = uuidByIndex.remove(idx);
@@ -112,6 +126,8 @@ public final class FarPlayerClientTracker {
     public Map<UUID, TrackedFarPlayer> snapshot() {
         return Map.copyOf(tracked);
     }
+
+    public long identityCapResets() { return identityCapResets; }
 
     public long rostersApplied() { return rostersApplied; }
     public long updatesApplied() { return updatesApplied; }

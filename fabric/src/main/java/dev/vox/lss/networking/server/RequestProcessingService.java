@@ -475,18 +475,29 @@ public class RequestProcessingService {
         }
         if (++this.farPlayerTickCounter < config.farPlayersUpdateIntervalTicks) return;
         this.farPlayerTickCounter = 0;
-        var online = new java.util.ArrayList<dev.vox.lss.common.farplayers
-                .FarPlayerBroadcastService.PlayerSnapshot>();
-        for (var p : this.server.getPlayerList().getPlayers()) {
-            online.add(FabricFarPlayerSnapshots.snapshot(p));
+        try {
+            var online = new java.util.ArrayList<dev.vox.lss.common.farplayers
+                    .FarPlayerBroadcastService.PlayerSnapshot>();
+            for (var p : this.server.getPlayerList().getPlayers()) {
+                online.add(FabricFarPlayerSnapshots.snapshot(p));
+            }
+            this.farPlayerService.tick(System.currentTimeMillis(), online,
+                    new dev.vox.lss.common.farplayers.FarPlayerBroadcastService.Settings(
+                            config.farPlayers, config.farPlayersMaxDistanceBlocks,
+                            config.farPlayersMinDistanceBlocks, config.farPlayersSendSpectators,
+                            config.farPlayersExclude, config.farPlayersUpdateIntervalTicks),
+                    this::sendFarPlayerFrame);
+        } catch (Exception e) {
+            // Containment (review): END_SERVER_TICK has no catch of its own — a
+            // snapshot/encode bug here must degrade far players, never the server tick.
+            if (!this.farPlayerTickErrorWarned) {
+                this.farPlayerTickErrorWarned = true;
+                LSSLogger.error("Far-player broadcast pass failed — contained (once per session)", e);
+            }
         }
-        this.farPlayerService.tick(System.currentTimeMillis(), online,
-                new dev.vox.lss.common.farplayers.FarPlayerBroadcastService.Settings(
-                        config.farPlayers, config.farPlayersMaxDistanceBlocks,
-                        config.farPlayersMinDistanceBlocks, config.farPlayersSendSpectators,
-                        config.farPlayersExclude, config.farPlayersUpdateIntervalTicks),
-                this::sendFarPlayerFrame);
     }
+
+    private boolean farPlayerTickErrorWarned;
 
     /** The dedicated far-player send lane (FARP §3.2 — never the column send queue):
      *  consults channel writability (an unwritable channel WITHHOLDS — the service

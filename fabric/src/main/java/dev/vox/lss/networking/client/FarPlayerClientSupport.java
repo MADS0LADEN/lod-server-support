@@ -86,6 +86,17 @@ public final class FarPlayerClientSupport {
         }
     }
 
+    /**
+     * Called at every handshake SEND (review M3): a re-handshake — the v16 discovery
+     * re-announce, a /reload re-attach, a LAN promote — starts a fresh server-side
+     * session whose subscription state is new, so a surviving latch would suppress the
+     * prefs send that triggers the first roster. Clearing here keeps maybeSendPrefs's
+     * once-unless-changed guard scoped to ONE server session, which is its contract.
+     */
+    static void onHandshakeSent() {
+        lastSentPrefs = null;
+    }
+
     /** Disconnect: the tracker + the prefs-sent latch die with the connection. */
     static void onSessionEnd() {
         TRACKER.clear();

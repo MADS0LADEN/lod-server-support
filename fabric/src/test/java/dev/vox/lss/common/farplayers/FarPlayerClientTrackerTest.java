@@ -91,4 +91,28 @@ class FarPlayerClientTrackerTest {
         t.onUpdates(new FarPlayerWire.Updates(3, "d", 10, List.of(entry(0, 2))), 2000);
         assertEquals(0, t.trackedCount(), "post-clear updates drop until a roster arrives");
     }
+
+    @Test
+    void identityAccumulationPastTheCapClearsAndSelfHeals() {
+        var t = new FarPlayerClientTracker();
+        t.onRoster(fullRoster(1, new FarPlayerWire.RosterEntry(0, A, "Alice")));
+        // Incremental adds accumulate past the cap (a buggy/hostile server that never
+        // removes): the tracker must clear rather than grow without bound.
+        int idx = 1;
+        while (t.currentEpoch() != -1) {
+            var adds = new java.util.ArrayList<FarPlayerWire.RosterEntry>();
+            for (int i = 0; i < 1000; i++, idx++) {
+                adds.add(new FarPlayerWire.RosterEntry(idx, new UUID(5, idx), "P" + idx));
+            }
+            t.onRoster(new FarPlayerWire.Roster(1, false, adds, new int[0]));
+            assertTrue(idx < FarPlayerClientTracker.MAX_TRACKED_IDENTITIES + 2000,
+                    "the cap must have fired by now");
+        }
+        assertEquals(1, t.identityCapResets());
+        assertEquals(0, t.trackedCount(), "past the cap: clear, wait for a full roster");
+        // Self-heal: the next FULL roster repopulates normally.
+        t.onRoster(fullRoster(9, new FarPlayerWire.RosterEntry(0, A, "Alice")));
+        t.onUpdates(new FarPlayerWire.Updates(9, "d", 10, List.of(entry(0, 1))), 3000);
+        assertEquals(1, t.trackedCount());
+    }
 }

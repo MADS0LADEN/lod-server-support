@@ -54,7 +54,7 @@ class FarPlayerBroadcastServiceTest {
             long equipHash, String[] equipIds, int[] equipCounts,
             FarPlayerWire.Vehicle vehicle) {
         return new FarPlayerBroadcastService.PlayerSnapshot(uuid, name, dim, x, y, z,
-                0f, 0f, 0f, (byte) 0, 0, 0, 0, spectator, invisible, alive,
+                0f, 0f, 0f, (byte) 0, 0, 0, 0, spectator, invisible, alive, false,
                 equipHash, equipIds, equipCounts, vehicle);
     }
 
@@ -63,6 +63,13 @@ class FarPlayerBroadcastServiceTest {
         svc.subscribeViewer(VIEWER);
         svc.onPrefs(VIEWER, prefs(true, true));
         return svc;
+    }
+
+    private static FarPlayerBroadcastService.PlayerSnapshot hiddenSnap(UUID uuid, String name,
+                                                                       double x, double z) {
+        return new FarPlayerBroadcastService.PlayerSnapshot(uuid, name, "minecraft:overworld",
+                x, 64, z, 0f, 0f, 0f, (byte) 0, 0, 0, 0, false, false, true, true,
+                0L, null, null, null);
     }
 
     private List<FarPlayerWire.Roster> rosters() {
