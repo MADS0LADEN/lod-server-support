@@ -380,4 +380,212 @@ class VoxyCompatTest {
         assertTrue(registered.isEmpty(),
                 "the bridge must not register (init would succeed against the stubs if the gate broke)");
     }
+
+    // ---- v0.11.0 stage D: the /lss reset Voxy ladder (order-pinned via injected hooks;
+    // ---- client-reset-command-and-cache-relocation-plan.md §Tests) ----
+
+    private static VoxyCompat.ResetHooks hooks(java.util.List<String> log,
+                                               Object instance,
+                                               java.nio.file.Path storageRoot,
+                                               java.nio.file.Path fallbackRoot,
+                                               Runnable rendererShutdownOrNull,
+                                               boolean rendererResolvable,
+                                               VoxyCompat.ThrowingRunnable shutdown,
+                                               VoxyCompat.ThrowingRunnable create) {
+        return new VoxyCompat.ResetHooks(
+                () -> { log.add("instance"); return instance; },
+                inst -> { log.add("storagePath"); return storageRoot; },
+                () -> { log.add("fallbackPath"); return fallbackRoot; },
+                () -> {
+                    log.add("resolveRenderer");
+                    if (!rendererResolvable) return null;
+                    return rendererShutdownOrNull != null ? rendererShutdownOrNull
+                            : () -> log.add("rendererShutdown");
+                },
+                () -> { log.add("shutdownInstance"); shutdown.run(); },
+                () -> { log.add("createInstance"); create.run(); },
+                target -> log.add("wipe:" + target.getFileName()),
+                () -> log.add("gc"),
+                () -> log.add("allChanged"));
+    }
+
+    private static final VoxyCompat.ThrowingRunnable OK = () -> {};
+
+    @Test
+    void resetLadderHappyPathRunsInThePinnedOrder() {
+        var log = new java.util.ArrayList<String>();
+        var root = java.nio.file.Path.of("srv");
+        var outcome = VoxyCompat.resetVoxy(hooks(log, new Object(), root, null, null, true, OK, OK));
+        assertEquals(ModCompat.VoxyResetOutcome.RESET, outcome);
+        assertEquals(java.util.List.of("instance", "storagePath", "resolveRenderer",
+                        "rendererShutdown", "shutdownInstance", "wipe:srv", "gc",
+                        "createInstance", "allChanged"), log,
+                "the ladder order is load-bearing: wipe root read BEFORE shutdown, renderer "
+                        + "down BEFORE the instance, wipe inside the down-window");
+    }
+
+    @Test
+    void unresolvableRendererHolderAbortsBeforeAnyTeardown() {
+        var log = new java.util.ArrayList<String>();
+        var outcome = VoxyCompat.resetVoxy(hooks(log, new Object(), java.nio.file.Path.of("srv"),
+                null, null, false, OK, OK));
+        assertEquals(ModCompat.VoxyResetOutcome.UNAVAILABLE, outcome);
+        assertFalse(log.contains("shutdownInstance"),
+                "aborting AFTER renderer resolution failed but BEFORE shutdownInstance is the "
+                        + "non-negotiable fail-safe (the isWorldUsed busy-wait freeze)");
+        assertFalse(log.stream().anyMatch(l -> l.startsWith("wipe:")), "no teardown, no wipe");
+        assertFalse(log.contains("createInstance"));
+    }
+
+    @Test
+    void nullInstanceWipesViaTheFallbackDerivationWithoutLifecycleCalls() {
+        var log = new java.util.ArrayList<String>();
+        var outcome = VoxyCompat.resetVoxy(hooks(log, null, java.nio.file.Path.of("live"),
+                java.nio.file.Path.of("fallback"), null, true, OK, OK));
+        assertEquals(ModCompat.VoxyResetOutcome.WIPED_NO_INSTANCE, outcome);
+        assertTrue(log.contains("fallbackPath"), "the wipe root comes from the fallback derivation");
+        assertTrue(log.contains("wipe:fallback"), "still wipes (no live storage to race)");
+        assertFalse(log.contains("shutdownInstance"), "no instance to shut down");
+        assertFalse(log.contains("createInstance"),
+                "never create an instance Voxy itself didn't have (config-disabled/GPU cases)");
+        assertFalse(log.contains("storagePath"), "no live instance to ask");
+    }
+
+    @Test
+    void shutdownThrowSkipsTheWipeButStillAttemptsRecoveryCreate() {
+        var log = new java.util.ArrayList<String>();
+        var outcome = VoxyCompat.resetVoxy(hooks(log, new Object(), java.nio.file.Path.of("srv"),
+                null, null, true, () -> { throw new IllegalStateException("world-cleaner join"); }, OK));
+        assertEquals(ModCompat.VoxyResetOutcome.SHUTDOWN_FAILED, outcome);
+        assertFalse(log.stream().anyMatch(l -> l.startsWith("wipe:")),
+                "storage may hold open handles — deleting over them is the Windows partial-wipe trap");
+        assertTrue(log.contains("createInstance"),
+                "Voxy is instanceless after the failed shutdown — recovery create still runs");
+        assertTrue(log.contains("allChanged"), "the renderer rebuild still runs after recovery");
+    }
+
+    @Test
+    void shutdownAndCreateBothThrowingIsRestartFailed() {
+        var log = new java.util.ArrayList<String>();
+        var outcome = VoxyCompat.resetVoxy(hooks(log, new Object(), java.nio.file.Path.of("srv"),
+                null, null, true,
+                () -> { throw new IllegalStateException("shutdown"); },
+                () -> { throw new IllegalStateException("create"); }));
+        assertEquals(ModCompat.VoxyResetOutcome.RESTART_FAILED, outcome);
+        assertFalse(log.contains("allChanged"), "no renderer rebuild against a dead instance");
+    }
+
+    @Test
+    void createThrowOnTheHappyPathIsRestartFailedAfterTheWipe() {
+        var log = new java.util.ArrayList<String>();
+        var outcome = VoxyCompat.resetVoxy(hooks(log, new Object(), java.nio.file.Path.of("srv"),
+                null, null, true, OK, () -> { throw new IllegalStateException("create"); }));
+        assertEquals(ModCompat.VoxyResetOutcome.RESTART_FAILED, outcome);
+        assertTrue(log.contains("wipe:srv"), "the wipe already happened — only the restart failed");
+    }
+
+    @Test
+    void storagePathThrowSkipsOnlyTheWipe() {
+        var log = new java.util.ArrayList<String>();
+        var hooks = new VoxyCompat.ResetHooks(
+                () -> new Object(),
+                inst -> { throw new IllegalStateException("no path"); },
+                () -> null,
+                () -> () -> log.add("rendererShutdown"),
+                () -> log.add("shutdownInstance"),
+                () -> log.add("createInstance"),
+                target -> log.add("wipe"),
+                () -> log.add("gc"),
+                () -> log.add("allChanged"));
+        assertEquals(ModCompat.VoxyResetOutcome.RESET, VoxyCompat.resetVoxy(hooks));
+        assertFalse(log.contains("wipe"), "no resolvable root -> no wipe, everything else runs");
+        assertTrue(log.contains("createInstance"));
+    }
+
+    // ---- reset-domain resolution (all-or-nothing, separate failure domain) ----
+
+    @Test
+    void resetDomainResolvesAgainstTheStubSurface() {
+        VoxyCompat.resetResetDomainForTest();
+        assertTrue(VoxyCompat.initResetDomain(),
+                "the reset domain must resolve against the stub Voxy classes");
+        VoxyCompat.resetResetDomainForTest();
+    }
+
+    @Test
+    void resetDomainFailureIsAllOrNothingAndNeverCostsTheProbe() {
+        VoxyCompat.resetResetDomainForTest();
+        VoxyCompat.classResolver = name -> {
+            if (name.equals("me.cortex.voxy.client.VoxyClientInstance")) {
+                throw new ClassNotFoundException(name);
+            }
+            return Class.forName(name);
+        };
+        assertFalse(VoxyCompat.initResetDomain(), "a partial chain must read as absent");
+
+        // The ingest bridge + backlog probe resolve independently afterwards.
+        VoxyCompat.resetSeams();
+        VoxyCompat.reportSink = (dimension, chunkX, chunkZ) -> {};
+        VoxyCompat.consumerRegistrar = registered::add;
+        var consumer = initBridge();
+        VoxelIngestService.taskCount = 7;
+        assertEquals(7, consumer.pendingIngestBacklog(),
+                "a dead reset domain must never cost the backlog probe");
+        VoxyCompat.resetResetDomainForTest();
+    }
+
+    @Test
+    void resetDomainFallsToTheSecondHolderRungWhenThePrimaryIsAbsent() {
+        VoxyCompat.resetResetDomainForTest();
+        VoxyCompat.classResolver = name -> {
+            if (name.equals("me.cortex.voxy.client.core.IVoxyRenderSystemHolder")) {
+                throw new ClassNotFoundException(name); // 0.2.11/dev era: only rung 2 exists
+            }
+            return Class.forName(name);
+        };
+        assertTrue(VoxyCompat.initResetDomain(),
+                "IGetVoxyRenderSystem.shutdownRenderer is the 0.2.11/dev fallback rung");
+        VoxyCompat.resetResetDomainForTest();
+    }
+
+    // ---- wipe containment (mirrors hostileServerAddressCannotEscapeCacheDir) ----
+
+    @Test
+    void wipeContainmentAcceptsOnlyVoxyStorageShapes(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) {
+        var game = tmp.resolve("game");
+        assertTrue(VoxyCompat.isWipeContained(
+                game.resolve(".voxy").resolve("saves").resolve("localhost_25565"), game),
+                "the multiplayer per-server dir is the canonical wipe target");
+        assertTrue(VoxyCompat.isWipeContained(
+                game.resolve("saves").resolve("myworld").resolve("voxy"), game),
+                "the singleplayer <world>/voxy shape");
+        assertFalse(VoxyCompat.isWipeContained(game.resolve(".voxy").resolve("saves"), game),
+                "the saves root itself would wipe EVERY server");
+        assertFalse(VoxyCompat.isWipeContained(game, game), "never the game dir");
+        assertFalse(VoxyCompat.isWipeContained(tmp.resolve("elsewhere").resolve("voxy2"), game),
+                "outside the game dir entirely (a Flashback replay override) -> skip, fail-safe");
+        assertFalse(VoxyCompat.isWipeContained(
+                game.resolve(".voxy").resolve("saves").resolve("..").resolve("..").resolve("x"), game),
+                "traversal normalizes out of containment");
+    }
+
+    @Test
+    void wipeVoxyStoreDeletesOnlyTheContainedTarget(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        var game = tmp.resolve("game");
+        var server = game.resolve(".voxy").resolve("saves").resolve("localhost_25565");
+        var sibling = game.resolve(".voxy").resolve("saves").resolve("other_server");
+        java.nio.file.Files.createDirectories(server.resolve("deadbeef"));
+        java.nio.file.Files.writeString(server.resolve("deadbeef").resolve("store.db"), "x");
+        java.nio.file.Files.createDirectories(sibling);
+
+        VoxyCompat.wipeVoxyStore(server, game);
+        assertFalse(java.nio.file.Files.exists(server), "the per-server tree is gone");
+        assertTrue(java.nio.file.Files.exists(sibling), "sibling servers untouched");
+
+        // A non-contained target is refused outright.
+        var outside = tmp.resolve("outside");
+        java.nio.file.Files.createDirectories(outside);
+        VoxyCompat.wipeVoxyStore(outside, game);
+        assertTrue(java.nio.file.Files.exists(outside), "outside the containment roots -> refused");
+    }
 }

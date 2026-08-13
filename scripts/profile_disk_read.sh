@@ -163,7 +163,7 @@ cmd_run() {
     local srv_cfg_dir="$root/fabric/build/run/benchmark-server/config"
     local cli_cfg_dir="$root/fabric/build/run/benchmark-client/config"
     mkdir -p "$srv_cfg_dir" "$cli_cfg_dir"
-    rm -rf "$cli_cfg_dir/lss/cache"
+    rm -rf "$cli_cfg_dir/lss/cache" "$root/fabric/build/run/benchmark-client/.lss/cache"  # both roots (stage D)
     stage_server_config "$srv_cfg_dir/lss-server-config.json"
     stage_client_config "$cli_cfg_dir/lss-client-config.json"
 

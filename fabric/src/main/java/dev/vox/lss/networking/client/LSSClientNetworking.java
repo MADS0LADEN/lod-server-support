@@ -126,6 +126,12 @@ public class LSSClientNetworking {
         columnProcessor.reportUndispatched(manager);
     }
 
+    /** Bounded wait for the in-flight decode drain — the /lss reset sequence's step-1
+     *  await (see {@link ClientColumnProcessor#awaitDecodeIdle}). */
+    static boolean awaitDecodeIdle(long timeoutMs) {
+        return columnProcessor.awaitDecodeIdle(timeoutMs);
+    }
+
     public static void triggerHostHandshake() {
         Minecraft.getInstance().execute(() -> {
             if (!LSSClientConfig.CONFIG.receiveServerLods) return;

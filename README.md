@@ -42,7 +42,9 @@ Voxy on its own can only build LOD data from chunks the client has already loade
 
 **Server** — `/lsslod stats` for per-player transfer statistics, `/lsslod diag` for detailed diagnostics, `/lsslod help` (also the bare `/lsslod`) for the full verb list. **Runtime settings**: `/lsslod set` lists the runtime-settable config keys with current values; `/lsslod set <key> <value>` applies a change immediately AND persists it to `lss-server-config.json` — values are clamped exactly like the config file, and a `lodDistanceChunks` change is pushed to connected current-version clients live (older clients pick it up on rejoin). With the LOD store: `/lsslod store status` (state, hit/miss counters, size), `/lsslod store invalidate all` (drop every stored column — they re-warm from normal serves), and on Fabric `/lsslod store backfill start|stop|status` to control the background pre-warm walk (`status` shows progress plus a remaining regions/columns estimate). Requires operator status (Fabric: gamemaster level; Paper: the `lss.admin` permission, default op).
 
-**Client** (Fabric only) — `/lss clearcache` re-requests every chunk, `/lss diag` shows connection and throughput, `/lss trace` toggles a debug log under `logs/`.
+**Client** (Fabric only) — `/lss clearcache` re-requests every chunk, `/lss reset` wipes Voxy's LOD store AND the LSS cache for the current server (LODs visibly disappear, then rebuild live as the server re-streams everything; if Voxy's ingest is disabled — its config toggle or a replay — LODs stay empty until it is re-enabled), `/lss diag` shows connection and throughput, `/lss trace` toggles a debug log under `logs/`. Without an active LSS session `/lss reset` requires `/lss reset confirm` — there is no server to re-stream from, so the wipe only refills from vanilla chunk loading.
+
+The LSS client cache lives in a `.lss/` folder in the game directory on fresh installs (the `.voxy` convention); installs that already have a `config/lss/cache/` keep using it.
 
 ## Configuration
 

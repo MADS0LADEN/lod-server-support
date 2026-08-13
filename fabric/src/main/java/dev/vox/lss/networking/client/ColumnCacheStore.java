@@ -43,7 +43,43 @@ public class ColumnCacheStore {
     static final AtomicInteger SAVE_WRITES_FOR_TEST = new AtomicInteger();
     /** save()/load() stream buffer — see the buffering note in save(). */
     private static final int IO_BUFFER_BYTES = 1 << 16;
-    private static final Path CACHE_DIR = FabricLoader.getInstance().getConfigDir().resolve("lss").resolve("cache");
+    /**
+     * Cache root, resolved LAZILY through {@link #resolveCacheRoot} (v0.11.0 stage D —
+     * client-reset-command-and-cache-relocation-plan.md Part 2): fresh installs use
+     * {@code <gameDir>/.lss/cache} (the {@code .voxy} convention); an install with an
+     * existing {@code config/lss/cache} directory keeps it forever (adoption, no
+     * migration — user decision). Deliberately UNBRANDED either way (jar-swap
+     * continuity, ci-dual-publish.md). Lazy so tests can drive both branches of the
+     * pure function without a loaded FabricLoader path baked in at class-init.
+     */
+    private static volatile Path cacheDir;
+
+    private static Path cacheDir() {
+        Path dir = cacheDir;
+        if (dir == null) {
+            dir = resolveCacheRoot(FabricLoader.getInstance().getConfigDir(),
+                    FabricLoader.getInstance().getGameDir());
+            cacheDir = dir;
+        }
+        return dir;
+    }
+
+    /**
+     * The adoption rule as a pure function: an existing {@code configDir/lss/cache}
+     * DIRECTORY wins (existing installs keep their cache and their path); otherwise
+     * {@code gameDir/.lss/cache}. A directory-exists check is deliberately the whole
+     * rule — an empty old dir still adopts (harmless, deterministic).
+     */
+    static Path resolveCacheRoot(Path configDir, Path gameDir) {
+        Path legacy = configDir.resolve("lss").resolve("cache");
+        if (Files.isDirectory(legacy)) return legacy;
+        return gameDir.resolve(".lss").resolve("cache");
+    }
+
+    /** The resolved root — package-visible for the tests that used to rebuild it by hand. */
+    static Path cacheRoot() {
+        return cacheDir();
+    }
     // Daemon thread — saves use atomic rename so JVM shutdown mid-write won't corrupt,
     // but the save may be lost. Acceptable for a rebuildable client cache.
     private static final ExecutorService IO_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
@@ -297,9 +333,9 @@ public class ColumnCacheStore {
         // Run on the IO thread (serialized FIFO with in-flight saves/loads) and wait, to preserve
         // the synchronous clear contract.
         runIoAndWait(() -> {
-            if (!Files.exists(CACHE_DIR)) return;
+            if (!Files.exists(cacheDir())) return;
 
-            try (DirectoryStream<Path> servers = Files.newDirectoryStream(CACHE_DIR)) {
+            try (DirectoryStream<Path> servers = Files.newDirectoryStream(cacheDir())) {
                 for (Path serverDir : servers) {
                     if (!Files.isDirectory(serverDir)) continue;
                     try (DirectoryStream<Path> files = Files.newDirectoryStream(serverDir)) {
@@ -359,7 +395,7 @@ public class ColumnCacheStore {
     }
 
     private static Path getServerDir(String serverAddress) {
-        return CACHE_DIR.resolve(sanitizeForFilePath(serverAddress));
+        return cacheDir().resolve(sanitizeForFilePath(serverAddress));
     }
 
     private static Path getCacheFile(String serverAddress, ResourceKey<Level> dimension) {

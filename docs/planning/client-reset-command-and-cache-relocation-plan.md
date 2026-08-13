@@ -77,14 +77,25 @@ decode-drain's in-flight column; and both mid-sequence failure paths
   server's. The wipe root must come from it (read reflectively BEFORE
   `shutdownInstance()`); a hand-duplicated `getBasePath` derivation would wipe the
   real server's cache while the user watches a replay.
-- The renderer holder is **the one unstable name**: mixin interface on vanilla
-  `LevelRenderer`, `me.cortex.voxy.client.core.IGetVoxyRenderSystem.shutdownRenderer()`
-  in 0.2.11/dev vs `IVoxyRenderSystemHolder.voxy$shutdownRenderer()` in 0.2.18-beta.
-  Needs a two-rung resolver (repo precedent: `MoonriseSendStateCompat`'s two-rung
-  ladder, `AntiXrayCompat`'s carrier ladder).
-- `levelRenderer.allChanged()` is **pure vanilla MC** (direct class literal per the
-  CLAUDE.md MC-type rule) and re-triggers Voxy's own renderer rebuild via
-  `MixinLevelRenderer` (`allChanged` RETURN → shutdownRenderer + createRenderer).
+- The renderer holder is **the one unstable name**: mixin interface,
+  `me.cortex.voxy.client.core.IGetVoxyRenderSystem.shutdownRenderer()` in 0.2.11/dev
+  (on vanilla `LevelRenderer`) vs `IVoxyRenderSystemHolder.voxy$shutdownRenderer()` in
+  0.2.18-beta. Needs a two-rung resolver (repo precedent: `MoonriseSendStateCompat`'s
+  two-rung ladder, `AntiXrayCompat`'s carrier ladder). **AMENDED at stage D
+  implementation (2026-08-13, §6.1 pair — see the v0.11.0 progress doc decisions
+  log):** the primary rung obtains the holder via the interface's **static
+  `getNullableHolder()`** rather than instanceof on `Minecraft.levelRenderer` — that
+  is what the 26.2 Voxy build's own reload does (bytecode-verified against the
+  `voxy-0.2.18-beta.jar` for MC 26.2), and on 26.2 the render-extract rework means
+  the mixin's carrier class is not knowable from LSS; the static abstracts it away.
+  The instanceof-on-levelRenderer shape survives as rung 2 (0.2.11/dev).
+- ~~`levelRenderer.allChanged()`~~ **AMENDED same pair:** on MC 26.2 vanilla moved
+  `allChanged()` off `LevelRenderer` onto **`Minecraft.levelExtractor`**
+  (`net.minecraft.client.renderer.extract.LevelExtractor.allChanged()`, both public)
+  as part of the render-extract rework — the 26.2 Voxy reload calls exactly that
+  (bytecode-verified), and it re-triggers Voxy's renderer rebuild. Pure vanilla MC
+  either way (direct class literal per the CLAUDE.md MC-type rule); support lines on
+  older MC keep the `levelRenderer.allChanged()` shape at stage G.
 - Voxy's per-server disk cache: multiplayer `<gameDir>/.voxy/saves/<serverIp with
   ':'→'_'>/<32-hex worldId>/…`, singleplayer `<world dir>/voxy`, realms
   `.voxy/saves/realms`, null server info → `.../UNKNOWN`
