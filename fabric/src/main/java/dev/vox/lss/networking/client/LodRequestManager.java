@@ -104,11 +104,55 @@ public class LodRequestManager {
     // Last polled backlog — trace + /lss diag observability.
     private int lastIngestBacklog = -1;
 
+    // The client transfer governor (adaptive-transfer-rate-plan.md Mechanism A): an
+    // AIMD on RECEIVED wire bytes that, on a congested slow link, caps the want-set
+    // through the manual rate-cap machinery. Suppliers are seams so tests drive
+    // tickWithContext without the networking statics or a running client.
+    final TransferRateGovernor governor = new TransferRateGovernor();
+    java.util.function.LongSupplier wireBytesReceivedSupplier =
+            LSSClientNetworking::getWireBytesReceived;
+    java.util.function.LongSupplier columnsReceivedSupplier =
+            LSSClientNetworking::getColumnsReceived;
+    /** The client's own tab-list ping (<=0 = no sample) — Mechanism A's congestion
+     *  conjunct. */
+    IntSupplier ownPingSupplier = LodRequestManager::readOwnTabPing;
+    /** Config kill switch seam (the adaptiveCadenceEnabled pattern). */
+    java.util.function.BooleanSupplier transferGovernorEnabled =
+            () -> LSSClientConfig.CONFIG.enableAdaptiveTransferRate;
+
+    private static int readOwnTabPing() {
+        var mc = Minecraft.getInstance();
+        var conn = mc.getConnection();
+        var player = mc.player;
+        if (conn == null || player == null) return -1;
+        var info = conn.getPlayerInfo(player.getUUID());
+        return info != null ? info.getLatency() : -1;
+    }
+
+    /** min-composition with BOTH off-sentinels explicit (review m2): {@code <= 0}
+     *  means OFF on each side and must never win a naive min. */
+    static int composeRateCaps(int manual, int governed) {
+        if (manual <= 0) return Math.max(governed, 0);
+        if (governed <= 0) return manual;
+        return Math.min(manual, governed);
+    }
+
     public LodRequestManager() {
         // Adaptive cadence: the scanner's fast trigger reads the awaiting-set size each
         // tick. Same main-client-thread contract as every other tracker consumer — every
         // mutation arrives via client.execute tasks on the thread that ticks maybeScan.
         this.scanner.setOutstandingSupplier(this.tracker::size);
+        // The transfer governor's seam split (plan review M2): the governed SUSTAINED
+        // rate feeds the spacing gate, the governed BURST cap (ceil(R/4)) feeds the
+        // budget clamp — 4 Hz quarter-batches while governed. Each site min-composes
+        // with the manual knob; with the governor off both read the manual value,
+        // bit-identical to the shipped shape.
+        this.scanner.columnRateCap = () -> composeRateCaps(
+                LSSClientConfig.CONFIG.lodColumnsPerSecondLimit,
+                this.governor.sustainedColumnsPerSecond());
+        this.scanner.columnBurstCap = () -> composeRateCaps(
+                LSSClientConfig.CONFIG.lodColumnsPerSecondLimit,
+                this.governor.burstColumnsPerSecond());
     }
 
     public void onSessionConfig(SessionConfigS2CPayload config, String serverAddress) {
@@ -144,6 +188,14 @@ public class LodRequestManager {
      * false) is excluded: its NOT_GENERATED IS permanent, and re-declaring would starve the
      * want-set. Guarded by Tier B so Tier A and every v18 session keep the permanent park.
      */
+    /** The governor's dialect exclusion (mirrors the fast cadence's v16 gate): a
+     *  legacy-fallback session's pacing is the drip-feed's own. */
+    private boolean isLegacySession() {
+        return this.sessionConfig == null
+                || this.sessionConfig.protocolVersion()
+                        == LSSConstants.V16_COMPAT_PROTOCOL_VERSION;
+    }
+
     private boolean v16TransientNotGenerated() {
         return this.v16GenerationDrive && this.sessionConfig != null
                 && this.sessionConfig.generationEnabled();
@@ -205,7 +257,18 @@ public class LodRequestManager {
         tickDimensionAndCachePhase(currentDim);
         tickMovementPhase(playerCx, playerCz);
         this.metrics.updateRollingRates();
-        if (haltedByBackpressure(columnQueueSize, columnQueueBytes, ingestBacklogSections)) {
+        boolean halted = haltedByBackpressure(columnQueueSize, columnQueueBytes,
+                ingestBacklogSections);
+        // The transfer governor observes EVERY tick — including halted ones, which is
+        // how a #71 halt disqualifies its interval (the client deliberately stopped
+        // ingesting; the depressed tail rate is not a link measurement).
+        this.governor.tick(this.governor.clock.getAsLong(),
+                this.wireBytesReceivedSupplier.getAsLong(),
+                this.columnsReceivedSupplier.getAsLong(),
+                this.tracker.size(), halted,
+                this.ownPingSupplier.getAsInt(),
+                this.transferGovernorEnabled.getAsBoolean() && !isLegacySession());
+        if (halted) {
             // Entering the halt: silence would leave the server pumping the last want-set
             // (up to 1024 backlogged asks). An EMPTY batch is the explicit "want nothing"
             // declaration — it replaces the backlog with nothing; already-admitted work
@@ -671,6 +734,10 @@ public class LodRequestManager {
         this.columns.clear();
         this.tracker.clear();
         this.metrics.reset();
+        // The governor dies with the session (plan review m3) — the gate's byte
+        // counters zero here too, and the negative-delta guard covers any interval
+        // already spanning the reset.
+        this.governor.reset();
     }
 
     private void startAsyncCacheLoad(ResourceKey<Level> dimension) {
@@ -785,6 +852,15 @@ public class LodRequestManager {
     /** Fast (completion-triggered) scan fires this session — the adaptive-cadence liveness signal. */
     public long getFastScans() { return this.scanner.getFastScans(); }
     public long getRateGated() { return this.scanner.getRateGated(); }
+
+    /** Governor receipt for /lss diag (review n14: rate_gated conflates manual and
+     *  governed refusals — this label disambiguates): "<cols>/s (<KB>/s)" while
+     *  engaged, "off" otherwise. */
+    public String getGovernedRateLabel() {
+        if (!this.governor.isEngaged()) return "off";
+        return this.governor.sustainedColumnsPerSecond() + "/s ("
+                + (this.governor.getDesiredBytesPerSec() / 1024) + " KB/s)";
+    }
 
     // Response counters
     public long getTotalColumnsReceived() { return this.metrics.getTotalColumnsReceived(); }

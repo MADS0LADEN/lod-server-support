@@ -66,6 +66,18 @@ class ConfigValidationTest {
         assertTrue(serverConfig().enableViaMismatchGuard);
     }
 
+    /** Both adaptive-transfer-rate mechanisms ship ON (adaptive-transfer-rate-plan.md):
+     *  the server ping backstop protects ANY client on a congested link, and the
+     *  client governor paces itself against every released v17+ server. Each has its
+     *  own kill switch. */
+    @Test
+    void adaptiveTransferRateMechanismsDefaultOn() {
+        assertTrue(serverConfig().enablePingBackstop,
+                "the ping backstop must ship enabled");
+        assertTrue(clientConfig().enableAdaptiveTransferRate,
+                "the client transfer governor must ship enabled");
+    }
+
     @Test
     void lodDistanceChunksClamped() {
         var c = serverConfig();

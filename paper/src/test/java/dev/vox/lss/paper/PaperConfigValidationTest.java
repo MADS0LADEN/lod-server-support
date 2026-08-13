@@ -42,6 +42,9 @@ class PaperConfigValidationTest {
         assertTrue(new PaperConfig().enableV18Compat);
         assertTrue(new PaperConfig().enableV19Compat);
         assertTrue(new PaperConfig().enableViaMismatchGuard);
+        // The ping backstop ships ON (adaptive-transfer-rate-plan.md Mechanism B —
+        // it protects ANY client on a congested link, including pre-governor ones).
+        assertTrue(new PaperConfig().enablePingBackstop);
     }
 
     @Test

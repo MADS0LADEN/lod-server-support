@@ -123,7 +123,7 @@ class DiagnosticsFormatterTest {
                 "DiskReader: submitted=5, completed=5",
                 "Generation: active=1/32, order_gated=7, inversions=3",
                 "Bandwidth: 512 B/s / 1.0 MB/s global (2.0 MB total, 0 B wire, cols zstd=0 raw=0)",
-                "  Steve: sq=3/4000, psync=2, pgen=1, sent=2000 (4.0 KB), rate=20/s, obuf=64.0 KB/128.0 KB, ceil=off, deferred=7, yielded=0"
+                "  Steve: sq=3/4000, psync=2, pgen=1, sent=2000 (4.0 KB), rate=20/s, obuf=64.0 KB/128.0 KB, ceil=off, pingf=1.00, deferred=7, yielded=0"
         ), DiagnosticsFormatter.formatDiagnostics(d));
     }
 

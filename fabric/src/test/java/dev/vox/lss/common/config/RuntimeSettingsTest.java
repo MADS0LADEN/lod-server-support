@@ -172,6 +172,22 @@ class RuntimeSettingsTest {
         assertEquals(names.size(), RuntimeSettings.listLines(c).size());
     }
 
+    /** The registry's first BOOLEAN row (adaptive-transfer-rate-plan.md — the ping
+     *  backstop's live A/B lever): strict parse, so a typo is a command-line error,
+     *  never a silent disable. */
+    @Test
+    void pingBackstopRowParsesStrictBooleans() {
+        var c = new TestServerConfig();
+        apply(c, "enablePingBackstop", "false");
+        assertEquals(false, c.enablePingBackstop, "false applies");
+        apply(c, "enablePingBackstop", "TRUE");
+        assertEquals(true, c.enablePingBackstop, "case-insensitive true applies");
+        assertThrows(IllegalArgumentException.class,
+                () -> apply(c, "enablePingBackstop", "yes"),
+                "anything but true/false is a parse error");
+        assertEquals(true, c.enablePingBackstop, "a rejected value changes nothing");
+    }
+
     /** The fixed outbound ceiling row (the AUTO mode was deleted —
      *  adaptive-transfer-rate-plan.md): 0 = OFF, and the row clamps exactly like boot
      *  validation (the R-2 rule: sub-floor values clamp UP to the 64 KB fixed floor,

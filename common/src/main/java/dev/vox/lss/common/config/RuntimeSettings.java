@@ -42,6 +42,15 @@ public final class RuntimeSettings {
         }
     }
 
+    /** Strict boolean parse for the registry's boolean rows: only "true"/"false" —
+     *  Boolean.parseBoolean's everything-else-is-false would make a typo a silent
+     *  disable at the command line. */
+    private static boolean parseBoolean(String raw) {
+        if ("true".equalsIgnoreCase(raw)) return true;
+        if ("false".equalsIgnoreCase(raw)) return false;
+        throw new IllegalArgumentException("expected true or false, got '" + raw + "'");
+    }
+
     private static double parseDouble(String raw) {
         double v;
         try {
@@ -132,6 +141,17 @@ public final class RuntimeSettings {
                     "applies within a tick; 0 = off (no ceiling — slow-link pacing is"
                             + " the client governor + ping backstop); explicit KB ="
                             + " fixed entry-gate ceiling"),
+            // The ping backstop's live A/B lever (adaptive-transfer-rate-plan.md —
+            // the registry's first BOOLEAN row; decision recorded in the plan's
+            // review log). Strict parse: only "true"/"false".
+            new SettingKey("enablePingBackstop",
+                    c -> String.valueOf(c.enablePingBackstop),
+                    (c, raw) -> {
+                        c.enablePingBackstop = parseBoolean(raw);
+                        return null;
+                    },
+                    "applies within a tick; false also resets any live per-player cut"
+                            + " back to full allocation"),
             // R-9 (E1): the privacy keys an admin answering a complaint must not need a
             // restart for. farPlayers is the registry's one STRING-typed row — a strict
             // parse rejects garbage at the command line, then the value routes through

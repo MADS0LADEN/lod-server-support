@@ -127,6 +127,16 @@ public abstract class ServerConfigBase extends JsonConfig {
      * {@code /lsslod set outboundBufferCeilingKB} (0 = off).
      */
     public int outboundBufferCeilingKB = 0;
+    /**
+     * The vanilla-ping backstop (adaptive-transfer-rate-plan.md, Mechanism B): when a
+     * player's keepalive ping rises >750 ms over its session baseline while LSS was
+     * actually sending to them, their LOD bandwidth allocation is cut (first cut lands
+     * below the observed send rate) and recovers slowly once ping normalizes. Coarse
+     * and universal — it protects ANY client on a congested link, including old ones
+     * without the client-side transfer governor. Runtime-mutable via
+     * {@code /lsslod set enablePingBackstop} (the live A/B lever).
+     */
+    public boolean enablePingBackstop = true;
 
     /** R-2 shared clamp: 0 (and any negative) = OFF; explicit values clamp to
      *  [MIN=64, MAX=262144] KB. Used by validate() AND the /lsslod set registry so

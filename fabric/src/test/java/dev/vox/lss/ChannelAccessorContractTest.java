@@ -90,6 +90,24 @@ class ChannelAccessorContractTest {
     }
 
     @Test
+    void bothPlatformsPlumbThePingFactorThroughTheFlushAllocation() throws Exception {
+        // The m12 plumbing pin (adaptive-transfer-rate-plan.md): the ping backstop's
+        // factor must ride the ALLOCATION argument into flushSendQueue — the
+        // per-player bucket clamps its banked burst to allocation/4, so only this
+        // placement shrinks the bank (up to ~6.25 MB at default caps) on the FIRST
+        // post-cut tick. Applied anywhere else, a cut leaves the old-cap bank intact
+        // for one full burst.
+        String fabric = Files.readString(Path.of(
+                "src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
+        assertTrue(fabric.contains("state.getPingBackstop().apply(perPlayerCap)"),
+                "Fabric must apply the ping factor to the flush allocation");
+        String paper = Files.readString(Path.of(
+                "../paper/src/main/java/dev/vox/lss/paper/PaperRequestProcessingService.java"));
+        assertTrue(paper.contains("state.getPingBackstop().apply(perPlayerCap)"),
+                "Paper twin must apply the ping factor to the flush allocation");
+    }
+
+    @Test
     void bothPlatformsInstallTheChannelPressureProbeAtRegistration() throws Exception {
         String fabric = Files.readString(Path.of(
                 "src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));

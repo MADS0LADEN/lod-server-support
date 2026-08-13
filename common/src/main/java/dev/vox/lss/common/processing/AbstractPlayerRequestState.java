@@ -108,6 +108,13 @@ public abstract class AbstractPlayerRequestState<T> {
      *  accepted corner of state-scoped latching. */
     private boolean sustainedYieldNoted;
 
+    // ---- The vanilla-ping backstop (adaptive-transfer-rate-plan.md Mechanism B) ----
+    // Per player per session by construction (dies with this state); observed on the
+    // service pump, applied to the flush allocation (the m12 plumbing).
+    private final PingBackstop pingBackstop = new PingBackstop();
+
+    public PingBackstop getPingBackstop() { return this.pingBackstop; }
+
     // ---- Want-set mailbox + backlog (protocol v17) ----
 
     // Network/region thread → processing thread, latest-wins: a batch overwritten before
