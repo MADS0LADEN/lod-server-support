@@ -189,6 +189,9 @@ public final class PaperSoakMetricsExporter {
         serviceMap.put("superseded", diag.getTotalSuperseded());
         serviceMap.put("range_filtered", diag.getTotalRangeFiltered());
         serviceMap.put("miss_dropped", diag.getTotalMissDropped());
+        // send-pacing-plan.md v3: the pacer's soak-visible receipt — inertness on
+        // loopback is EMPIRICAL, so a moved guard-soak baseline needs attribution.
+        serviceMap.put("paced_ticks", service.getTickDiag().getPacedTicksTotal());
         result.put("service", serviceMap);
 
         var diskMap = new LinkedHashMap<String, Object>();

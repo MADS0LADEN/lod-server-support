@@ -491,9 +491,21 @@ class TransferRateGovernorTest {
         // path there is the offer-backing freeze.
         long defaultCapBytesPerSec =
                 new dev.vox.lss.config.LSSServerConfig().bytesPerSecondPerPlayer();
-        long perTickShare = defaultCapBytesPerSec / dev.vox.lss.common.LSSConstants.TICKS_PER_SECOND;
-        assertTrue(perTickShare * SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS
-                        >= TransferRateGovernor.ENGAGE_BELOW_BYTES_PER_SEC / 4,
+        // Both sides are BYTES WITHIN ONE FAST-FIRE WINDOW (5 ticks = 0.25 s at
+        // defaults — the units audit's fix; the old form hardcoded the 4 Hz divisor
+        // and would have RELAXED if the fast-fire floor ever widened):
+        // LHS = what the pace floor delivers in that window; RHS = the byte size of a
+        // governed quarter-batch (desired x window, desired < ENGAGE_BELOW). The RHS
+        // understates the disengage-probe overshoot (desired may legally exceed
+        // ENGAGE_BELOW by DISENGAGE_RATE_INTERVALS x STEP ≈ 2.5 MB/s for a few
+        // intervals) — the ~6x headroom at defaults absorbs it.
+        long window = SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS;
+        long floorBytesPerWindow =
+                (defaultCapBytesPerSec / dev.vox.lss.common.LSSConstants.TICKS_PER_SECOND)
+                        * window;
+        long quarterBatchBytes = TransferRateGovernor.ENGAGE_BELOW_BYTES_PER_SEC
+                * window / dev.vox.lss.common.LSSConstants.TICKS_PER_SECOND;
+        assertTrue(floorBytesPerWindow >= quarterBatchBytes,
                 "the pace floor must clear a governed quarter-batch inside the fast-fire floor");
     }
 }

@@ -1,6 +1,6 @@
 # Server-side send pacing — spread the burst, never govern the rate — plan
 
-**Status: PLANNED v2, post 2-Fable review** (2026-08-13, the
+**Status: IMPLEMENTED (v3 — the 3-Opus implementation round's clamp)** (2026-08-13, the
 adaptive-transfer-rate program's shelved follow-up; companion to
 `adaptive-transfer-rate-plan.md`). User direction: spreading the client's
 requested work over time a bit is good enough to stop spikes from totally
@@ -134,13 +134,23 @@ latency-sensitive; they already ride separate paths). No arming, no evidence,
 no probe input — the budget is a pure function of the send queue and the
 allocation the flush already receives:
 
-- **The budget:** every tick with a non-empty queue,
-  `paceBudget = max(allocationBytes / TICKS_PER_SECOND, queuedRawBytes / PACE_HORIZON_TICKS)`
-  — checked in-loop before each send EXCEPT the first (the one-payload
-  presence gate: a legal oversized column ships whole, the next flush waits —
-  the deleted AUTO budget's proven shape, minus the falsified estimator).
-  Leftover stays queued (ordinary retention; nothing dropped, nothing
-  bounced). `PACE_HORIZON_TICKS = 10`.
+- **The budget (v3):** every tick with a non-empty queue,
+  `paceBudget = clamp(queuedRawBytes / PACE_HORIZON_TICKS, share, PACE_MAX_BURST_SHARES × share)`
+  where `share = allocationBytes / TICKS_PER_SECOND` — checked in-loop before
+  each send EXCEPT the first (the one-payload presence gate: a legal
+  oversized column ships whole — so a tick's true write is budget + one
+  crossing payload — and at the degenerate budget of 0 the gate keeps one
+  payload per tick flowing). Leftover stays queued (ordinary retention;
+  nothing dropped, nothing bounced). `PACE_HORIZON_TICKS = 10`,
+  `PACE_MAX_BURST_SHARES = 2` — the impl round's clamp, resolving a genuine
+  tension: the integration lens showed the unbounded Q/10 term MEETS THE
+  BANK on real-terrain waves (Q ≥ 2.5×allocation — an 800-column terrain
+  wave is ~52 MB raw) and unbounds the very first tick, while the
+  correctness lens proved the same term is LOAD-BEARING below 20 TPS (the
+  floor is tick-denominated, the limiter wall-clock-denominated — on a slow
+  server the queue term is what restores cap-rate delivery). Two shares
+  covers full rate down to ~10 TPS; below that pacing under-delivers on an
+  already-degraded server (queue retained by the router, never dropped).
 - **Why the refill-share floor is the whole trick** (the v2 insight, from the
   review round's triangle): `allocation/20` is the per-tick share of the
   operator's CONFIGURED cap — the declared intent for sustained rate. A
@@ -155,16 +165,18 @@ allocation the flush already receives:
   oversized backlogs (Q > allocation/2) drain ABOVE the refill share,
   exponentially decaying toward it — the bank still serves catch-up, just as
   a slope instead of a cliff.
-- **First-tick coverage** (v1's fatal corner, closed): the budget needs no
-  evidence, so the store-warm rejoin/teleport wave — the growing flagship
-  case, store default-on since v0.11.0 — is bounded on its FIRST tick at one
-  refill share (~1.25 MB raw at the default 25 MB/s cap) instead of the full
-  ~6.25 MB bank. The kernel send buffer below the gauge (~0.5-0.7 MB
-  measured on the rig path) still absorbs its own depth at memory speed —
-  the honest bound is **~0.5-1.3 s at 10 Mbps** (kernel depth + up to two
-  wire shares before yield engages; the kernel term is the irreducible floor
-  of ANY server-side mechanism in this family — the companion program's
-  structural finding); versus the old ~3-5 s dump, a 3-4× improvement.
+- **First-tick coverage** (v1's fatal corner, closed; v3 numbers): the
+  budget needs no evidence, so every wave including the first is bounded —
+  at ONE refill share (~1.31 MB raw at the default cap) for bank-sized
+  waves (the flagship store-warm case at soak-like column sizes), and at
+  TWO shares for deep real-terrain backlogs (the clamp ceiling). The kernel
+  send buffer below the gauge (~0.5-0.7 MB measured on the rig path) still
+  absorbs its own depth at memory speed — the honest bound is **~0.5-1.3 s
+  at 10 Mbps for bank-sized waves, ~2× that for clamp-ceiling deep
+  backlogs** (kernel depth + up to two shares wire before yield engages;
+  the kernel term is the irreducible floor of ANY server-side mechanism in
+  this family — the companion program's structural finding); versus the old
+  ~3-5 s dump, a 2.5-4× improvement across the range.
 - **Denomination: RAW bytes** (`QueuedPayload.estimatedBytes`), matching the
   limiter and the allocation the floor derives from. Wire ≤ raw, so the
   socket-facing amplitude is bounded a fortiori; no raw/wire mixing anywhere
@@ -176,20 +188,22 @@ allocation the flush already receives:
   yield gate (unwritable ticks book `yielded=`, the budget never evaluates) →
   pace budget bounds the writable tick's send loop → bandwidth limiter
   charges per payload as today. The pingf-cut allocation composes
-  automatically: the floor derives from the CUT allocation, so a backstop cut
-  shrinks the pace floor with it. When a big backlog makes `Q/HORIZON` exceed
-  the cut share, the budget merely becomes NON-BINDING — the pace budget only
-  VETOES sends; authority still requires `canSend(cutAllocation)` per payload,
-  whose bank re-clamps to cutAllocation/4 on the first post-cut tick (the m12
-  plumbing) — so the max() cannot leak a byte past a cut, and `paced=`
-  honestly books only budget-stopped ticks (delta round, verified). The
+  automatically (v3): BOTH clamp bounds derive from the CUT allocation, so a
+  backstop cut paces harder in the same direction (the budget itself scales
+  down — the v2 "limiter stays the authority" scenario dissolved with the
+  clamp, since the budget can no longer exceed 2 cut-shares while the bank
+  is 5); the limiter still charges per payload, and `paced=` honestly books
+  only budget-stopped ticks. The
   starvation-floor tick is structurally exempt (it breaks after exactly one
   send, and the budget skips the first payload) — an explicit guard
   documents it.
 - **Observability:** per-player `paced=` counter (ticks where the pace budget
   stopped a PARTIAL flush — a mechanism counter beside `deferred=`/`yielded=`
-  at line end, never a loss signal). One more `PlayerDiag` field (a fourth
-  compat ctor) + golden re-pins.
+  at line end, never a loss signal; one more `PlayerDiag` field + compat ctor
+  + golden re-pins) AND a service-scoped `service.paced_ticks` twin exported
+  by both platforms' soak exporters (impl round: inertness is empirical, so a
+  moved guard-soak baseline needs in-recording attribution; the yield
+  counters' survive-teardown rule).
 - **Config:** `enableSendPacing` (server, default true) — a `/lsslod set`
   boolean row (the `enablePingBackstop` precedent; the rig A/B lever), filed
   in check_soak.py's `SERVER_CONFIG_BOOL_KEYS` same-commit (done — the
@@ -252,9 +266,11 @@ allocation the flush already receives:
   + apply test); the move-tracer boot-row echo (`enableSendPacing` joins
   `enablePingBackstop` — same partition-the-collections rationale).
 - Guard soaks: fresh-backfill + disk-saturation + rate-limit-storm +
-  **store-second-join** (delta round: the only guard where loopback pacing
-  actually BINDS — the store-warm wave is the bank-burst shape; without it
-  the triple asserts headroom on runs where the mechanism never fires).
+  **store-second-join** (delta round: the store-warm wave is the bank-burst
+  shape where loopback pacing actually BINDS) + **bandwidth-throttle** (impl
+  round, both lenses independently: the smallest-allocation scenario — the
+  one where the FLOOR term binds and whose queue_full/delivery premises are
+  the ones per-tick shaping could move).
   Inertness is NOT structural in v2 (the budget binds exactly where the bank
   used to burst — wave-completion ticks stretch from 1 to ≤5 ticks): the
   expectation is UNCHANGED verdicts because every law is conservation- or
@@ -325,3 +341,41 @@ binds), the m7 pin reformulated as a static defaults inequality with the
 pingf-cut degrade documented, the Q/10-during-cut limiter-bound property
 made explicit (+T1 case), the first-tick bound honesty-widened to
 ~0.5-1.3 s, §2.F re-grounded on the watermark arithmetic.
+
+
+**3-Opus implementation review (2026-08-13), all MERGE WITH FIXES — folded
+as v3:**
+
+*Integration lens*: MAJOR — the unbounded `max(share, Q/10)` let deep
+real-terrain backlogs (Q ≥ 2.5×allocation; 800 columns × 64 KB ≈ 52 MB) push
+the budget to the bank, unbounding the first tick the mechanism exists to
+bound; every headline claim carried the unstated `Q < 2.5×alloc` condition.
+MINORs: no soak-visible pacing signal (the guard protocol needs
+attribution), per-player-only counter, the every-tick O(queue) walk's
+overstated precedent, floor-tick double walk, the budget+one-payload
+overshoot, three promised pins missing, guard soaks unrun.
+
+*Correctness lens*: production verified correct point-by-point; the 6.25 MB
+spike trace reproduces the 5-tick slope EXACTLY (paced=4, limiter never
+binds). MINOR — the floor is TICK-denominated while the limiter is
+wall-clock-denominated: below 20 TPS the floor under-delivers and the Q/10
+term is what restores cap rate (load-bearing, so it must not be deleted).
+The m7 pin's units verified coherent but drift-unsafe (the hardcoded /4
+would RELAX if the fast-fire floor widened).
+
+*Test-adequacy lens*: MAJOR — the RAW-denomination pin was VACUOUS: the
+test helper hit the 4-arg QueuedPayload compat ctor (third arg bound to
+submissionOrder, wire silently = raw), so the one mutant the pin exists to
+catch stayed green. MINORs: the m7 units rewrite, two wall-clock
+token-boundary expectations (Tier-1 flake bait — no CI retry), the
+presence-gate and floor-guard pins vacuous at any budget > 0, no multi-tick
+slope pin.
+
+**The v3 resolution**: `clamp(Q/HORIZON, share, 2×share)` — the ceiling
+bounds deep-backlog first ticks at 2 shares while preserving the low-TPS
+compensation to ~10 TPS (the two lenses' tension resolved); the suite
+rewritten on the state's injected nano clock (deterministic, no sleeps)
+with the canonical-ctor fix, the deep-backlog clamp pin, the 5-tick wave
+pin, the budget-0 presence pin, the boot-echo + 5-arg pins, and the
+units-carried m7 pin; `service.paced_ticks` exported by both platforms
+(contract file updated); honest bounds written into §3.

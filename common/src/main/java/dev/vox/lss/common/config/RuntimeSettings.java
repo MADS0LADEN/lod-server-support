@@ -160,8 +160,9 @@ public final class RuntimeSettings {
                         c.enableSendPacing = parseBoolean(raw);
                         return null;
                     },
-                    "applies within a tick; spreads LOD send bursts over ~5 ticks so"
-                            + " game packets interleave (never paces below the cap rate)"),
+                    "applies within a tick; spreads LOD send bursts toward the cap's"
+                            + " per-tick rate so game packets interleave (never paces"
+                            + " below the configured cap)"),
             // R-9 (E1): the privacy keys an admin answering a complaint must not need a
             // restart for. farPlayers is the registry's one STRING-typed row — a strict
             // parse rejects garbage at the command line, then the value routes through

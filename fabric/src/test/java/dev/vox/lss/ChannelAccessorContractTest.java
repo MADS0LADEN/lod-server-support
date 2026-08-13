@@ -137,6 +137,14 @@ class ChannelAccessorContractTest {
                 "../common/src/main/java/dev/vox/lss/common/DiagnosticsFormatter.java"));
         assertTrue(formatter.contains("state.getPacedTicks()"),
                 "the diag builder must read the LIVE paced counter");
+        // The move-tracer boot-row echoes both transport-shaping kill switches (the
+        // m5 partition-the-collections rationale) — deletable with every unit test
+        // green otherwise.
+        String bootstrap = Files.readString(Path.of(
+                "src/main/java/dev/vox/lss/trace/MoveTraceBootstrap.java"));
+        assertTrue(bootstrap.contains("enablePingBackstop")
+                        && bootstrap.contains("enableSendPacing"),
+                "the boot row must echo both transport-shaping kill switches");
     }
 
     @Test
