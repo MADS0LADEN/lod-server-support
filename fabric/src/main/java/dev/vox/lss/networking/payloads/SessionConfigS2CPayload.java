@@ -96,7 +96,7 @@ public record SessionConfigS2CPayload(
                         // same 4-field layout this arm reads (the data-version append is
                         // version-20-only, so isReadable() is false and it decodes 0).
                         // STICKY announce memory (review CRITICAL-1): the ladder's own 16
-                        // rung firing 5 s later must not push a still-in-flight 19 echo
+                        // rung firing 10 s later must not push a still-in-flight 19 echo
                         // to the foreign arm — that fabricated (19, enabled=false) and
                         // silently disabled LOD for the session. Gated on the client's own
                         // announce (mark-before-send causality, see V16ClientWire), so an

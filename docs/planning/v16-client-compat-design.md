@@ -23,8 +23,26 @@ production changes), and the isolation held. Where the code diverges from §§2�
   the implementation splits it into `ClientSessionGate` (discovery timer + `isV16Server` + the
   version-acceptance ladder) and `V16ClientWire` (the one static column-decode flag).
   Functionally equivalent, arguably cleaner — but the §5 diagram names a class that does not exist.
-- **Discovery delay is 100 ticks (5 s), not 60/3 s** (`V16_DISCOVERY_DELAY_TICKS`). Widened for
-  margin against a healthy v18 server whose SessionConfig is briefly delayed by a join-time stall.
+- **Discovery delay is 200 ticks (10 s), not 60/3 s** (`V16_DISCOVERY_DELAY_TICKS`). Originally
+  widened to 100/5 s for margin against a healthy server whose SessionConfig is briefly delayed by
+  a join-time stall; doubled 2026-08-13 (user decision) after a live 1 Mbps throttled join held the
+  config echo past 10 s and walked the whole ladder against a healthy v20 server. Slower legacy
+  discovery (~20 s worst case to a v16 session) is the accepted cost.
+- **NEW — establish-path dialect-flip heal (2026-08-13, found live as a client hard-disconnect).**
+  When the ladder advanced past the version a late echo establishes, the server's dialect mark
+  follows the client's LAST announce — and because C2S batches are byte-identical across dialects,
+  the new manager's first want-set raced ahead of the downgrade guard's heal and was answered with
+  LEGACY-LAYOUT columns: a netty `DecoderException` hard kick ("found 26871 bytes extra") at the
+  client's current-dialect codec, killing the connection on every warm join through a slow link.
+  Fix in `ClientSessionGate.onSessionConfig`: at establish, if `currentAnnounce != version`, the
+  client re-announces the accepted version (mark-before-send) BEFORE the manager is built — TCP
+  ordering then guarantees the server's dialect flip precedes the first batch. Send-success-only
+  commit of `currentAnnounce` (a thrown send retries on the next config); the downgrade guard also
+  commits, so heal echoes never re-announce. This also closes the pre-heal transient decode window
+  (a raced lower echo could mis-arm legacy decode against the established stream until the guard
+  ran). Pinned by the `establishAfterTheLadderAdvancedReAnnounces*` family in
+  `ClientSessionGateTest`. Released v0.9.1–v0.10.0 clients carry the racy ladder and can still hit
+  the kick on saturated links; the heal ships with v0.11.0.
 - **NEW — downgrade guard + v18 re-assert (not in the plan; closes the review's headline finding).**
   Two independent review agents found that a slow-join v18 server (SessionConfig later than the
   discovery delay) makes the client fire the v16 fallback, which a compat-on v18 server *answers*,

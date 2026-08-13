@@ -39,13 +39,18 @@ final class ClientSessionGate {
     }
 
     /** Ticks (client tick = 1/20 s) of SessionConfig silence before the discovery ladder
-     *  advances one rung (C3, XVER §6: announce 20 → 19 → 16). Generous (5 s per rung): a
-     *  healthy same-version server replies in well under a second, and the margin keeps a
-     *  briefly-stalled server (a join-time freeze on a heavy modded server) from tripping
-     *  the fallback. Should a rung slip through anyway, the downgrade guard in
-     *  {@link #onSessionConfig} re-asserts the established version rather than degrading.
-     *  Worst case to a v16 session: ~10 s of silence after the first announce. */
-    static final int V16_DISCOVERY_DELAY_TICKS = 100;
+     *  advances one rung (C3, XVER §6: announce 20 → 19 → 16). Generous (10 s per rung —
+     *  raised from 5 s, 2026-08-13): a healthy same-version server replies in well under a
+     *  second, but a SATURATED LINK can hold the whole join-time burst — the config echo
+     *  included — past 5 s (measured live through a 1 Mbps throttled proxy: the ladder
+     *  walked all three rungs against a healthy current server), and every false walk
+     *  costs a server-side dialect flip plus manager-rebuild churn that the establish
+     *  re-announce then has to heal. The margin's cost lands only on genuine legacy
+     *  servers — slower first LOD (worst case to a v16 session: ~20 s of silence after
+     *  the first announce), accepted per user decision 2026-08-13. Should a rung slip
+     *  through anyway, establishment re-announces the accepted version (see
+     *  {@link #onSessionConfig}) and the downgrade guard re-asserts it on raced echoes. */
+    static final int V16_DISCOVERY_DELAY_TICKS = 200;
 
     private final ClientColumnProcessor columnProcessor;
     // Sends the C2S handshake announcing the given protocol version; injected so tests can
@@ -310,10 +315,49 @@ final class ClientSessionGate {
                 int reAnnounce = this.sessionVersion;
                 V16ClientWire.markAnnouncedVersion(reAnnounce);
                 this.handshakeSender.accept(reAnnounce);
+                // Commit the announce (send-success only, matching the ladder's m4 rule)
+                // so the server's echo to this re-assert skips the establish-path
+                // re-announce below — without this the echo would observe a stale
+                // currentAnnounce and burn one redundant handshake round-trip.
+                this.currentAnnounce = reAnnounce;
             } catch (Exception e) {
                 LSSLogger.debug("re-assert handshake send failed: " + e.getMessage());
             }
             return;
+        }
+
+        // Dialect-flip heal at ESTABLISH (found live 2026-08-13 through a throttled 1 Mbps
+        // link, as a client hard-disconnect): when the ladder advanced past the version
+        // being established — the SLOW-ECHO race accepted above — the server's dialect
+        // mark follows this connection's LAST announce, so at this instant the server
+        // considers the session legacy and will serve LEGACY-LAYOUT columns. C2S batches
+        // are byte-identical across dialects (v16-compat design), so the new manager's
+        // first want-set would be accepted and answered in the wrong dialect — and a
+        // dialect-mismatched column frame is a netty-level DecoderException HARD KICK
+        // ("found N bytes extra"), not a contained ingest failure. Re-announce the
+        // accepted version BEFORE the manager exists: TCP ordering then guarantees the
+        // server's dialect flip precedes the first batch, so it can never answer a
+        // current client in a legacy layout. The raced lower echoes still land in the
+        // downgrade guard above (idempotent re-asserts). Bounded: the server's reply
+        // echoes this same version and currentAnnounce is committed below (send-success
+        // only — a thrown send leaves it stale so a re-sent config retries the heal),
+        // which makes the echo skip this branch. The != 0 conjunct keeps a connection
+        // that never announced (no handshake sent) from ever handshaking from here.
+        if (this.currentAnnounce != 0 && this.currentAnnounce != version) {
+            LSSLogger.info("Establishing protocol " + version + " after the discovery ladder "
+                    + "had advanced to v" + this.currentAnnounce + " (slow echo) — re-announcing v"
+                    + version + " so the server sheds the ladder's dialect mark before any "
+                    + "column is served.");
+            try {
+                // Mark-before-send: this also re-arms our own column decode for the
+                // ESTABLISHED dialect — the ladder had armed the legacy rung's decode,
+                // and a column arriving before the raced echoes heal it would misparse.
+                V16ClientWire.markAnnouncedVersion(version);
+                this.handshakeSender.accept(version);
+                this.currentAnnounce = version;
+            } catch (Exception e) {
+                LSSLogger.debug("establish re-announce send failed: " + e.getMessage());
+            }
         }
 
         this.isV16Server = v16;

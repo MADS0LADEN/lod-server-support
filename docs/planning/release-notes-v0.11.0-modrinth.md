@@ -13,3 +13,7 @@ Credit: SeeU (MIT) as prior art. Folia remains experimental.
 `dirtyBroadcastIntervalSeconds: 0` = broadcasts off, `lodDistanceChunks` default
 now 300, LOD yields to vanilla transport by default
 (`lodYieldsToVanillaTransport: true`), client cache in `.lss/` for fresh installs.
+
+**Fixed**: a "Packet was larger than I expected" disconnect right after joining
+on slow connections (a protocol-discovery race with the server's legacy-client
+support; the client also waits longer before trying legacy protocols now).
