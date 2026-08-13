@@ -46,6 +46,7 @@ public final class RuntimeSettings {
      *  Boolean.parseBoolean's everything-else-is-false would make a typo a silent
      *  disable at the command line. */
     private static boolean parseBoolean(String raw) {
+        raw = raw.trim();
         if ("true".equalsIgnoreCase(raw)) return true;
         if ("false".equalsIgnoreCase(raw)) return false;
         throw new IllegalArgumentException("expected true or false, got '" + raw + "'");

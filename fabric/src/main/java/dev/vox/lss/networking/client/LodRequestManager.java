@@ -109,6 +109,9 @@ public class LodRequestManager {
     // through the manual rate-cap machinery. Suppliers are seams so tests drive
     // tickWithContext without the networking statics or a running client.
     final TransferRateGovernor governor = new TransferRateGovernor();
+    /** Cumulative want-set columns actually OFFERED to the wire (post-send) — the
+     *  governor's offer-backing input (impl review MAJOR-1). Main client thread. */
+    private long declaredColumnsCumulative;
     java.util.function.LongSupplier wireBytesReceivedSupplier =
             LSSClientNetworking::getWireBytesReceived;
     java.util.function.LongSupplier columnsReceivedSupplier =
@@ -147,13 +150,19 @@ public class LodRequestManager {
         // rate feeds the spacing gate, the governed BURST cap (ceil(R/4)) feeds the
         // budget clamp — 4 Hz quarter-batches while governed. Each site min-composes
         // with the manual knob; with the governor off both read the manual value,
-        // bit-identical to the shipped shape.
+        // bit-identical to the shipped shape. The burst site falls back to the FULL
+        // sustained rate when the adaptive cadence is off (impl review MAJOR-1: with
+        // the fast path structurally unavailable, quarter-batches at 1 Hz deliver a
+        // quarter of the governed rate forever — full 1 Hz batches are the manual
+        // knob's shipped shape and let the loop actually reach its target).
         this.scanner.columnRateCap = () -> composeRateCaps(
                 LSSClientConfig.CONFIG.lodColumnsPerSecondLimit,
                 this.governor.sustainedColumnsPerSecond());
         this.scanner.columnBurstCap = () -> composeRateCaps(
                 LSSClientConfig.CONFIG.lodColumnsPerSecondLimit,
-                this.governor.burstColumnsPerSecond());
+                this.scanner.adaptiveCadenceEnabled.getAsBoolean()
+                        ? this.governor.burstColumnsPerSecond()
+                        : this.governor.sustainedColumnsPerSecond());
     }
 
     public void onSessionConfig(SessionConfigS2CPayload config, String serverAddress) {
@@ -163,6 +172,9 @@ public class LodRequestManager {
         // session never re-enables it).
         this.v16GenerationDrive = false;
         resetRequestState();
+        // The governor dies with the SESSION (plan review m3); the negative-delta
+        // guard covers any interval already spanning the gate-counter zeroing.
+        this.governor.reset();
         this.lastDimension = null;
         this.cacheLoaded = false;
         this.scanner.setConfig(config);
@@ -262,13 +274,17 @@ public class LodRequestManager {
                 ingestBacklogSections);
         // The transfer governor observes EVERY tick — including halted ones, which is
         // how a #71 halt disqualifies its interval (the client deliberately stopped
-        // ingesting; the depressed tail rate is not a link measurement).
+        // ingesting; the depressed tail rate is not a link measurement). The ping read
+        // (tab-list lookup) is skipped while inactive.
+        boolean governorActive =
+                this.transferGovernorEnabled.getAsBoolean() && !isLegacySession();
         this.governor.tick(this.governor.clock.getAsLong(),
                 this.wireBytesReceivedSupplier.getAsLong(),
                 this.columnsReceivedSupplier.getAsLong(),
+                this.declaredColumnsCumulative,
                 this.tracker.size(), halted,
-                this.ownPingSupplier.getAsInt(),
-                this.transferGovernorEnabled.getAsBoolean() && !isLegacySession());
+                governorActive ? this.ownPingSupplier.getAsInt() : -1,
+                governorActive);
         if (halted) {
             // Entering the halt: silence would leave the server pumping the last want-set
             // (up to 1024 backlogged asks). An EMPTY batch is the explicit "want nothing"
@@ -486,6 +502,7 @@ public class LodRequestManager {
         }
         try {
             this.batchSender.send(new BatchChunkRequestC2SPayload(positions, timestamps, count));
+            this.declaredColumnsCumulative += count; // the governor's offer-backing input
             long nowMs = System.currentTimeMillis();
             for (int i = 0; i < count; i++) {
                 this.metrics.recordRequestSent(positions[i], nowMs); // RTT: last-declare stamp
@@ -721,6 +738,11 @@ public class LodRequestManager {
         LSSClientNetworking.reportUndispatchedColumns(this);
         saveCache();
         resetRequestState();
+        // Same connection, same link: the governor keeps its MEASUREMENTS across a
+        // dimension change and drops only control state (impl review MINOR-2 — a full
+        // reset would reseed the ping baseline from the congested current reading and
+        // the engagement conjunct could never fire again).
+        this.governor.onDimensionChange();
         // Re-anchor the prune hysteresis: the cleared state has nothing to prune, and a
         // stale anchor from the old dimension would fire (or defer) the first new-dimension
         // prune arbitrarily.
@@ -735,10 +757,6 @@ public class LodRequestManager {
         this.columns.clear();
         this.tracker.clear();
         this.metrics.reset();
-        // The governor dies with the session (plan review m3) — the gate's byte
-        // counters zero here too, and the negative-delta guard covers any interval
-        // already spanning the reset.
-        this.governor.reset();
     }
 
     private void startAsyncCacheLoad(ResourceKey<Level> dimension) {
@@ -748,6 +766,7 @@ public class LodRequestManager {
 
     public void disconnect() {
         this.tracker.clear();
+        this.governor.reset(); // the reset-family convention (teardown is self-sufficient)
         // Defensive disarm: the manager is normally dropped right after, but the session
         // gate's teardown is deliberately self-sufficient — an armed scanner over a
         // cleared tracker would satisfy the fast trigger trivially.

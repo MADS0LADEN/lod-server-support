@@ -69,14 +69,17 @@ final class TransferRateGovernor {
      *  minutes (Mechanism B's rule, mirrored client-side). */
     private static final long BASELINE_DRIFT_MS_PER_SEC = 1;
 
-    /** Injectable clock (millis) — the frontier-damper test pattern. */
-    LongSupplier clock = System::currentTimeMillis;
+    /** Injectable MONOTONIC clock in millis (impl review m2: interval math on the
+     *  wall clock misreads an NTP step or VM resume as a rate collapse — a spurious
+     *  cut to the floor). Arbitrary epoch; only deltas are used. */
+    LongSupplier clock = () -> System.nanoTime() / 1_000_000L;
 
     // ---- Interval accumulation (main client thread) ----
     private boolean intervalSeeded;
     private long intervalStartMillis;
     private long intervalStartWireBytes;
     private long intervalStartColumns;
+    private long intervalStartDeclared;
     private boolean awaitingAtStart;
     private boolean haltSeenThisInterval;
 
@@ -106,23 +109,31 @@ final class TransferRateGovernor {
     /**
      * One observation per client tick. {@code wireBytesCumulative}/{@code columnsCumulative}
      * are the session gate's monotonic arrival counters (they zero at session reset — the
-     * negative-delta guard makes such intervals non-qualifying); {@code halted} is this
-     * tick's #71 backpressure-halt verdict (a halt anywhere in an interval disqualifies
-     * it — the client deliberately stopped ingesting, so the depressed tail rate is not a
-     * link measurement); {@code pingMs} is the tab-list latency ({@code <= 0} = no
-     * sample); {@code active} is the composed gate (config kill switch on, not a harness
-     * JVM, not a legacy-dialect session) — false hard-resets so a mid-session toggle
-     * leaves no stale cap behind.
+     * negative-delta guard makes such intervals non-qualifying);
+     * {@code declaredCumulative} counts want-set columns actually OFFERED to the wire
+     * (the manager's post-send counter — the impl review MAJOR-1 offer-backing input:
+     * a downward step is link evidence only when the actuator genuinely offered the
+     * governed rate, because the actuator is a stop-and-wait WINDOW whose achieved
+     * rate collapses with answer latency — cadence holds, the walk-cost coverage
+     * limit, gen-bound serves, high base RTT — none of which is link shortfall);
+     * {@code halted} is this tick's #71 backpressure-halt verdict (a halt anywhere in
+     * an interval disqualifies it — the client deliberately stopped ingesting, so the
+     * depressed tail rate is not a link measurement); {@code pingMs} is the tab-list
+     * latency ({@code <= 0} = no sample); {@code active} is the composed gate (config
+     * kill switch on, not a harness JVM, not a legacy-dialect session) — false
+     * hard-resets so a mid-session toggle leaves no stale cap behind.
      */
     void tick(long nowMillis, long wireBytesCumulative, long columnsCumulative,
-              int awaitingSize, boolean halted, int pingMs, boolean active) {
+              long declaredCumulative, int awaitingSize, boolean halted, int pingMs,
+              boolean active) {
         if (!active || harnessJvm()) {
             if (this.engaged || this.intervalSeeded) hardReset();
             return;
         }
         updatePingBaseline(nowMillis, pingMs);
         if (!this.intervalSeeded) {
-            seedInterval(nowMillis, wireBytesCumulative, columnsCumulative, awaitingSize);
+            seedInterval(nowMillis, wireBytesCumulative, columnsCumulative,
+                    declaredCumulative, awaitingSize);
             return;
         }
         if (halted) this.haltSeenThisInterval = true;
@@ -130,14 +141,16 @@ final class TransferRateGovernor {
         if (elapsed < INTERVAL_MILLIS) return;
 
         evaluateInterval(nowMillis, wireBytesCumulative, columnsCumulative,
-                awaitingSize, elapsed);
-        seedInterval(nowMillis, wireBytesCumulative, columnsCumulative, awaitingSize);
+                declaredCumulative, awaitingSize, elapsed);
+        seedInterval(nowMillis, wireBytesCumulative, columnsCumulative,
+                declaredCumulative, awaitingSize);
     }
 
     private void evaluateInterval(long nowMillis, long wireBytes, long columns,
-                                  int awaitingSize, long elapsedMillis) {
+                                  long declared, int awaitingSize, long elapsedMillis) {
         long deltaBytes = wireBytes - this.intervalStartWireBytes;
         long deltaColumns = columns - this.intervalStartColumns;
+        long deltaDeclared = declared - this.intervalStartDeclared;
         // A reset zeroed the gate counters mid-interval (review m3): non-qualifying, and
         // the estimator takes no sample from garbage.
         boolean invalid = deltaBytes < 0 || deltaColumns < 0;
@@ -156,7 +169,13 @@ final class TransferRateGovernor {
 
         if (this.engaged) {
             if (qualifying) {
-                stepEngaged(measured);
+                // Offer-backing (impl review MAJOR-1): the interval must have OFFERED
+                // ≥ ¾ of the governed rate for a downward step to be link evidence.
+                long expectedDeclared =
+                        (long) sustainedColumnsPerSecond() * elapsedMillis / 1000L;
+                boolean offerBacked = deltaDeclared >= 0
+                        && deltaDeclared * 4L >= expectedDeclared * 3L;
+                stepEngaged(measured, offerBacked);
             }
             // Disengage (b): sustained normal ping — evaluated on EVERY interval (a
             // converged session produces no qualifying intervals, which is exactly the
@@ -177,16 +196,28 @@ final class TransferRateGovernor {
         }
     }
 
-    private void stepEngaged(long measured) {
+    private void stepEngaged(long measured, boolean offerBacked) {
         boolean shortfall = measured < this.desiredBytesPerSec - STEP_BYTES_PER_SEC / 4;
+        if (shortfall && !offerBacked) {
+            // The actuator under-offered (a cadence hold, the walk-cost coverage
+            // limit, actionable retries, an RTT-stretched window) — the low measured
+            // rate is the WINDOW's doing, not the link's. FREEZE: adjusting nothing
+            // is safe; cutting here is the MAJOR-1 ratchet-to-floor defect.
+            return;
+        }
         if (shortfall) {
             this.desiredBytesPerSec =
                     Math.max(measured - STEP_BYTES_PER_SEC / 2, MIN_RATE_BYTES_PER_SEC);
             this.keptUpStreak = 0;
         } else if (++this.keptUpStreak % DRAIN_EVERY_KEPT_UP == 0) {
-            // Deterministic drain interval: bleed standing queue instead of probing up.
-            this.desiredBytesPerSec =
-                    Math.max(measured - STEP_BYTES_PER_SEC / 4, MIN_RATE_BYTES_PER_SEC);
+            // Deterministic drain interval: bleed standing queue instead of probing
+            // up. Anchored at min(desired, measured) (impl review MINOR-3): when the
+            // size EWMA lags a regime change, measured can exceed desired, and a
+            // measured-anchored drain would RAISE desired several-fold in one step —
+            // the opposite of a bleed.
+            this.desiredBytesPerSec = Math.max(
+                    Math.min(this.desiredBytesPerSec, measured) - STEP_BYTES_PER_SEC / 4,
+                    MIN_RATE_BYTES_PER_SEC);
         } else {
             this.desiredBytesPerSec += STEP_BYTES_PER_SEC;
         }
@@ -261,11 +292,13 @@ final class TransferRateGovernor {
         }
     }
 
-    private void seedInterval(long nowMillis, long wireBytes, long columns, int awaitingSize) {
+    private void seedInterval(long nowMillis, long wireBytes, long columns,
+                              long declared, int awaitingSize) {
         this.intervalSeeded = true;
         this.intervalStartMillis = nowMillis;
         this.intervalStartWireBytes = wireBytes;
         this.intervalStartColumns = columns;
+        this.intervalStartDeclared = declared;
         this.awaitingAtStart = awaitingSize > 0;
         this.haltSeenThisInterval = false;
     }
@@ -281,6 +314,15 @@ final class TransferRateGovernor {
         this.haltSeenThisInterval = false;
         // The size estimator and ping baseline survive a config-toggle reset (they are
         // measurements, not control state) but die with the session in reset().
+    }
+
+    /** Dimension change (impl review MINOR-2): same connection, same link — the
+     *  MEASUREMENTS (ping baseline, size estimate) survive so a still-congested link
+     *  re-engages in 1-2 intervals off the kept baseline; only control state drops
+     *  (a full reset would reseed the baseline from the CONGESTED current ping and
+     *  the engagement conjunct could never fire again). */
+    void onDimensionChange() {
+        hardReset();
     }
 
     /** Session teardown (the reset family): everything dies with the session. */

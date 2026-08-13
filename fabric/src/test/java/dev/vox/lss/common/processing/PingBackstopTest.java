@@ -23,15 +23,39 @@ class PingBackstopTest {
     @Test
     void zeroAndAbsentSamplesNeverSeedTheBaseline() {
         // Review m9: a ~0 anchor would read a distant player's natural ping as
-        // permanent excess and cut them during early backfill.
+        // permanent excess and cut them during early backfill. The natural ping here
+        // sits ABOVE the 750 ms cut threshold (impl review M3: at 600 ms the original
+        // pin stayed green even with the seeding guard removed — it verified the cut
+        // threshold, not the seeding rule): a zero-anchored baseline WOULD cut this
+        // player; a correctly-seeded one must not.
         var b = new PingBackstop();
         adjust(b, 0, 0, 0);       // absent
         adjust(b, ADJ, -1, 0);    // no signal
-        // First NONZERO sample seeds; 600 ms natural ping, excess 0 → no cut even with
-        // send traffic.
-        adjust(b, 2 * ADJ, 600, 10_000 * KB);
-        adjust(b, 3 * ADJ, 601, 20_000 * KB);
-        assertEquals(1.0, b.factor(), "a natural 600 ms ping must never be cut");
+        // First NONZERO sample seeds; 1000 ms natural ping, excess ~0 → no cut even
+        // with attributed send traffic.
+        adjust(b, 2 * ADJ, 1_000, 10_000 * KB);
+        adjust(b, 3 * ADJ, 1_001, 20_000 * KB);
+        assertEquals(1.0, b.factor(), "a natural 1000 ms ping must never be cut");
+    }
+
+    @Test
+    void recoveryProceedsOnAnUnchangedCalmPing() {
+        // Impl review MAJOR-2: 26.2's integer smoothing (3·L+s)/4 is bit-stable for
+        // samples in [L, L+3], so a calm link's reported ping stops changing — which
+        // is exactly the post-congestion state. Recovery gated on a CHANGED ping
+        // would freeze a cut factor below 1.0 for the rest of the session; only the
+        // CUT branch carries the changed-ping gate.
+        var b = new PingBackstop();
+        adjust(b, 0, 50, 0);
+        adjust(b, ADJ, 2_000, 2_560 * KB);
+        double cut = b.factor();
+        assertTrue(cut < 1.0);
+        long now = ADJ;
+        for (int i = 0; i < 3; i++) {
+            b.observe(now += ADJ, 60, 2_560 * KB, CAP); // SAME calm value every time
+        }
+        assertEquals(cut * PingBackstop.RECOVER_MULTIPLIER, b.factor(), 1e-9,
+                "three identical calm readings must still recover");
     }
 
     @Test

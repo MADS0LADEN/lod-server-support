@@ -167,7 +167,7 @@ class RuntimeSettingsTest {
                 "generationConcurrencyLimitPerPlayer", "mbPerSecondLimitPerPlayer",
                 "mbPerSecondLimitGlobal", "dirtyBroadcastIntervalSeconds",
                 "maxConcurrentDiskReads", "farPlayers", "farPlayersMaxDistanceBlocks",
-                "outboundBufferCeilingKB")));
+                "outboundBufferCeilingKB", "enablePingBackstop")));
         var c = new TestServerConfig();
         assertEquals(names.size(), RuntimeSettings.listLines(c).size());
     }

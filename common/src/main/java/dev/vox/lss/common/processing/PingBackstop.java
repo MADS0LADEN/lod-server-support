@@ -36,8 +36,8 @@ public final class PingBackstop {
      *  loop is deliberately coarse). */
     public static final long ADJUST_INTERVAL_MILLIS = 5_000L;
     /** Attribution guard: never punish an LSS-idle session for someone else's
-     *  congestion — a cut requires at least this many LSS bytes sent since the last
-     *  adjustment. */
+     *  congestion — a cut requires at least this many LSS bytes sent in the last
+     *  evaluation window (~one ADJUST_INTERVAL; anchors advance every evaluation). */
     public static final long ATTRIBUTION_MIN_BYTES = 64L * 1024;
     /** The factor floors at whatever yields this effective rate. */
     public static final long FLOOR_BYTES_PER_SEC = 64L * 1024;
@@ -92,31 +92,43 @@ public final class PingBackstop {
         }
         if (nowMillis - this.lastAdjustMillis < ADJUST_INTERVAL_MILLIS) return;
         if (pingMs <= 0 || this.baselineMs < 0) return;
-        // "Only when the latency value has changed since the last adjustment": the
-        // keepalive updates ~every 15 s, so most 5 s windows see the same smoothed
-        // value — re-adjusting on it would triple the loop gain for free.
-        if (pingMs == this.lastAdjustPing) return;
 
+        // Every evaluation advances the window anchors, so the send-bytes window the
+        // attribution guard and the binding-cut anchor read stays ~one interval wide
+        // (impl review MINOR-1: anchoring only at EXECUTED adjustments let the window
+        // stretch unboundedly — a near-idle session then accumulated the 64 KB guard
+        // over minutes while its computed send RATE read tiny, inverting the guard).
         long sentSinceLast = Math.max(0, totalBytesSent - this.lastAdjustBytesSent);
         long windowMillis = nowMillis - this.lastAdjustMillis;
+        boolean pingChanged = pingMs != this.lastAdjustPing;
         this.lastAdjustMillis = nowMillis;
         this.lastAdjustPing = pingMs;
         this.lastAdjustBytesSent = totalBytesSent;
 
         int excess = pingMs - this.baselineMs;
-        if (excess > CUT_EXCESS_MS && sentSinceLast > ATTRIBUTION_MIN_BYTES
-                && capBytesPerSec > 0) {
-            double sendRate = sentSinceLast * 1000.0 / Math.max(1L, windowMillis);
-            // The binding first cut (m7): land below the OBSERVED send rate at once.
-            double cut = Math.min(0.5 * this.factor, 0.5 * sendRate / capBytesPerSec);
-            double floor = Math.min(1.0, (double) FLOOR_BYTES_PER_SEC / capBytesPerSec);
-            this.factor = Math.max(floor, cut);
+        if (excess > CUT_EXCESS_MS) {
+            // A CUT additionally requires a CHANGED ping (the smoothed keepalive
+            // refreshes ~every 15 s; re-cutting on the same stale value would triple
+            // the loop gain) plus attribution. The gate is cut-side ONLY (impl review
+            // MAJOR-2): 26.2's integer smoothing (3·L+s)/4 is bit-stable for samples
+            // in [L, L+3], so calm links stop changing the value — recovery gated on
+            // change could freeze a cut factor below 1.0 for the rest of the session.
+            if (pingChanged && sentSinceLast > ATTRIBUTION_MIN_BYTES
+                    && capBytesPerSec > 0) {
+                double sendRate = sentSinceLast * 1000.0 / Math.max(1L, windowMillis);
+                // The binding first cut (m7): land below the OBSERVED send rate at once.
+                double cut = Math.min(0.5 * this.factor, 0.5 * sendRate / capBytesPerSec);
+                double floor = Math.min(1.0, (double) FLOOR_BYTES_PER_SEC / capBytesPerSec);
+                this.factor = Math.max(floor, cut);
+            }
             this.calmStreak = 0;
-        } else if (excess < RECOVER_EXCESS_MS && this.factor < 1.0) {
-            if (++this.calmStreak >= RECOVER_STREAK) {
+        } else if (excess < RECOVER_EXCESS_MS) {
+            if (this.factor < 1.0 && ++this.calmStreak >= RECOVER_STREAK) {
                 this.calmStreak = 0;
                 this.factor = Math.min(1.0, this.factor * RECOVER_MULTIPLIER);
             }
+        } else {
+            this.calmStreak = 0; // the middle band is not calm
         }
     }
 
@@ -134,9 +146,15 @@ public final class PingBackstop {
         return this.factor;
     }
 
-    /** Kill-switch hygiene: a disabled backstop must not leave a stale cut applied. */
+    /** Kill-switch hygiene: a disabled backstop must not leave a stale cut applied —
+     *  and the window re-anchors (impl review m3: a live off→on A/B cycle would
+     *  otherwise compute its first post-re-enable cut over the whole disabled span,
+     *  mis-anchoring the binding cut). Called every tick while disabled; the volatile
+     *  write is guarded. */
     public void resetFactor() {
-        this.factor = 1.0;
+        if (this.factor != 1.0) this.factor = 1.0;
         this.calmStreak = 0;
+        this.windowSeeded = false;
+        this.lastAdjustPing = Integer.MIN_VALUE;
     }
 }

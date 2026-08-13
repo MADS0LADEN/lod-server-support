@@ -105,6 +105,18 @@ class ChannelAccessorContractTest {
                 "../paper/src/main/java/dev/vox/lss/paper/PaperRequestProcessingService.java"));
         assertTrue(paper.contains("state.getPingBackstop().apply(perPlayerCap)"),
                 "Paper twin must apply the ping factor to the flush allocation");
+        // The OBSERVE pass (impl review: with it deleted, the factor stays 1.0 forever
+        // and the apply pin above stays green — Mechanism B silently inert), plus the
+        // diag plumb (the golden constructs PlayerDiag through the compat ctor, so a
+        // literal 1.0 in fromStates would keep every rendering test green).
+        assertTrue(fabric.contains("state.getPingBackstop().observe("),
+                "Fabric must run the backstop observe pass");
+        assertTrue(paper.contains("state.getPingBackstop().observe("),
+                "Paper twin must run the backstop observe pass");
+        String formatter = Files.readString(Path.of(
+                "../common/src/main/java/dev/vox/lss/common/DiagnosticsFormatter.java"));
+        assertTrue(formatter.contains("state.getPingBackstop().factor()"),
+                "the diag builder must read the LIVE factor into pingf=");
     }
 
     @Test

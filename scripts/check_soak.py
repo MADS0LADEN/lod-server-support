@@ -215,6 +215,10 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     # gate — the AUTO mode was deleted, adaptive-transfer-rate-plan.md). Listed so
     # an A/B scenario can pin it — the R4 lesson below is exactly this omission.
     "outboundBufferCeilingKB",
+    # The ping backstop's kill switch (adaptive-transfer-rate-plan.md Mechanism B) —
+    # structurally inert on loopback (latency 0 never seeds a baseline), listed so a
+    # live-shaped A/B scenario can pin it (the S-8 same-commit allowlist rule).
+    "enablePingBackstop",
     "generationConcurrencyLimitGlobal", "generationTimeoutSeconds",
     "dirtyBroadcastIntervalSeconds",
     "generationConcurrencyLimitPerPlayer", "perDimensionTimestampCacheSizeMB",

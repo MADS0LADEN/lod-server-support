@@ -383,7 +383,12 @@ Removed outright (same branch, before the new mechanisms land):
   logs the engaged rate); `yielded=` low; disconnect/rejoin re-engages
   within ~2 s. A second check with the CLIENT kill switch off: behavior
   degrades to yield-only (today's shape) and `pingf=` engages within ~30 s
-  if ping balloons — B's live receipt.
+  if ping balloons — B's live receipt. **Expected limit cycle (impl review
+  m4, documented not fixed)**: on a permanently slow link the ping-normal
+  disengage can produce a governed/ungoverned sawtooth (~60 s capped,
+  ~30-45 s uncapped while the 30 s-stale tab ping catches up) — read it as
+  the documented cycle, not a failure; if disruptive, the fix is
+  re-engagement hysteresis.
 
 ## Process
 
@@ -453,3 +458,67 @@ client actuation. Two pre-implementation checks recorded: 26.2 tab-
 latency refresh cadence/smoothing (A's signal; >10 s staleness switches
 the drain bias to the deterministic every-8th-kept-up variant) and
 keepalive smoothing (load-bearing for the A/B margin).
+
+**Implementation review (3 Opus, 2026-08-13) — all three MERGE WITH FIXES,
+all folded:**
+
+*Control lens* — MAJOR-1 (the design finding): the governed actuator is a
+stop-and-wait WINDOW (the outstanding-divisor gate waits for the whole
+quarter-batch below B=20), so any answer-latency floor above 250 ms —
+`enableAdaptiveScanCadence=false`, movement past the ring-128 walk-cost
+coverage limit, actionable-retry/pressure holds, gen-bound serves, base
+RTT ≥ ~300 ms — read as link shortfall and ratcheted `desired` to
+MIN_RATE on exactly the target populations. FIXED two-sided:
+**offer-backing** (a downward step requires the interval to have OFFERED
+≥ ¾ of the governed rate — the manager counts post-send declared columns;
+an under-offered shortfall FREEZES) and the **burst site falls back to
+the full sustained rate when the adaptive cadence is off** (1 Hz full
+batches — the manual knob's shipped shape — instead of quarter-rate
+forever). Residual accepted: dynamic under-offer (movement past ring 128,
+RTT > ~500 ms) freezes `desired` and delivers below it until conditions
+clear — bounded, safe-direction, disengaged by the ping-normal path.
+MAJOR-2: B's changed-ping gate sat before BOTH branches, and 26.2's
+integer smoothing is bit-stable on calm links — a cut factor could freeze
+below 1.0 for the session. FIXED: the gate is cut-side only; recovery
+runs on the 5 s cadence. MINOR-1 window anchors now advance every
+evaluation (the attribution guard reads a real ~5 s window; the
+inverted tiny-rate anchor is gone). MINOR-2 dimension change now keeps
+the governor's MEASUREMENTS (baseline + size estimate) and drops only
+control state (`onDimensionChange()`); full reset stays session-scoped.
+MINOR-3 the drain interval anchors at min(desired, measured) — an
+EWMA-lag interval can no longer RAISE desired. N7 recorded: the #71
+taper shrinks the batch but not the spacing charge, so the taper's
+sustained-rate effect is limited — pre-existing with the manual knob.
+
+*Integration lens* — M1 production-wiring pins added (see the test list
+below). M2 `enablePingBackstop` added to check_soak.py's config
+allowlist (the R4/S-8 same-commit rule — without it no soak arm could
+ever A/B the backstop). m1 the LSSConstants 0=AUTO javadoc rewritten.
+m2 the governor clock is now monotonic (nanoTime-derived — an NTP step
+read as a rate collapse). m3 `resetFactor()` re-anchors the window (a
+live off→on A/B no longer mis-anchors its first cut). m4 RECORDED as a
+live-gate expectation, not fixed: on a permanently slow link the
+ping-normal disengage (60 s calm) can open a governed/ungoverned
+SAWTOOTH (~60 s capped, ~30-45 s uncapped while the stale tab ping
+refreshes) — the live gate should read this as the documented limit
+cycle, not a failure; B backstops the severe end. If observed as
+disruptive, the fix is re-engagement hysteresis, not removal. m5 the
+move-tracer boot row echoes `enablePingBackstop`. m6/n1 registry
+containsAll + parseBoolean trim.
+
+*Test-adequacy lens* — M1 the governor had ZERO wiring coverage: added
+`engagedGovernorShrinksTheDeclaredBatchThroughTheProductionWiring` (also
+reds a swapped-lambda wiring), `governorKillSwitchBindsThroughThe
+ProductionConfigRead`, `legacySessionExcludesTheGovernor` (manager
+level), and the scanner-level `governedSeamSplitEquilibratesAtFourHertz`
+(M2 — the 4 Hz equilibrium through the real spacing gate). M3 the
+zero-sample baseline pin was vacuous at a 600 ms natural ping (below the
+cut threshold — it verified the threshold, not the seeding); re-pinned at
+1000 ms where a zero-anchored baseline WOULD cut. Also added: disengage
+path (a) (`sustainedRateAboveTheEngageThresholdDisengages`), the
+pre-first-sample no-cap guard, the drain-never-raises pin, the
+under-offered-freeze pin, both harness properties, the operating-region
+constants pin, the refused-tick floor-counter pin (re-covering the one
+surviving shape the deleted AUTO suite pinned), the `pingf=` value-render
+pin, the observe-pass + formatter-plumb source-regex pins, and the
+recovery-on-unchanged-calm-ping pin.

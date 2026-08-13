@@ -1634,6 +1634,25 @@ class SpiralScannerTest {
     }
 
     @Test
+    void governedSeamSplitEquilibratesAtFourHertz() {
+        // The governed shape (plan review M2 + impl review M2's missing pin): the
+        // BURST cap ceil(R/4) at the budget site with R at the spacing site prices a
+        // declared quarter-batch to exactly the 5-tick floor — 4 Hz quarter-batches.
+        // The single-supplier revert this pin exists to red (same R at both sites)
+        // spaces to 20 ticks: 1 Hz full-second bursts, the shape that grazes
+        // Mechanism B's 750 ms threshold and consumes the A/B separation margin.
+        var rig = new AdaptiveRig(scanner(16));
+        rig.s.columnRateCap = () -> 160;   // sustained site: R
+        rig.s.columnBurstCap = () -> 40;   // budget site: ceil(R/4)
+        assertEquals(40, rig.primeAndArm(),
+                "the budget clamp reads the BURST cap, not the sustained rate");
+        rig.s.noteDeclared(40);
+        rig.outstanding = 0;
+        assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(),
+                "40 declared at R=160 prices to exactly the floor — 4 Hz quarter-batches");
+    }
+
+    @Test
     void smallTailBatchesStillRideTheFloor() {
         // The converging-tail sparkle survives: N=10 at R=100 prices to 2 ticks → the
         // 5-tick floor binds, and the floor ticks never count as rate-gated.
