@@ -206,6 +206,9 @@ tasks.register('vssJar') {
                         // Far players (E1): the privacy node rebrands too (R-1 surface 5 —
                         // extend HERE and the release_check token lists together, or the
                         // VSS jar silently ships an lss.* node).
+                        // NOTE: display/declaration rename only — the Java
+                        // enforcement literal in PaperFarPlayerSnapshots stays lss.*
+                        // (documented drift; fix before any VSS re-enable).
                         text = text.replace('lss.farplayers.hidden', 'vss.farplayers.hidden')
                         def ne = new ZipEntry('plugin.yml')
                         zos.putNextEntry(ne)

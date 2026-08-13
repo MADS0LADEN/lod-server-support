@@ -363,8 +363,15 @@ public final class FarPlayerBroadcastService {
 
             boolean equipmentDue = t.equipmentIdentities() != null
                     && (!row.equipmentEverSent || row.equipmentHash != t.equipmentHash());
+            Integer rosterIndex = state.indexByUuid.get(t.uuid());
+            if (rosterIndex == null) {
+                // Visible but not (yet) indexed — reachable only if the incremental
+                // adds cap ever drops below the visible cap (today both are 1024, so
+                // this is armor, not a path); an unboxed get would NPE the tick.
+                continue;
+            }
             entries.add(new FarPlayerWire.UpdateEntry(
-                    state.indexByUuid.get(t.uuid()),
+                    rosterIndex,
                     qx, qy, qz, yaw, headYaw, pitch, t.poseFlags(),
                     FarPlayerWire.velocityToShort(t.velXPerSecond()),
                     FarPlayerWire.velocityToShort(t.velYPerSecond()),

@@ -85,6 +85,11 @@ final class PaperFarPlayerSnapshots {
                 // uncovered (documented: per-viewer filtering would break the
                 // once-per-tick snapshot inversion) — target-level vanish is the
                 // staff-invisibility case.
+                // NOTE (pre-G review): the vssJar rewrite renames the DECLARED
+                // plugin.yml node to vss.farplayers.hidden but this enforcement
+                // literal stays lss.* — on a VSS jar the documented node grants
+                // nothing. VSS publishing is disabled since v0.8.0 (exposure ~0);
+                // route through Brand or dual-check before any VSS re-enable.
                 p.getBukkitEntity().hasPermission("lss.farplayers.hidden")
                         || isVanished(p.getBukkitEntity()),
                 hash, equipmentIds, equipmentCounts, vehicle);
