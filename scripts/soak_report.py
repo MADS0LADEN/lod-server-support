@@ -57,6 +57,13 @@ SERVER_CONCERNING = {
     # drops mean the batcher can't keep up or the disk is full).
     "store errors": "store.errors",
     "store deposit drops": "store.deposit_drops",
+    # Far players (E1): ANY movement on a soak run is concerning — the client property
+    # gate keeps harness clients unsubscribed, so nonzero means the E1 baseline-
+    # neutrality contract broke (the checker's far-players-inert violation is the hard
+    # gate; this is the digest's mirror). The bytes ride a dedicated lane and are
+    # deliberately absent from the bytes_sent/wire_bytes cross-identity audits.
+    "far-player frames": "far_players.update_frames",
+    "far-player bytes": "far_players.bytes",
 }
 SERVER_MECHANISM = {
     "duplicate skips": "service.duplicate_skips",

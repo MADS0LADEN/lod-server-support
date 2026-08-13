@@ -102,6 +102,9 @@ class ExporterContractTest {
         @Override public ChunkGenerationService generationService() { return null; }
         @Override public DirtyColumnTracker dirtyTracker() { return this.dirtyTracker; }
         @Override public DirtyContentFilter dirtyContentFilter() { return this.dirtyContentFilter; }
+        @Override public dev.vox.lss.common.farplayers.FarPlayerBroadcastService farPlayerService() {
+            return new dev.vox.lss.common.farplayers.FarPlayerBroadcastService(null);
+        }
         @Override public SharedBandwidthLimiter bandwidthLimiter() { return this.bandwidthLimiter; }
         @Override public Collection<? extends AbstractPlayerRequestState<?>> players() {
             return this.players.values();

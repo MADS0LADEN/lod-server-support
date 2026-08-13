@@ -280,6 +280,19 @@ public final class PaperSoakMetricsExporter {
         dedupMap.put("groups", internals.dedupGroups());
         result.put("dedup", dedupMap);
 
+        // Far players — verbatim twin of the Fabric exporter's group (same keys, same
+        // order; the shared contract pins parity). All-zero on every soak run (the
+        // client property gate — E1 baseline neutrality).
+        var farPlayers = service.getFarPlayerService();
+        var farMap = new LinkedHashMap<String, Object>();
+        farMap.put("subscribers", (long) farPlayers.subscriberCount());
+        farMap.put("roster_frames", farPlayers.rosterFramesSent());
+        farMap.put("update_frames", farPlayers.updateFramesSent());
+        farMap.put("entries", farPlayers.entriesSent());
+        farMap.put("suppressed", farPlayers.suppressedUnchanged());
+        farMap.put("bytes", farPlayers.bytesSent());
+        result.put("far_players", farMap);
+
         // LOD store — verbatim twin of the Fabric exporter's group (same keys, same
         // order; the shared server-snapshot.contract pins parity). All-zero while
         // lodStore=off.

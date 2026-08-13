@@ -91,6 +91,8 @@ class PaperExporterContractTest {
             doReturn(this.diskReader).when(this.service).getDiskReader();
             doReturn(this.genService).when(this.service).getGenerationService();
             doReturn(this.dirtyTracker).when(this.service).getDirtyTracker();
+            doReturn(new dev.vox.lss.common.farplayers.FarPlayerBroadcastService(null))
+                    .when(this.service).getFarPlayerService();
             doReturn(this.bandwidthLimiter).when(this.service).getBandwidthLimiter();
             doReturn(players).when(this.service).getPlayers();
         }

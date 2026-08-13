@@ -209,6 +209,7 @@ public class PaperCommands implements CommandExecutor, TabCompleter {
                 service.getPlayers().values()
         ).withV16Line(service.getV16CompatManager().diagLineOrNull())
                 .withV18Line(service.getDialectTracker().diagLine())
+                .withFarPlayersLine(farPlayersDiagLineOrNull(service))
                 .withYieldLine(DiagnosticsFormatter.yieldDiagLineOrNull(
                         config.lodYieldsToVanillaTransport, service.getTickDiag()))
                 .withXrayLine(xrayDiagLine());
@@ -246,5 +247,15 @@ public class PaperCommands implements CommandExecutor, TabCompleter {
             return List.of("all");
         }
         return Collections.emptyList();
+    }
+
+    /** Present ONLY once far players have been touched (a subscriber exists or frames
+     *  were ever sent) — inert servers render nothing, so soak/benchmark diag output is
+     *  byte-unchanged (E1 baseline neutrality). */
+    private static String farPlayersDiagLineOrNull(
+            PaperRequestProcessingService service) {
+        var fp = service.getFarPlayerService();
+        if (fp == null) return null; // partial rigs (mocked service seams)
+        return fp.subscriberCount() > 0 || fp.rosterFramesSent() > 0 ? fp.diagLine() : null;
     }
 }

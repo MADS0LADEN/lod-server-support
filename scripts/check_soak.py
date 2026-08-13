@@ -295,6 +295,13 @@ SERVER_MONOTONIC = (
     # raw==raw); cols_zstd/cols_raw = per-payload codec outcomes at build. Monotonic
     # counters; no law consumes them yet — the compress-gate harness reads them.
     "service.wire_bytes", "service.cols_zstd", "service.cols_raw",
+    # Far players (E1, FARP §3.2): a dedicated send lane with its OWN counters —
+    # deliberately NOT part of service.bytes_sent/wire_bytes (the cross-identity
+    # audits). Monotonic; the E1 baseline-neutrality check additionally requires them
+    # to stay ZERO on every soak run (the client property gate keeps harness clients
+    # unsubscribed — a nonzero here means the gate broke and the baselines shifted).
+    "far_players.roster_frames", "far_players.update_frames",
+    "far_players.entries", "far_players.suppressed", "far_players.bytes",
     # Server-owned generation: disk misses resolved into transient silent drops (law A5's
     # dedicated term — a subset of superseded events, counted separately because
     # backlog-replace supersession never touches disk).
@@ -360,7 +367,7 @@ KNOWN_SERVER_KEYS = {
     # additions (sampled per tick by the driver); probe_hashes appears only when the server
     # JVM runs with -Dlss.soak.probes. All are observational — no law requires their presence.
     "snapshot": {"event", "wallMs", "tick", "service", "disk", "generation", "dirty",
-                 "bandwidth", "players", "dedup", "jvm", "tscache", "store",
+                 "bandwidth", "players", "dedup", "jvm", "tscache", "store", "far_players",
                  "mailbox_depth_hw", "mspt_avg_window", "probe_hashes"},
     # mapped appears only on Folia runs, only when true: the driver acknowledged a timeline
     # command Folia unregisters (save-all) as a deliberate no-op instead of executing it.
@@ -1074,7 +1081,23 @@ def evaluate_laws(ctx):
                                     "no client-laws window carried nonzero request deltas — "
                                     "conservation laws never fired on real traffic",
                                     {"client_windows": sum(client_windows.values())}))
+    violations += far_players_inert_violations(ctx.server_snaps[-1])
     return violations, windows, sum(client_windows.values())
+
+
+def far_players_inert_violations(last_snapshot):
+    """E1 baseline neutrality (FARP §3.3 property gate): soak clients must NEVER
+    subscribe to far players — their capability bit is property-gated off — so every
+    far_players counter must read zero on every scenario. A nonzero here means the gate
+    broke and every soak baseline silently shifted. Presence-tolerant: pre-E1
+    recordings without the block pass vacuously."""
+    fp = last_snapshot.get("far_players", {})
+    moved = {k: v for k, v in fp.items() if isinstance(v, (int, float)) and v != 0}
+    if moved:
+        return [Violation("far-players-inert", "entire run",
+                          "far_players counters moved on a soak run — the client "
+                          "property gate must keep harness clients unsubscribed", moved)]
+    return []
 
 
 # ----------------------------------------------------------------------- named checks
@@ -3166,6 +3189,8 @@ def _srv(wall=1000, seg=0, over=None):
                            "order_gated": 0, "inversions": 0},
             "dirty": {"pending": 0, "broadcast_positions": 0, "marked_total": 0,
                       "suppressed_total": 0},
+            "far_players": {"subscribers": 0, "roster_frames": 0, "update_frames": 0,
+                            "entries": 0, "suppressed": 0, "bytes": 0},
             "store": {"hits": 0, "misses": 0, "deposits": 0, "deposit_drops": 0,
                       "deposit_skips": 0,
                       "errors": 0, "mem_hits": 0, "mem_evictions": 0, "sweep_drops": 0,
@@ -3498,6 +3523,11 @@ def selftest():
     hits("disc one orphaned position", list(disc(disc_ctx(2000, 111, {"lodDistanceChunks": 24}))),
          "disc-completeness")
     hits("disc config missing lod", list(disc(disc_ctx(99999, 0, {}))), "disc-completeness")
+
+    # --- Far-players baseline neutrality (E1) ---
+    clean("far players inert", far_players_inert_violations(_srv(1000)))
+    hits("far players moved", far_players_inert_violations(
+        _srv(1000, over={"far_players.roster_frames": 3})), "far-players-inert")
 
     # --- Window floors (vacuous-pass guard) ---
     clean("floors met", check_window_floors({(1, 0): 3}, {(1, 0): 3}))
