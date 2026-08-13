@@ -90,7 +90,12 @@ recorded):
 - **Engagement gate**: UNENGAGED (no cap applied) until a qualifying
   SHORTFALL interval: bytes were received, the awaiting set was non-empty at
   both interval edges (demand existed all interval — an idle or converged
-  interval must never adjust; the DH idle-collapse fix), and the measured
+  interval must never adjust; the DH idle-collapse fix), NO backpressure
+  halt overlapped the interval (review m1: a #71 halt keeps the awaiting
+  set populated while the client deliberately stops ingesting — the
+  depressed tail rate would read as shortfall and double-throttle exactly
+  the weak-client population; the pre-halt TAPER regime is same-direction
+  and intended composition, documented not excluded), and the measured
   rate < `ENGAGE_BELOW_BYTES_PER_SEC` (4 MB/s — faster sessions never engage,
   the disarm posture).
 - **First engagement**: `desired = measured − STEP/2` (bootstrap-by-shortfall
@@ -101,10 +106,15 @@ recorded):
   intervals change nothing.
 - **Actuation**: the byte-denominated `desired` converts to a columns/s bound
   via a per-session EWMA of received column wire size (the client knows every
-  frame's size) and feeds the SAME internal path the manual
-  `lodColumnsPerSecondLimit` uses (budget clamp + size-weighted fast-fire
-  spacing). Composition with the manual knob: the EFFECTIVE cap is
-  `min(manual, governed)` — the auto governor may go below the manual knob's
+  frame's size; wire-denominated, same denomination as the measurement) and
+  feeds the SAME internal path the manual `lodColumnsPerSecondLimit` uses
+  (budget clamp + size-weighted fast-fire spacing). The conversion FLOORS AT
+  1 column/s (review m2: `columnRateCap`'s contract is `<= 0` = OFF, and
+  MIN_RATE ÷ a >64 KB column EWMA would integer-convert to the off sentinel
+  at exactly the moment the cap must bind hardest). Composition with the
+  manual knob: the EFFECTIVE cap is `min(manual, governed)` with BOTH
+  off-sentinels handled explicitly (manual=0 means "manual off", and must
+  not win a naive min) — the auto governor may go below the manual knob's
   50-columns/s clamp floor (its own floor is MIN_RATE in bytes); the manual
   knob keeps its meaning as a hard operator/user bound.
 - **Disengagement**: no shortfall for 10 consecutive qualifying intervals
@@ -117,6 +127,12 @@ recorded):
 - Sessions on legacy dialects (v16 fallback) are EXCLUDED (their pacing is
   the legacy drip-feed's own; the governor gates on a current-dialect
   session, mirroring the adaptive-cadence v16 exclusion).
+- **Lifecycle** (review m3): governor state dies with the session (the
+  adaptive-cadence reset-family precedent). The session gate's byte
+  counters zero at reset, so an interval spanning a reset / dimension
+  change / `/lss reset` reads a negative or garbage delta — such intervals
+  are NON-QUALIFYING and re-seed the interval baseline; first engagement
+  after a rejoin starts fresh.
 
 ## Mechanism B — the vanilla-ping backstop (server-side; ALL clients)
 
@@ -148,7 +164,20 @@ buffer LSS cannot see — the exact number the live sessions diagnosed with.
   high), they push the same direction with B coarse and slow — bounded,
   non-oscillatory (B cuts at most once per 5 s and recovers slower than A
   adapts). Effective server cap: `min(alloc, cap × pingFactor)`.
-- Kill switch: `enablePingBackstop` (server config, default true).
+- Kill switch: `enablePingBackstop` (server config, default true) — ALSO a
+  `/lsslod set` row (the registry's first boolean row; the AUTO ceiling's
+  precedent made its kill switch a live row, and B's live A/B on the rig
+  is this program's working method — a config-edit-plus-restart lever
+  would make the live gate needlessly slow).
+- Integration precision (review m4): both services compute the per-player
+  cap once OUTSIDE the player loop — `cap × pingFactor` is per-player and
+  applies inside the per-state path (at the `flushSendQueue` allocation),
+  not to the shared cap. Fabric reads `player.connection.latency()` (the
+  move-tracer precedent, −1 = no signal); Paper reads the same NMS field
+  off its ServerPlayer handle. B's per-player state (baseline, factor,
+  5 s sent-bytes window) is pump-thread-confined on the state object —
+  fine on Folia too, where a stale-int latency read off the pump is
+  benign.
 
 ## Deletion inventory (the confirmed-dead AUTO ceiling)
 
@@ -173,6 +202,21 @@ Removed outright (same branch, before the new mechanisms land):
   meaning), the `ceil=` diag token (renders the fixed value or `off`), and
   the round-2 floor-reset rescope on the YIELD counter (send-success +
   empty-queue-only resets — independently correct, review-verified, pinned).
+- Test/harness stragglers the first inventory missed (review M2 — the
+  first three are COMPILE or hard-red breaks, not drift):
+  `PaperConfigValidationTest` references `AUTO_CEILING_DISARM_BYTES` and
+  pins the whole 0=AUTO semantics block — rewrite to 0=OFF (Paper T1 is
+  NOT an unchanged surface; it also gains the `enablePingBackstop`
+  default/key rows); `RuntimeSettingsTest`'s "0 returns to AUTO" pin and
+  the `RuntimeSettings` row help text ("0 = AUTO … 262144 = off") flip to
+  the pre-AUTO meaning (0 = off; 262144 loses its special role — note in
+  the set reply that it's now just a large fixed ceiling);
+  `DiagnosticsFormatterTest`'s `ceil=` VALUE pin (driven by the deleted
+  AUTO gauge), `DiagnosticsFormatter`'s `getAutoCeilingGauge` fallback +
+  pre-auto-ceiling compat ctor, and the full-line golden (also gains
+  `pingf=`); `ConfigValidationTest`'s AUTO-comment context;
+  `ServerConfigBase`'s 0=AUTO javadoc for the key; `check_soak.py`'s
+  config-allowlist comment naming AutoOutboundCeilingTest.
 - Docs: auto-outbound-ceiling-design.md gets a terminal header (SUPERSEDED →
   this plan) and stays as the falsification record; CLAUDE.md's outbound-
   ceiling bullet rewritten (fixed-only + this plan's governors); the
@@ -192,22 +236,36 @@ Removed outright (same branch, before the new mechanisms land):
   reason) and one on disengagement — the client-side receipt the estimator
   rounds never had. Diag-level state (`desired`, interval measurements) at
   debug.
-- No exporter/schema changes: both governors are latency mechanisms whose
-  soak-visible behavior is identical to today on loopback (A never engages —
-  loopback delivery outruns `ENGAGE_BELOW_BYTES_PER_SEC`; B never cuts —
-  loopback ping ~0). Structural CI-inertness, pinned in T1.
+- No exporter/schema changes. CI-inertness is NOT structural for A
+  (review M1): the byte-denominated engage threshold is met by soaks whose
+  own configs throttle bandwidth (`bandwidth-throttle` caps global at
+  256 KB/s), by superflat scenarios (~1-2 KB columns keep the BYTE rate
+  under 4 MB/s at any column rate), and by the generation-paced benchmark —
+  and a governed want-set breaks premises calibrated to the constant
+  `WANT_SET_BUDGET` (bandwidth-throttle's `queue_full >= 1`,
+  disk-saturation's `superseded >= 100`, rate-limit-storm's ceiling).
+  Therefore the governor is PROPERTY-GATED OFF under `-Dlss.soak` and
+  `-Dlss.benchmark` (the far-player precedent —
+  `FarPlayerClientSupport`'s harness gate), and T1 pins the GATE, not a
+  structural claim. B stays structurally inert on loopback (ping ~0 never
+  crosses 750 ms excess) — that half keeps its structural pin.
 
 ## Test plan
 
 - T1: governor AIMD unit suite (engagement gate incl. demand-backing, the
-  no-idle-collapse pin, bootstrap-by-shortfall, kept-up/shortfall steps,
-  disengagement, the min(manual, governed) composition, the column-size EWMA
-  conversion, the v16-session exclusion, kill switch); ping backstop unit
-  suite (baseline drift, attribution guard, cut/recover ladder, the
-  operating-region separation constants, kill switch); deletion pins (the
-  7-arg flush overload's fixed-ceiling semantics unchanged; `ceil=` renders
-  fixed/off); diag token goldens.
-- T2 + Paper T1: unchanged surfaces re-run.
+  no-idle-collapse pin, the #71-halt non-qualifying pin, the reset/negative-
+  delta non-qualifying pin, bootstrap-by-shortfall, kept-up/shortfall steps,
+  disengagement, the min(manual, governed) composition incl. BOTH
+  off-sentinel cases, the column-size EWMA conversion incl. the floor-at-1
+  pin, the v16-session exclusion, the soak/benchmark property gate, kill
+  switch); ping backstop unit suite (baseline drift, attribution guard,
+  cut/recover ladder, the operating-region separation constants, the
+  per-player factor application point, kill switch + its registry row);
+  deletion pins (the 7-arg flush overload's fixed-ceiling semantics
+  unchanged; `ceil=` renders fixed/off; set row 0 = OFF); diag token
+  goldens (`pingf=` insertion re-goldens the full line).
+- T2 re-run. Paper T1 is a CHANGED surface (review M2): the config-test
+  AUTO block rewrites to 0=OFF and the new key rows land there too.
 - Guard soak: fresh-backfill (both governors must be structurally inert).
 - **Live gate — the 4 Mbps throttled session**: tab ping settling to
   ~300-600 ms while LODs stream at ~0.35-0.45 MB/s wire (the client INFO
@@ -219,9 +277,30 @@ Removed outright (same branch, before the new mechanisms land):
 ## Process
 
 Plan review: 2 Fable subagents (control-loop lens: AIMD dynamics, engagement/
-disengagement edges, the A/B composition rule, the declaration clamp's trust
-boundary; integration lens: sidecar/handler repeat-tolerance, the deletion
+disengagement edges, the A/B composition rule; integration lens: the deletion
 inventory's completeness, config/registry/diag registrations, doc sweep,
 CI-inertness). Then implement → 3-Opus implementation review → gates → deploy
 to the rig + rebuild the local client jar (the client half is the fix — the
 user's Prism instance needs it).
+
+### Review log
+
+**Integration lens (Fable, 2026-08-13) — IMPLEMENT WITH FIXES, all folded:**
+M1 the CI-inertness claim was false for A (soak configs themselves create
+sub-4 MB/s qualifying intervals; a governed want-set breaks premises
+calibrated to the constant budget) → property gate under
+`-Dlss.soak`/`-Dlss.benchmark`, pin the gate. M2 deletion inventory missed
+the Paper config-test COMPILE break (`AUTO_CEILING_DISARM_BYTES`), the
+RuntimeSettings 0=AUTO row-help/pins, the DiagnosticsFormatter AUTO-gauge
+fallback + compat ctor + full-line golden, ConfigValidationTest context,
+ServerConfigBase javadoc, check_soak.py comment → all inventoried; "Paper
+T1 unchanged" claim dropped. m1 #71-halt intervals must be non-qualifying
+(halt keeps awaiting populated while ingestion deliberately stops). m2
+columns/s conversion can emit the `<=0` OFF sentinel → floor at 1 +
+explicit off-sentinel min composition. m3 lifecycle vs the reset family
+specified (non-qualifying spanning intervals, state dies with session).
+m4 per-player factor placement + Folia thread-confinement note + `pingf=`
+golden. Nits: `enablePingBackstop` promoted to a registry row (decision
+recorded — first boolean row); Sodium slider under-run is rendered via the
+`getRateGated` extension (no new slider row — the adaptive-cadence
+precedent); SOAK_DIALECT fidelity moot under the M1 gate.
