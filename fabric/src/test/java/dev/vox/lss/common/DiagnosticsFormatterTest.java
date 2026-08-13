@@ -587,9 +587,8 @@ class DiagnosticsFormatterTest {
         assertEquals("25h 1m", DiagnosticsFormatter.formatUptime(25 * 3600 + 60 + 5));
     }
 
-    /** The ceil= VALUE branch (post-hoc review n1): an armed AUTO gauge or a fixed
-     *  ceiling renders bytes, never "off" — a dropped fixedCeilingBytes fallback or a
-     *  broken gauge plumb would silently render off forever. */
+    /** The ceil= VALUE branch: a fixed ceiling renders bytes, never "off" — a dropped
+     *  fixedCeilingBytes fallback would silently render off forever. */
     @Test
     void ceilTokenRendersValuesWhenArmed() {
         var d = new DiagnosticsFormatter.DiagData(

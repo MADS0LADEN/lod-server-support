@@ -1,7 +1,6 @@
 package dev.vox.lss.paper;
 
 import dev.vox.lss.common.LSSConstants;
-import dev.vox.lss.common.processing.AbstractPlayerRequestState;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
@@ -93,40 +92,29 @@ class PaperConfigValidationTest {
         assertEquals(1, c.dirtyBroadcastIntervalSeconds, "1 is the nonzero floor, kept exactly");
     }
 
-    /** Transport deference ships OFF (0) on both platforms — the elytra-wall investigation
-     *  measured the head-of-line mechanism ABSENT (flat ping, empty send queue), so the gate
-     *  exists to be armed from measurement, not by default. The 4096 KB floor binds only
-     *  nonzero opt-ins, and is deliberately well above one maximum-size column so a single
-     *  legal payload can never trip the gate on its own. */
+    /** The outbound ceiling ships OFF (0) — the AUTO mode that briefly occupied 0 was
+     *  deleted (adaptive-transfer-rate-plan.md: three live falsifications; slow-link
+     *  pacing is the client governor + ping backstop now). Explicit values stay the
+     *  operator-FIXED entry-gate ceiling with the 64 KB floor. */
     @Test
-    void outboundBufferCeilingShipsAutoWithASmallFixedFloor() {
-        // auto-outbound-ceiling-design.md: 0 = AUTO is the shipped default (the
-        // per-player drain-rate ceiling); explicit values are operator-FIXED ceilings.
+    void outboundBufferCeilingShipsOffWithASmallFixedFloor() {
         assertEquals(0, new PaperConfig().outboundBufferCeilingKB,
-                "the outbound ceiling must ship in AUTO mode (0)");
+                "the outbound ceiling must ship OFF (0)");
         PaperConfig c = new PaperConfig();
         c.outboundBufferCeilingKB = 1;
         c.validate();
         assertEquals(LSSConstants.MIN_OUTBOUND_BUFFER_CEILING_KB, c.outboundBufferCeilingKB,
                 "a fixed opt-in must clamp up to the floor through the Paper subclass");
-        // The old floor rationale (floor > one maximum-size column) is SUPERSEDED by
-        // the one-payload presence gate: an oversized payload ships whole past any
-        // small ceiling, so the floor now only rules out meaninglessly tiny values —
-        // and it must sit BELOW the AUTO disarm threshold or small fixed ceilings
-        // (the slow-link operator override) would be unreachable.
-        assertTrue((long) LSSConstants.MIN_OUTBOUND_BUFFER_CEILING_KB * 1024L
-                        < AbstractPlayerRequestState.AUTO_CEILING_DISARM_BYTES,
-                "the fixed floor must stay below the AUTO disarm threshold");
         c.outboundBufferCeilingKB = 0;
         c.validate();
-        assertEquals(0, c.outboundBufferCeilingKB, "0 stays 0 — AUTO, the R-2 rule");
+        assertEquals(0, c.outboundBufferCeilingKB, "0 stays 0 — off, the R-2 rule");
         c.outboundBufferCeilingKB = -5;
         c.validate();
-        assertEquals(0, c.outboundBufferCeilingKB, "negatives normalize to AUTO");
+        assertEquals(0, c.outboundBufferCeilingKB, "negatives normalize to off");
         c.outboundBufferCeilingKB = 999_999;
         c.validate();
         assertEquals(LSSConstants.MAX_OUTBOUND_BUFFER_CEILING_KB, c.outboundBufferCeilingKB,
-                "the ceiling of the clamp is the documented OFF idiom (262144)");
+                "explicit values clamp to the fixed-ceiling range");
     }
 
     /** The lodStore SPLIT default (user decision, 2026-08-08 second round), through the

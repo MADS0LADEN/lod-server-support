@@ -120,8 +120,8 @@ public final class RuntimeSettings {
                     "applies within a tick; 0 = AUTO (half the reader pool with the store"
                             + " on, the whole pool with it off); lowering lets in-flight"
                             + " reads finish"),
-            // Auto outbound ceiling (auto-outbound-ceiling-design.md): the AUTO kill
-            // switch the design round required — 262144 disarms live, 0 returns to AUTO.
+            // Fixed outbound ceiling (the AUTO mode was deleted —
+            // adaptive-transfer-rate-plan.md): 0 = off, explicit KB = fixed ceiling.
             new SettingKey("outboundBufferCeilingKB",
                     c -> String.valueOf(c.outboundBufferCeilingKB),
                     (c, raw) -> {
@@ -129,9 +129,9 @@ public final class RuntimeSettings {
                                 ServerConfigBase.clampOutboundBufferCeilingKB(parseInt(raw));
                         return null;
                     },
-                    "applies within a tick; 0 = AUTO (per-player ~250 ms latency ceiling"
-                            + " on slow links, self-disarming on fast ones); explicit KB ="
-                            + " fixed ceiling; 262144 = off"),
+                    "applies within a tick; 0 = off (no ceiling — slow-link pacing is"
+                            + " the client governor + ping backstop); explicit KB ="
+                            + " fixed entry-gate ceiling"),
             // R-9 (E1): the privacy keys an admin answering a complaint must not need a
             // restart for. farPlayers is the registry's one STRING-typed row — a strict
             // parse rejects garbage at the command line, then the value routes through

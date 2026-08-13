@@ -1162,9 +1162,6 @@ public class PaperRequestProcessingService {
             long[] dropped = state.flushSendQueue(perPlayerCap, this.bandwidthLimiter, this.diag,
                     data -> this.columnPayloadSender.send(state, data),
                     (long) this.config.outboundBufferCeilingKB * 1024L,
-                    // AUTO outbound ceiling: 0 = AUTO, mode passed explicitly (S-9a) —
-                    // the Fabric twin's comment.
-                    this.config.outboundBufferCeilingKB == 0,
                     this.config.lodYieldsToVanillaTransport,
                     // Prune gated on the yield (review B-2) — the Fabric twin's comment.
                     this.config.lodYieldsToVanillaTransport

@@ -729,9 +729,6 @@ public class RequestProcessingService {
         flushSendQueues(this.players.values(), perPlayerCap, this.bandwidthLimiter, this.diag,
                 this::sendColumnPayload, this.offThreadProcessor,
                 (long) config.outboundBufferCeilingKB * 1024L,
-                // AUTO outbound ceiling (auto-outbound-ceiling-design.md): 0 = AUTO is
-                // the config contract; the flush takes the mode EXPLICITLY (S-9a).
-                config.outboundBufferCeilingKB == 0,
                 config.lodYieldsToVanillaTransport,
                 // The prune is the YIELD's companion (§2.1 — long queue residency is a
                 // yield phenomenon) and must not ship armed under the default-FALSE
@@ -851,25 +848,13 @@ public class RequestProcessingService {
                                  FabricOffThreadProcessor offThreadProcessor,
                                  long outboundCeilingBytes, boolean yieldToTransport,
                                  int pruneRadiusChunks) {
-        flushSendQueues(states, perPlayerCap, bandwidthLimiter, diag, sender,
-                offThreadProcessor, outboundCeilingBytes, false, yieldToTransport,
-                pruneRadiusChunks);
-    }
-
-    static void flushSendQueues(Iterable<PlayerRequestState> states, long perPlayerCap,
-                                 SharedBandwidthLimiter bandwidthLimiter, TickDiagnostics diag,
-                                 ColumnPayloadSender sender,
-                                 FabricOffThreadProcessor offThreadProcessor,
-                                 long outboundCeilingBytes, boolean autoOutboundCeiling,
-                                 boolean yieldToTransport,
-                                 int pruneRadiusChunks) {
         for (var state : states) {
             if (!state.hasCompletedHandshake()) continue;
             long[] dropped = state.flushSendQueue(perPlayerCap, bandwidthLimiter, diag,
                     payload -> {
                         if (consumeSendDropFault()) return;
                         sender.send(state, payload);
-                    }, outboundCeilingBytes, autoOutboundCeiling, yieldToTransport,
+                    }, outboundCeilingBytes, yieldToTransport,
                     pruneRadiusChunks);
             if (dropped.length > 0) {
                 // A send failure or the relevance prune discarded resolved-but-undelivered

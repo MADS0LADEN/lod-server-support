@@ -21,7 +21,7 @@ public final class DiagnosticsFormatter {
             long outboundPending, long outboundHighWater, long sendDeferrals,
             long yielded, long ceilBytes
     ) {
-        /** Pre-auto-ceiling shape — keeps existing constructions/tests intact
+        /** No-ceiling shape — keeps existing constructions/tests intact
          *  (ceil renders "off"). */
         public PlayerDiag(String name, int sendQueue, int maxSendQueue, int pendingSync,
                           int pendingGen, long sent, long bytes, long outboundPending,
@@ -356,10 +356,9 @@ public final class DiagnosticsFormatter {
                     state.getTotalSectionsSent(), state.getTotalBytesSent(),
                     state.getOutboundPendingBytes(), state.getOutboundPendingHighWater(),
                     state.getSendDeferrals(), state.getYieldedTicks(),
-                    // AUTO's per-player derived gauge; -1 = off. An operator-FIXED
-                    // ceiling never trains the gauge, so it renders through the
-                    // fixedCeilingBytes fallback the caller resolves from config.
-                    fixedCeilingBytes > 0 ? fixedCeilingBytes : state.getAutoCeilingGauge()
+                    // Operator-FIXED ceiling from config, or -1 = off (the AUTO ceiling
+                    // was deleted — adaptive-transfer-rate-plan.md).
+                    fixedCeilingBytes > 0 ? fixedCeilingBytes : -1L
             ));
         }
 
