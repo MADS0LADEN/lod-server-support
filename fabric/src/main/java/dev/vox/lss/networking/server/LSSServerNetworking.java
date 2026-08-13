@@ -306,8 +306,14 @@ public class LSSServerNetworking {
 
         if (decision.outcome() == HandshakeGate.Outcome.NO_CONSUMER) {
             // A re-handshake that no longer carries a consumer sheds any prior
-            // far-player subscription too (review: same-session downgrade).
-            service.getFarPlayerService().removeViewer(player.getUUID());
+            // far-player subscription too (review: same-session downgrade). Null
+            // guard (pre-G review): HandshakeGate returns NO_CONSUMER on caps 0
+            // regardless of servicePresent, so a v16-era caps-0 client hitting the
+            // LAN-construction gap or the SERVER_STOPPING race lands here with no
+            // service — the sibling branches carry the same guard.
+            if (service != null) {
+                service.getFarPlayerService().removeViewer(player.getUUID());
+            }
             // Visible to admins via this log.
             LSSLogger.info("Player " + player.getName().getString()
                     + " has no LOD consumer (caps=" + payload.capabilities()
