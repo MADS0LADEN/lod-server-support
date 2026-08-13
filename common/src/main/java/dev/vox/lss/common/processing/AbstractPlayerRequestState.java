@@ -100,9 +100,13 @@ public abstract class AbstractPlayerRequestState<T> {
     private volatile long yieldedTicks = 0;
     private int yieldNoSendTicks = 0;
     private int flushTickCounter = 0;
-    /** One INFO per JVM the first time any player rides the floor — the log archive's
-     *  answer to an after-the-fact "LOD was slow" report (yield plan §5). */
-    private static volatile boolean sustainedYieldWarned;
+    /** One INFO per PLAYER SESSION the first time that player rides the floor — the log
+     *  archive's answer to an after-the-fact "LOD was slow for X" report (yield plan §5;
+     *  user decision 2026-08-13: was one-per-JVM, which hid every player after the
+     *  first). Instance field, so the latch lives exactly as long as this state: a
+     *  dimension change mid-session builds a fresh state and may log once more — the
+     *  accepted corner of state-scoped latching. */
+    private boolean sustainedYieldNoted;
 
     // ---- Want-set mailbox + backlog (protocol v17) ----
 
@@ -761,12 +765,12 @@ public abstract class AbstractPlayerRequestState<T> {
                     // the one-shot INFO fire only HERE, on a send that actually left
                     // (review A-1/B-5).
                     this.yieldNoSendTicks = 0;
-                    if (!sustainedYieldWarned) {
-                        sustainedYieldWarned = true;
-                        LSSLogger.info("Transport yield sustained for " + YIELD_FLOOR_TICKS
-                                + " ticks on " + getPlayerName() + " — LOD is running at the"
-                                + " starvation floor (~1 column/5 s) while vanilla traffic"
-                                + " drains; this is lodYieldsToVanillaTransport working");
+                    if (!this.sustainedYieldNoted) {
+                        this.sustainedYieldNoted = true;
+                        LSSLogger.info("Limiting LOD delivery to " + getPlayerName()
+                                + ": the client or network cannot keep up, so game traffic"
+                                + " is prioritized and LODs will catch up once the"
+                                + " connection drains (logged once per session)");
                     }
                     break;
                 }
