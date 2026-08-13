@@ -466,6 +466,111 @@ cycles.
   Tier 2, the re-piped `disk-read-gate` scenario, `fresh-backfill` +
   `disk-saturation` under the no-op pins, release_check.
 
+## Amendment 2 revision (2026-08-13, two-reviewer design round folded in — both PROCEED WITH CHANGES)
+
+The concurrency-lens and harness-lens reviews corrected four claims above and
+pinned the exact semantics. Where this section disagrees with Amendment 2's
+first draft, THIS section governs.
+
+**R-MAJ-1 — the saturation predicate must count permit-less in-flight work, and
+lives on the READER, not `DiskReadGate`.** The first draft's bare
+"no permit AND park full" lags by one pool-queue depth: the router iterates at
+~µs/entry while a parking worker pays a store lookup first, so the router pumps
+the pool queue full before the park count moves, and the queued tasks then
+overflow-drop at the same rate as the motivating incident — retention would not
+deliver its own premise. The concurrency reviewer's fix (add `tasksInFlight`)
+overshoots in the other direction: `hasHeadroom()` is false only at a COMPLETELY
+full queue, so at K=pool (`disk-saturation`, threads:1) the queue can sit at
+capacity−1 with `inUse == cap` and `tasksInFlight >= parkCapacity` — false
+saturation, `gate_stops` on a non-opted baseline. The synthesis counts only
+permit-LESS in-flight work:
+
+    gateSaturated() ≡ readGate.inUse() >= readGate.capacity()
+                   && gateParkedCount + (tasksInFlight − readGate.inUse())
+                      >= gateParkCapacity
+
+Structurally false at K=pool: the park is pigeonhole-empty (a classifying thread
+always finds a permit) and `tasksInFlight − inUse` = queued < queueCapacity =
+parkCapacity whenever `hasHeadroom()` passed. In the K<pool miss storm it binds
+BEFORE the queue can overflow the park (parked + queued + permit-less runners),
+making retention dominant and overflow drops true race armor. Hit-heavy
+over-conservatism (queued store hits inflate the term near queue-full) is
+accepted — re-evaluated per pass at ~20 Hz. Both comparisons `>=` (transient
+over-capacity shapes: lowered K, park claim-then-back-out). Composed as
+`AbstractChunkDiskReader.gateSaturated()` (the park is reader state;
+`DiskReadGate` stays a pure permit counter, gaining at most accessors); the
+`OffThreadProcessor` accessor null-guards like `hasDiskHeadroom` (null reader →
+never saturated). Pin `gateParkCapacity >= queueCapacity` with a ctor comment —
+the structural-false argument needs it.
+
+**R-MAJ-2 — evaluation is PER ENTRY at the same `!attached` site, headroom
+FIRST.** Not a pass-head check: per-entry re-observation collapses the race to
+classification latency (a park refill mid-drain is seen by the next entry) and a
+mid-pass saturation flip stops admission at the flip (pinned). `hasDiskHeadroom`
+is checked first so `gate_stops` counts only gate-attributable stops and
+pool-full behavior stays byte-identical. New `AdmitResult.GATE_SATURATED`
+handled exactly like `NO_DISK_HEADROOM` — same SYNC-slot + dedup-group unwind,
+retain + stop THIS PLAYER's pass (routeAll continues to the next player — the
+existing headroom semantics; M4 rotation keeps fairness) — plus one `gate_stops`
+increment per stopped player-pass. Memo rung stays above (generation never
+gated); dedup attaches ride through saturation; the frontier stamp already
+happened upstream.
+
+**R-MAJ-3 — honest store-hit-cost wording.** The first draft's "held ≤1 pass" is
+wrong: the hold is re-imposed every pass for the DURATION of the saturated
+episode (park drains at expensive-phase rate — worst case, an A7 IOWorker
+stall, minutes), and the predicate is global across players. Mitigations that
+keep it acceptable: ts>0 rejoins resolve via the timestamp rung without
+submitting, `restoreBacklog` republishes the want-set so probes keep serving
+retained heads, the memo rung keeps escalating, and the held-hit subset is only
+ts<=0-no-server-stamp asks. Recorded, not built: a store-membership pre-check
+remains rejected. Release-note/README wording "store-served LODs are never
+throttled by it" → "store-served LODs never consume its permits".
+
+**R-MIN-1 — WARN: latched once per session** (the store-eviction precedent —
+the once-a-minute re-key would fire 3–5 times during one legitimate distance-300
+cold join, the exact noise this amendment removes). One WARN on the first
+sustained saturation episode, naming `gate_stops=` in diag and the
+`maxConcurrentDiskReads` remedy; totals live in diag. The armor-drop WARN keeps
+its throttle and "dropped" wording but LOSES the remedy sentence (overflow now
+indicates a burst race, not capacity).
+
+**R-MIN-2 — registration corrections.** `KNOWN_SERVER_KEYS` needs NO change
+(top-level registry; `disk` already present) — the real registration is
+`SERVER_MONOTONIC += "disk.gate_stops"`, which auto-propagates to
+`GLOBAL_SERVER_FIELDS` required-presence. Counter home:
+`DiskReaderDiagnostics`, beside `gated` (diag adjacency free). Full sweep:
+exporters ×2, the ONE shared contract literal (`disk.gate_stops=long`, sorted),
+the A7 arm + `OPT_INS["disk-read-gate"] = {"gated", "gate_stops"}` (KEEP
+`gated` — armor fires legitimately), `_srv` fixture `"gate_stops": 0`, the
+selftest A7 pair, `soak_report SERVER_MECHANISM["router gate stops"]`, diag
+token order `read_gate=, gate_parked=, gate_stops=, gated=` (append preserves
+greps), stale-comment sweep (checker opt-in/monotonic/A7 comments,
+soak_report armor comment, OffThreadProcessor saturated-flavor comment, reader
+readAndDeliver + diag comments).
+
+**R-MIN-3 — scenario floor goes static.** `superseded >= gated` is vacuous at
+gated ~0; replace with the disk-saturation-precedent static `superseded >= 100`
+(measured margin: the flood re-declares ~1 Hz through convergence, thousands
+expected). Premise `disk.gate_stops > 0`; `disk.saturated == 0` unchanged;
+`disk.gated` deliberately UNPINNED (0-or-small legitimate). The named check's
+required-fields list swaps to `server.disk.gate_stops`. NOTE for the A/B: the
+efficiency win shows in convergence time and WARN noise, not in any conserved
+counter — `disk.submitted` stays ≈ unique positions in both models.
+
+**Verified no-change set (both reviewers):** law A5's fold contains no `gated`
+term in either identity; A1 rides the documented `queue_full`
+retained-no-disposition precedent; all 26 no-op scenario baselines are
+structurally gate-free (the park-full conjunct is the carrier of that proof —
+pinned in Tier 1 as the K=pool structural-false test); `disk-saturation`
+unchanged; no permanent router wedge (the park drains monotonically under hold —
+nothing refills it while the router holds — and every permit release drains);
+oscillation fairness rides M4 rotation; v16 synthetic want-sets route through
+the same mailbox/backlog and heal at their 1 Hz declarer; backfill untouched;
+AdaptiveReadThrottle composes independently (EWMA fed by real completions,
+which continue during saturation); parked entries hold pending slots so
+re-declared duplicates resolve IN_FLIGHT and never double-admit.
+
 ## Future phase (recorded, not planned)
 
 Fabric-only MSPT modulation of K: feed `getCurrentSmoothedTickTime` into an

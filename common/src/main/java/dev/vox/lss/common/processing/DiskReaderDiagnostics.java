@@ -13,6 +13,7 @@ public class DiskReaderDiagnostics {
     private final AtomicLong saturationCount = new AtomicLong();
     private final AtomicLong successCount = new AtomicLong();
     private final AtomicLong gatedCount = new AtomicLong();
+    private final AtomicLong gateStopsCount = new AtomicLong();
     private final AtomicLong totalReadTimeNanos = new AtomicLong();
 
     public void recordSubmitted() { this.submittedCount.incrementAndGet(); }
@@ -33,6 +34,14 @@ public class DiskReaderDiagnostics {
      *  Distinct from {@code saturated}, which is recorded at the pool-rejection SUBMIT
      *  site — the two share the silent-drop ChunkReadResult flavor but never a counter. */
     public void recordGated() { this.gatedCount.incrementAndGet(); }
+    /** A router pass stopped by gate saturation (Amendment 2 retention — one increment
+     *  per stopped PLAYER-pass, so with N players it can grow ~N x 20 Hz while the gate
+     *  stays saturated; it is a pass counter, never a held-reads count). Monotonic,
+     *  goes still at convergence (SERVER_MONOTONIC member). The retained entries carry
+     *  no disposition — they stay in the backlog and are replaced wholesale by the
+     *  next declaration (counted superseded there, law A1's queue_full precedent).
+     *  Returns the new total (the reader's once-per-session WARN latch reads it). */
+    public long recordGateStop() { return this.gateStopsCount.incrementAndGet(); }
 
     public String formatDiagnostics(int pendingCount) {
         long completed = this.completedCount.get();
@@ -55,6 +64,7 @@ public class DiskReaderDiagnostics {
     }
 
     public long getGatedCount() { return this.gatedCount.get(); }
+    public long getGateStopsCount() { return this.gateStopsCount.get(); }
     public long getSubmittedCount() { return this.submittedCount.get(); }
     public long getCompletedCount() { return this.completedCount.get(); }
     public long getNotFoundCount() { return this.notFoundCount.get(); }

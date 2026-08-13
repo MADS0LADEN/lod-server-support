@@ -93,9 +93,11 @@ ANOMALY_OPT_INS = {
     "store-save-storm": frozenset({"saturated"}),
     "store-save-storm-off": frozenset({"saturated"}),
     "dimension-rejoin-warm": frozenset({"saturated"}),
-    # The gate's own scenario: gated>0 is its PREMISE (K=1 under a threads:2 flood), so
-    # the anomaly is opted in; saturated stays UN-opted — its named check requires 0.
-    "disk-read-gate": frozenset({"gated"}),
+    # The gate's own scenario (Amendment 2 retention): gate_stops>0 is its PREMISE
+    # (K=1 under a threads:2 flood must saturate and stop router passes), and gated
+    # (park-overflow race armor) may legitimately fire small-or-zero during the same
+    # flood, so BOTH are opted in; saturated stays UN-opted — its named check requires 0.
+    "disk-read-gate": frozenset({"gated", "gate_stops"}),
     # Paper/Folia (SOAK_PLATFORM=paper|folia): cold-cache disc resync from the base world, like
     # warm-rejoin run 1, so the same load-shaped opt-ins apply.
     "paper-dirty-falling-block": frozenset({"saturated"}),
@@ -324,6 +326,12 @@ SERVER_MONOTONIC = (
     # store-hit exclusion precedent), so A5's derived-successful identity is untouched;
     # A7 flags any increase unless the scenario opts in ("gated" — only disk-read-gate).
     "disk.gated",
+    # Router passes stopped by gate saturation (Amendment 2 retention): one event per
+    # stopped player-pass; retained entries carry NO disposition (the queue_full
+    # precedent), so no conservation law reads this. Monotonic, still at convergence;
+    # membership here also makes it required-present on every snapshot (both exporters
+    # emit it unconditionally). A7 flags any increase unless opted in (disk-read-gate).
+    "disk.gate_stops",
     # Miss-memo rung hits (v0.7.1 miss memo): a fresh memoized absence skipped the redundant
     # disk re-read and escalated straight to the generation ladder. Law A5 counts these as
     # VIRTUAL not-founds on its left side — each hit is dispositioned exactly like a real
@@ -876,6 +884,11 @@ def law_A7_server(prev, cur, window, opt_ins):
     # nonzero delta there is a PERMIT LEAK (or a missing pin) — a stronger signal than
     # the saturated arm, same design. Only disk-read-gate opts in.
     _anomaly(prev, cur, "disk.gated", window, "disk.gated", opt_ins, "gated", out)
+    # Router retention stops (Amendment 2): a nonzero delta on a no-op-pinned scenario
+    # (K=pool) is structurally impossible unless the predicate leaked — same design as
+    # the gated arm. Only disk-read-gate opts in.
+    _anomaly(prev, cur, "disk.gate_stops", window, "disk.gate_stops", opt_ins,
+             "gate_stops", out)
     return out
 
 
@@ -1427,48 +1440,56 @@ def check_disk_saturation(ctx):
                         "backlog never drained)", {"wallMs": last["wallMs"]})
 
 
-@named_check("disk-read-gate", ["server.disk.gated", "server.disk.saturated",
-                                "server.service.superseded"])
+@named_check("disk-read-gate", ["server.disk.gate_stops", "server.disk.saturated",
+                               "server.service.superseded"])
 def check_disk_read_gate(ctx):
     """The DiskReadGate's own scenario (disk-read-concurrency-gate-plan.md, as amended
-    by the stage-B park deviation): a prebuilt superflat annulus read at
-    diskReaderThreads=2 with maxConcurrentDiskReads=1 — every column is a real region
-    read (lodStore off, base world pre-generated). Permit-less misses PARK (bounded at
-    threads*32=64) and drain on release; the 2112-position flood far exceeds the park
-    list, so OVERFLOW bounces MUST occur (disk.gated > 0, the premise) while the v17
-    headroom gate keeps the POOL itself un-saturated (distinct mechanisms: saturated =
-    pool-queue rejection at submit; gated = park-overflow bounce inside the task). A
-    bounce is the standard silent superseded drop healed by re-declaration, so
-    convergence still completes — the fed permit always drains."""
+    by the stage-B park deviation and Amendment 2's router retention): a prebuilt
+    superflat annulus read at diskReaderThreads=2 with maxConcurrentDiskReads=1 —
+    every column is a real region read (lodStore off, base world pre-generated).
+    Permit-less misses PARK (bounded at threads*32=64) and drain on release; the
+    2112-position flood far exceeds the park, so the gate must SATURATE (permits
+    exhausted AND the park + permit-less in-flight work at its bound) and the router
+    must answer with RETENTION — gate_stops counts one event per stopped player-pass,
+    so gate_stops > 0 is the premise — while the v17 headroom gate keeps the POOL
+    itself un-saturated (distinct mechanisms: saturated = pool-queue rejection at
+    submit; gate_stops = router hold at admission). disk.gated survives as the
+    park-overflow race-armor tier and is deliberately UNPINNED here (0 or small are
+    both legitimate — it counts submissions already in flight when the park filled).
+    Retained entries are replaced wholesale by each fresh declaration, so the churn
+    shows as superseded: a static floor (the disk-saturation precedent) replaces the
+    old `superseded >= gated` floor, which is vacuous at gated ~0."""
     last = ctx.server_snaps[-1]
-    if last["disk"]["gated"] <= 0:
+    if last["disk"]["gate_stops"] <= 0:
         yield Violation("disk-read-gate", "final snapshot",
-                        "disk.gated never fired — the premise did not hold (K=1 under a "
-                        "2-thread pool over a full annulus of real reads must refuse at "
-                        "least one acquire), so this run proves nothing about the gate; "
-                        "check the scenario config staged maxConcurrentDiskReads=1",
-                        {"expected": "> 0", "actual": last["disk"]["gated"]})
+                        "disk.gate_stops never fired — the premise did not hold (K=1 "
+                        "under a 2-thread pool over a full annulus of real reads must "
+                        "saturate the gate and stop at least one router pass), so this "
+                        "run proves nothing about retention; check the scenario config "
+                        "staged maxConcurrentDiskReads=1",
+                        {"expected": "> 0", "actual": last["disk"]["gate_stops"]})
     if last["disk"]["saturated"] != 0:
         yield Violation("disk-read-gate", "final snapshot",
                         "disk.saturated fired — the pool-queue headroom gate leaked "
-                        "(gate refusals must be the ONLY bounce source in this scenario)",
+                        "(the router retention must hold pressure before the pool "
+                        "queue can reject a submit in this scenario)",
                         {"expected": "== 0", "actual": last["disk"]["saturated"]})
-    # Every gated bounce is a superseded drop re-declared by the client, so the drop-heal
-    # loop's floor is the gated count itself (superseded also absorbs backlog-replace
-    # supersession on top — >= is exact for the heal-loop claim).
-    if last["service"]["superseded"] < last["disk"]["gated"]:
+    # Retained entries are superseded by each fresh declaration during the flood — the
+    # retention churn loop's floor. STATIC (the disk-saturation precedent): the old
+    # `superseded >= gated` floor is vacuous when gated reads ~0 under retention.
+    if last["service"]["superseded"] < 100:
         yield Violation("disk-read-gate", "final snapshot",
-                        "superseded < gated — gated bounces are not being dispositioned "
-                        "as silent superseded drops (the saturated-flavor routing broke)",
-                        {"superseded": last["service"]["superseded"],
-                         "gated": last["disk"]["gated"]})
+                        "superseded < 100 — the retention churn loop never ran "
+                        "(retained entries must be superseded by each fresh "
+                        "declaration during the flood)",
+                        {"expected": ">= 100", "actual": last["service"]["superseded"]})
     if ctx.final_client(1) is None:
         yield Violation("disk-read-gate", "run1", "no client snapshots in run 1", {})
         return
     if (len(ctx.server_snaps) - 1) not in ctx.quiescent_server:
         yield Violation("disk-read-gate", "final snapshot",
-                        "last server snapshot is not verified-quiescent (the gated drops "
-                        "never converged — K >= 1 must always drain)",
+                        "last server snapshot is not verified-quiescent (the retained "
+                        "entries never converged — K >= 1 must always drain)",
                         {"wallMs": last["wallMs"]})
 
 
@@ -3200,7 +3221,7 @@ def _srv(wall=1000, seg=0, over=None):
                         "grace_skipped": 0, "miss_dropped": 0},
             "disk": {"submitted": 0, "completed": 0, "not_found": 0, "all_air": 0,
                      "errors": 0, "saturated": 0, "successful": 0, "pending": 0,
-                     "memo_hits": 0, "gated": 0},
+                     "memo_hits": 0, "gated": 0, "gate_stops": 0},
             "generation": {"submitted": 0, "completed": 0, "timeouts": 0,
                            "removed_in_flight": 0, "active": 0,
                            "order_gated": 0, "inversions": 0},
@@ -3419,6 +3440,15 @@ def selftest():
     clean("A7 gated with opt-in", law_A7_server(
         _srv(1000), _srv(6000, over={"disk.gated": 1}), "selftest",
         frozenset({"gated"})))
+    # The retention arm (Amendment 2): gate_stops>0 on a no-op-pinned (K=pool) scenario
+    # means the saturation predicate leaked — structurally impossible there (the park
+    # stays pigeonhole-empty). Only disk-read-gate opts in.
+    hits("A7 gate_stops w/o opt-in", law_A7_server(
+        _srv(1000), _srv(6000, over={"disk.gate_stops": 1}), "selftest",
+        frozenset({"gated"})), "A7")
+    clean("A7 gate_stops with opt-in", law_A7_server(
+        _srv(1000), _srv(6000, over={"disk.gate_stops": 1}), "selftest",
+        frozenset({"gate_stops"})))
 
     # --- A7 client: dropped is the only client anomaly at v17, and is never optable
     # (the responses.rate_limited arm left with the wire response; law B1 is deleted) ---

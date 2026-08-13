@@ -533,13 +533,120 @@ class AbstractChunkDiskReaderTest {
     }
 
     /** The read_gate diag token is ALWAYS rendered (the live-deploy log's config-era
-     *  receipt): in-use/K plus the monotonic gated counter. */
+     *  receipt): in-use/K, the park gauge, the retention-stop counter (Amendment 2 —
+     *  mechanism before armor), then the monotonic overflow counter last. */
     @Test
     void getDiagnosticsRendersTheReadGateToken() {
         reader.configureReadGate(3);
         String line = reader.getDiagnostics();
-        assertTrue(line.contains(", read_gate=0/3, gate_parked=0, gated=0"),
+        assertTrue(line.contains(", read_gate=0/3, gate_parked=0, gate_stops=0, gated=0"),
                 "the gate token must render even while the gate is a no-op: " + line);
+    }
+
+    /**
+     * The saturation predicate's live truth table (Amendment 2): pegged permits ALONE
+     * are not saturation (a permit holder in flight contributes nothing permit-less);
+     * a FULL park with the permit held reads saturated; the drain clears it, every
+     * parked read delivers real data, and the overflow counter never moves — retention
+     * has no drop tier of its own.
+     */
+    @Test
+    void gateSaturationPredicateBindsAtParkFullAndClearsOnDrain() throws Exception {
+        var gated = new TestDiskReader(2);
+        gated.registerPlayer(player);
+        try {
+            gated.configureReadGate(1);
+            var store = new GateStubStore(); // answer=null: every lookup is a miss
+            gated.attachStore(store);
+            assertFalse(gated.gateSaturated(), "an idle gate is never saturated");
+
+            var opStarted = new CountDownLatch(1);
+            var holdOpen = new CountDownLatch(1);
+            gated.submit(player, 0, 0, 1L, () -> {
+                opStarted.countDown();
+                if (!holdOpen.await(30, TimeUnit.SECONDS)) throw new IllegalStateException("never released");
+                return new byte[]{1};
+            });
+            assertTrue(opStarted.await(5, TimeUnit.SECONDS), "the permit-holding read must start");
+            assertFalse(gated.gateSaturated(),
+                    "pegged permits with an empty park are NOT saturation — the holder "
+                            + "is not permit-less work");
+
+            // Fill the park exactly to capacity (threads*32 = 64): each miss parks.
+            for (int i = 1; i <= 64; i++) {
+                gated.submit(player, i, 7, 100L + i, () -> new byte[]{2});
+            }
+            long deadline = System.nanoTime() + 30_000_000_000L;
+            while (!gated.gateSaturated() && System.nanoTime() < deadline) Thread.sleep(2);
+            assertTrue(gated.gateSaturated(),
+                    "permit held + park at capacity must read saturated");
+            assertEquals(0, gated.getDiag().getGatedCount(),
+                    "an exactly-full park has overflowed nothing");
+            assertNull(gated.getPlayerQueue(player).poll(),
+                    "parked reads deliver nothing while parked — no drops either");
+
+            // Release: the park drains on the freed permit; saturation self-clears.
+            holdOpen.countDown();
+            var results = new ArrayList<ChunkReadResult>();
+            deadline = System.nanoTime() + 30_000_000_000L;
+            while (results.size() < 65 && System.nanoTime() < deadline) {
+                var r = gated.getPlayerQueue(player).poll();
+                if (r != null) results.add(r); else Thread.sleep(2);
+            }
+            assertEquals(65, results.size(), "the holder AND all 64 parked reads deliver");
+            assertTrue(results.stream().noneMatch(ChunkReadResult::saturated),
+                    "retention has no drop tier — every parked read produced real data");
+            assertFalse(gated.gateSaturated(), "a drained park clears saturation");
+            assertEquals(0, gated.getDiag().getGatedCount());
+        } finally {
+            gated.shutdown();
+        }
+    }
+
+    /**
+     * The K = pool structural-false pin (Amendment 2 revision — the carrier of every
+     * no-op scenario baseline): with the gate at pool size, queued pool work must
+     * never read saturated, because the permit-less term counts only work BEYOND the
+     * permit holders and the park stays pigeonhole-empty (a classifying thread always
+     * finds a permit). A bare tasksInFlight term would flip this true at
+     * queue-nearly-full and shift the disk-saturation baseline.
+     */
+    @Test
+    void gateSaturationIsStructurallyFalseAtPoolK() throws Exception {
+        var r = new TestDiskReader(1); // K = pool = 1 (the ctor default), no store
+        r.registerPlayer(player);
+        try {
+            var opStarted = new CountDownLatch(1);
+            var holdOpen = new CountDownLatch(1);
+            r.submit(player, 0, 0, 1L, () -> {
+                opStarted.countDown();
+                if (!holdOpen.await(30, TimeUnit.SECONDS)) throw new IllegalStateException("never released");
+                return new byte[]{1};
+            });
+            assertTrue(opStarted.await(5, TimeUnit.SECONDS));
+
+            // Queue 31 more (capacity 32): one slot free, so hasHeadroom still passes —
+            // exactly the state the router would consult the gate in.
+            for (int i = 1; i <= 31; i++) {
+                r.submit(player, i, 9, 200L + i, () -> new byte[]{3});
+            }
+            assertTrue(r.hasHeadroom(), "premise: the router would reach the gate check");
+            assertFalse(r.gateSaturated(),
+                    "queued work at K = pool must NEVER read saturated (the permit-less "
+                            + "term excludes the holder; the park is pigeonhole-empty)");
+
+            holdOpen.countDown();
+            var results = new ArrayList<ChunkReadResult>();
+            long deadline = System.nanoTime() + 30_000_000_000L;
+            while (results.size() < 32 && System.nanoTime() < deadline) {
+                var res = r.getPlayerQueue(player).poll();
+                if (res != null) results.add(res); else Thread.sleep(2);
+            }
+            assertEquals(32, results.size(), "everything drains normally");
+            assertEquals(0, r.getDiag().getGatedCount());
+        } finally {
+            r.shutdown();
+        }
     }
 
     /** Minimal concrete config for the reapply seam (only maxConcurrentDiskReads and
