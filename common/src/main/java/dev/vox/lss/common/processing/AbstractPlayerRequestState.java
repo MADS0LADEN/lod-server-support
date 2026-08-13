@@ -147,14 +147,34 @@ public abstract class AbstractPlayerRequestState<T> {
         return this.autoCeilingGauge;
     }
 
+    /** Fast-streak up-recovery (round-3 amendment): consecutive probe intervals where
+     *  LSS wrote at least this much AND the channel gauge still read ~empty. */
+    static final long AUTO_CEILING_UP_EVIDENCE_MIN_WRITE = 32L * 1024;
+    static final long AUTO_CEILING_UP_EVIDENCE_EPSILON = 4L * 1024;
+    static final int AUTO_CEILING_UP_STREAK_TICKS = 40; // ~2 s at 20 Hz
+    private int ceilFastStreak;
+
     /**
-     * One estimator step at the authoritative probe read (design §Estimator):
-     * {@code drained = pending_prev + lss_wire_written_since_last_probe - pending_now},
-     * sampled only across busy intervals ({@code pending_prev > 0}), skipping negative
-     * samples (other writers grew the queue — vanilla bursts, far-player frames) and
-     * no-signal reads (-1 poisons the CURRENT and the NEXT sample via pendingPrev).
-     * A genuine zero-drain sample trains (a stalled link is real signal). Returns the
-     * derived ceiling in bytes, or -1 when AUTO is disarmed/untrained.
+     * One estimator step at the authoritative probe read (design §Estimator, as amended
+     * round 3 — the LIVE rig falsified the written-term arithmetic): netty writes are
+     * ASYNC, so bytes handed to the event loop may not be reflected in the pending
+     * gauge for milliseconds — a burst tick's sample {@code prev + written − now} then
+     * reads a phantom multi-MB/s drain (measured live: EWMA 6 MB/s on a 500 KB/s link,
+     * ceil=1.5 MB, the ceiling never bound). The estimator therefore samples ONLY
+     * PURE-DRAIN intervals ({@code written == 0} since the last probe — hold ticks,
+     * which dominate on exactly the links the ceiling exists for):
+     * {@code drained = pending_prev − pending_now}, no written term at all. Busy guard
+     * ({@code prev > 0}), negative guard (another writer grew the queue), and the
+     * no-signal poison are unchanged; a genuine zero-drain sample still trains.
+     *
+     * <p>UP-recovery (pure-drain sampling alone cannot observe an IMPROVED link — a
+     * converged flush writes every tick): {@link #AUTO_CEILING_UP_STREAK_TICKS}
+     * consecutive intervals of "wrote ≥ 32 KB and the gauge still reads ≤ 4 KB" double
+     * the EWMA — bounded probing whose overshoot is corrected within one hold tick's
+     * real sample, climbing a genuinely-fast link to the disarm threshold in a few
+     * seconds. Visibility lag cannot sustain the streak (~2 s of consistently-empty
+     * reads after MB-scale writes is genuine drain, not a millisecond hand-off).
+     * Returns the derived ceiling in bytes, or -1 when AUTO is disarmed/untrained.
      */
     private long updateDrainEstimatorAndDeriveCeiling(long pendingNow) {
         long now = this.ceilClock.getAsLong();
@@ -165,18 +185,32 @@ public abstract class AbstractPlayerRequestState<T> {
         long dtNanos = now - this.ceilLastProbeNanos;
         boolean probedBefore = this.ceilLastProbeNanos != 0;
         this.ceilLastProbeNanos = now;
-        if (probedBefore && prev > 0 && pendingNow >= 0 && dtNanos > 0) {
-            long drained = prev + written - pendingNow;
-            if (drained >= 0) {
-                double rate = drained * 1e9 / dtNanos;
-                if (!this.ceilTrained) {
-                    this.ceilDrainEwmaBytesPerSec = rate;
-                    this.ceilTrained = true;
-                } else {
-                    double alpha = 1 - Math.exp(-dtNanos / AUTO_CEILING_EWMA_TAU_NANOS);
-                    this.ceilDrainEwmaBytesPerSec =
-                            alpha * rate + (1 - alpha) * this.ceilDrainEwmaBytesPerSec;
+        if (probedBefore && dtNanos > 0 && pendingNow >= 0) {
+            if (written == 0 && prev > 0) {
+                // Pure-drain sample: the only interval shape whose arithmetic the async
+                // write hand-off cannot corrupt.
+                long drained = prev - pendingNow;
+                if (drained >= 0) {
+                    double rate = drained * 1e9 / dtNanos;
+                    if (!this.ceilTrained) {
+                        this.ceilDrainEwmaBytesPerSec = rate;
+                        this.ceilTrained = true;
+                    } else {
+                        double alpha = 1 - Math.exp(-dtNanos / AUTO_CEILING_EWMA_TAU_NANOS);
+                        this.ceilDrainEwmaBytesPerSec =
+                                alpha * rate + (1 - alpha) * this.ceilDrainEwmaBytesPerSec;
+                    }
                 }
+                this.ceilFastStreak = 0;
+            } else if (this.ceilTrained
+                    && written >= AUTO_CEILING_UP_EVIDENCE_MIN_WRITE
+                    && pendingNow <= AUTO_CEILING_UP_EVIDENCE_EPSILON) {
+                if (++this.ceilFastStreak >= AUTO_CEILING_UP_STREAK_TICKS) {
+                    this.ceilFastStreak = 0;
+                    this.ceilDrainEwmaBytesPerSec *= 2;
+                }
+            } else {
+                this.ceilFastStreak = 0;
             }
         }
         if (!this.ceilTrained) return -1; // optimistic start: no ceiling until evidence

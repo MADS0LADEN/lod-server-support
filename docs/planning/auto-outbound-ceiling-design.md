@@ -286,6 +286,27 @@ exceed it — round-2 nit).
   switch, the ChannelAccessorContractTest pin, the inverted Paper floor
   assert, the full docs/notes sweep, `deferred=` meaning flip, volatile
   `ceil=` gauge, Paper goldens verified unaffected. ALL folded into this v2.
+- **Round 3 (2026-08-13, LIVE FALSIFICATION on the rig — the acceptance gate
+  earning its keep):** the first deployed build measured `ceil=1.5 MB,
+  deferred=0, yielded=668` on the 4 Mbps session — the EWMA trained to ~6 MB/s
+  on a 500 KB/s link and the ceiling never bound (user-observed: vanilla
+  updates arriving in 3-5 s clumps = 1.5 MB / 500 KB/s). ROOT CAUSE all three
+  review rounds missed: netty writes are ASYNC — bytes handed to the event
+  loop are not yet reflected in the pending gauge, so a burst tick's
+  written-inclusive sample (`prev + written − now`) reads phantom multi-MB/s
+  drain (~28 MB/s spikes live). FIX: the estimator samples ONLY PURE-DRAIN
+  intervals (`written == 0` since the last probe: `drained = prev − now`, no
+  written term — hold ticks dominate on exactly the links the ceiling serves),
+  plus a bounded fast-streak UP-recovery (40 consecutive intervals of "wrote
+  ≥ 32 KB, gauge still ≤ 4 KB" double the EWMA — pure-drain sampling alone
+  cannot observe an improved link, and visibility lag cannot sustain a 2 s
+  streak). The stability §'s "samples flow while the ceiling binds" claim is
+  amended: in converged partial-flush states samples pause and the ceiling
+  freezes (degradation re-samples via holds; improvement recovers via the
+  streak). Confirmed live: capping the player's bandwidth to 0.4 MB/s (the
+  burst-bank experiment) collapsed the latency to normal — the injection
+  amplitude was the entire effect.
+
 - **Round 2 (2026-08-13, delta review by the round-1 control reviewer):**
   IMPLEMENT WITH FIXES. Fixes folded: the 2 MB constant is a DISARM threshold,
   not a clamp (a clamp silently governs fast clients under a raised bandwidth

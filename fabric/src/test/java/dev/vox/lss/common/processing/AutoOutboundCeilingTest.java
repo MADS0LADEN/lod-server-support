@@ -287,6 +287,58 @@ class AutoOutboundCeilingTest {
     }
 
     @Test
+    void writtenIntervalsNeverSampleTheAsyncLagRegression() throws Exception {
+        // Round-3 amendment (found LIVE on the rig): netty writes are ASYNC, so a
+        // burst tick's written bytes may not be in the pending gauge yet — the old
+        // written-inclusive sample read a phantom multi-MB/s drain (measured: EWMA
+        // 6 MB/s on a 500 KB/s link, ceil=1.5 MB, the ceiling never bound). An
+        // interval with ANY written bytes must not sample, however drain-shaped its
+        // arithmetic looks.
+        trainTo500KBps(); // ceil 125 KB from pure-drain samples
+        tickClock();
+        setPending(75_000); // steady: this tick's own sample is 0-drain (tiny decay)
+        state.addReadyPayload(new QueuedPayload<>("burst", 100_000, 0, POS_1));
+        Thread.sleep(50);
+        autoFlush(); // probe first (gauge settles), THEN writes 100 KB
+        assertEquals(List.of("burst"), sent, "premise: the burst left (presence gate)");
+        long gaugeAfterWrite = state.getAutoCeilingGauge();
+        tickClock();
+        setPending(0); // the phantom shape: prev 75K + written 100K − now 0 would
+                       // have read 3.5 MB/s under the old written-inclusive sample
+        autoFlush();
+        assertEquals(gaugeAfterWrite, state.getAutoCeilingGauge(),
+                "a written interval must NOT train — the async hand-off makes its "
+                        + "arithmetic read phantom drain (3.5 MB/s here, 28 MB/s live)");
+    }
+
+    @Test
+    void fastStreakDoublesTheEwmaTowardDisarm() throws Exception {
+        // Pure-drain sampling cannot observe an IMPROVED link (a converged flush
+        // writes every tick) — the bounded up-recovery: 40 consecutive intervals of
+        // "wrote >= 32 KB, gauge still ~empty" double the EWMA; a genuinely fast
+        // link climbs to the disarm threshold in a few rounds, and an overshoot is
+        // corrected by the next hold tick's real sample.
+        trainTo500KBps(); // EWMA ~500 KB/s, ceil ~125 KB
+        // Each 40-iteration round yields ~one doubling (the round's first interval has
+        // written=0 from the previous probe and samples instead, resetting the streak);
+        // ~5 doublings take the EWMA past the 8 MB/s that computes over the 2 MB bar.
+        for (int round = 0; round < 7 && state.getAutoCeilingGauge() != -1; round++) {
+            for (int i = 0; i <= AbstractPlayerRequestState.AUTO_CEILING_UP_STREAK_TICKS; i++) {
+                tickClock();
+                setPending(0); // gauge empty every read
+                state.addReadyPayload(new QueuedPayload<>("w" + round + "_" + i,
+                        40_000, 100 + round * 100 + i, POS_1));
+                Thread.sleep(1);
+                autoFlush(); // writes 40 KB; next probe sees pending 0 → streak++
+            }
+        }
+        assertEquals(-1, state.getAutoCeilingGauge(),
+                "sustained wrote-and-vanished evidence must climb the EWMA to the "
+                        + "disarm threshold (500 KB/s x2 x2 x2 crosses 8 MB/s > the "
+                        + "2 MB-computed bar) — an improved link is never left clipped");
+    }
+
+    @Test
     void nonAutoOverloadsNeverTrainOrGate() throws Exception {
         // The S-9a defaults pin, extended: the 7-arg overload (auto=false) must keep 0
         // meaning "no ceiling at all" — busy probe reads must not train anything.
