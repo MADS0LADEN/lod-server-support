@@ -121,7 +121,8 @@ public class LodRequestManager {
             () -> LSSClientConfig.CONFIG.enableAdaptiveTransferRate;
 
     private static int readOwnTabPing() {
-        var mc = Minecraft.getInstance();
+        var mc = Minecraft.getInstance(); // null under fabric-loader-junit (headless)
+        if (mc == null) return -1;
         var conn = mc.getConnection();
         var player = mc.player;
         if (conn == null || player == null) return -1;
