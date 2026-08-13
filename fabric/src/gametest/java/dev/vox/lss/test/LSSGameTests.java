@@ -134,7 +134,8 @@ public class LSSGameTests {
         helper.assertTrue(c.bytesPerSecondGlobal() >= LSSConstants.MIN_BYTES_PER_SECOND && c.bytesPerSecondGlobal() <= LSSConstants.MAX_BYTES_PER_SECOND_GLOBAL_LIMIT, "bytesPerSecondGlobal");
         helper.assertTrue(c.generationConcurrencyLimitGlobal >= LSSConstants.MIN_CONCURRENT_GENERATIONS && c.generationConcurrencyLimitGlobal <= LSSConstants.MAX_CONCURRENT_GENERATIONS, "generationConcurrencyLimitGlobal");
         helper.assertTrue(c.generationTimeoutSeconds >= LSSConstants.MIN_GENERATION_TIMEOUT && c.generationTimeoutSeconds <= LSSConstants.MAX_GENERATION_TIMEOUT, "generationTimeoutSeconds");
-        helper.assertTrue(c.dirtyBroadcastIntervalSeconds >= LSSConstants.MIN_DIRTY_BROADCAST_INTERVAL && c.dirtyBroadcastIntervalSeconds <= LSSConstants.MAX_DIRTY_BROADCAST_INTERVAL, "dirtyBroadcastIntervalSeconds");
+        // 0 = dirty pushes disabled (v0.11.0) — a first-class value beside the sending band.
+        helper.assertTrue(c.dirtyBroadcastIntervalSeconds == 0 || (c.dirtyBroadcastIntervalSeconds >= LSSConstants.MIN_DIRTY_BROADCAST_INTERVAL && c.dirtyBroadcastIntervalSeconds <= LSSConstants.MAX_DIRTY_BROADCAST_INTERVAL), "dirtyBroadcastIntervalSeconds");
         helper.assertTrue(c.generationConcurrencyLimitPerPlayer >= LSSConstants.MIN_CONCURRENCY_LIMIT && c.generationConcurrencyLimitPerPlayer <= LSSConstants.MAX_CONCURRENCY_LIMIT, "generationConcurrencyLimitPerPlayer");
         helper.succeed();
     }

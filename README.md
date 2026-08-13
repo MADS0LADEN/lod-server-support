@@ -51,7 +51,7 @@ Config is generated on first run at the paths in the install table above. The ge
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `enabled` | `true` | Enable LOD distribution |
-| `lodDistanceChunks` | `512` | Max LOD distance in chunks |
+| `lodDistanceChunks` | `300` | Max LOD distance in chunks |
 | `mbPerSecondLimitPerPlayer` | `25.0` | Per-player bandwidth cap in MiB/s (decimals like `12.5` work), counted **before** compression |
 | `mbPerSecondLimitGlobal` | `75.0` | Total bandwidth cap across all players in MiB/s, counted **before** compression |
 | `enableChunkGeneration` | `true` | Generate missing chunks on demand, so players see terrain nobody has visited |

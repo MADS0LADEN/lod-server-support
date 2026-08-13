@@ -26,6 +26,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -281,6 +282,100 @@ class PaperDirtyColumnBroadcasterTest {
         assertTrue(sent.isEmpty(), "the longer interval is honored mid-window (no caching)");
         broadcaster.tick(config);
         assertEquals(1, sent.size(), "fires at the NEW interval boundary");
+    }
+
+    // ---- DIRTY0 (v0.11.0): interval 0 = sends off, drain keeps the fallback cadence ----
+
+    /** Twin of the Fabric intervalZeroDrainsInvalidatesAndClearsWithZeroSends — the shape
+     *  of zeroEligiblePlayersStillInvalidatesTimestamps, but WITH an eligible player who
+     *  must get the clears and still no frame. */
+    @Test
+    void intervalZeroDrainsInvalidatesAndClearsWithZeroSends() {
+        config.dirtyBroadcastIntervalSeconds = 0;
+        var uuid = UUID.randomUUID();
+        var state = addPlayer(uuid, overworld, true, false);
+        long pos = PositionUtil.packPosition(1, 2);
+        state.stampProbeSuppress(pos);
+        assertTrue(state.isProbeSuppressed(pos), "precondition: the suppress stamp is armed");
+        tracker.markDirty(OVERWORLD, 1, 2);
+
+        for (int i = 0; i < LSSConstants.DIRTY_DRAIN_ONLY_INTERVAL_SECONDS * LSSConstants.TICKS_PER_SECOND; i++) {
+            broadcaster.tick(config);
+        }
+
+        assertEquals(0, tracker.pendingCount(), "the fallback tick drains the tracker");
+        assertEquals(1, processor.invalidations.size(),
+                "the invalidation fan-out must still run with sends off");
+        assertArrayEquals(new long[]{pos}, processor.invalidations.get(0).positions());
+        assertEquals(1, processor.clears.size(),
+                "the eligible player's done-bit clear must still be queued with sends off");
+        assertEquals(uuid, processor.clears.get(0).playerUuid());
+        // NOTE: isProbeSuppressed also reads false once PROBE_SUPPRESS_TTL_NANOS (1.5 s)
+        // expires — 200 no-op ticks run in microseconds, so the clear is what's pinned.
+        assertFalse(state.isProbeSuppressed(pos),
+                "the probe-suppress stamp must be cleared by the fallback tick");
+        assertFalse(state.skipProbe(pos), "the edited column must be probe-eligible again");
+        assertTrue(sent.isEmpty(), "interval 0 means NO dirty-columns frame ever leaves the server");
+    }
+
+    /** Interval 0 fires on exactly the fallback-cadence tick, not before — a raw 0 would
+     *  compute intervalTicks = 0 and drain every tick. */
+    @Test
+    void intervalZeroFiresOnExactlyTheFallbackCadenceTick() {
+        config.dirtyBroadcastIntervalSeconds = 0;
+        addPlayer(UUID.randomUUID(), overworld, true, false);
+        tracker.markDirty(OVERWORLD, 3, 4);
+
+        int fallbackTicks = LSSConstants.DIRTY_DRAIN_ONLY_INTERVAL_SECONDS * LSSConstants.TICKS_PER_SECOND;
+        for (int t = 1; t < fallbackTicks; t++) {
+            broadcaster.tick(config);
+            assertEquals(1, tracker.pendingCount(), "tick " + t + " must not drain — the fallback"
+                    + " cadence is " + LSSConstants.DIRTY_DRAIN_ONLY_INTERVAL_SECONDS + " s, not every tick");
+        }
+        assertTrue(processor.invalidations.isEmpty(), "nothing fires before the fallback tick");
+        broadcaster.tick(config); // the fallback-interval tick
+        assertEquals(0, tracker.pendingCount(), "the fallback-interval tick drains");
+        assertEquals(1, processor.invalidations.size());
+        assertTrue(sent.isEmpty());
+    }
+
+    /** Mid-run flips BOTH ways (the live-read-per-tick contract midRunConfigIntervalChange…
+     *  pins for nonzero values): 0 -> 1 resumes sends on the next interval; nonzero -> 0
+     *  stops sends while the drain continues at the fallback cadence. */
+    @Test
+    void midRunFlipsBetweenZeroAndNonzeroSwitchSendsBothWays() {
+        var uuid = UUID.randomUUID();
+        addPlayer(uuid, overworld, true, false);
+        long pos = PositionUtil.packPosition(1, 2);
+
+        // Start off (0): the fallback drain happens silently.
+        config.dirtyBroadcastIntervalSeconds = 0;
+        tracker.markDirty(OVERWORLD, 1, 2);
+        for (int i = 0; i < LSSConstants.DIRTY_DRAIN_ONLY_INTERVAL_SECONDS * LSSConstants.TICKS_PER_SECOND; i++) {
+            broadcaster.tick(config);
+        }
+        assertEquals(0, tracker.pendingCount());
+        assertTrue(sent.isEmpty(), "no frames while off");
+
+        // Flip 0 -> 1: sends resume on the next (1 s) interval.
+        config.dirtyBroadcastIntervalSeconds = 1;
+        tracker.markDirty(OVERWORLD, 1, 2);
+        fireBroadcast();
+        assertEquals(1, sent.size(), "flipping back to nonzero resumes sends live — no restart");
+        assertArrayEquals(new long[]{pos}, sent.get(0).positions());
+
+        // Flip 1 -> 0: sends stop, the drain keeps running at the fallback cadence.
+        sent.clear();
+        int invalidationsBefore = processor.invalidations.size();
+        config.dirtyBroadcastIntervalSeconds = 0;
+        tracker.markDirty(OVERWORLD, 5, 6);
+        for (int i = 0; i < LSSConstants.DIRTY_DRAIN_ONLY_INTERVAL_SECONDS * LSSConstants.TICKS_PER_SECOND; i++) {
+            broadcaster.tick(config);
+        }
+        assertEquals(0, tracker.pendingCount(), "the drain continues after the flip to 0");
+        assertEquals(invalidationsBefore + 1, processor.invalidations.size(),
+                "invalidation fan-out continues after the flip to 0");
+        assertTrue(sent.isEmpty(), "no frames after the flip to 0");
     }
 
     // ---- PP-021: failed-send isolation ----

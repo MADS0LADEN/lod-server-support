@@ -138,6 +138,12 @@ public final class LSSConstants {
     public static final int MAX_GENERATION_TIMEOUT = 600;
     public static final int MIN_DIRTY_BROADCAST_INTERVAL = 1;
     public static final int MAX_DIRTY_BROADCAST_INTERVAL = 300;
+    /** Drain cadence when dirty SENDS are disabled (dirtyBroadcastIntervalSeconds = 0):
+     *  the broadcasters still drain the tracker and run the invalidation fan-out (store
+     *  rows, timestamp cache, in-flight taints, per-player done-bit/probe-stamp clears)
+     *  on this interval — only the DirtyColumnsS2CPayload send is gated off. Matches the
+     *  field's default so "off" costs the same server-side as the default cadence. */
+    public static final int DIRTY_DRAIN_ONLY_INTERVAL_SECONDS = 10;
     public static final int MIN_CONCURRENCY_LIMIT = 1;
     public static final int MAX_CONCURRENCY_LIMIT = 1000;
     /** Per-DIMENSION timestamp-cache bounds (multiply by dimension count for the real heap

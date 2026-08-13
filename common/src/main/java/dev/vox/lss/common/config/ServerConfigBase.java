@@ -14,12 +14,13 @@ public abstract class ServerConfigBase extends JsonConfig {
     protected static final String FILE_NAME = "lss-server-config.json";
 
     public boolean enabled = true;
-    /** LOD radius in chunks. 512 by user decision 2026-08-08 (config rework) — this
-     *  REVERSES the 2026-08-02 same-day revert of 512: the D0 tile cache made the
-     *  derived footprint cheap (AUTO ~45 MB/dim at 512 vs ~109 MB pre-tile). Note what
-     *  scales with it — the timestamp cache (see effectiveTimestampCacheMB) and, with
-     *  the store on (its 2026-08-08 default), the warmed disk footprint. */
-    public int lodDistanceChunks = 512;
+    /** LOD radius in chunks. 300 by user decision 2026-08-12 (v0.11.0 stage A) — a
+     *  middle landing after 256 → 512 → 300 (the 2026-08-08 rework's 512 was generous
+     *  but sized the default workload/disk footprint above what a typical server
+     *  wants out of the box). Note what scales with it — the timestamp cache (see
+     *  effectiveTimestampCacheMB, AUTO follows this automatically) and, with the
+     *  store on (a fresh install's default), the warmed disk footprint. */
+    public int lodDistanceChunks = 300;
     /**
      * Per-player bandwidth cap. Went 20 -> 50 -> 25 MiB on 2026-08-02, 25 -> 15 MiB on
      * 2026-08-05 (v0.9.1), then 15 -> 25 MiB on 2026-08-08 (all user decisions; the
@@ -134,6 +135,20 @@ public abstract class ServerConfigBase extends JsonConfig {
     /** 32 -> 40 by user decision 2026-08-08 (config rework), matching the per-player cap. */
     public int generationConcurrencyLimitGlobal = 40;
     public int generationTimeoutSeconds = 60;
+    /**
+     * Seconds between dirty-column pushes to clients. <b>0 = dirty pushes DISABLED</b>
+     * (v0.11.0, dirty-broadcast-interval-zero-plan.md): no {@code DirtyColumnsS2CPayload}
+     * ever leaves the server, but the drain and the whole invalidation fan-out — LOD-store
+     * rows, the timestamp cache, in-flight taints, per-player done-bit/probe-stamp clears —
+     * keep running every {@link LSSConstants#DIRTY_DRAIN_ONLY_INTERVAL_SECONDS} seconds, so
+     * a rejoin or any mid-session re-ask re-resolves honestly. Consequences an operator
+     * accepts with 0: connected clients keep stale LOD until they re-ask (rejoin always
+     * heals), and {@code NOT_GENERATED}-parked positions lose their one mid-session revival
+     * path (the dirty broadcast) — they heal only on reconnect. Flipping back to nonzero is
+     * live (the broadcasters re-read per tick) but never retroactive: edits drained during
+     * an off window already left the tracker and surface via re-ask only. Negative values
+     * normalize to 0; 1 stays the nonzero floor, 300 the ceiling.
+     */
     public int dirtyBroadcastIntervalSeconds = 10;
     // The per-player SYNC (disk-read) slot cap is NOT config anymore — see
     // LSSConstants.SYNC_ON_LOAD_SLOT_CAP (shadowed by the disk-pool headroom gate at the
@@ -590,7 +605,19 @@ public abstract class ServerConfigBase extends JsonConfig {
                 LSSConstants.MAX_BYTES_PER_SECOND_GLOBAL_LIMIT / MB);
         generationConcurrencyLimitGlobal = Math.clamp(generationConcurrencyLimitGlobal, LSSConstants.MIN_CONCURRENT_GENERATIONS, LSSConstants.MAX_CONCURRENT_GENERATIONS);
         generationTimeoutSeconds = Math.clamp(generationTimeoutSeconds, LSSConstants.MIN_GENERATION_TIMEOUT, LSSConstants.MAX_GENERATION_TIMEOUT);
-        dirtyBroadcastIntervalSeconds = Math.clamp(dirtyBroadcastIntervalSeconds, LSSConstants.MIN_DIRTY_BROADCAST_INTERVAL, LSSConstants.MAX_DIRTY_BROADCAST_INTERVAL);
+        // 0 (and negative nonsense) = dirty pushes disabled — the lodStoreMaxMB idiom; only a
+        // nonzero value clamps into the sending band. See the field javadoc for the semantics.
+        dirtyBroadcastIntervalSeconds = dirtyBroadcastIntervalSeconds <= 0 ? 0
+                : Math.clamp(dirtyBroadcastIntervalSeconds,
+                        LSSConstants.MIN_DIRTY_BROADCAST_INTERVAL, LSSConstants.MAX_DIRTY_BROADCAST_INTERVAL);
+        if (dirtyBroadcastIntervalSeconds == 0) {
+            // Precedent: PaperConfig's Folia store warn — the mode must be visible in the log.
+            // (Also fires during the config suites' extreme-value clamp sweeps; harmless.)
+            dev.vox.lss.common.LSSLogger.info("dirtyBroadcastIntervalSeconds is 0: dirty pushes to"
+                    + " clients are DISABLED. The invalidation drain still runs every "
+                    + LSSConstants.DIRTY_DRAIN_ONLY_INTERVAL_SECONDS + " s; connected clients pick"
+                    + " up terrain edits only on rejoin or their own re-asks.");
+        }
         // Config review section 9.1: the per-player ceiling used to be MAX_CONCURRENCY_LIMIT
         // (1000) while the GLOBAL ceiling is MAX_CONCURRENT_GENERATIONS — a per-player value
         // above the fleet-wide one is unreachable by construction (a player cannot hold more

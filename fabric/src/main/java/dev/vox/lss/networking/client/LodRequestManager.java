@@ -528,8 +528,9 @@ public class LodRequestManager {
             // Cadence-NEUTRAL: only re-open the ring walk so the dirty position (which may
             // sit below the confirmed ring) is reachable at the NEXT scheduled scan.
             // resetScanCounter() here was the last survivor of the cadence-debounce class:
-            // it DELAYED the next scan 20 ticks per broadcast, and at the legal
-            // dirtyBroadcastIntervalSeconds floor (1 s) a sustained edit stream could
+            // it DELAYED the next scan 20 ticks per broadcast, and at the floor for a
+            // SENDING dirtyBroadcastIntervalSeconds (1 s; 0 disables sends entirely — this
+            // handler simply never fires then) a sustained edit stream could
             // phase-lock scans off entirely — starving re-declaration, the want-set's only
             // self-heal (the same failure class as the removed movement debounce).
             this.scanner.resetConfirmedRing();

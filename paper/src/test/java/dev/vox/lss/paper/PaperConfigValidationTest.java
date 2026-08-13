@@ -72,6 +72,26 @@ class PaperConfigValidationTest {
         assertEquals(LSSConstants.MIN_LOD_STORE_MAX_MB, c.lodStoreMaxMB);
     }
 
+    /** Paper twin of the Fabric named test (v0.11.0, dirty-broadcast-interval-zero-plan.md):
+     *  0 = dirty pushes disabled survives validate() through the Paper subclass, negatives
+     *  normalize to 0, and 1 stays the floor for a nonzero (sending) interval. */
+    @Test
+    void dirtyBroadcastIntervalZeroDisablesSendsAndNonzeroFloorsAt1() {
+        PaperConfig c = new PaperConfig();
+        c.dirtyBroadcastIntervalSeconds = 0;
+        c.validate();
+        assertEquals(0, c.dirtyBroadcastIntervalSeconds, "0 = sends off, must survive validate");
+
+        c.dirtyBroadcastIntervalSeconds = -5;
+        c.validate();
+        assertEquals(0, c.dirtyBroadcastIntervalSeconds,
+                "negative nonsense must mean sends off, not a 1 s cadence");
+
+        c.dirtyBroadcastIntervalSeconds = 1;
+        c.validate();
+        assertEquals(1, c.dirtyBroadcastIntervalSeconds, "1 is the nonzero floor, kept exactly");
+    }
+
     /** Transport deference ships OFF (0) on both platforms — the elytra-wall investigation
      *  measured the head-of-line mechanism ABSENT (flat ping, empty send queue), so the gate
      *  exists to be armed from measurement, not by default. The 4096 KB floor binds only
@@ -148,8 +168,11 @@ class PaperConfigValidationTest {
                     new Bounds(LSSConstants.MIN_GENERATION_TIMEOUT, LSSConstants.MAX_GENERATION_TIMEOUT)),
             Map.entry("missMemoTtlSeconds",
                     new Bounds(LSSConstants.MIN_MISS_MEMO_TTL_SECONDS, LSSConstants.MAX_MISS_MEMO_TTL_SECONDS)),
+            // dirtyBroadcastIntervalSeconds' legal floor is 0 (= dirty pushes off, v0.11.0);
+            // the real 1 s floor applies to nonzero (sending) intervals only, pinned by the
+            // named test below — same shape as the lodStoreMaxMB/outboundBufferCeilingKB rows.
             Map.entry("dirtyBroadcastIntervalSeconds",
-                    new Bounds(LSSConstants.MIN_DIRTY_BROADCAST_INTERVAL, LSSConstants.MAX_DIRTY_BROADCAST_INTERVAL)),
+                    new Bounds(0, LSSConstants.MAX_DIRTY_BROADCAST_INTERVAL)),
             Map.entry("sendQueueLimitPerPlayer",
                     new Bounds(LSSConstants.MIN_SEND_QUEUE_SIZE, LSSConstants.MAX_SEND_QUEUE_SIZE)),
             // generationConcurrencyLimitPerPlayer and perDimensionTimestampCacheSizeMB left the

@@ -165,6 +165,17 @@ conservatism — above it the number would describe something the reader cannot 
 | `lodDistanceChunks` | `256` | 1..2048 | Generous already. The 2048 ceiling costs nothing now that the fast-rescan gate is predicted-walk-cost based rather than distance-based. |
 | Paper `updateEvents` | 7 events | — | Correct. Excluding `BlockFromToEvent` (fluid flow) by default is right. |
 
+> **Erratum (2026-08-13, v0.11.0 stage A):** two rows above are superseded.
+> `dirtyBroadcastIntervalSeconds`' clamp is now **`0` or `1..300`** — `0` disables
+> dirty pushes entirely (previously it clamped to 1 s, the *fastest* cadence — the
+> opposite of the operator's intent); the drain + invalidation fan-out keep running
+> every `DIRTY_DRAIN_ONLY_INTERVAL_SECONDS` (10 s), negatives normalize to 0
+> (`docs/planning/dirty-broadcast-interval-zero-plan.md`). And `lodDistanceChunks`'
+> default is **300** (user decision 2026-08-12): 256 → 512 in the 2026-08-08 rework
+> (see §11.4's earlier same-day history), then 512 → 300 for v0.11.0 as a middle
+> landing — the AUTO timestamp-cache derivation (§7.3 erratum) follows it
+> automatically.
+
 ### 3.2 `bytesPerSecondLimitGlobal`: 100 MiB → **256 MiB**
 
 At the 20 MiB per-player default, the global cap **starts binding at five concurrent
