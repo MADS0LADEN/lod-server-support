@@ -410,6 +410,62 @@ auto/override resolver tests + clamp-audit doc erratum.
    pin) — the gate classes are common-side and pump-free, but the experimental
    label rules apply to the release note.
 
+## Amendment 2 (2026-08-13, user direction at the v0.11.0 F pause): router-level retention replaces park-overflow drops
+
+**Live evidence that prompted it**: the v0.11.0 rig deploy's first warm join produced
+thousands of park-overflow drops (`gated` WARN deltas of 767/668/173 per minute
+against K=2) — each one a wasted full cycle (router admission → SYNC slot → dedup
+group → pool-queue trip → **a store lookup** → drop → re-declaration ≤1 s later →
+repeat), plus a WARN whose "raise maxConcurrentDiskReads" advice misread the design
+working as the design failing. The drop tier also violates the architecture's own
+idiom: it is the only place an ADMITTED ask is dropped for pure capacity below the
+router ("nothing is bounced": slot-cap full → retain and continue; no disk headroom
+→ retain and stop).
+
+**The change**: when the gate is SATURATED (permits exhausted AND the park full),
+the ROUTER retains the entry and stops the pass — the exact `hasHeadroom()`
+semantics — so pending asks stay in the backlog and are replaced/reprioritized
+wholesale by the next want-set declaration instead of burning drop-and-re-ask
+cycles.
+
+- `DiskReadGate.isSaturated()`: true iff no permit is available AND the park is
+  full. Cheap atomic reads; volatile-composition tolerant (a stale read admits or
+  holds one entry for one pass — both self-healing).
+- `AbstractChunkDiskReader.gateSaturated()` accessor; the ROUTER checks it as a
+  SEPARATE conjunct beside `hasHeadroom()` at the same site (deliberately NOT
+  folded into `hasHeadroom()` — the AdaptiveReadThrottle composes with headroom
+  independently and must stay orthogonal): saturated → retain the entry, STOP the
+  pass, count ONE `gate_stops` event per stopped pass.
+- The reader-side park is UNCHANGED (it is the holder-feeding mechanism, the
+  amendment-1 deviation). The overflow-drop path REMAINS as race armor only
+  (submissions already in flight when the park filled) — still counted
+  `disk.gated`, expected ~0 in steady state.
+- **Store-hit cost, accepted**: while saturated, the router holds ALL submissions
+  (hits included) for ≤1 pass — at park-full there are ≥K running + threads×32
+  parked misses, the marginal submission is overwhelmingly another miss, and hits
+  already in the pool queue keep draining permit-free.
+- **Conservation**: retained entries carry NO disposition (they simply stay in the
+  backlog); when the next declaration replaces them they count `superseded` like
+  any replaced entry — law A5's partition is UNCHANGED (`disk.gated` keeps its
+  never-submitted slot, now near-zero).
+- **Observability**: `disk.gate_stops` joins both exporters + the contract literal
+  + `KNOWN_SERVER_KEYS`/`SERVER_MONOTONIC` + soak_report (the R-6 same-commit
+  rule); diag gains `gate_stops=` beside `gated=`. The once-a-minute WARN re-keys
+  to `gate_stops` deltas (sustained router holds = the capacity-pressure signal;
+  the remedy text is unchanged and now honest) — the overflow-drop WARN text stays
+  on the armor path.
+- **Scenario re-pipe**: `disk-read-gate`'s premise becomes `disk.gate_stops > 0`
+  (the gate BOUND via retention) + `disk.saturated == 0` + the superseded floor;
+  `disk.gated` is left unpinned (race armor may legitimately read 0 or small).
+  Checker + selftest rows updated with the key registrations. The no-op-pinned
+  scenarios (K=pool) must show `gate_stops == 0` — their baselines stay gate-free.
+- Backfill bypasses by construction — unchanged. Both platforms ride the one
+  common router implementation.
+- **Found-bug loop**: this re-opens the stage-B gates — Tier 1 gate/router pins
+  (new: saturated→retain+stop, unsaturated→normal, armor-drop still counted),
+  Tier 2, the re-piped `disk-read-gate` scenario, `fresh-backfill` +
+  `disk-saturation` under the no-op pins, release_check.
+
 ## Future phase (recorded, not planned)
 
 Fabric-only MSPT modulation of K: feed `getCurrentSmoothedTickTime` into an
