@@ -6,11 +6,12 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * The E1 inert-shipping pins (mega plan E1 row): the compiled arm is OFF — the
- * capability bit is never composed regardless of config — and the soak/benchmark
- * property gate (FARP §3.3) holds once E2 arms it: soak/benchmark clients are full
- * Loom clients distinguished ONLY by the system properties, and an armed bit there
- * would subscribe them and shift every soak baseline.
+ * The capability-composition pins (mega plan E2 row): the compiled arm is ON, and the
+ * capability bit composes from the ARM + the soak/benchmark property gate ONLY
+ * (FARP §3.3, E2 review M2 — deliberately config-independent, the prefs-carrier
+ * rule): soak/benchmark clients are full Loom clients distinguished ONLY by the
+ * system properties, and an armed bit there would subscribe them and shift every
+ * soak baseline.
  */
 class FarPlayerClientSupportTest {
 
@@ -19,20 +20,33 @@ class FarPlayerClientSupportTest {
         assertTrue(FarPlayerClientSupport.CLIENT_ARMED,
                 "E2's defaults decision (user 2026-08-12) arms the bit — flipping this "
                         + "back off is a release decision, not drift");
-        assertEquals(0, FarPlayerClientSupport.capabilityBitFor(false, true, false, false),
+        assertEquals(0, FarPlayerClientSupport.capabilityBitFor(false, false, false),
                 "the unarmed composition stays pinned (support-line backports may ship it)");
     }
 
     @Test
     void propertyGateKeepsSoakAndBenchmarkClientsUnsubscribedOnceArmed() {
         assertEquals(LSSConstants.CAPABILITY_FAR_PLAYERS,
-                FarPlayerClientSupport.capabilityBitFor(true, true, false, false),
-                "armed + enabled + no harness properties -> the bit");
-        assertEquals(0, FarPlayerClientSupport.capabilityBitFor(true, true, true, false),
+                FarPlayerClientSupport.capabilityBitFor(true, false, false),
+                "armed + no harness properties -> the bit");
+        assertEquals(0, FarPlayerClientSupport.capabilityBitFor(true, true, false),
                 "a soak JVM never subscribes (baseline neutrality)");
-        assertEquals(0, FarPlayerClientSupport.capabilityBitFor(true, true, false, true),
+        assertEquals(0, FarPlayerClientSupport.capabilityBitFor(true, false, true),
                 "a benchmark JVM never subscribes");
-        assertEquals(0, FarPlayerClientSupport.capabilityBitFor(true, false, false, false),
-                "the config toggle is honored");
+    }
+
+    @Test
+    void capabilityBitIsDeliberatelyIndependentOfTheEnabledToggle() {
+        // E2 review M2 (both reviewers): the subscription is the PREFS CARRIER. A
+        // client with the master toggle OFF but shareSelf=false set must still
+        // deliver that opt-out — coupling the bit to `enabled` made "turn everything
+        // off" strand the opt-out server-side (more visible, not less). The server
+        // skips serving disabled subscribers before any frame work, so the carrier
+        // session costs a map entry; the RENDERER checks farPlayersEnabled itself.
+        // capabilityBitFor deliberately has NO config parameter — this test exists
+        // so a future "optimization" re-adding one trips a pin, not just a review.
+        assertEquals(LSSConstants.CAPABILITY_FAR_PLAYERS,
+                FarPlayerClientSupport.capabilityBitFor(true, false, false),
+                "armed + no harness properties -> the bit, regardless of any config");
     }
 }

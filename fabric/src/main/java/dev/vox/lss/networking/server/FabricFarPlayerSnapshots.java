@@ -59,7 +59,12 @@ final class FabricFarPlayerSnapshots {
                     FarPlayerWire.angleToByte(v.getXRot()));
         }
 
-        var delta = p.getDeltaMovement(); // blocks/tick -> blocks/second
+        // getKnownMovement, NOT getDeltaMovement (E2 review M1): player motion is
+        // client-authoritative — ServerPlayer.deltaMovement carries knockback and
+        // little else, so the hint would read ~0 for an elytra player at 40 b/s and
+        // extrapolation would ship inert. ServerPlayer overrides getKnownMovement to
+        // return the move-packet-reported motion (and the vehicle's when ridden).
+        var delta = p.getKnownMovement(); // blocks/tick -> blocks/second
         return new FarPlayerBroadcastService.PlayerSnapshot(
                 p.getUUID(), p.getName().getString(),
                 p.level().dimension().identifier().toString(),

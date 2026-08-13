@@ -59,7 +59,12 @@ final class PaperFarPlayerSnapshots {
                     FarPlayerWire.angleToByte(v.getXRot()));
         }
 
-        var delta = p.getDeltaMovement(); // blocks/tick -> blocks/second
+        // getKnownMovement, NOT getDeltaMovement (E2 review M1): player motion is
+        // client-authoritative — ServerPlayer.deltaMovement carries knockback and
+        // little else, so the hint would read ~0 for an elytra player at 40 b/s and
+        // extrapolation would ship inert. ServerPlayer overrides getKnownMovement to
+        // return the move-packet-reported motion (and the vehicle's when ridden).
+        var delta = p.getKnownMovement(); // blocks/tick -> blocks/second
         return new FarPlayerBroadcastService.PlayerSnapshot(
                 p.getUUID(), p.getName().getString(),
                 p.level().dimension().identifier().toString(),
@@ -85,13 +90,24 @@ final class PaperFarPlayerSnapshots {
                 hash, equipmentIds, equipmentCounts, vehicle);
     }
 
+    private static volatile boolean vanishReadWarned;
+
     private static boolean isVanished(org.bukkit.entity.Player bukkit) {
         try {
             for (var meta : bukkit.getMetadata("vanished")) {
                 if (meta.asBoolean()) return true;
             }
-        } catch (Exception ignored) {
-            // A plugin's broken MetadataValue must not cost the snapshot pass.
+        } catch (Exception e) {
+            // Fail OPEN (throw -> not-vanished): fail-closed would mass-hide players
+            // on any broken plugin. But a silently dead privacy lever violates the
+            // once-bounded-logging convention (E2 review m-4) — warn once per JVM.
+            if (!vanishReadWarned) {
+                vanishReadWarned = true;
+                dev.vox.lss.common.LSSLogger.warn(
+                        "Vanish metadata read failed — vanish detection degraded for this"
+                                + " session; the lss.farplayers.hidden permission and"
+                                + " farPlayersExclude still apply (" + e + ")");
+            }
         }
         return false;
     }

@@ -93,6 +93,11 @@ public final class FarPlayerBroadcastService {
         UUID vehicleUuid;
         String vehicleType;
         boolean equipmentEverSent;
+        // The last DELIVERED frame carried a nonzero velocity hint (E2 review m7):
+        // position deltas gate `changed`, so a decelerating player's final moving
+        // frame can park the client extrapolating ~1.5 windows past the true rest
+        // point; this forces exactly one zero-velocity rest frame after the stop.
+        boolean velWasNonzero;
         // False until a frame carrying this target DELIVERED (commit-on-success):
         // a row created on a withheld tick is blank, and without this flag a target
         // whose real state happens to equal the blank row (exact origin, zero angles)
@@ -326,13 +331,19 @@ public final class FarPlayerBroadcastService {
             UUID vehicleUuid = t.vehicle() == null ? null : t.vehicle().uuid();
             String vehicleType = t.vehicle() == null ? null : t.vehicle().typeIdentity();
 
+            boolean velNowZero = FarPlayerWire.velocityToShort(t.velXPerSecond()) == 0
+                    && FarPlayerWire.velocityToShort(t.velYPerSecond()) == 0
+                    && FarPlayerWire.velocityToShort(t.velZPerSecond()) == 0;
             boolean changed = firstSend
                     || row.quantX != qx || row.quantY != qy || row.quantZ != qz
                     || row.yaw != yaw || row.headYaw != headYaw || row.pitch != pitch
                     || row.pose != t.poseFlags()
                     || row.equipmentHash != t.equipmentHash()
                     || !java.util.Objects.equals(row.vehicleUuid, vehicleUuid)
-                    || !java.util.Objects.equals(row.vehicleType, vehicleType);
+                    || !java.util.Objects.equals(row.vehicleType, vehicleType)
+                    // The one-shot rest frame (m7): a stop after motion ships once so
+                    // the client stops dead-reckoning at the parked position.
+                    || (row.velWasNonzero && velNowZero);
             if (!changed) {
                 suppressedUnchanged.incrementAndGet();
                 continue;
@@ -370,8 +381,10 @@ public final class FarPlayerBroadcastService {
             final boolean equipDue = equipmentDue;
             final byte pose = t.poseFlags();
             final long equipHash = t.equipmentHash();
+            final boolean velNonzeroSent = !velNowZero;
             rowCommits.add(() -> {
                 rowRef.everSent = true;
+                rowRef.velWasNonzero = velNonzeroSent;
                 rowRef.quantX = qx;
                 rowRef.quantY = qy;
                 rowRef.quantZ = qz;

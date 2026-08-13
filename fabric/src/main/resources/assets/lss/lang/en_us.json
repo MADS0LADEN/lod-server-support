@@ -12,7 +12,7 @@
   "lss.config.far_players_enabled": "Show Far Players",
   "lss.config.far_players_enabled.tooltip": "Show other players beyond normal render distance as simple player models in your LOD terrain. Only works on servers running LOD Server Support with far players enabled.",
   "lss.config.far_players_share_self": "Share My Position",
-  "lss.config.far_players_share_self.tooltip": "Share your position with other players' LOD view. When enabled, players far away from you can see where you are (as a distant player model). Turn this off to stay invisible beyond normal render distance. Server exclude lists and permissions always apply on top.",
+  "lss.config.far_players_share_self.tooltip": "Share your position with other players' LOD view. When enabled, players far away from you can see where you are (as a distant player model). Turn this off to stay invisible beyond normal render distance. Applies while connected through LOD Server Support (Receive Server LODs on, an LOD mod installed) — without that connection, only server-side settings (exclude list, permissions, vanish) protect your position. Server exclude lists and permissions always apply on top.",
   "lss.config.far_players_name_tags": "Far Player Name Tags",
   "lss.config.far_players_name_tags.tooltip": "Show name tags over far-player models.",
   "lss.config.far_players_render_distance": "Far Player Render Limit",

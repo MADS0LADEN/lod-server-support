@@ -324,7 +324,7 @@ class FarPlayerBroadcastServiceTest {
         var svc = subscribed();
         var world = List.of(snap(VIEWER, "Viewer", 0, 0), snap(T1, "T", 500, 0));
         svc.tick(10_000, world, settings("off"), sender());
-        assertTrue(sent.isEmpty(), "mode off ships nothing (E1's inert default)");
+        assertTrue(sent.isEmpty(), "mode off ships nothing");
 
         svc.onPrefs(VIEWER, prefs(false, true));
         svc.tick(11_000, world, settings("on"), sender());
@@ -358,5 +358,141 @@ class FarPlayerBroadcastServiceTest {
         svc.tick(20_000, List.of(viewer, snapFull(T1, "Far", "minecraft:overworld", x, 64, 0,
                 false, false, true, 0, null, null, horse)), s, sender());
         assertEquals(before + 1, updates().size(), "a mount change forces through the tier");
+    }
+
+    // ---- The E1-review pins (re-landed at E2 — the E1 fix batch wrote and RAN these
+    // ---- green, but an external file-watcher revert ate the write before the commit;
+    // ---- incident recorded in the progress doc) + the E2 m7 rest-frame pin.
+
+    @Test
+    void stopAfterMotionShipsExactlyOneRestFrameThenSuppresses() {
+        // E2 review m7: the last moving frame carries a nonzero velocity hint; without
+        // a forced rest frame the client dead-reckons ~1.5 windows past the true stop
+        // and parks there. One zero-velocity frame must ship, then suppression.
+        var svc = subscribed();
+        var viewer = snap(VIEWER, "Viewer", 0, 0);
+        var moving = new FarPlayerBroadcastService.PlayerSnapshot(T1, "T",
+                "minecraft:overworld", 500, 64, 0, 0f, 0f, 0f, (byte) 0,
+                12.0, 0, 0, false, false, true, false, 0L, null, null, null);
+        svc.tick(10_000, List.of(viewer, moving), settings("on"), sender());
+        int afterMoving = updates().size();
+
+        var resting = new FarPlayerBroadcastService.PlayerSnapshot(T1, "T",
+                "minecraft:overworld", 500, 64, 0, 0f, 0f, 0f, (byte) 0,
+                0, 0, 0, false, false, true, false, 0L, null, null, null);
+        svc.tick(10_500, List.of(viewer, resting), settings("on"), sender());
+        var u = updates();
+        assertEquals(afterMoving + 1, u.size(), "the stop ships one rest frame");
+        assertEquals(0, u.get(u.size() - 1).entries().get(0).velX(),
+                "the rest frame carries the zero velocity that stops extrapolation");
+
+        svc.tick(11_000, List.of(viewer, resting), settings("on"), sender());
+        assertEquals(afterMoving + 1, updates().size(),
+                "after the rest frame, an unchanged target suppresses again");
+    }
+
+    @Test
+    void hiddenPermissionDropsTheTargetFromRosterAndUpdates() {
+        var svc = subscribed();
+        svc.tick(10_000, List.of(snap(VIEWER, "Viewer", 0, 0),
+                hiddenSnap(T1, "Hidden", 500, 0), snap(T2, "Plain", 600, 0)),
+                settings("on"), sender());
+        var r = rosters();
+        assertEquals(1, r.size());
+        assertEquals(1, r.get(0).added().size(), "the hidden player never enters the roster");
+        assertEquals("Plain", r.get(0).added().get(0).name());
+        for (var u : updates()) {
+            assertEquals(1, u.entries().size(), "no update entry for a hidden player");
+        }
+    }
+
+    @Test
+    void withheldIncrementalRosterCommitsNothingAndRetriesNextTick() {
+        var svc = subscribed();
+        var viewer = snap(VIEWER, "Viewer", 0, 0);
+        svc.tick(10_000, List.of(viewer, snap(T1, "A", 500, 0)), settings("on"), sender());
+        assertEquals(1, rosters().size());
+
+        // T2 arrives while the channel is unwritable: the frame is withheld and the
+        // membership commit must NOT happen (commit-on-success — a burned index with
+        // no delivered add is a permanently silent player).
+        sendResult = false;
+        svc.tick(10_500, List.of(viewer, snap(T1, "A", 500, 0), snap(T2, "B", 600, 0)),
+                settings("on"), sender());
+        assertEquals(1, rosters().size());
+
+        sendResult = true;
+        svc.tick(11_000, List.of(viewer, snap(T1, "A", 500, 0), snap(T2, "B", 600, 0)),
+                settings("on"), sender());
+        var r = rosters();
+        assertEquals(2, r.size(), "the add re-sends once the channel drains");
+        assertEquals("B", r.get(1).added().get(0).name());
+    }
+
+    @Test
+    void withheldUpdatesLeaveRowsUncommittedSoAStationaryTargetStillHeals() {
+        var svc = subscribed();
+        var viewer = snap(VIEWER, "Viewer", 0, 0);
+        svc.tick(10_000, List.of(viewer, snap(T1, "T", 500, 0)), settings("on"), sender());
+        int before = updates().size();
+
+        // The target moves, but the frame is withheld — then STOPS moving. If rows
+        // advanced at scan time, delta suppression would eat every later frame and the
+        // client would keep the stale position forever.
+        sendResult = false;
+        svc.tick(10_500, List.of(viewer, snap(T1, "T", 510, 0)), settings("on"), sender());
+        assertEquals(before, updates().size());
+
+        sendResult = true;
+        svc.tick(11_000, List.of(viewer, snap(T1, "T", 510, 0)), settings("on"), sender());
+        var u = updates();
+        assertEquals(before + 1, u.size(), "the uncommitted row re-sends the missed movement");
+        assertEquals(FarPlayerWire.quantizePos(510),
+                u.get(u.size() - 1).entries().get(0).quantX());
+    }
+
+    @Test
+    void updatesChunkUnderTheDictionaryBoundAndStayDecodable() {
+        var svc = subscribed();
+        var world = new ArrayList<FarPlayerBroadcastService.PlayerSnapshot>();
+        world.add(snap(VIEWER, "Viewer", 0, 0));
+        // 150 targets x 6 unique equipment identities = 900 dictionary entries — over
+        // MAX_DICT_ENTRIES (512) in one frame. Encode must chunk, decode must accept.
+        for (int i = 0; i < 150; i++) {
+            var ids = new String[FarPlayerWire.EQUIPMENT_SLOTS];
+            var counts = new int[FarPlayerWire.EQUIPMENT_SLOTS];
+            for (int slot = 0; slot < ids.length; slot++) {
+                ids[slot] = "modx:item_" + i + "_" + slot;
+                counts[slot] = 1;
+            }
+            world.add(snapFull(new UUID(1, i), "P" + i, "minecraft:overworld",
+                    200 + i, 64, 0, false, false, true, 1000 + i, ids, counts, null));
+        }
+        svc.tick(10_000, world, settings("on"), sender());
+        var u = updates();
+        assertTrue(u.size() >= 2, "the first geared frame must chunk, got " + u.size());
+        int total = u.stream().mapToInt(f -> f.entries().size()).sum();
+        assertEquals(150, total, "chunking preserves every entry exactly once");
+    }
+
+    @Test
+    void visibleSetCapsNearestFirstAtTheWireBound() {
+        var svc = subscribed();
+        var world = new ArrayList<FarPlayerBroadcastService.PlayerSnapshot>();
+        world.add(snap(VIEWER, "Viewer", 0, 0));
+        var s = new FarPlayerBroadcastService.Settings("on", 16384, 0, false, List.of(), 10);
+        for (int i = 0; i < FarPlayerWire.MAX_UPDATE_ENTRIES + 50; i++) {
+            world.add(snap(new UUID(2, i), "P" + i, 200 + i * 4.0, 0));
+        }
+        svc.tick(10_000, world, s, sender());
+        var r = rosters();
+        assertEquals(1, r.size());
+        assertEquals(FarPlayerWire.MAX_UPDATE_ENTRIES, r.get(0).added().size(),
+                "the served set caps at the wire bound");
+        assertTrue(r.get(0).added().stream().anyMatch(e -> e.name().equals("P0")),
+                "nearest targets survive the cap");
+        assertTrue(r.get(0).added().stream()
+                        .noneMatch(e -> e.name().equals("P" + (FarPlayerWire.MAX_UPDATE_ENTRIES + 49))),
+                "the farthest target is the one dropped");
     }
 }

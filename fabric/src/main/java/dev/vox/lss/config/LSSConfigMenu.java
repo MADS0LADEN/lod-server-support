@@ -89,6 +89,13 @@ public class LSSConfigMenu implements ConfigEntryPoint {
 
         // ---- Far players (E2, FARP §3.3): its own page — a distinct feature with
         //      its own privacy semantics, not another LOD slider ----
+        // Save handler for far-player options: persist AND push the prefs NOW (E2
+        // review M2/m4 — a mid-session "Share My Position" flip must not wait for a
+        // rejoin; maybeSendPrefs's changed-guard makes redundant calls free).
+        StorageEventHandler fpSave = () -> {
+            cfg.save();
+            dev.vox.lss.networking.client.FarPlayerClientSupport.onClientConfigChanged();
+        };
         var fpPage = builder.createOptionPage();
         fpPage.setName(Component.translatable("lss.config.far_players.page"));
 
@@ -99,7 +106,7 @@ public class LSSConfigMenu implements ConfigEntryPoint {
         fpEnabled.setImpact(OptionImpact.LOW);
         fpEnabled.setDefaultValue(true);
         fpEnabled.setBinding(v -> cfg.farPlayersEnabled = v, () -> cfg.farPlayersEnabled);
-        fpEnabled.setStorageHandler(save);
+        fpEnabled.setStorageHandler(fpSave);
         fpGroup.addOption(fpEnabled);
 
         var fpDep = new Identifier[]{Identifier.parse("lss:far_players_enabled")};
@@ -113,7 +120,7 @@ public class LSSConfigMenu implements ConfigEntryPoint {
         fpShare.setImpact(OptionImpact.LOW);
         fpShare.setDefaultValue(true);
         fpShare.setBinding(v -> cfg.farPlayersShareSelf = v, () -> cfg.farPlayersShareSelf);
-        fpShare.setStorageHandler(save);
+        fpShare.setStorageHandler(fpSave);
         fpGroup.addOption(fpShare);
 
         var fpTags = builder.createBooleanOption(Identifier.parse("lss:far_players_name_tags"));
@@ -122,7 +129,7 @@ public class LSSConfigMenu implements ConfigEntryPoint {
         fpTags.setImpact(OptionImpact.LOW);
         fpTags.setDefaultValue(true);
         fpTags.setBinding(v -> cfg.farPlayersNameTags = v, () -> cfg.farPlayersNameTags);
-        fpTags.setStorageHandler(save);
+        fpTags.setStorageHandler(fpSave);
         fpTags.setEnabledProvider(s -> s.readBooleanOption(fpDep[0]), fpDep);
         fpGroup.addOption(fpTags);
 
@@ -137,14 +144,15 @@ public class LSSConfigMenu implements ConfigEntryPoint {
                 : Component.literal(Integer.toString(v)));
         fpRender.setBinding(v -> cfg.farPlayersMaxRenderDistanceBlocks = v,
                 () -> cfg.farPlayersMaxRenderDistanceBlocks);
-        fpRender.setStorageHandler(save);
+        fpRender.setStorageHandler(fpSave);
         fpRender.setEnabledProvider(s -> s.readBooleanOption(fpDep[0]), fpDep);
         fpGroup.addOption(fpRender);
 
         fpPage.addOptionGroup(fpGroup);
-        mod.addPage(fpPage);
 
+        // Main LSS page first (n12) — far players is the secondary page.
         mod.addPage(page);
+        mod.addPage(fpPage);
     }
 
     /** The descriptor's `icon` path as a resource Identifier ("assets/&lt;ns&gt;/&lt;path&gt;" →

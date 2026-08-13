@@ -81,11 +81,13 @@ public class LSSClientConfig extends JsonConfig {
     // bit-identical to pre-cap behavior.
     public int lodColumnsPerSecondLimit = 0;
 
-    // ---- Far players (v0.11.0 stage E1, FARP §3.3 — INERT until E2 arms the client
+    // ---- Far players (v0.11.0, FARP §3.3 — ARMED since E2 via the client
     // ---- capability bit; these keys exist so upgrading users can pre-configure).
 
-    /** Receive far-player proxies (the capability bit's config term). E1 ships the bit
-     *  compiled OFF regardless; E2 arms it. */
+    /** Receive far-player proxies (the RENDERER's master toggle). Deliberately NOT a
+     *  term of the capability bit (E2 review M2): the subscription doubles as the
+     *  prefs carrier for the shareSelf opt-out, so a disabled viewer still
+     *  subscribes — it just renders nothing and the server skips serving it. */
     public boolean farPlayersEnabled = true;
     /** Client-side visibility ring overrides in blocks (0 = server-controlled). */
     public int farPlayersMaxDistanceBlocks = 0;

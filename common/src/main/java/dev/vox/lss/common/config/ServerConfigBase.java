@@ -564,9 +564,9 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public List<String> xrayHiddenBlocks = defaultXrayHiddenBlocks();
 
-    // ---- Far players (v0.11.0 stage E1 — far-player-proxies-plan.md §3.4, INERT until
-    // ---- E2 flips the compiled default to "on"; all serving is additionally gated on
-    // ---- the client's CAPABILITY_FAR_PLAYERS bit, which E1 clients never send).
+    // ---- Far players (v0.11.0 — far-player-proxies-plan.md §3.4; ARMED since E2:
+    // ---- compiled default "on", clients send CAPABILITY_FAR_PLAYERS; serving is
+    // ---- always additionally gated on that bit, so vanilla/legacy clients cost 0).
 
     /**
      * Far-player proxies: {@code "off"} / {@code "opt-in"} / {@code "on"}. Server-

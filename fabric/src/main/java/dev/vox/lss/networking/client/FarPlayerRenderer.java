@@ -39,28 +39,30 @@ import java.util.concurrent.ConcurrentHashMap;
  *       through-wall outline that contradicts the privacy stance.</li>
  *   <li><b>No fog mixin</b> — a proxy beyond fog-end fades like terrain would;
  *       {@code farPlayersMaxRenderDistanceBlocks} is the alignment knob.</li>
- *   <li><b>Handoff hysteresis</b>: proxying begins past the vanilla circle
- *       +{@link #HANDOFF_FAR_EDGE_BLOCKS} and ends inside +{@link #HANDOFF_NEAR_EDGE_BLOCKS}
- *       (a ±16-block band, so the boundary never flickers), with
- *       {@code ClientEntityEvents.ENTITY_LOAD} as the edge trigger that kills the
- *       proxy the same frame the real entity appears (the 1-frame crossfade guard).
- *       SeeU's conjuncts (real-present AND chunk-loaded AND inside-circle) survive in
- *       the steady-state formula — entity-add can precede a renderable chunk.</li>
+ *   <li><b>Handoff = vanilla's own cull test</b> (E2 review M3 — this REPLACES the
+ *       planned Euclidean ±16 band, decisions log entry 16): the proxy renders
+ *       exactly when the REAL entity would not — {@code real == null || !chunkLoaded
+ *       || !real.shouldRenderAtSqrDistance(camDistSq)}. A distance band measured
+ *       Euclidean against square chunk geometry both double-rendered at the render
+ *       square's diagonal AND left an invisibility annulus at high render distance
+ *       (entity cull ~256 blocks sits far inside a 32-chunk circle). Keying on the
+ *       same predicate both directions self-synchronizes the swap with vanilla's
+ *       entity pop (the exact crossfade), so no hysteresis band is needed;
+ *       {@code ClientEntityEvents.ENTITY_LOAD} stays as the same-frame kill when a
+ *       real entity spawns in.</li>
  *   <li><b>Vehicles render at E3</b> — a mounted target renders UNMOUNTED at its own
  *       wire position (the R-10 pre-rendering scenario: no crash, no seat math).</li>
  *   <li><b>Containment</b>: the whole pass is latch-guarded — a renderer bug degrades
  *       to "no proxies" for the session, never a render-thread crash loop.</li>
  * </ul>
  *
- * <p>Render thread only (COLLECT_SUBMITS); the tracker is main-thread-written and
- * read here — the snapshot copy is the boundary.
+ * <p>Threading: every touchpoint runs on the client MAIN thread, which IS the render
+ * thread (network receivers hop via execute(), ENTITY_LOAD fires from addEntity,
+ * COLLECT_SUBMITS is the main-thread extract/submit phase). snapshot() is a shallow
+ * copy sharing mutable FarPlayerMotion — it is defense-in-depth, NOT a thread
+ * boundary; do not move this pass off-thread trusting it (E2 review n9).
  */
 public final class FarPlayerRenderer {
-
-    /** Hysteresis band past the vanilla render circle: begin proxying beyond
-     *  +FAR_EDGE, stop inside +NEAR_EDGE (never equal — the ±16 flicker band). */
-    static final int HANDOFF_NEAR_EDGE_BLOCKS = 16;
-    static final int HANDOFF_FAR_EDGE_BLOCKS = 48;
 
     /** Proxy entity-id base: far above vanilla's server-assigned counter AND disjoint
      *  from SeeU's 1_000_000_000 block (both installed must never collide). Each id is
@@ -72,22 +74,25 @@ public final class FarPlayerRenderer {
     private static volatile FarPlayerRenderer instance;
 
     private final Map<UUID, Proxy> proxies = new HashMap<>();
-    /** Hysteresis memory: uuids currently in the proxying state. */
-    private final Set<UUID> proxying = new HashSet<>();
     /** Small identity→Item cache (equipment strings repeat every frame). */
     private final Map<String, Item> itemCache = new ConcurrentHashMap<>();
     private int nextProxyId = PROXY_ID_BASE;
     private boolean crashLatched;
 
-    /** Installed by {@link LSSClientNetworking} at client init; static so the
-     *  session-end path in {@link FarPlayerClientSupport} can clear it. */
+    /** Installed by {@link FarPlayerClientSupport#initRenderer()} (called from
+     *  {@code LSSClient}); static so the session-end path can clear it. */
     static void install(FarPlayerRenderer renderer) {
         instance = renderer;
     }
 
+    /** Session end: proxies die AND the crash latch resets (E2 review m5 — one
+     *  contained throw next session beats a per-JVM dead feature). */
     static void clearInstance() {
         var r = instance;
-        if (r != null) r.clear();
+        if (r != null) {
+            r.clear();
+            r.crashLatched = false;
+        }
     }
 
     /** The ENTITY_LOAD edge trigger: a REAL player entity appearing kills its proxy
@@ -95,14 +100,12 @@ public final class FarPlayerRenderer {
     static void onRealPlayerLoad(UUID uuid) {
         var r = instance;
         if (r != null) {
-            r.proxying.remove(uuid);
             r.proxies.remove(uuid);
         }
     }
 
     void clear() {
         proxies.clear();
-        proxying.clear();
     }
 
     /** The COLLECT_SUBMITS pass. */
@@ -120,9 +123,11 @@ public final class FarPlayerRenderer {
 
     private void renderContained(LevelRenderContext context) {
         var config = LSSClientConfig.CONFIG;
-        // The same gate that arms the capability bit (soak/benchmark properties
-        // included) — an unsubscribed session renders nothing by construction.
-        if (FarPlayerClientSupport.capabilityBit() == 0) {
+        // The bit gate covers arm + the soak/benchmark properties; farPlayersEnabled
+        // is checked HERE because the bit deliberately no longer carries it (the
+        // subscription is the prefs carrier — E2 review M2): a disabled viewer still
+        // delivers its shareSelf opt-out, it just renders nothing.
+        if (FarPlayerClientSupport.capabilityBit() == 0 || !config.farPlayersEnabled) {
             if (!proxies.isEmpty()) clear();
             return;
         }
@@ -148,8 +153,7 @@ public final class FarPlayerRenderer {
         var dispatcher = minecraft.getEntityRenderDispatcher();
         float partialTick = minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false);
         int animationTick = localPlayer.tickCount;
-        long now = System.currentTimeMillis();
-        int vanillaBlocks = minecraft.options.getEffectiveRenderDistance() * 16;
+        long now = FarPlayerClientSupport.monotonicMillis();
         int maxRender = config.farPlayersMaxRenderDistanceBlocks;
         int minRender = config.farPlayersMinDistanceBlocks;
 
@@ -159,26 +163,21 @@ public final class FarPlayerRenderer {
             Vec3 position = new Vec3(sample.x(), sample.y(), sample.z());
             double distance = position.distanceTo(localPlayer.position());
             if (distance < minRender || (maxRender > 0 && distance > maxRender)) {
-                proxying.remove(tracked.uuid());
                 continue;
             }
 
-            // Handoff (SeeU's conjuncts + the hysteresis band).
-            boolean realPresent = level.getPlayerByUUID(tracked.uuid()) != null;
-            boolean chunkLoaded = level.hasChunk(Mth.floor(position.x) >> 4,
-                    Mth.floor(position.z) >> 4);
-            boolean inProxyState = proxying.contains(tracked.uuid());
-            if (inProxyState) {
-                if (realPresent && chunkLoaded
-                        && distance <= vanillaBlocks + HANDOFF_NEAR_EDGE_BLOCKS) {
-                    proxying.remove(tracked.uuid());
-                    continue;
-                }
-            } else {
-                boolean begin = !realPresent || !chunkLoaded
-                        || distance > vanillaBlocks + HANDOFF_FAR_EDGE_BLOCKS;
-                if (!begin) continue;
-                proxying.add(tracked.uuid());
+            // Handoff = vanilla's own draw decision (M3 — see the class javadoc):
+            // the proxy renders exactly when the real entity would not. Same
+            // predicate both directions, so the swap is frame-synchronized with
+            // vanilla's entity pop — no band, no flicker, no diagonal double-render,
+            // no high-render-distance invisibility annulus.
+            var real = level.getPlayerByUUID(tracked.uuid());
+            if (real != null
+                    && level.hasChunk(Mth.floor(position.x) >> 4,
+                            Mth.floor(position.z) >> 4)
+                    && real.shouldRenderAtSqrDistance(
+                            cameraPosition.distanceToSqr(real.position()))) {
+                continue;
             }
 
             Proxy proxy = proxies.compute(tracked.uuid(), (uuid, current) ->
@@ -203,7 +202,6 @@ public final class FarPlayerRenderer {
                     context.submitNodeCollector());
         }
         proxies.keySet().removeIf(uuid -> !active.contains(uuid));
-        proxying.retainAll(active);
     }
 
     /** Monotonic id from the LSS block, probed against the live level (a taken id —

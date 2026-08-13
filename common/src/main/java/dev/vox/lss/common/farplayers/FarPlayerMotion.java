@@ -109,8 +109,9 @@ public final class FarPlayerMotion {
                 toYaw, toHeadYaw, toPitch);
     }
 
-    /** True while the sample is a moving one (lerp in progress or extrapolating with a
-     *  nonzero hint) — the renderer's walk-animation input. */
+    /** True while the sample is a moving one (lerp in progress or extrapolating with
+     *  a nonzero hint). Diagnostic/cadence input — the renderer derives its walk
+     *  animation from positional deltas, not from this (E2 review n8). */
     public boolean isMoving(long nowMillis) {
         long dt = nowMillis - snapshotMillis;
         if (dt <= windowMillis) {

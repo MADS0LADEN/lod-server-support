@@ -1367,7 +1367,7 @@ public class ServiceLifecycleGameTests {
      * handshake — a crafted handshake WITH the capability bit subscribes (one without
      * it does not), and a broadcast pass sends a roster + updates for an in-range far
      * target while an out-of-range one is filtered. Client tracker state is Tier 3 /
-     * live territory. The compiled-off client arm never reaches here — this test
+     * live territory. The client arm plays no part here — this test
      * crafts the bit the way an E2 client will.
      */
     @GameTest(structure = "fabric-gametest-api-v1:empty")

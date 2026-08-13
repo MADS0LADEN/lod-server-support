@@ -32,17 +32,39 @@ public final class FarPlayerClientSupport {
     /** The handshake-composition term. The soak/benchmark property gate (FARP §3.3):
      *  those clients are full Loom clients distinguished only by the system
      *  properties — without the explicit check they would subscribe and shift soak
-     *  baselines. */
+     *  baselines. DELIBERATELY independent of {@code farPlayersEnabled} (E2 review
+     *  M2, both reviewers): the subscription is the PREFS CARRIER — a client whose
+     *  master toggle is off but whose shareSelf opt-out is set must still deliver
+     *  that opt-out, and the server already skips serving disabled subscribers
+     *  before any frame work. Coupling the bit to `enabled` made "turn everything
+     *  off" strand the opt-out: MORE visible, not less. */
     public static int capabilityBit() {
-        return capabilityBitFor(CLIENT_ARMED, LSSClientConfig.CONFIG.farPlayersEnabled,
+        return capabilityBitFor(CLIENT_ARMED,
                 Boolean.getBoolean("lss.soak"), Boolean.getBoolean("lss.benchmark"));
     }
 
     /** Pure form for the Tier 1 property-gate pin. */
-    static int capabilityBitFor(boolean armed, boolean enabled, boolean soakJvm,
-                                boolean benchmarkJvm) {
-        if (!armed || !enabled || soakJvm || benchmarkJvm) return 0;
+    static int capabilityBitFor(boolean armed, boolean soakJvm, boolean benchmarkJvm) {
+        if (!armed || soakJvm || benchmarkJvm) return 0;
         return LSSConstants.CAPABILITY_FAR_PLAYERS;
+    }
+
+    /**
+     * Called by the Sodium screen's storage handler for the far-player options (E2
+     * review m4): a mid-session "Share My Position" flip must reach the server NOW,
+     * not on the next rejoin — maybeSendPrefs's changed-guard makes this free when
+     * nothing changed. Sessions that never handshook (receiveServerLods off, no LOD
+     * consumer) have no channel to send on; the tooltip documents that residue.
+     */
+    public static void onClientConfigChanged() {
+        maybeSendPrefs();
+    }
+
+    /** Monotonic millis for motion state (E2 review m6): wall clock steps freeze or
+     *  teleport every proxy; nanoTime is the SeeU-proven source. All motion writers
+     *  and samplers must use THIS. */
+    public static long monotonicMillis() {
+        return System.nanoTime() / 1_000_000L;
     }
 
     /**
@@ -80,7 +102,7 @@ public final class FarPlayerClientSupport {
     /** Updates frame, main client thread. */
     static void onUpdatesFrame(byte[] body) {
         try {
-            TRACKER.onUpdates(FarPlayerWire.decodeUpdates(body), System.currentTimeMillis());
+            TRACKER.onUpdates(FarPlayerWire.decodeUpdates(body), monotonicMillis());
         } catch (Exception e) {
             LSSLogger.warn("Malformed far-player updates frame — ignored (" + e + ")");
         }
