@@ -270,7 +270,14 @@ allocation the flush already receives:
   shape where loopback pacing actually BINDS) + **bandwidth-throttle** (impl
   round, both lenses independently: the smallest-allocation scenario — the
   one where the FLOOR term binds and whose queue_full/delivery premises are
-  the ones per-tick shaping could move).
+  the ones per-tick shaping could move). **RUN 2026-08-13, ALL FIVE PASS
+  (0 violations, 0 warnings) with in-recording attribution via
+  `service.paced_ticks`: bandwidth-throttle BOUND (paced_ticks=3 — the
+  floor term fired on the tiny allocation exactly as predicted, and no law
+  moved); the other four inert (=0 — store-second-join's superflat columns
+  are too small to outrun a default refill share, so the store-warm BINDING
+  coverage on loopback comes from bandwidth-throttle plus the deterministic
+  T1 five-tick wave pin; real-terrain binding is the rig live gate's job).**
   Inertness is NOT structural in v2 (the budget binds exactly where the bank
   used to burst — wave-completion ticks stretch from 1 to ≤5 ticks): the
   expectation is UNCHANGED verdicts because every law is conservation- or
