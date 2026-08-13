@@ -66,7 +66,10 @@ operator tuning (auto-derived), plus a manual override.
   carries no source field at all (the `COLUMN_SOURCE_*` byte is inside the opaque
   serialized body).
 
-**Why fail-fast-drop, not retain**: retention would have to happen at the router's
+**Why fail-fast-drop, not retain** — *the drop half of this rationale is OVERTURNED
+by Amendment 2 below (router-level retention on gate saturation); the pre-submit
+part stands — parking/retention still happen only after the store lookup ran*:
+retention would have to happen at the router's
 pre-submission gates — but store hit/miss is unknowable until the store lookup runs
 INSIDE the pool task (`AbstractChunkDiskReader.readAndDeliver:430`), so pre-submit
 retention would hold back would-be store hits, recreating the exact problem this
@@ -379,10 +382,12 @@ auto/override resolver tests + clamp-audit doc erratum.
 - CLAUDE.md: Configuration bullet + a line in the disk-reader architecture section
   (the seam, the store-hit exclusion, the drop-heal).
 - `config-defaults-and-clamps-review-2026-08-02.md` erratum.
-- Release notes (Configuration + Performance): "Disk-read CPU is now bounded
-  independently of bandwidth — `maxConcurrentDiskReads` (default auto: half the
-  reader pool) caps concurrent expensive region reads; store-served LODs are never
-  throttled by it. Raise bandwidth freely on store-heavy servers."
+- Release notes (Configuration + Performance) — **SUPERSEDED BY AMENDMENT 2:
+  do not copy this draft; the live tag drafts in release-tag-v0.11.0*.txt carry
+  the current wording** ("store-served LODs never consume its capacity"): "Disk-read
+  CPU is now bounded independently of bandwidth — `maxConcurrentDiskReads` (default
+  auto: half the reader pool) caps concurrent expensive region reads. Raise
+  bandwidth freely on store-heavy servers."
 
 ## Verification
 
@@ -520,12 +525,20 @@ happened upstream.
 wrong: the hold is re-imposed every pass for the DURATION of the saturated
 episode (park drains at expensive-phase rate — worst case, an A7 IOWorker
 stall, minutes), and the predicate is global across players. Mitigations that
-keep it acceptable: ts>0 rejoins resolve via the timestamp rung without
-submitting, `restoreBacklog` republishes the want-set so probes keep serving
-retained heads, the memo rung keeps escalating, and the held-hit subset is only
-ts<=0-no-server-stamp asks. Recorded, not built: a store-membership pre-check
-remains rejected. Release-note/README wording "store-served LODs are never
-throttled by it" → "store-served LODs never consume its permits".
+keep it acceptable — ALL scoped to entries AHEAD OF the stopped head (the 3-Opus
+implementation round's correction: once a pass stops, nothing BEHIND the head is
+polled, so timestamp/probe/duplicate/memo resolution continues only for the
+nearer prefix; closest-first ordering makes that the right prefix to keep
+serving, and re-declaration heals the tail): ts>0 rejoins resolve via the
+timestamp rung without submitting, `restoreBacklog` republishes the want-set so
+probe coverage is computed (consumed only up to the head), the memo rung keeps
+escalating ahead of the head, and the held-hit subset is only
+ts<=0-no-server-stamp asks. Practical magnitude on a slow-IO box (A7-class
+stall): ALL per-player serve progress paces at the expensive-read rate for the
+episode — the old drop tier did not do that; accepted with eyes open. Recorded,
+not built: a store-membership pre-check remains rejected. Release-note/README
+wording "store-served LODs are never throttled by it" → "store-served LODs never
+consume its capacity".
 
 **R-MIN-1 — WARN: latched once per session** (the store-eviction precedent —
 the once-a-minute re-key would fire 3–5 times during one legitimate distance-300
@@ -551,12 +564,30 @@ readAndDeliver + diag comments).
 
 **R-MIN-3 — scenario floor goes static.** `superseded >= gated` is vacuous at
 gated ~0; replace with the disk-saturation-precedent static `superseded >= 100`
-(measured margin: the flood re-declares ~1 Hz through convergence, thousands
-expected). Premise `disk.gate_stops > 0`; `disk.saturated == 0` unchanged;
+(measured margin: 664 on the first passing retention run — 6.6× the floor; the
+old drop-era runs measured higher because every drop was also a re-declared
+miss). Premise `disk.gate_stops > 0`; `disk.saturated == 0` unchanged;
 `disk.gated` deliberately UNPINNED (0-or-small legitimate). The named check's
 required-fields list swaps to `server.disk.gate_stops`. NOTE for the A/B: the
 efficiency win shows in convergence time and WARN noise, not in any conserved
 counter — `disk.submitted` stays ≈ unique positions in both models.
+
+**Implementation-round notes (3-Opus review, 2026-08-13):** the attribution
+smear between `gate_stops` and `NO_DISK_HEADROOM` is bounded at T−K entries per
+pass (an empty-park saturation read needs `queued >= queueCapacity − (T−K)`), so
+the counter's meaning is tighter than "near queue-full". `gate_stops` scales with
+the saturated episode's DURATION, not the flood size (measured 41 on the first
+passing run vs 2945 drop-era `gated` on the same scenario) — the `> 0` premise
+has ~40× headroom; revisit only if a much faster box shrinks it. Harness
+back-compat: `disk.gate_stops` joining the required-presence set means archived
+pre-Amendment-2 recordings now fail schema validation with a named violation —
+the documented "re-record rather than debug" stance. `store-offline-mutate`'s
+`maxConcurrentDiskReads: 3` (vs AUTO pool = 3 on vanilla-IO soak boxes) is K =
+pool there, and its phase is `enabled: false` besides — inert, left as is. A K
+LOWERED at runtime then raised back to pool can read saturated transiently until
+the park residue drains (nothing refills a held park, so it self-clears within
+one release cycle) — unreachable in any scenario, noted in the predicate's
+javadoc.
 
 **Verified no-change set (both reviewers):** law A5's fold contains no `gated`
 term in either identity; A1 rides the documented `queue_full`

@@ -114,8 +114,8 @@ public abstract class AbstractChunkDiskReader {
         // (bounded by the queue) can never reach the park bound while the park itself
         // stays pigeonhole-empty. Shrinking the park below the queue reopens the
         // overflow-drop window the router retention exists to close.
-        this.gateParkCapacity = threadCount * QUEUE_CAPACITY_PER_THREAD;
         int queueCapacity = threadCount * QUEUE_CAPACITY_PER_THREAD;
+        this.gateParkCapacity = queueCapacity; // ONE computation — the >= relation by construction
         var workQueue = new ArrayBlockingQueue<Runnable>(queueCapacity);
         this.workQueue = workQueue;
         this.executor = new ThreadPoolExecutor(threadCount, threadCount, 0L, TimeUnit.MILLISECONDS,
@@ -171,7 +171,10 @@ public abstract class AbstractChunkDiskReader {
      * <p>Evaluated PER ENTRY on the processing thread (stale reads self-heal within
      * one classification latency — a park refill mid-drain is seen by the next
      * entry). Hit-heavy over-conservatism near queue-full is accepted: the stop is
-     * re-evaluated every pass at ~20 Hz.
+     * re-evaluated every pass at ~20 Hz. One transient exception to the K = pool
+     * argument: a K LOWERED at runtime parks entries, and raising it back to pool
+     * can read saturated until that residue drains — self-clearing (nothing refills
+     * a held park; every release drains), unreachable in any pinned scenario.
      */
     public boolean gateSaturated() {
         int inUse = this.readGate.inUse();
@@ -180,21 +183,43 @@ public abstract class AbstractChunkDiskReader {
                 >= this.gateParkCapacity;
     }
 
-    /** Ticks (router passes) of gate-stop before the once-per-session capacity WARN
-     *  latches: ~1 s of continuously stopped passes at the 20 Hz cycle — a sustained
-     *  episode, not a single transient stop. */
-    private static final long GATE_STOP_WARN_THRESHOLD = 20;
+    /** A saturation EPISODE = gate stops arriving with no quiet gap longer than this.
+     *  Any pass that admits (or any second without a stop) ends the episode. */
+    private static final long GATE_STOP_EPISODE_GAP_NANOS = 1_000_000_000L;
+    /** Episode length that latches the once-per-session capacity WARN: ~3 s of
+     *  repeated stops is sustained load. A cumulative count was the first shape here
+     *  and was wrong both ways (3-Opus round): 20 isolated stops spread over hours
+     *  latched a WARN claiming "sustained load", and one 2-tick blip on a 10-player
+     *  server latched it in ~100 ms (the counter grows ~N players x 20 Hz). */
+    private static final long GATE_STOP_WARN_SUSTAIN_NANOS = 3_000_000_000L;
     private volatile boolean gateStopWarnLatched = false;
+    // Episode tracking — processing-thread only (recordGateStop's caller contract).
+    private boolean gateStopSeen = false;
+    private long gateStopEpisodeStartNanos;
+    private long gateStopLastNanos;
 
     /**
      * Books one gate-stopped router pass (Amendment 2). The capacity WARN is LATCHED
      * once per session (the store-eviction precedent — a per-minute re-key fired 3-5
-     * times during one legitimate cold join, the exact noise retention removes):
-     * running totals live in {@code /lsslod diag}'s {@code gate_stops=} token.
+     * times during one legitimate cold join, the exact noise retention removes) and
+     * only on a SUSTAINED episode: running totals live in {@code /lsslod diag}'s
+     * {@code gate_stops=} token either way.
      */
     public void recordGateStop() {
-        long total = this.diag.recordGateStop();
-        if (total >= GATE_STOP_WARN_THRESHOLD && !this.gateStopWarnLatched) {
+        recordGateStop(System.nanoTime());
+    }
+
+    /** Clock-injectable seam (the latch is time-based). Processing thread only. */
+    void recordGateStop(long nowNanos) {
+        this.diag.recordGateStop();
+        if (this.gateStopWarnLatched) return;
+        if (!this.gateStopSeen
+                || nowNanos - this.gateStopLastNanos > GATE_STOP_EPISODE_GAP_NANOS) {
+            this.gateStopEpisodeStartNanos = nowNanos; // a new episode begins
+            this.gateStopSeen = true;
+        }
+        this.gateStopLastNanos = nowNanos;
+        if (nowNanos - this.gateStopEpisodeStartNanos >= GATE_STOP_WARN_SUSTAIN_NANOS) {
             this.gateStopWarnLatched = true;
             LSSLogger.warn("Disk reads are concurrency-gated under sustained load (read_gate="
                     + this.readGate.capacity() + "/" + this.readGate.capacity()
@@ -205,6 +230,11 @@ public abstract class AbstractChunkDiskReader {
                     + " headroom allows and you want faster cold backfill. (Logged once per"
                     + " session.)");
         }
+    }
+
+    /** Latch observability for the Tier 1 episode-detector pins. */
+    boolean gateStopWarnLatchedForTest() {
+        return this.gateStopWarnLatched;
     }
 
     /** The native→v20 body translator for pre-migration {@code wirefmt=19} store rows

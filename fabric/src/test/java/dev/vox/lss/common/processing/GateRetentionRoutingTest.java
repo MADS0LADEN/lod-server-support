@@ -112,6 +112,24 @@ class GateRetentionRoutingTest {
             assertEquals(1, proc.gateStops.get(),
                     "exactly ONE gate_stops per stopped player-pass — it is a pass "
                             + "counter, never a held-reads count");
+
+            // The UNWIND pin (3-Opus round MINOR-3 — the one silent session-permanent
+            // regression): the retained head must hold NO pending slot. A leaked slot
+            // resolves Duplicate.IN_FLIGHT forever (no result will ever clear it) and
+            // wedges one SYNC slot per gate stop until the cap parks the player.
+            assertFalse(state.hasPendingRequest(10, 0),
+                    "a gate-retained entry must be fully unwound — no pending slot");
+
+            // ...and no leaked dedup group: once the gate clears, the SAME positions
+            // must admit as fresh submissions (a leaked group would silently attach).
+            proc.saturation = () -> false;
+            proc.postSnapshot(snapshotOf(players), List.of());
+            waitFor(() -> proc.routeCyclesForTest() >= 2, "post-clear routing cycle");
+            assertEquals(3, proc.submits.size(),
+                    "after the gate clears, every retained entry admits fresh — a leaked "
+                            + "dedup group or pending slot would swallow the resubmission");
+            assertEquals(0, state.getBacklogSize());
+            assertEquals(1, proc.gateStops.get(), "the cleared pass books no stop");
         } finally {
             proc.shutdown();
         }

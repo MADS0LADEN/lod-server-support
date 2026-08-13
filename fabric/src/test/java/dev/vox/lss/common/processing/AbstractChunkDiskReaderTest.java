@@ -375,10 +375,14 @@ class AbstractChunkDiskReaderTest {
     }
 
     /**
-     * Park OVERFLOW is the bounce (the gate-site wiring pin): with the permit held and
-     * the park list full (threads×32 = 64 for this reader), the next miss delivers the
-     * saturated flavor — counted {@code gated}, never {@code submitted}/{@code
-     * saturated} — which the processor's existing silent-superseded routing consumes.
+     * Park OVERFLOW is the RACE-ARMOR bounce (Amendment 2 demoted it from the primary
+     * pressure valve — the router's retention conjunct now holds sustained pressure
+     * upstream, and this direct-submit-past-a-pegged-permit shape is one the router
+     * prevents by construction; it remains reachable by in-flight races): with the
+     * permit held and the park list full (threads×32 = 64 for this reader), the next
+     * miss delivers the saturated flavor — counted {@code gated}, never {@code
+     * submitted}/{@code saturated} — which the processor's existing silent-superseded
+     * routing consumes.
      */
     @Test
     void parkOverflowBouncesAsSaturatedFlavorAndCountsGated() throws Exception {
@@ -647,6 +651,96 @@ class AbstractChunkDiskReaderTest {
         } finally {
             r.shutdown();
         }
+    }
+
+    /**
+     * The multi-thread K = pool discriminator (3-Opus round MINOR-4): all four pool
+     * threads blocked HOLDING permits (inUse == cap) with the queue deep — 124 of 128
+     * — so {@code hasHeadroom()} still passes. The permit-less term (tasksInFlight −
+     * inUse = 124 queued) stays below the park bound (128) → never saturated. A bare
+     * {@code tasksInFlight} term reads 128 ≥ 128 here and flips TRUE — the exact
+     * regression that would shift the disk-saturation baseline.
+     */
+    @Test
+    void gateSaturationStaysFalseAtPoolKWithAllPermitsHeldAndADeepQueue() throws Exception {
+        var r = new TestDiskReader(4); // K = pool = 4 (ctor default)
+        r.registerPlayer(player);
+        try {
+            var started = new CountDownLatch(4);
+            var holdOpen = new CountDownLatch(1);
+            for (int i = 0; i < 4; i++) {
+                r.submit(player, i, 0, 1L + i, () -> {
+                    started.countDown();
+                    if (!holdOpen.await(30, TimeUnit.SECONDS)) throw new IllegalStateException("never released");
+                    return new byte[]{1};
+                });
+            }
+            assertTrue(started.await(5, TimeUnit.SECONDS), "all four holders must start");
+            for (int i = 10; i < 134; i++) { // 124 queued behind the blocked pool
+                r.submit(player, i, 3, 100L + i, () -> new byte[]{2});
+            }
+            assertTrue(r.hasHeadroom(), "premise: 124/128 queued — the router would consult the gate");
+            assertFalse(r.gateSaturated(),
+                    "K = pool with every permit held and a deep queue must stay unsaturated "
+                            + "— only permit-LESS work may count toward the park bound");
+
+            holdOpen.countDown();
+            var results = new ArrayList<ChunkReadResult>();
+            long deadline = System.nanoTime() + 30_000_000_000L;
+            while (results.size() < 128 && System.nanoTime() < deadline) {
+                var res = r.getPlayerQueue(player).poll();
+                if (res != null) results.add(res); else Thread.sleep(2);
+            }
+            assertEquals(128, results.size(), "everything drains normally");
+            assertEquals(0, r.getDiag().getGatedCount());
+        } finally {
+            r.shutdown();
+        }
+    }
+
+    /**
+     * The gate-stop plumbing + episode-detector pins (3-Opus round: the router test
+     * stubs {@code recordGateStop}, so without this the real chain — processor →
+     * reader → diag → diag token — and the WARN latch had zero Tier 1 coverage; a
+     * broken chain would print gate_stops=0 forever while the soak red pointed at
+     * the scenario config).
+     */
+    @Test
+    void recordGateStopFeedsDiagAndLatchesTheWarnOnlyOnASustainedEpisode() {
+        reader.recordGateStop();
+        assertEquals(1, reader.getDiag().getGateStopsCount(),
+                "a recorded stop lands in the reader's diagnostics");
+        assertTrue(reader.getDiagnostics().contains("gate_stops=1"),
+                "and renders in the always-on diag token");
+        assertFalse(reader.gateStopWarnLatchedForTest(), "one stop never latches");
+
+        // Drive the episode detector through the clock seam. A dense sub-second BLIP
+        // (the 10-player 2-tick shape that falsely latched the cumulative counter)
+        // must not latch, however many stops it books.
+        long t = System.nanoTime() + 10_000_000_000L; // fresh episode (>1 s after the real stop)
+        for (int i = 0; i < 50; i++) {
+            reader.recordGateStop(t);
+            t += 10_000_000L; // 10 ms apart — 0.5 s span
+        }
+        assertFalse(reader.gateStopWarnLatchedForTest(),
+                "a dense sub-second blip must NOT latch the sustained-load WARN");
+
+        // A >1 s quiet gap ends the episode; the next one must start from zero.
+        t += 5_000_000_000L;
+        for (int i = 0; i < 25; i++) {
+            reader.recordGateStop(t);
+            t += 100_000_000L; // 100 ms apart — crosses 3 s highly sustained
+        }
+        assertFalse(reader.gateStopWarnLatchedForTest(),
+                "2.4 s of sustained stops is still below the 3 s episode bar");
+        for (int i = 0; i < 10; i++) {
+            reader.recordGateStop(t);
+            t += 100_000_000L;
+        }
+        assertTrue(reader.gateStopWarnLatchedForTest(),
+                "stops spanning >= 3 s with <= 1 s gaps latch the once-per-session WARN");
+        assertEquals(86, reader.getDiag().getGateStopsCount(),
+                "every stop counted regardless of the latch");
     }
 
     /** Minimal concrete config for the reapply seam (only maxConcurrentDiskReads and

@@ -205,7 +205,10 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     # note (stage-B review ACC-5): store-offline-mutate's pin of 3 equals the FABRIC
     # vanilla AUTO pool; a >=8-core Paper standalone run of that phase resolves a
     # larger prioritized pool, where 3 would nominally bind — inert there
-    # (enabled=false, no read traffic) and the A7 gated arm flags any leak.
+    # (enabled=false, no read traffic) and the A7 gated/gate_stops arms flag any leak
+    # (since Amendment 2 the gate_stops arm fires FIRST — saturation binds before
+    # overflow — so arming that phase, or copying its K pin into a new scenario on a
+    # box whose AUTO pool exceeds it, needs the opt-in or a K=pool pin).
     "maxConcurrentDiskReads",
     "sendQueueLimitPerPlayer", "bytesPerSecondLimitGlobal",
     # Transport deference (0 = off, the shipped default). Listed so an A/B scenario can
