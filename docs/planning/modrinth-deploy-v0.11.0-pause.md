@@ -20,22 +20,22 @@ byte size matches the local file afterwards), then Restart via the panel:
       "sftp://$MODRINTH_SFTP_HOST/mods/lod-server-support-fabric.jar"
     # Restart: panel Stop/Start button (the archon curl needs a fresh token/HAR)
 
-## 2. Config refresh (R-8 — REQUIRED with the deploy)
+## 2. Config refresh (R-8, amended by user direction 2026-08-13 — DELETE and regenerate)
 
-The standing rig config predates two default rounds (legacy `bytesPerSecondLimit*`
-byte keys, `lodDistanceChunks: 256`) and would mask the shipped v0.11.0
-experience. Replace `/config/lss-server-config.json` on the server with EXACTLY:
+The standing rig config predates two default rounds and would mask the shipped
+v0.11.0 experience. Per the user's direction, DELETE
+`/config/lss-server-config.json` on the server before the restart and let the
+mod regenerate it — a brand-new file takes the full fresh-install defaults,
+including `lodStore: "on"` via the fresh-create hook (distance 300, mb caps
+25/75, gen caps 40/40, `maxConcurrentDiskReads` AUTO = half-pool, `farPlayers`
+"on", `lodYieldsToVanillaTransport` true).
 
-    {
-      "lodStore": "on",
-      "lodStoreMaxMB": 10240
-    }
-
-Everything else falls through to the v0.11.0 compiled defaults (distance 300,
-mb caps 25/75, gen caps 40/40, `maxConcurrentDiskReads` AUTO = half-pool with the
-store on, `farPlayers` "on", dirty interval default). Only the two genuinely
-rig-specific keys survive per the plan. Upload over SFTP the same way (the server
-rewrites the file with the full audited key set on first boot).
+**Known delta vs the old rig config**: `lodStoreMaxMB` regenerates as `0` =
+UNCAPPED (the rig previously capped at 10240 MB; the store DB is ~4 GB). The
+2 GiB free-space floor still bounds the backfill, but re-add
+`"lodStoreMaxMB": 10240` later if the host's disk quota matters. The old
+`lodDistanceChunks: 256` becomes 300 (slightly larger discs), and the legacy
+byte-denominated bandwidth keys are gone in favor of the new defaults.
 
 ## 3. After restart — verification (RCON, ~/rcon.py; no leading slash)
 

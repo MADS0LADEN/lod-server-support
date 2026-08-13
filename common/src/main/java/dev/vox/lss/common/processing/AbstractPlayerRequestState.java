@@ -611,7 +611,7 @@ public abstract class AbstractPlayerRequestState<T> {
 
     /**
      * Full flush overload carrying the transport-yield gate
-     * ({@code lodYieldsToVanillaTransport}, default false — vanilla-first-lod-yield-plan.md
+     * ({@code lodYieldsToVanillaTransport}, default true since v0.11.0 — vanilla-first-lod-yield-plan.md
      * v2.1) and the relevance-prune radius (0 = prune disabled). The gate IS netty's
      * writability flag: while the channel is writable the bandwidth limiter is the only
      * constraint; while it is not, this tick's column flush is skipped and the queue

@@ -135,9 +135,9 @@ class PaperConfigValidationTest {
 
     /** Paper inherits the shared yield default: unarmed until the live E3 A/B (§4). */
     @Test
-    void transportYieldDefaultsOff() {
-        assertFalse(new PaperConfig().lodYieldsToVanillaTransport,
-                "lodYieldsToVanillaTransport must default FALSE (Fabric parity)");
+    void transportYieldDefaultsOn() {
+        assertTrue(new PaperConfig().lodYieldsToVanillaTransport,
+                "lodYieldsToVanillaTransport defaults TRUE since v0.11.0 (Fabric parity)");
     }
 
     /** Paper inherits the shared transcode default: disk serves transcode NBT straight to

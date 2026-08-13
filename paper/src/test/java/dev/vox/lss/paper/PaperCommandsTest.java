@@ -239,8 +239,12 @@ class PaperCommandsTest {
                         m.equals("Dialects: v20=0, v19=0, v18=0, v16=0, started=0/0/0/0")),
                 "the Dialects line renders unconditionally (the v20 count IS the live"
                         + " LOD-session count): " + messages);
-        assertEquals(10, messages.size(),
-                "all ten diagnostic lines render with no players connected: " + messages);
+        assertTrue(messages.stream().anyMatch(m ->
+                        m.equals("Yield: armed=true, ticks_total=0, bytes_withheld=0 B")),
+                "the Yield arming receipt renders on the default config (default TRUE"
+                        + " since v0.11.0, user decision 2026-08-13): " + messages);
+        assertEquals(11, messages.size(),
+                "all eleven diagnostic lines render with no players connected: " + messages);
     }
 
     @Test

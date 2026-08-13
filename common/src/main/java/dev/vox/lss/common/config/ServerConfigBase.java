@@ -137,14 +137,17 @@ public abstract class ServerConfigBase extends JsonConfig {
      * already backed up ahead of vanilla's chunk packets. A starvation floor sends one
      * payload per 5 s so a hard-yielding player is distinguishable from a dead one, and a
      * once-a-minute relevance prune drops queue entries the player has long left behind.
-     * <b>Default FALSE</b> — the mechanism ships unarmed (the project's recorded evidence
-     * discipline: the default flips only in a later release citing the live E3 A/B, whose
-     * metric is moved-wrongly/rejection EVENT RATES). Behind a buffering proxy
-     * (Velocity/Bungee) the gate sees the server→proxy hop and is best-effort: it can
-     * under-yield, never over-yield. While armed, expect flying players to ride the floor
-     * during sustained vanilla chunk bursts — that IS "vanilla first". No clamp (boolean).
+     * <b>Default TRUE since v0.11.0</b> (user decision 2026-08-13, superseding the
+     * v0.10.0 ships-unarmed stance and its planned live-A/B precondition — the flip
+     * rides the v0.11.0 Modrinth manual-testing pause as its live observation window).
+     * Behind a buffering proxy (Velocity/Bungee) the gate sees the server→proxy hop
+     * and is best-effort: it can under-yield, never over-yield. While armed, expect
+     * flying players to ride the floor during sustained vanilla chunk bursts — that
+     * IS "vanilla first". Loopback channels never go unwritable, so soaks/gametests
+     * are provably unaffected (the CI-inertness pin in TransportYieldFlushTest).
+     * No clamp (boolean).
      */
-    public boolean lodYieldsToVanillaTransport = false;
+    public boolean lodYieldsToVanillaTransport = true;
     /** Fleet-wide bandwidth ceiling. Raised 100 -> 256 MiB 2026-08-02 (config review
      *  section 3.2 — at 20 MiB/player the old value bound at FIVE concurrent LOD players),
      *  lowered 256 -> 60 MiB on 2026-08-05 (user decision, v0.9.1, alongside the 15 MiB

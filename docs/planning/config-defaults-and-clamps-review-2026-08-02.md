@@ -584,3 +584,10 @@ that run.
   false, `farPlayersExclude` empty list. `farPlayers` and `farPlayersMaxDistanceBlocks`
   are `/lsslod set` rows (R-9) sharing those exact helpers. This file predates the keys;
   the audit tables above deliberately do NOT enumerate them — this erratum is the record.
+
+- **2026-08-13 erratum (v0.11.0, user decision at the F pause): `lodYieldsToVanillaTransport`
+  default false → TRUE.** Supersedes the v0.10.0 A2 ships-unarmed stance and its planned
+  live-E3-A/B precondition — the v0.11.0 Modrinth manual-testing pause is the live
+  observation window instead. Soaks/gametests provably unaffected (loopback channels
+  never report unwritable — the CI-inertness pin in TransportYieldFlushTest); both
+  config-suite default pins flipped with the change.
