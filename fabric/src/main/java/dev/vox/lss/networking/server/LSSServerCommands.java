@@ -17,11 +17,37 @@ class LSSServerCommands {
             dispatcher.register(
                     Commands.literal(Brand.serverCommand())
                             .requires(source -> source.permissions().hasPermission(Permissions.COMMANDS_GAMEMASTER))
+                            // Bare root = help (v0.11.0 stage C; a bare /lsslod used to
+                            // be a Brigadier parse error). Review-verified safe: the
+                            // .requires gate sits on THIS root literal, so a
+                            // permissionless parse still consumes zero nodes.
+                            .executes(ctx -> showHelp(ctx.getSource()))
+                            .then(Commands.literal("help")
+                                    .executes(ctx -> showHelp(ctx.getSource()))
+                            )
                             .then(Commands.literal("stats")
                                     .executes(ctx -> showStats(ctx.getSource()))
                             )
                             .then(Commands.literal("diag")
                                     .executes(ctx -> showDiagnostics(ctx.getSource()))
+                            )
+                            .then(Commands.literal("set")
+                                    .executes(ctx -> listSettings(ctx.getSource()))
+                                    .then(Commands.argument("key",
+                                                    com.mojang.brigadier.arguments.StringArgumentType.word())
+                                            .suggests((c, b) -> {
+                                                for (var name : dev.vox.lss.common.config.RuntimeSettings.keyNames()) {
+                                                    if (name.toLowerCase().startsWith(b.getRemainingLowerCase())) {
+                                                        b.suggest(name);
+                                                    }
+                                                }
+                                                return b.buildFuture();
+                                            })
+                                            .then(Commands.argument("value",
+                                                            com.mojang.brigadier.arguments.StringArgumentType.greedyString())
+                                                    .executes(ctx -> setSetting(ctx.getSource(),
+                                                            com.mojang.brigadier.arguments.StringArgumentType.getString(ctx, "key"),
+                                                            com.mojang.brigadier.arguments.StringArgumentType.getString(ctx, "value")))))
                             )
                             .then(Commands.literal("store")
                                     .then(Commands.literal("status")
@@ -40,6 +66,59 @@ class LSSServerCommands {
                             )
             );
         });
+    }
+
+    private static int showHelp(CommandSourceStack source) {
+        for (var line : dev.vox.lss.common.CommandHelp.lines(Brand.serverCommand(), true)) {
+            source.sendSuccess(() -> Component.literal(line), false);
+        }
+        return 1;
+    }
+
+    private static int listSettings(CommandSourceStack source) {
+        source.sendSuccess(() -> Component.literal(
+                "Runtime-settable keys (applied + persisted to lss-server-config.json):"), false);
+        for (var line : dev.vox.lss.common.config.RuntimeSettings.listLines(LSSServerConfig.CONFIG)) {
+            source.sendSuccess(() -> Component.literal("  " + line), false);
+        }
+        return 1;
+    }
+
+    /** The /lsslod set apply path (v0.11.0 stage C): parse → per-key clamp → assign once
+     *  → validate() → save() → reply. Fabric commands run on the SERVER thread (= tick
+     *  thread), so the mutation and the re-push are direct — the tick-poll consumers
+     *  pick the change up at the next tick. */
+    private static int setSetting(CommandSourceStack source, String keyName, String rawValue) {
+        var key = dev.vox.lss.common.config.RuntimeSettings.byName(keyName);
+        if (key == null) {
+            source.sendFailure(Component.literal("Unknown key '" + keyName + "'. Settable: "
+                    + String.join(", ", dev.vox.lss.common.config.RuntimeSettings.keyNames())));
+            return 0;
+        }
+        var config = LSSServerConfig.CONFIG;
+        String before = key.current().apply(config);
+        String effective;
+        try {
+            effective = dev.vox.lss.common.config.RuntimeSettings
+                    .applyAndPersist(config, key, rawValue);
+        } catch (IllegalArgumentException e) {
+            source.sendFailure(Component.literal(keyName + ": " + e.getMessage()));
+            return 0;
+        }
+        String repushNote = "";
+        if (key.name().equals("lodDistanceChunks") && !effective.equals(before)) {
+            var service = LSSServerNetworking.getRequestService();
+            if (service != null) {
+                int[] counts = service.repushSessionConfig();
+                repushNote = "; re-pushed to " + counts[0] + " client(s)"
+                        + (counts[1] > 0 ? " (" + counts[1] + " legacy update on rejoin)" : "");
+            }
+        }
+        String reply = keyName + " = " + effective
+                + dev.vox.lss.common.config.RuntimeSettings.clampedSuffix(effective, rawValue)
+                + " — " + key.applyNote() + repushNote;
+        source.sendSuccess(() -> Component.literal(reply), true);
+        return 1;
     }
 
     /** Phase 5 ops: one-line store health for "are LODs stale?" triage. */

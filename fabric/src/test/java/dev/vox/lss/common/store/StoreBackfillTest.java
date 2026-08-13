@@ -405,4 +405,112 @@ class StoreBackfillTest {
         awaitDone(bf);
         store.shutdown();
     }
+
+    /** v0.11.0 stage C (SET plan Part 2): the remaining-estimate arithmetic table over
+     *  the package-visible static — every branch pinned directly (review F5: the
+     *  original trio only ever asserted degenerate zeros). The `running:` line itself
+     *  is UNPINNED by scripts (only the terminal lines are contracts). */
+    @Test
+    void remainingEstimateArithmeticCoversBothBranchesAndTheClamps() {
+        // Measured branch: 3 planned, 1 walked with 2 present chunks seen -> avg 2,
+        // 2 regions x 2 = 4 columns.
+        assertEquals("~2 regions / ~4 columns left",
+                StoreBackfill.remainingEstimateFor(3, 1, 2));
+        // Integer-division floor of the average, not a float render.
+        assertEquals("~1 regions / ~2 columns left",
+                StoreBackfill.remainingEstimateFor(3, 2, 5));
+        // Pre-first-region fallback: no measured average yet -> <= worst case at
+        // 1024 columns/region, and no divide-by-zero.
+        assertEquals("~2 regions / <=2048 columns left",
+                StoreBackfill.remainingEstimateFor(2, 0, 0));
+        assertEquals("~0 regions / <=0 columns left",
+                StoreBackfill.remainingEstimateFor(0, 0, 0));
+        // walked can pass total when a plan shrinks mid-walk: remaining clamps at 0.
+        assertEquals("~0 regions / ~0 columns left",
+                StoreBackfill.remainingEstimateFor(1, 2, 5));
+    }
+
+    /** The walk actually maintains the volatile counters the estimate reads (the
+     *  static table above pins arithmetic, this pins the plumbing): a reader latch
+     *  parks the walker mid-region-1 of a two-region plan, and the concurrent estimate
+     *  must read walked=1/total=2 with region 1's measured average. */
+    @Test
+    void remainingEstimateReflectsMidWalkProgressUnderALatchParkedReader() throws Exception {
+        writeRegion(0, 0, 5, 6);       // near, walks first: 2 present chunks
+        writeRegion(3, 0, 0, 1, 2, 3); // far: 4 present chunks
+        SqliteLodStore store = openStore();
+        var parked = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var first = new AtomicBoolean(true);
+        var bf = backfill(store, (dim, cx, cz) -> {
+            if (first.compareAndSet(true, false)) {
+                parked.countDown();
+                try {
+                    release.await(20, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return new byte[]{1};
+        }, new AtomicBoolean(true), new AtomicBoolean(true));
+        assertTrue(bf.start());
+        assertTrue(parked.await(20, java.util.concurrent.TimeUnit.SECONDS),
+                "walker must reach the first region-1 read");
+        // Parked inside region 1's chunk loop: walked=1 (bumped at region visit),
+        // seen=2 (region 1's present count), so remaining=1 at avg 2.
+        assertEquals("~1 regions / ~2 columns left", bf.remainingEstimate(),
+                "mid-walk the estimate must show the un-walked far region");
+        release.countDown();
+        awaitDone(bf);
+        assertEquals("~0 regions / ~0 columns left", bf.remainingEstimate(),
+                "at walk end the estimate must show nothing left");
+        store.shutdown();
+    }
+
+    /** A SECOND start() must never show the prior run's progress (SET review): the
+     *  counters reset at walk start. Deterministic (review T1/F6 — the old version
+     *  raced the async done-mark commit and asserted a shape both outcomes produced):
+     *  run 1's done-marks are POLLED committed before run 2 plans, two fresh regions
+     *  make run 2's plan size 2, and the latch-parked mid-walk estimate distinguishes
+     *  reset (walked=1, seen=1 -> "~1 / ~1") from carried-over counters (walked=2,
+     *  seen=3 -> "~0 / ..."). */
+    @Test
+    void progressResetsOnASecondStart() throws Exception {
+        writeRegion(0, 0, 5, 6); // run 1: one region, 2 present chunks
+        SqliteLodStore store = openStore();
+        var parkRun2 = new AtomicBoolean(false);
+        var parked = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var bf = backfill(store, (dim, cx, cz) -> {
+            if (parkRun2.get() && parked.getCount() > 0) {
+                parked.countDown();
+                try {
+                    release.await(20, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return new byte[]{1};
+        }, new AtomicBoolean(true), new AtomicBoolean(true));
+        assertTrue(bf.start());
+        awaitDone(bf);
+        // Run 1 leaves walked=1/total=1. Wait for its done-mark to COMMIT so run 2's
+        // plan deterministically excludes region (0,0) (mirrors the resume test).
+        for (int i = 0; i < 400 && !store.isBackfillRegionDone(OW, 0, 0); i++) Thread.sleep(25);
+        assertTrue(store.isBackfillRegionDone(OW, 0, 0), "run 1's region must be done-marked");
+
+        writeRegion(5, 0, 7);       // run 2 nearest: 1 present chunk
+        writeRegion(6, 0, 0, 1, 2); // run 2 far: 3 present chunks
+        parkRun2.set(true);
+        assertTrue(bf.start());
+        assertTrue(parked.await(20, java.util.concurrent.TimeUnit.SECONDS),
+                "run 2's walker must reach its first read");
+        // Reset counters: walked=1, seen=1, total=2 -> "~1 / ~1". Carried-over run-1
+        // counters would read walked=2, seen=3 -> "~0 regions / ..." instead.
+        assertEquals("~1 regions / ~1 columns left", bf.remainingEstimate(),
+                "a second start must re-derive progress from THIS run's counters");
+        release.countDown();
+        awaitDone(bf);
+        store.shutdown();
+    }
 }

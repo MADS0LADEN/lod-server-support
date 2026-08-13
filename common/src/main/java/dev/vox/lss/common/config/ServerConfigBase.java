@@ -646,13 +646,63 @@ public abstract class ServerConfigBase extends JsonConfig {
         lodStore = "on";
     }
 
+    // ---- Per-key clamp helpers (v0.11.0 stage C, runtime-settings-commands-plan.md +
+    // the mega plan's R-2 registry clamp rule): validate() and the /lsslod set registry
+    // share these EXACT functions, so a registry row can never clamp differently from
+    // boot validation (the review MAJOR: a bare (min,max) row would turn
+    // `set dirtyBroadcastIntervalSeconds 0` into 1 s — re-breaking DIRTY0 through the
+    // command surface one stage after it was fixed — and `set maxConcurrentDiskReads 0`
+    // into K=1 instead of AUTO). ----
+
+    public static int clampLodDistance(int v) {
+        return Math.clamp(v, LSSConstants.MIN_LOD_DISTANCE, LSSConstants.MAX_LOD_DISTANCE);
+    }
+
+    /** Negative = the file-absent sentinel → the compiled default; else the byte band. */
+    public static double clampMbPerPlayer(double v) {
+        if (v < 0) return DEFAULT_MB_PER_PLAYER;
+        return Math.clamp(v, LSSConstants.MIN_BYTES_PER_SECOND / MB,
+                LSSConstants.MAX_BYTES_PER_SECOND_PER_PLAYER / MB);
+    }
+
+    public static double clampMbGlobal(double v) {
+        if (v < 0) return DEFAULT_MB_GLOBAL;
+        return Math.clamp(v, LSSConstants.MIN_BYTES_PER_SECOND / MB,
+                LSSConstants.MAX_BYTES_PER_SECOND_GLOBAL_LIMIT / MB);
+    }
+
+    public static int clampGenGlobal(int v) {
+        return Math.clamp(v, LSSConstants.MIN_CONCURRENT_GENERATIONS, LSSConstants.MAX_CONCURRENT_GENERATIONS);
+    }
+
+    /** Cross-field: the per-player cap clamps against the CONFIGURED global (§9.1). */
+    public static int clampGenPerPlayer(int v, int configuredGlobal) {
+        return Math.clamp(v, LSSConstants.MIN_CONCURRENCY_LIMIT, configuredGlobal);
+    }
+
+    /** 0 (and negatives) = dirty pushes disabled — a first-class value (DIRTY0). */
+    public static int clampDirtyBroadcastInterval(int v) {
+        return v <= 0 ? 0 : Math.clamp(v,
+                LSSConstants.MIN_DIRTY_BROADCAST_INTERVAL, LSSConstants.MAX_DIRTY_BROADCAST_INTERVAL);
+    }
+
+    /** 0 (and negatives) = AUTO, store-conditional — never a tight gate. */
+    public static int clampMaxConcurrentDiskReads(int v) {
+        return v <= 0 ? 0 : Math.clamp(v,
+                LSSConstants.MIN_MAX_CONCURRENT_DISK_READS, LSSConstants.MAX_DISK_READER_THREADS);
+    }
+
+    // R-5 log-on-change (stage C): validate() re-runs on every /lsslod set, so its
+    // advisory INFO lines must fire on TRANSITION, not per call — a runtime `set` would
+    // otherwise re-print the dirty-0 mode line (and Paper's Folia store warn) on every
+    // unrelated key change. Transient: never serialized, per-process state only.
+    private transient int lastAdvisedDirtyInterval = Integer.MIN_VALUE;
+
     @Override
     public void validate() {
-        lodDistanceChunks = Math.clamp(lodDistanceChunks, LSSConstants.MIN_LOD_DISTANCE, LSSConstants.MAX_LOD_DISTANCE);
+        lodDistanceChunks = clampLodDistance(lodDistanceChunks);
         resolveBandwidthKeys();
-        mbPerSecondLimitPerPlayer = Math.clamp(mbPerSecondLimitPerPlayer,
-                LSSConstants.MIN_BYTES_PER_SECOND / MB,
-                LSSConstants.MAX_BYTES_PER_SECOND_PER_PLAYER / MB);
+        mbPerSecondLimitPerPlayer = clampMbPerPlayer(mbPerSecondLimitPerPlayer);
         // 0 = AUTO is a first-class value (the default); only a nonzero explicit override
         // clamps into the supported band — the same shape as lodStoreMaxMB.
         diskReaderThreads = diskReaderThreads <= 0 ? 0 : Math.clamp(diskReaderThreads,
@@ -660,9 +710,7 @@ public abstract class ServerConfigBase extends JsonConfig {
         // Same 0 = AUTO shape (negative normalizes to AUTO, mirroring diskReaderThreads —
         // never to 1, which would be the TIGHTEST gate); the pool clamp applies at
         // derivation, where the resolved pool size is known.
-        maxConcurrentDiskReads = maxConcurrentDiskReads <= 0 ? 0 : Math.clamp(
-                maxConcurrentDiskReads, LSSConstants.MIN_MAX_CONCURRENT_DISK_READS,
-                LSSConstants.MAX_DISK_READER_THREADS);
+        maxConcurrentDiskReads = clampMaxConcurrentDiskReads(maxConcurrentDiskReads);
         sendQueueLimitPerPlayer = Math.clamp(sendQueueLimitPerPlayer,
                 LSSConstants.MIN_SEND_QUEUE_SIZE, LSSConstants.MAX_SEND_QUEUE_SIZE);
         // 0 = disabled is a first-class value (the default); any nonzero opt-in clamps into
@@ -670,31 +718,31 @@ public abstract class ServerConfigBase extends JsonConfig {
         outboundBufferCeilingKB = outboundBufferCeilingKB <= 0 ? 0 : Math.clamp(
                 outboundBufferCeilingKB, LSSConstants.MIN_OUTBOUND_BUFFER_CEILING_KB,
                 LSSConstants.MAX_OUTBOUND_BUFFER_CEILING_KB);
-        mbPerSecondLimitGlobal = Math.clamp(mbPerSecondLimitGlobal,
-                LSSConstants.MIN_BYTES_PER_SECOND / MB,
-                LSSConstants.MAX_BYTES_PER_SECOND_GLOBAL_LIMIT / MB);
-        generationConcurrencyLimitGlobal = Math.clamp(generationConcurrencyLimitGlobal, LSSConstants.MIN_CONCURRENT_GENERATIONS, LSSConstants.MAX_CONCURRENT_GENERATIONS);
+        mbPerSecondLimitGlobal = clampMbGlobal(mbPerSecondLimitGlobal);
+        generationConcurrencyLimitGlobal = clampGenGlobal(generationConcurrencyLimitGlobal);
         generationTimeoutSeconds = Math.clamp(generationTimeoutSeconds, LSSConstants.MIN_GENERATION_TIMEOUT, LSSConstants.MAX_GENERATION_TIMEOUT);
         // 0 (and negative nonsense) = dirty pushes disabled — the lodStoreMaxMB idiom; only a
         // nonzero value clamps into the sending band. See the field javadoc for the semantics.
-        dirtyBroadcastIntervalSeconds = dirtyBroadcastIntervalSeconds <= 0 ? 0
-                : Math.clamp(dirtyBroadcastIntervalSeconds,
-                        LSSConstants.MIN_DIRTY_BROADCAST_INTERVAL, LSSConstants.MAX_DIRTY_BROADCAST_INTERVAL);
-        if (dirtyBroadcastIntervalSeconds == 0) {
-            // Precedent: PaperConfig's Folia store warn — the mode must be visible in the log.
-            // (Also fires during the config suites' extreme-value clamp sweeps; harmless.)
+        dirtyBroadcastIntervalSeconds = clampDirtyBroadcastInterval(dirtyBroadcastIntervalSeconds);
+        if (dirtyBroadcastIntervalSeconds == 0
+                && lastAdvisedDirtyInterval != dirtyBroadcastIntervalSeconds) {
+            // Precedent: PaperConfig's Folia store warn — the mode must be visible in the
+            // log. Log-on-CHANGE (R-5, stage C): validate() re-runs on every /lsslod set.
+            // (Still fires during the config suites' extreme-value clamp sweeps on the
+            // first transition; harmless.)
             dev.vox.lss.common.LSSLogger.info("dirtyBroadcastIntervalSeconds is 0: dirty pushes to"
                     + " clients are DISABLED. The invalidation drain still runs every "
                     + LSSConstants.DIRTY_DRAIN_ONLY_INTERVAL_SECONDS + " s; connected clients pick"
                     + " up terrain edits only on rejoin or their own re-asks.");
         }
+        lastAdvisedDirtyInterval = dirtyBroadcastIntervalSeconds;
         // Config review section 9.1: the per-player ceiling used to be MAX_CONCURRENCY_LIMIT
         // (1000) while the GLOBAL ceiling is MAX_CONCURRENT_GENERATIONS — a per-player value
         // above the fleet-wide one is unreachable by construction (a player cannot hold more
         // generation slots than exist), so it validated to silent nonsense. Clamp against the
         // configured global, which is itself already clamped on the line above.
-        generationConcurrencyLimitPerPlayer = Math.clamp(generationConcurrencyLimitPerPlayer,
-                LSSConstants.MIN_CONCURRENCY_LIMIT, generationConcurrencyLimitGlobal);
+        generationConcurrencyLimitPerPlayer = clampGenPerPlayer(
+                generationConcurrencyLimitPerPlayer, generationConcurrencyLimitGlobal);
         // 0 = AUTO (derived from lodDistanceChunks); only an explicit value clamps.
         perDimensionTimestampCacheSizeMB = perDimensionTimestampCacheSizeMB <= 0 ? 0
                 : Math.clamp(perDimensionTimestampCacheSizeMB,

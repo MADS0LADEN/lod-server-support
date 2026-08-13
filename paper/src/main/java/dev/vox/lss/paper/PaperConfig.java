@@ -60,6 +60,11 @@ public class PaperConfig extends ServerConfigBase {
             // freshly populated chunk request it through the normal scan path anyway.
     );
 
+    // R-5 log-on-change (v0.11.0 stage C): validate() re-runs on every /lsslod set, so
+    // the Folia store warn must fire on TRANSITION, not per call. Transient — never
+    // serialized, per-process state only.
+    private transient String lastAdvisedFoliaStoreMode;
+
     @Override
     public void validate() {
         super.validate();
@@ -70,12 +75,14 @@ public class PaperConfig extends ServerConfigBase {
         // one more unvalidated surface, not the first), but it must not be silent.
         if (FoliaSupport.IS_FOLIA
                 && dev.vox.lss.common.store.LodStoreMode.normalize(lodStore)
-                        != dev.vox.lss.common.store.LodStoreMode.OFF) {
+                        != dev.vox.lss.common.store.LodStoreMode.OFF
+                && !lodStore.equals(this.lastAdvisedFoliaStoreMode)) {
             LSSLogger.warn("The LOD store is armed on FOLIA (lodStore=" + lodStore
                     + "), where it is NOT validated (single-player soaks only;"
                     + " concurrent multi-region ingress is untested). Set"
                     + " lodStore=off to disable it if you see store-related issues.");
         }
+        this.lastAdvisedFoliaStoreMode = lodStore;
     }
 
     public static PaperConfig load(Path dataFolder) {

@@ -145,6 +145,121 @@ public class CommandGameTests {
         helper.succeed();
     }
 
+    /** v0.11.0 stage C: /lsslod help + the bare root through the real tree. */
+    @GameTest(structure = "fabric-gametest-api-v1:empty")
+    public void lsslodHelpAndBareRootDispatchTheSharedHelp(GameTestHelper helper) {
+        ServerLevel level = helper.getLevel();
+        var server = level.getServer();
+        var commands = server.getCommands();
+        var lines = new ArrayList<String>();
+        var source = new CommandSourceStack(recorder(lines), Vec3.ZERO, Vec2.ZERO, level,
+                PermissionSet.ALL_PERMISSIONS, "lss-test", Component.literal("lss-test"),
+                server, null);
+
+        commands.performPrefixedCommand(source, "lsslod help");
+        helper.assertTrue(anyLineContains(lines, "set <key> <value>"),
+                "help must document the set verb, got: " + lines);
+        helper.assertTrue(anyLineContains(lines, "store backfill start|stop|status"),
+                "Fabric help includes the backfill verbs, got: " + lines);
+
+        lines.clear();
+        commands.performPrefixedCommand(source, "lsslod");
+        helper.assertTrue(anyLineContains(lines, "set <key> <value>"),
+                "the bare root must render the same help (was a parse error), got: " + lines);
+        helper.succeed();
+    }
+
+    /**
+     * v0.11.0 stage C: /lsslod set through the real tree — the listing, a real apply
+     * (mutate-and-restore per the ServiceLifecycleGameTests precedent), the 0-semantics
+     * pin, and the parse-error reply. NOTE the real handler calls config.save(), which
+     * writes the gametest run dir's staged config — restored in finally AND re-saved so
+     * the file-side effect cannot leak into later tests (fabric/build.gradle's doFirst
+     * re-stages each run regardless; the restore keeps the in-memory config honest).
+     */
+    @GameTest(structure = "fabric-gametest-api-v1:empty")
+    public void lsslodSetAppliesClampsAndRestores(GameTestHelper helper) {
+        ServerLevel level = helper.getLevel();
+        var server = level.getServer();
+        var commands = server.getCommands();
+        var lines = new ArrayList<String>();
+        var source = new CommandSourceStack(recorder(lines), Vec3.ZERO, Vec2.ZERO, level,
+                PermissionSet.ALL_PERMISSIONS, "lss-test", Component.literal("lss-test"),
+                server, null);
+        var config = dev.vox.lss.config.LSSServerConfig.CONFIG;
+        int savedDistance = config.lodDistanceChunks;
+        int savedDirty = config.dirtyBroadcastIntervalSeconds;
+        try {
+            commands.performPrefixedCommand(source, "lsslod set");
+            helper.assertTrue(anyLineContains(lines, "lodDistanceChunks = " + savedDistance),
+                    "the listing shows current values, got: " + lines);
+
+            lines.clear();
+            commands.performPrefixedCommand(source, "lsslod set lodDistanceChunks 96");
+            helper.assertTrue(anyLineContains(lines, "lodDistanceChunks = 96"),
+                    "the apply replies with the effective value, got: " + lines);
+            helper.assertTrue(config.lodDistanceChunks == 96, "the mutation applied");
+
+            lines.clear();
+            commands.performPrefixedCommand(source, "lsslod set dirtyBroadcastIntervalSeconds 0");
+            helper.assertTrue(config.dirtyBroadcastIntervalSeconds == 0,
+                    "0 = off must survive the real command surface (R-2)");
+
+            lines.clear();
+            commands.performPrefixedCommand(source, "lsslod set lodDistanceChunks many");
+            helper.assertTrue(anyLineContains(lines, "not an integer"),
+                    "a parse error replies without mutating, got: " + lines);
+            helper.assertTrue(config.lodDistanceChunks == 96, "parse error assigned nothing");
+        } finally {
+            config.lodDistanceChunks = savedDistance;
+            config.dirtyBroadcastIntervalSeconds = savedDirty;
+            config.validate();
+            config.save();
+        }
+        helper.succeed();
+    }
+
+    /**
+     * v0.11.0 stage C (review F9): the SessionConfig re-push COMPOSED through the real
+     * command — `set lodDistanceChunks` dispatched with a registered CURRENT-dialect
+     * player must mutate the config AND report the push in its reply (the wire receipt;
+     * the client-side apply is Tier 3 territory). The count assert tolerates >=1
+     * because other multi-tick gametests can hold registered players concurrently —
+     * "re-pushed to 0" (our mock skipped) is the failure this pins.
+     */
+    @GameTest(structure = "fabric-gametest-api-v1:empty")
+    public void setLodDistanceRepushesSessionConfigToRegisteredPlayers(GameTestHelper helper) {
+        ServerLevel level = helper.getLevel();
+        var server = level.getServer();
+        var commands = server.getCommands();
+        var service = dev.vox.lss.networking.server.LSSServerNetworking.getRequestService();
+        helper.assertTrue(service != null, "service active on the gametest server");
+        var player = placeMockServerPlayer(helper);
+        var config = dev.vox.lss.config.LSSServerConfig.CONFIG;
+        int savedDistance = config.lodDistanceChunks;
+        var lines = new ArrayList<String>();
+        var source = new CommandSourceStack(recorder(lines), Vec3.ZERO, Vec2.ZERO, level,
+                PermissionSet.ALL_PERMISSIONS, "lss-test", Component.literal("lss-test"),
+                server, null);
+        try {
+            service.registerPlayer(player, dev.vox.lss.common.LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+            int target = savedDistance == 96 ? 128 : 96; // must differ or the re-push is skipped
+            commands.performPrefixedCommand(source, "lsslod set lodDistanceChunks " + target);
+            helper.assertTrue(config.lodDistanceChunks == target,
+                    "the real command path applied the distance");
+            helper.assertTrue(anyLineContains(lines, "re-pushed to "),
+                    "the reply must carry the re-push receipt, got: " + lines);
+            helper.assertTrue(!anyLineContains(lines, "re-pushed to 0 "),
+                    "the registered CURRENT-dialect mock must be counted, got: " + lines);
+        } finally {
+            service.removePlayer(player.getUUID());
+            config.lodDistanceChunks = savedDistance;
+            config.validate();
+            config.save();
+        }
+        helper.succeed();
+    }
+
     /**
      * CG-022: /lsslod stats executed through the dispatcher against the LIVE service with a
      * registered player carrying known counters — the command → service → shared formatter

@@ -14,13 +14,13 @@ folia-supported: true
 # noise that reads like an LSS bug. No hard dependency: without Via the probe is a
 # silent no-signal.
 softdepend: [ViaVersion]
-description: Paper Plugin that provides unofficial multiplayer support for Voxy.
+description: Voxy multiplayer support (unofficial). Enables players with Voxy to see fully rendered terrain out to hundreds of chunks on multiplayer servers without needing to explore the world first.
 author: VoX
 website: https://modrinth.com/plugin/lod-server-support
 commands:
   lsslod:
     description: LOD Server Support admin commands
-    usage: /lsslod <stats|diag|store>
+    usage: /lsslod <stats|diag|store|set|help>
     permission: lss.admin
 permissions:
   lss.admin:

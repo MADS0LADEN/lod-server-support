@@ -172,4 +172,24 @@ class DiskReadDoneSweepTest {
             proc.shutdown();
         }
     }
+
+    /** v0.11.0 stage C (/lsslod set lodDistanceChunks): the sweep radius follows config
+     *  as a MONOTONIC MAX — raising grows it next tick; lowering never shrinks it within
+     *  the run (an under-radius sweep is semantically free but causes redundant serves;
+     *  the too-large cost is only memory already bounded by M3's trim). */
+    @org.junit.jupiter.api.Test
+    void updateSweepRadiusIsAMonotonicMax() {
+        var proc = new TestProcessor(new java.util.concurrent.ConcurrentHashMap<>());
+        try {
+            int boot = proc.sweepRadiusForTest();
+            proc.updateSweepRadius(boot + 100);
+            org.junit.jupiter.api.Assertions.assertEquals(boot + 100, proc.sweepRadiusForTest(),
+                    "raising the derived radius must grow the sweep radius");
+            proc.updateSweepRadius(boot);
+            org.junit.jupiter.api.Assertions.assertEquals(boot + 100, proc.sweepRadiusForTest(),
+                    "lowering must never shrink it within the run — monotonic max");
+        } finally {
+            proc.shutdown();
+        }
+    }
 }

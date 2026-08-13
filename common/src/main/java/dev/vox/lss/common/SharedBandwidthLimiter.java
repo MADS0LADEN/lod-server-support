@@ -24,7 +24,7 @@ import java.util.function.LongSupplier;
  * internal counters.</p>
  */
 public class SharedBandwidthLimiter {
-    private final long maxBytesPerSecond;
+    private long maxBytesPerSecond; // non-final since v0.11.0 stage C — see reconfigure()
     private final LongSupplier nanoClock;
     private long availableTokens;
     private long lastRefillNanos;
@@ -65,6 +65,26 @@ public class SharedBandwidthLimiter {
             this.lastRefillNanos += refill * LSSConstants.NANOS_PER_SECOND / this.maxBytesPerSecond;
             this.availableTokens = Math.min(this.availableTokens + refill, this.maxBytesPerSecond);
         }
+    }
+
+    /**
+     * Runtime ceiling change (v0.11.0 stage C — the /lsslod set tick-poll pattern):
+     * tick-thread only, like every other method here. Cheap no-op on an unchanged
+     * value. Lowering clamps banked tokens down to the new ceiling (a full old-ceiling
+     * burst must not ride out under the new cap); raising takes effect at the next
+     * refill. The refill anchor is kept — the elapsed window credits at the NEW rate.
+     */
+    public void reconfigure(long newMaxBytesPerSecond) {
+        if (newMaxBytesPerSecond == this.maxBytesPerSecond) return;
+        this.maxBytesPerSecond = newMaxBytesPerSecond;
+        this.availableTokens = Math.min(this.availableTokens, newMaxBytesPerSecond);
+    }
+
+    /** The configured ceiling. Tick-thread read only (reconfigure()'s no-op compare +
+     *  tests) — the field is plain, so a cross-thread read may be stale; nothing
+     *  display-side consumes it. */
+    public long getMaxBytesPerSecond() {
+        return this.maxBytesPerSecond;
     }
 
     public long getPerPlayerAllocation(int activePlayerCount) {

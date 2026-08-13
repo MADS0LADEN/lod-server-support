@@ -18,6 +18,7 @@ import dev.vox.lss.common.tracking.DirtyColumnTracker;
 import dev.vox.lss.config.LSSServerConfig;
 import dev.vox.lss.networking.payloads.BatchChunkRequestC2SPayload;
 import dev.vox.lss.networking.payloads.BatchResponseS2CPayload;
+import dev.vox.lss.networking.payloads.SessionConfigS2CPayload;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.server.MinecraftServer;
@@ -436,6 +437,7 @@ public class RequestProcessingService {
         this.diag.reset(this.offThreadProcessor.getDiagnostics());
 
         var config = LSSServerConfig.CONFIG;
+        applyRuntimeConfig(config);
         var generationReady = tickGenerationService();
         // v16 declares BEFORE the lifecycle pass: the probe reads the mailbox during
         // processPlayerLifecycle, and postSnapshot wakes the processing thread which takes
@@ -454,6 +456,69 @@ public class RequestProcessingService {
         flushSendQueues(lifecycle.activeCount, config);
         tickDirtyBroadcast(config);
         tickDiagnosticsLog(config);
+    }
+
+    // /lsslod set support (v0.11.0 stage C — the tick-poll pattern): each formerly
+    // capture-at-construction consumer re-applies config at the top of the tick, on the
+    // thread that owns its state (the broadcaster's live-read precedent). Change-guarded
+    // so the steady state costs a few field compares.
+    private int lastAppliedGenGlobal = -1;
+    private int lastAppliedGenPerPlayer = -1;
+
+    private void applyRuntimeConfig(LSSServerConfig config) {
+        this.bandwidthLimiter.reconfigure(config.bytesPerSecondGlobal());
+        this.diskReader.reapplyGateCapacity(config);
+        this.offThreadProcessor.updateSweepRadius(config.lodDistanceChunks
+                + LSSConstants.LOD_DISTANCE_BUFFER + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS);
+        int genGlobal = config.generationConcurrencyLimitGlobal;
+        int genPerPlayer = config.generationConcurrencyLimitPerPlayer;
+        if (genGlobal != this.lastAppliedGenGlobal || genPerPlayer != this.lastAppliedGenPerPlayer) {
+            if (this.generationService != null) {
+                this.generationService.updateCaps(genGlobal, genPerPlayer);
+            }
+            for (var state : this.players.values()) {
+                state.updateGenSlotCap(genPerPlayer);
+            }
+            this.lastAppliedGenGlobal = genGlobal;
+            this.lastAppliedGenPerPlayer = genPerPlayer;
+        }
+    }
+
+    /**
+     * Push a fresh SessionConfig to every CURRENT-dialect (v20) session after a
+     * runtime {@code set lodDistanceChunks} (SET plan §"Pushing the new distance").
+     * Legacy sessions (v19/v18/v16) are deliberately skipped — their clients'
+     * mid-session-config behavior is release-frozen and unverified; they keep the
+     * handshake distance until rejoin. Fabric: commands run on the server thread (=
+     * tick thread), so this is called directly from the set handler.
+     *
+     * @return {pushed, legacySkipped}
+     */
+    public int[] repushSessionConfig() {
+        var config = LSSServerConfig.CONFIG;
+        int pushed = 0;
+        int legacy = 0;
+        for (var state : this.players.values()) {
+            if (this.dialects.dialectOf(state.getPlayerUUID())
+                    != dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT) {
+                legacy++;
+                continue;
+            }
+            var payload = new SessionConfigS2CPayload(
+                    LSSConstants.PROTOCOL_VERSION,
+                    config.enabled,
+                    config.lodDistanceChunks,
+                    config.enableChunkGeneration,
+                    net.minecraft.SharedConstants.getCurrentVersion()
+                            .dataVersion().version());
+            try {
+                ServerPlayNetworking.send(state.getPlayer(), payload);
+                pushed++;
+            } catch (Exception e) {
+                LSSLogger.error("Session-config re-push failed for " + state.getPlayerName(), e);
+            }
+        }
+        return new int[]{pushed, legacy};
     }
 
     private List<TickSnapshot.GenerationReadyData> tickGenerationService() {

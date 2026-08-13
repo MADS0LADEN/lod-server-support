@@ -1,0 +1,181 @@
+package dev.vox.lss.common.config;
+
+import java.util.List;
+import java.util.Locale;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+
+/**
+ * The {@code /lsslod set} key registry (v0.11.0 stage C,
+ * runtime-settings-commands-plan.md as amended by the mega plan's R-2/R-5) — shared by
+ * both command surfaces so Fabric/Paper cannot drift (the HandshakeGate parity
+ * precedent).
+ *
+ * <p>Each row carries a PER-KEY CLAMP FUNCTION — the exact static helpers
+ * {@link ServerConfigBase#validate()} calls, never a bare (min,max) band (the R-2
+ * registry clamp rule: a naive band would turn {@code set dirtyBroadcastIntervalSeconds
+ * 0} into 1 s — re-breaking DIRTY0 through the command surface — and {@code set
+ * maxConcurrentDiskReads 0} into K=1 instead of AUTO).
+ *
+ * <p>The apply sequence the command surfaces run (the plan's threading fix): parse →
+ * clamp on a scratch value and assign the final post-clamp value ONCE (Paper's ingress
+ * and handshake paths read config off-pump, so a raw-assign-then-validate window could
+ * leak one out-of-band read) → {@code config.validate()} (idempotent, pinned; performs
+ * the cross-field work) → {@code config.save()} → reply with the post-validate value
+ * read back through {@link SettingKey#current}.
+ */
+public final class RuntimeSettings {
+
+    /** One settable key: parse+clamp+assign in {@code apply} (throws
+     *  IllegalArgumentException on a malformed value), current-value render, and the
+     *  human "when it applies" note for the command reply. */
+    public record SettingKey(String name,
+                             Function<ServerConfigBase, String> current,
+                             BiFunction<ServerConfigBase, String, Void> apply,
+                             String applyNote) {}
+
+    private static int parseInt(String raw) {
+        try {
+            return Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("not an integer: '" + raw + "'");
+        }
+    }
+
+    private static double parseDouble(String raw) {
+        double v;
+        try {
+            v = Double.parseDouble(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("not a number: '" + raw + "'");
+        }
+        if (!Double.isFinite(v)) throw new IllegalArgumentException("not finite: '" + raw + "'");
+        return v;
+    }
+
+    private static final List<SettingKey> KEYS = List.of(
+            new SettingKey("lodDistanceChunks",
+                    c -> String.valueOf(c.lodDistanceChunks),
+                    (c, raw) -> {
+                        c.lodDistanceChunks = ServerConfigBase.clampLodDistance(parseInt(raw));
+                        return null;
+                    },
+                    "applies now server-side; current-protocol clients get a config re-push"
+                            + " (legacy clients update on rejoin — a SHRINK leaves them"
+                            + " re-asking beyond the new distance until rejoin); the AUTO"
+                            + " timestamp cache stays at boot sizing until restart"),
+            new SettingKey("generationConcurrencyLimitGlobal",
+                    c -> String.valueOf(c.generationConcurrencyLimitGlobal),
+                    (c, raw) -> {
+                        c.generationConcurrencyLimitGlobal =
+                                ServerConfigBase.clampGenGlobal(parseInt(raw));
+                        return null;
+                    },
+                    "applies to new generation admissions within a tick; in-flight"
+                            + " generations are never cancelled; lowering the global also"
+                            + " drags the per-player cap down to it"),
+            new SettingKey("generationConcurrencyLimitPerPlayer",
+                    c -> String.valueOf(c.generationConcurrencyLimitPerPlayer),
+                    (c, raw) -> {
+                        c.generationConcurrencyLimitPerPlayer = ServerConfigBase
+                                .clampGenPerPlayer(parseInt(raw), c.generationConcurrencyLimitGlobal);
+                        return null;
+                    },
+                    "applies to new admissions within a tick, including existing sessions"),
+            new SettingKey("mbPerSecondLimitPerPlayer",
+                    c -> String.valueOf(c.mbPerSecondLimitPerPlayer),
+                    (c, raw) -> {
+                        c.mbPerSecondLimitPerPlayer =
+                                ServerConfigBase.clampMbPerPlayer(parseDouble(raw));
+                        return null;
+                    },
+                    "applies immediately (read per tick at the flush); counts RAW bytes,"
+                            + " before wire compression"),
+            new SettingKey("mbPerSecondLimitGlobal",
+                    c -> String.valueOf(c.mbPerSecondLimitGlobal),
+                    (c, raw) -> {
+                        c.mbPerSecondLimitGlobal =
+                                ServerConfigBase.clampMbGlobal(parseDouble(raw));
+                        return null;
+                    },
+                    "applies within a tick (the shared limiter reconfigures at the next"
+                            + " tick); counts RAW bytes, before wire compression"),
+            new SettingKey("dirtyBroadcastIntervalSeconds",
+                    c -> String.valueOf(c.dirtyBroadcastIntervalSeconds),
+                    (c, raw) -> {
+                        c.dirtyBroadcastIntervalSeconds =
+                                ServerConfigBase.clampDirtyBroadcastInterval(parseInt(raw));
+                        return null;
+                    },
+                    "applies at the next broadcast tick; 0 DISABLES dirty pushes (the"
+                            + " server-side invalidation drain keeps running; clients then"
+                            + " refresh only on rejoin or their own re-requests)"),
+            new SettingKey("maxConcurrentDiskReads",
+                    c -> String.valueOf(c.maxConcurrentDiskReads),
+                    (c, raw) -> {
+                        c.maxConcurrentDiskReads =
+                                ServerConfigBase.clampMaxConcurrentDiskReads(parseInt(raw));
+                        return null;
+                    },
+                    "applies within a tick; 0 = AUTO (half the reader pool with the store"
+                            + " on, the whole pool with it off); lowering lets in-flight"
+                            + " reads finish"));
+
+    public static List<SettingKey> keys() {
+        return KEYS;
+    }
+
+    public static SettingKey byName(String name) {
+        for (var k : KEYS) {
+            if (k.name().equalsIgnoreCase(name)) return k;
+        }
+        return null;
+    }
+
+    /** The tab-completion / usage list, registry-derived so it cannot drift. */
+    public static List<String> keyNames() {
+        return KEYS.stream().map(SettingKey::name).toList();
+    }
+
+    /**
+     * The full apply sequence minus the platform-specific reply/re-push: parse+clamp+
+     * assign-once via the row, then validate() (cross-field work) and save(). Returns
+     * the post-validate effective value. Throws IllegalArgumentException on a malformed
+     * value (nothing assigned).
+     */
+    public static String applyAndPersist(ServerConfigBase config, SettingKey key, String rawValue) {
+        key.apply().apply(config, rawValue);
+        config.validate();
+        config.save();
+        return key.current().apply(config);
+    }
+
+    /** The reply's "(clamped from 'raw')" suffix, or "" when the value was accepted
+     *  as given. Numeric-aware (review F3): "25" rendering back as "25.0" is a formatting
+     *  difference, not a clamp — compare parsed values when both sides parse. */
+    public static String clampedSuffix(String effective, String rawValue) {
+        String raw = rawValue.trim();
+        if (effective.equals(raw)) return "";
+        try {
+            if (Double.parseDouble(effective) == Double.parseDouble(raw)) return "";
+        } catch (NumberFormatException ignored) {
+            // non-numeric render: fall through to the string verdict
+        }
+        return " (clamped from '" + raw + "')";
+    }
+
+    /** The no-args `set` listing: one "key = value" line per registry row. */
+    public static List<String> listLines(ServerConfigBase config) {
+        return KEYS.stream()
+                .map(k -> k.name() + " = " + k.current().apply(config))
+                .toList();
+    }
+
+    private RuntimeSettings() {}
+
+    static {
+        // Registry hygiene: duplicate names would make byName order-dependent.
+        assert KEYS.stream().map(k -> k.name().toLowerCase(Locale.ROOT)).distinct().count()
+                == KEYS.size();
+    }
+}

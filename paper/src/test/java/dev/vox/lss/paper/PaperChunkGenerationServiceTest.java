@@ -189,6 +189,26 @@ class PaperChunkGenerationServiceTest {
         assertEquals(3, svc.launches.size());
     }
 
+    /** v0.11.0 stage C (/lsslod set tick-poll): updateCaps gates the NEXT admission;
+     *  in-flight generations are untouched by a lowering. */
+    @Test
+    void updateCapsMidRunGatesNewAdmissionsWithoutCancellingInFlight() {
+        var svc = new CapturingGenService(config(2, 16, 60));
+        var level = overworldLevel();
+
+        assertTrue(svc.submitGeneration(UUID.randomUUID(), level, 0, 0, 1L));
+        assertTrue(svc.submitGeneration(UUID.randomUUID(), level, 1, 0, 2L));
+        assertFalse(svc.submitGeneration(UUID.randomUUID(), level, 2, 0, 3L), "at the old cap");
+
+        svc.updateCaps(3, 16); // raise: the next admission fits
+        assertTrue(svc.submitGeneration(UUID.randomUUID(), level, 2, 0, 4L));
+        assertEquals(3, svc.launches.size(), "raise admitted a third launch, none cancelled");
+
+        svc.updateCaps(1, 16); // lower below in-flight: gates NEW, cancels nothing
+        assertFalse(svc.submitGeneration(UUID.randomUUID(), level, 3, 0, 5L));
+        assertEquals(3, svc.launches.size(), "in-flight generations survive the lowering");
+    }
+
     @Test
     void globalCapBouncesNewLaunches() {
         var svc = new CapturingGenService(config(2, 16, 60));

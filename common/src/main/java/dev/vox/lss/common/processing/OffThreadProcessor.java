@@ -168,9 +168,28 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     private static final int DEFAULT_SWEEP_RADIUS_CHUNKS =
             LSSConstants.MAX_LOD_DISTANCE + LSSConstants.LOD_DISTANCE_BUFFER + SWEEP_RADIUS_MARGIN_CHUNKS;
 
-    // diskReadDone sweep (M3): radius captured at construction — safe while no config
-    // reload path exists (none today; a future reload must re-derive it).
-    private final int diskReadDoneSweepRadiusChunks;
+    // diskReadDone sweep (M3): volatile since v0.11.0 stage C — /lsslod set
+    // lodDistanceChunks re-derives it each lifecycle tick as a MONOTONIC MAX
+    // (updateSweepRadius). Monotonic-max rationale (SET review, corrected): an
+    // under-radius sweep of a still-declarable done-bit is semantically FREE (worst
+    // case one redundant re-serve — in-pipeline/grace entries are kept regardless), so
+    // the max avoids redundant serves, not corruption; the cost of a too-large radius
+    // is only memory already bounded by M3's trim. Do not treat this as a
+    // data-integrity constraint.
+    private volatile int diskReadDoneSweepRadiusChunks;
+
+    /** Runtime radius re-derivation (v0.11.0 stage C): monotonic max — see the field
+     *  comment. Called from the owning service's tick pass with the config-derived
+     *  radius; never shrinks within a run. */
+    public void updateSweepRadius(int derivedRadiusChunks) {
+        if (derivedRadiusChunks > this.diskReadDoneSweepRadiusChunks) {
+            this.diskReadDoneSweepRadiusChunks = derivedRadiusChunks;
+        }
+    }
+
+    int sweepRadiusForTest() {
+        return this.diskReadDoneSweepRadiusChunks;
+    }
 
     /** Old-signature overload (test rigs) — production passes the config-derived radius. */
     protected OffThreadProcessor(Map<UUID, PlayerState> players,
