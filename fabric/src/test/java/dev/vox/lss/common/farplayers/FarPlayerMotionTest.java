@@ -120,6 +120,26 @@ class FarPlayerMotionTest {
     }
 
     @Test
+    void vehicleMotionSeedsFromMountPositionAndRidesTheRiderVelocity() {
+        // R-10 v1.3: the mount lerps its OWN wire positions but extrapolates with the
+        // RIDER's velocity hint — separate hints shear visibly at horse/boat speeds.
+        var m = new FarPlayerMotion(100.0, 64.0, 0.0, 90f, 10f, 10, 1_000);
+        var seed = m.sample(1_100);
+        assertEquals(100, seed.x(), 1e-9, "the seed holds still");
+        assertEquals(90f, seed.yaw(), 1e-4, "vehicle yaw mirrors into headYaw"
+                + " (vehicles have no separate head)");
+        assertEquals(90f, seed.headYaw(), 1e-4);
+
+        // Rider velocity 20 b/s applied through applyRaw at the mount's new position.
+        m.applyRaw(110, 64, 0, 90f, 90f, 10f, 20, 0, 0, 10, 1_500);
+        assertEquals(600, m.windowMillis());
+        assertEquals(105, m.sample(1_800).x(), 1e-6, "mount lerp midpoint");
+        // 200 ms past the window: extrapolate with the RIDER's hint (20 b/s * 0.2 s).
+        assertEquals(110 + 4, m.sample(1_500 + 600 + 200).x(), 1e-4,
+                "the mount dead-reckons on the rider's velocity");
+    }
+
+    @Test
     void trackerAttachesOneMotionPerPlayerAndAppliesAcrossFrames() {
         var t = new FarPlayerClientTracker();
         var A = new java.util.UUID(0, 1);

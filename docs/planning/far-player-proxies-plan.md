@@ -319,7 +319,13 @@ players disabled; set farPlayersEnabled=true to prefer LSS"), (b) document the
 LSS-only-server case explicitly in the README row, and (c) surface the state in the
 Sodium screen (a "disabled: SeeU present" tooltip) so the fix is discoverable where
 the user looks. Server side needs nothing (a client subscribes to at most one
-system).
+system). **AS BUILT (E3, §6.1 pair — decisions log 2026-08-13 entry 21): the
+override lever is the NEW client key `farPlayersWithSeeU` (default false), not
+"set farPlayersEnabled=true" — that key defaults true, so setting it cannot
+express an explicit preference. The gate suppresses only the EFFECTIVE enabled
+term (renderer + the prefs `enabled` field): the capability bit stays composed
+and prefs still deliver, so the shareSelf opt-out survives SeeU's presence (the
+E2 prefs-carrier rule). The INFO logs once per session, not every session.**
 
 ## 7. Phasing
 

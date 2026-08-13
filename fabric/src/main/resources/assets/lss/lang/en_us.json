@@ -17,5 +17,8 @@
   "lss.config.far_players_name_tags.tooltip": "Show name tags over far-player models.",
   "lss.config.far_players_render_distance": "Far Player Render Limit",
   "lss.config.far_players_render_distance.tooltip": "Maximum distance (blocks) at which far players are drawn. Set this to roughly your fog distance if distant players fading at the horizon bothers you. 0 follows the server's limit.",
-  "lss.config.far_players_render_distance.server": "Server limit"
+  "lss.config.far_players_render_distance.server": "Server limit",
+  "lss.config.far_players_enabled.tooltip.seeu": "Show other players beyond normal render distance as simple player models in your LOD terrain. CURRENTLY DISABLED: SeeU is installed and renders far players itself — enable 'Prefer LSS Far Players' below to use LSS instead (running both would draw every distant player twice).",
+  "lss.config.far_players_with_seeu": "Prefer LSS Far Players",
+  "lss.config.far_players_with_seeu.tooltip": "Use LSS far players even though SeeU is installed. Leave this off if SeeU is your far-player renderer; turning it on makes LSS render them (disable or remove SeeU's own display to avoid seeing every distant player twice)."
 }

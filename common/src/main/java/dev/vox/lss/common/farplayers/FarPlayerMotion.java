@@ -56,9 +56,48 @@ public final class FarPlayerMotion {
         this.windowMillis = declaredWindowMillis(cadenceTicks);
     }
 
+    /** Vehicle-motion seed (R-10 v1.3): the mount's own wire position/angles, with the
+     *  RIDER's velocity hint applied later via {@link #applyRaw} — rider and mount
+     *  share a velocity by definition, and separate hints would visibly shear at
+     *  horse/boat speeds. Vehicles have yaw+pitch only; headYaw mirrors yaw. */
+    public FarPlayerMotion(double x, double y, double z, float yaw, float pitch,
+                           int cadenceTicks, long nowMillis) {
+        this.toX = x;
+        this.toY = y;
+        this.toZ = z;
+        this.fromX = x;
+        this.fromY = y;
+        this.fromZ = z;
+        this.toYaw = yaw;
+        this.toHeadYaw = yaw;
+        this.toPitch = pitch;
+        this.fromYaw = yaw;
+        this.fromHeadYaw = yaw;
+        this.fromPitch = pitch;
+        this.snapshotMillis = nowMillis;
+        this.windowMillis = declaredWindowMillis(cadenceTicks);
+    }
+
     /** A new frame: the CURRENT sampled state becomes the lerp origin (never the raw
      *  previous target — a frame landing mid-lerp must not snap). */
     public void apply(FarPlayerWire.UpdateEntry e, int cadenceTicks, long nowMillis) {
+        applyRaw(FarPlayerWire.dequantizePos(e.quantX()),
+                FarPlayerWire.dequantizePos(e.quantY()),
+                FarPlayerWire.dequantizePos(e.quantZ()),
+                FarPlayerWire.byteToAngle(e.yaw()),
+                FarPlayerWire.byteToAngle(e.headYaw()),
+                FarPlayerWire.byteToAngle(e.pitch()),
+                FarPlayerWire.shortToVelocity(e.velX()),
+                FarPlayerWire.shortToVelocity(e.velY()),
+                FarPlayerWire.shortToVelocity(e.velZ()),
+                cadenceTicks, nowMillis);
+    }
+
+    /** The raw-value form of {@link #apply} — the vehicle-motion entry point (mount
+     *  position + RIDER velocity), same window/anchoring semantics. */
+    public void applyRaw(double x, double y, double z, float yaw, float headYaw,
+                         float pitch, double velXPerSec, double velYPerSec,
+                         double velZPerSec, int cadenceTicks, long nowMillis) {
         Sample cur = sample(nowMillis);
         this.fromX = cur.x();
         this.fromY = cur.y();
@@ -66,15 +105,15 @@ public final class FarPlayerMotion {
         this.fromYaw = cur.yaw();
         this.fromHeadYaw = cur.headYaw();
         this.fromPitch = cur.pitch();
-        this.toX = FarPlayerWire.dequantizePos(e.quantX());
-        this.toY = FarPlayerWire.dequantizePos(e.quantY());
-        this.toZ = FarPlayerWire.dequantizePos(e.quantZ());
-        this.toYaw = FarPlayerWire.byteToAngle(e.yaw());
-        this.toHeadYaw = FarPlayerWire.byteToAngle(e.headYaw());
-        this.toPitch = FarPlayerWire.byteToAngle(e.pitch());
-        this.velX = FarPlayerWire.shortToVelocity(e.velX());
-        this.velY = FarPlayerWire.shortToVelocity(e.velY());
-        this.velZ = FarPlayerWire.shortToVelocity(e.velZ());
+        this.toX = x;
+        this.toY = y;
+        this.toZ = z;
+        this.toYaw = yaw;
+        this.toHeadYaw = headYaw;
+        this.toPitch = pitch;
+        this.velX = velXPerSec;
+        this.velY = velYPerSec;
+        this.velZ = velZPerSec;
         long declared = declaredWindowMillis(cadenceTicks);
         long measured = nowMillis - this.snapshotMillis;
         // Declared+margin is the floor; the measured gap corrects upward (the tier

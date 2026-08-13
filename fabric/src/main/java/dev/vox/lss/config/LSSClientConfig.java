@@ -103,6 +103,11 @@ public class LSSClientConfig extends JsonConfig {
     public boolean farPlayersShareSelf = true;
     /** Cap the distance others may see me at, blocks (0 = no extra cap). */
     public int farPlayersShareDistanceBlocks = 0;
+    /** Prefer LSS far players even when SeeU is installed (E3 coexist — default
+     *  false: SeeU's presence disables the LSS half to avoid double proxies; this is
+     *  a SEPARATE key because farPlayersEnabled defaults true and cannot express an
+     *  explicit preference). Ignored without SeeU. */
+    public boolean farPlayersWithSeeU = false;
     /** Renderer cap in blocks (0 = follow the server ring). The fog-alignment knob:
      *  LSS ships NO fog mixin — align this with your fog if proxies fading at the
      *  horizon bothers you (FARP §3.3 fog stance). */

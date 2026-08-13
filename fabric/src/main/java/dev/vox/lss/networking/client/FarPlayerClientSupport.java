@@ -67,6 +67,53 @@ public final class FarPlayerClientSupport {
         return System.nanoTime() / 1_000_000L;
     }
 
+    private static volatile Boolean seeuPresent;
+    private static volatile boolean seeuInfoLogged;
+
+    /**
+     * The SeeU-coexist gate (E3, FARP plan §6 as amended — decisions log): both mods
+     * rendering the same distant player = double proxies, so SeeU's presence disables
+     * the LSS renderer/receive half UNLESS `farPlayersWithSeeU` overrides (a separate
+     * key because `farPlayersEnabled` defaults true — "set it true" cannot express an
+     * explicit preference). This gates the EFFECTIVE enabled term only: the capability
+     * bit stays composed and prefs still deliver (the prefs-carrier rule survives —
+     * `enabled=false` in the prefs stops the server streaming frames; the shareSelf
+     * opt-out still arrives). An INFO names the override once so the fix is
+     * discoverable from the log; the Sodium tooltip carries it too.
+     */
+    public static boolean effectiveFarPlayersEnabled() {
+        var config = LSSClientConfig.CONFIG;
+        boolean gate = effectiveEnabledFor(config.farPlayersEnabled, isSeeuPresent(),
+                config.farPlayersWithSeeU);
+        if (!gate && config.farPlayersEnabled && isSeeuPresent() && !seeuInfoLogged) {
+            seeuInfoLogged = true;
+            LSSLogger.info("SeeU detected — LSS far players disabled to avoid double"
+                    + " proxies; set farPlayersWithSeeU=true in lss-client-config.json"
+                    + " (or the Sodium screen note) to prefer LSS");
+        }
+        return gate;
+    }
+
+    /** Pure form for the Tier 1 coexist pin. */
+    static boolean effectiveEnabledFor(boolean configEnabled, boolean seeuPresent,
+                                       boolean withSeeUOverride) {
+        return configEnabled && (!seeuPresent || withSeeUOverride);
+    }
+
+    public static boolean isSeeuPresent() {
+        Boolean present = seeuPresent;
+        if (present == null) {
+            try {
+                present = net.fabricmc.loader.api.FabricLoader.getInstance()
+                        .isModLoaded("seeu");
+            } catch (Throwable t) {
+                present = false; // loader-less unit contexts: no SeeU
+            }
+            seeuPresent = present;
+        }
+        return present;
+    }
+
     /**
      * Prefs send, once per session unless changed (the {@code lss:client_info} sidecar
      * guard doctrine per R-7: a v0.11.0 client reaches PRE-v0.11.0 servers that never
@@ -77,7 +124,7 @@ public final class FarPlayerClientSupport {
     static void maybeSendPrefs() {
         if (capabilityBit() == 0) return;
         var config = LSSClientConfig.CONFIG;
-        var prefs = new FarPlayerWire.Prefs(config.farPlayersEnabled,
+        var prefs = new FarPlayerWire.Prefs(effectiveFarPlayersEnabled(),
                 config.farPlayersMaxDistanceBlocks, config.farPlayersMinDistanceBlocks,
                 config.farPlayersShareSelf, config.farPlayersShareDistanceBlocks);
         if (prefs.equals(lastSentPrefs)) return;
