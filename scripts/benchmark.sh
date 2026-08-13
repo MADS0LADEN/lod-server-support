@@ -98,7 +98,10 @@ reset_world_from_base() {
 }
 
 clear_client_lss_cache() {
-    rm -rf "$CLIENT_RUN_DIR/config/lss/cache" "$CLIENT_RUN_DIR/config/vss/cache" 2>/dev/null || true
+    # Both cache roots (stage D relocation: legacy config/lss/cache is adopted when it
+    # exists, fresh run dirs write the game-root .lss/cache). The old config/vss/cache
+    # entry was a dead path (no in-repo VSS build ever used it) — dropped.
+    rm -rf "$CLIENT_RUN_DIR/config/lss/cache" "$CLIENT_RUN_DIR/.lss/cache" 2>/dev/null || true
 }
 
 # Drop the OS page cache (measure-cycle cold-read variant). Best-effort: passwordless

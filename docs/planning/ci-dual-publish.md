@@ -88,7 +88,10 @@ structural, not incidental, and was verified against the code:
 - **Config paths are hardcoded, brand-independent** — `config/lss/…`,
   `lss-server-config.json`, `lss-client-config.json`, Paper's `plugins/LodServerSupport/…`.
   Mod id stays `lss`; plugin name stays `LodServerSupport`. So swapping an LSS jar for a VSS
-  jar on the same install keeps all config seamlessly.
+  jar on the same install keeps all config seamlessly. (Since v0.11.0 the client CACHE root
+  is `<gameDir>/.lss/cache` on fresh installs — still unbranded for the same jar-swap
+  reason; an existing `config/lss/cache` directory is adopted forever, see
+  `ColumnCacheStore.resolveCacheRoot`.)
 
 Result: LSS↔LSS, LSS↔VSS, VSS↔LSS, VSS↔VSS all negotiate the identical protocol-18 session.
 

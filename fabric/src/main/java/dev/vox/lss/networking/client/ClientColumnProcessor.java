@@ -571,6 +571,30 @@ class ClientColumnProcessor {
         }
     }
 
+    /**
+     * Bounded wait for the in-flight decode drain to finish (v0.11.0 stage D — the
+     * /lss reset sequence). {@link #reportUndispatched} drains the QUEUE, but a column
+     * the drain already polled "still dispatches normally" on the LSS-ColumnProcessor
+     * thread — concurrently with the Voxy teardown that follows, where a late dispatch
+     * can open a fresh store handle INSIDE the directory being wiped (the Windows
+     * partial-delete trap). A polled column decodes in milliseconds, so this await is
+     * cheap and closes the race deterministically. Main client thread; returns false on
+     * timeout (the caller proceeds — the wipe is IO-contained regardless).
+     */
+    boolean awaitDecodeIdle(long timeoutMs) {
+        long deadline = System.nanoTime() + timeoutMs * 1_000_000L;
+        while (this.processing.get()) {
+            if (System.nanoTime() - deadline > 0) return false;
+            try {
+                Thread.sleep(1);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return true;
+    }
+
     /** End the current session: any in-flight drain self-terminates at its next epoch check. */
     void shutdown() {
         var resolver = this.identityResolver;

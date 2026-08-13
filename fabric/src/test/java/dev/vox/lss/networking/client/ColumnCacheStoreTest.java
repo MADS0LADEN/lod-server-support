@@ -35,8 +35,9 @@ class ColumnCacheStoreTest {
     private static Path getCacheFile(String serverAddress, ResourceKey<Level> dimension) {
         String dimKey = dimension.identifier().toString().replaceAll("[^a-zA-Z0-9._-]", "_");
         String serverKey = serverAddress.replaceAll("[^a-zA-Z0-9._-]", "_");
-        return FabricLoader.getInstance().getConfigDir()
-                .resolve("lss").resolve("cache").resolve(serverKey).resolve(dimKey + ".bin");
+        // Through the store's own resolved root (stage D) — hand-rebuilding the path
+        // here would silently diverge from the adoption rule.
+        return ColumnCacheStore.cacheRoot().resolve(serverKey).resolve(dimKey + ".bin");
     }
 
     @Test
@@ -378,7 +379,7 @@ class ColumnCacheStoreTest {
 
         // ".." survives sanitization only embedded inside a single path segment, where it
         // has no traversal meaning — the server dir stays a direct child of the cache dir.
-        Path cacheDir = FabricLoader.getInstance().getConfigDir().resolve("lss").resolve("cache").normalize();
+        Path cacheDir = ColumnCacheStore.cacheRoot().normalize();
         assertEquals(cacheDir, cacheDir.resolve(sanitized).normalize().getParent());
 
         var dim = testDimension("traversal");
@@ -388,7 +389,8 @@ class ColumnCacheStoreTest {
         ColumnCacheStore.save(hostile, dim, map);
 
         assertTrue(Files.exists(getCacheFile(hostile, dim)), "file must land inside the sanitized server dir");
-        // Where the raw id would have landed if separators were honored: config/lss/traversal-target.
+        // Where the raw id would have landed if separators were honored: two levels above
+        // the cache root (<root>/../../traversal-target).
         assertFalse(Files.exists(cacheDir.resolve(hostile).normalize()),
                 "a traversal id must not write outside the cache dir");
         ColumnCacheStore.clearForServer(hostile);
@@ -636,5 +638,36 @@ class ColumnCacheStoreTest {
             gate.countDown();
             ColumnCacheStore.clearForServer(server);
         }
+    }
+
+    /** v0.11.0 stage D (cache relocation, Part 2): the adoption rule's two branches.
+     *  An existing config/lss/cache DIRECTORY wins (existing installs keep their path,
+     *  no migration); otherwise the game-root .lss/cache. NOTE these are the REAL gate
+     *  for the .lss branch — a dev box's persisted Loom run dir adopts the old root, so
+     *  a local Tier-3 green never exercises the new branch (plan §Verification). */
+    @Test
+    void resolveCacheRootAdoptsAnExistingLegacyDirectory(@org.junit.jupiter.api.io.TempDir Path tmp) throws IOException {
+        Path configDir = tmp.resolve("config");
+        Path gameDir = tmp.resolve("game");
+        Files.createDirectories(configDir.resolve("lss").resolve("cache"));
+        assertEquals(configDir.resolve("lss").resolve("cache"),
+                ColumnCacheStore.resolveCacheRoot(configDir, gameDir),
+                "an existing legacy cache dir must be adopted");
+    }
+
+    @Test
+    void resolveCacheRootUsesGameRootDotLssWhenNoLegacyDirExists(@org.junit.jupiter.api.io.TempDir Path tmp) throws IOException {
+        Path configDir = tmp.resolve("config");
+        Path gameDir = tmp.resolve("game");
+        Files.createDirectories(configDir); // config dir exists, but no lss/cache under it
+        assertEquals(gameDir.resolve(".lss").resolve("cache"),
+                ColumnCacheStore.resolveCacheRoot(configDir, gameDir),
+                "a fresh install lands at <gameDir>/.lss/cache");
+        // A FILE at the legacy path is not a directory — still the new root.
+        Files.createDirectories(configDir.resolve("lss"));
+        Files.writeString(configDir.resolve("lss").resolve("cache"), "not a dir");
+        assertEquals(gameDir.resolve(".lss").resolve("cache"),
+                ColumnCacheStore.resolveCacheRoot(configDir, gameDir),
+                "a non-directory at the legacy path must not be adopted");
     }
 }

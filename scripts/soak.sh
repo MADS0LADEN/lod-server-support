@@ -351,10 +351,18 @@ fi
 # Provenance guard: the cache is keyed only by server address (localhost_25565), which
 # ALL platforms share — a kept cache populated against another platform's base world
 # carries stamps from a different world's clock and fails the warm-path expectations.
+# Stage D (cache relocation): the client cache may live at EITHER root — the legacy
+# config/lss/cache (adopted when it exists) or the game-root .lss/cache (fresh run
+# dirs). Clearing must cover both or a stale cache at the other root warms a run that
+# expects cold. NOTE the cold-restart-resync restore deliberately creates
+# config/lss/cache: under the adoption rule that FORCES the legacy root for the run,
+# which is load-bearing — the restored cache must be the one the client actually opens.
+LEGACY_CACHE_DIR="$CLIENT_RUN_DIR/config/lss/cache"
+DOTLSS_CACHE_DIR="$CLIENT_RUN_DIR/.lss/cache"
 CACHE_PLATFORM_MARKER="$CLIENT_RUN_DIR/config/lss/cache-platform"
 if [[ -f "$CACHE_PLATFORM_MARKER" && "$(cat "$CACHE_PLATFORM_MARKER")" != "$SOAK_PLATFORM" ]]; then
     echo "[soak] Client cache was populated on platform '$(cat "$CACHE_PLATFORM_MARKER")' — clearing for $SOAK_PLATFORM"
-    rm -rf "$CLIENT_RUN_DIR/config/lss/cache"
+    rm -rf "$LEGACY_CACHE_DIR" "$DOTLSS_CACHE_DIR"
 fi
 case "$SCENARIO" in
     dirty-broadcast)
@@ -362,13 +370,13 @@ case "$SCENARIO" in
         ;;
     cold-restart-resync)
         echo "[soak] Restoring client column cache from $BASE_WORLD_DIR/client-cache"
-        rm -rf "$CLIENT_RUN_DIR/config/lss/cache"
+        rm -rf "$LEGACY_CACHE_DIR" "$DOTLSS_CACHE_DIR"
         mkdir -p "$CLIENT_RUN_DIR/config/lss"
-        cp -r "$BASE_WORLD_DIR/client-cache" "$CLIENT_RUN_DIR/config/lss/cache"
+        cp -r "$BASE_WORLD_DIR/client-cache" "$LEGACY_CACHE_DIR"
         ;;
     *)
         echo "[soak] Clearing client column cache"
-        rm -rf "$CLIENT_RUN_DIR/config/lss/cache"
+        rm -rf "$LEGACY_CACHE_DIR" "$DOTLSS_CACHE_DIR"
         ;;
 esac
 mkdir -p "$CLIENT_RUN_DIR/config/lss"
@@ -547,10 +555,19 @@ if [[ "$SCENARIO" == "fresh-backfill" && -d "$SERVER_RUN_DIR/world" ]]; then
     mkdir -p "$BASE_WORLD_DIR"
     rm -rf "$BASE_WORLD_DIR/world"
     cp -r "$SERVER_RUN_DIR/world" "$BASE_WORLD_DIR/world"
+    # Stage D: collect from whichever root the client actually used this run — a
+    # fresh run dir writes .lss/cache while a legacy dir adopts config/lss/cache;
+    # checking only the old path would silently turn every warm scenario cold.
+    COLLECT_CACHE_DIR=""
     if [[ -d "$CLIENT_RUN_DIR/config/lss/cache" ]]; then
-        echo "[soak] Saving client column cache snapshot to $BASE_WORLD_DIR/client-cache"
+        COLLECT_CACHE_DIR="$CLIENT_RUN_DIR/config/lss/cache"
+    elif [[ -d "$CLIENT_RUN_DIR/.lss/cache" ]]; then
+        COLLECT_CACHE_DIR="$CLIENT_RUN_DIR/.lss/cache"
+    fi
+    if [[ -n "$COLLECT_CACHE_DIR" ]]; then
+        echo "[soak] Saving client column cache snapshot from $COLLECT_CACHE_DIR"
         rm -rf "$BASE_WORLD_DIR/client-cache"
-        cp -r "$CLIENT_RUN_DIR/config/lss/cache" "$BASE_WORLD_DIR/client-cache"
+        cp -r "$COLLECT_CACHE_DIR" "$BASE_WORLD_DIR/client-cache"
     else
         echo "[soak] WARNING: No client cache to snapshot (cold-restart-resync will re-run fresh-backfill)"
     fi

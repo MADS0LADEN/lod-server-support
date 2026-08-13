@@ -57,7 +57,8 @@ cmd_baseworld() {
     # staged config so the run regenerates pure defaults, and clear the client cache.
     rm -f "$MAIN_ROOT/fabric/build/run/benchmark-server/config/lss-server-config.json"
     rm -f "$MAIN_ROOT/fabric/build/run/benchmark-client/config/lss-client-config.json"
-    rm -rf "$MAIN_ROOT/fabric/build/run/benchmark-client/config/lss/cache"
+    rm -rf "$MAIN_ROOT/fabric/build/run/benchmark-client/config/lss/cache" \
+           "$MAIN_ROOT/fabric/build/run/benchmark-client/.lss/cache"  # both roots (stage D)
     log "Building base world: fresh run for ${seconds}s (generation enabled, defaults)"
     (export BENCHMARK_CONFIG_STAGED=1; cd "$MAIN_ROOT" && ./scripts/benchmark.sh fresh "$seconds")
     log "Base world saved to benchmark-worlds/base/world"
@@ -131,7 +132,7 @@ cmd_run() {
     local srv_cfg_dir="$root/fabric/build/run/benchmark-server/config"
     local cli_cfg_dir="$root/fabric/build/run/benchmark-client/config"
     mkdir -p "$srv_cfg_dir" "$cli_cfg_dir"
-    rm -rf "$cli_cfg_dir/lss/cache"
+    rm -rf "$cli_cfg_dir/lss/cache" "$root/fabric/build/run/benchmark-client/.lss/cache"  # both roots (stage D)
     stage_server_config "$srv_cfg_dir/lss-server-config.json" "$bg_read"
     stage_client_config "$cli_cfg_dir/lss-client-config.json"
 

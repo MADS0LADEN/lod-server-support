@@ -14,7 +14,27 @@ public final class VoxyCommon {
         return instance;
     }
 
+    // ---- Reset-domain surface (v0.11.0 stage D): shape-mirrors of the statics the
+    // ---- reset resolver binds (javap-verified stable across 0.2.11/0.2.18/dev).
+
+    public static volatile Runnable shutdownBody = () -> {};
+    public static volatile Runnable createBody = () -> {};
+
+    public static void shutdownInstance() {
+        shutdownBody.run();
+    }
+
+    public static void createInstance() {
+        createBody.run();
+    }
+
+    public static boolean isAvailable() {
+        return instance != null;
+    }
+
     public static void reset() {
         instance = new VoxyInstance();
+        shutdownBody = () -> {};
+        createBody = () -> {};
     }
 }

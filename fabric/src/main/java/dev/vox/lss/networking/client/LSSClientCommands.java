@@ -31,6 +31,11 @@ public class LSSClientCommands {
                                 return Command.SINGLE_SUCCESS;
                             })
                     )
+                    .then(ClientCommands.literal("reset")
+                            .executes(context -> runReset(context.getSource(), false))
+                            .then(ClientCommands.literal("confirm")
+                                    .executes(context -> runReset(context.getSource(), true)))
+                    )
                     .then(ClientCommands.literal("diag")
                             .executes(context -> {
                                 showDiagnostics(context.getSource());
@@ -55,6 +60,40 @@ public class LSSClientCommands {
                     )
             );
         });
+    }
+
+    /**
+     * The /lss reset production wiring (v0.11.0 stage D): the sequence itself lives in
+     * {@link ResetCoordinator} (seam-injected, JUnit-pinned ordering); this method only
+     * binds the live collaborators. Main client thread (client commands dispatch there —
+     * the same thread Voxy's own command and login/disconnect mixins run on, so no
+     * concurrent-lifecycle race).
+     */
+    private static int runReset(FabricClientCommandSource source, boolean confirmed) {
+        var manager = LSSClientNetworking.getRequestManager();
+        ResetCoordinator.run(new ResetCoordinator.Deps(
+                manager != null,
+                () -> {
+                    if (manager != null) {
+                        LSSClientNetworking.reportUndispatchedColumns(manager);
+                    }
+                    // Await even without a manager (review n4): a reset typed right
+                    // after a disconnect can race the disconnect drain's final dispatch
+                    // into the wipe window.
+                    if (!LSSClientNetworking.awaitDecodeIdle(2_000)) {
+                        dev.vox.lss.common.LSSLogger.warn(
+                                "Reset: decode drain still busy after 2s — proceeding "
+                                        + "(the wipe is IO-contained regardless)");
+                    }
+                },
+                dev.vox.lss.compat.ModCompat::resetVoxyLods,
+                () -> {
+                    if (manager != null) manager.flushCache();
+                },
+                ColumnCacheStore::clearAll,
+                line -> source.sendFeedback(Component.literal(line).withStyle(ChatFormatting.GOLD))),
+                confirmed);
+        return Command.SINGLE_SUCCESS;
     }
 
     private static void showDiagnostics(FabricClientCommandSource source) {
