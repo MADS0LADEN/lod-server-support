@@ -85,45 +85,104 @@ recorded):
 
 **The loop** (client-side, beside the scanner/manager; all state per session):
 
-- Each 1 s wall-clock interval, measure received LSS wire bytes (the session
-  gate already counts every column frame's shipped size).
+- **Measurement**: 2 s wall-clock intervals (review m6 — 1 s intervals alias
+  against the batch cadence, capturing 0 or 2 bursts; at 4 Hz actuation a
+  2 s window bounds the burst-count error to ~±12.5%, comparable to the
+  kept-up band), measuring received LSS wire bytes (the session gate's wire
+  counter — post-bottleneck arrival truth, network-thread accounting).
+- **The congestion signal** (review M1): the client's own tab-list ping
+  (PlayerInfo latency — the vanilla keepalive path, so it excludes LSS
+  server processing time) against a session-rolling minimum baseline with a
+  +1 ms/s upward drift — the client-side mirror of Mechanism B's signal.
+  `pingExcess = ping − baseline`. **Pre-implementation check**: verify
+  26.2's tab-latency refresh cadence and smoothing (historically the
+  latency broadcast is periodic and the field smoothed (3·old+new)/4 —
+  staleness only DELAYS engagement, the safe direction, but it makes the
+  ping-driven drain bias below over-cut for up to one refresh period; if
+  the measured staleness exceeds ~10 s, the drain bias falls back to the
+  deterministic every-8th-kept-up drain interval, decision recorded at
+  implementation).
 - **Engagement gate**: UNENGAGED (no cap applied) until a qualifying
-  SHORTFALL interval: bytes were received, the awaiting set was non-empty at
-  both interval edges (demand existed all interval — an idle or converged
-  interval must never adjust; the DH idle-collapse fix), NO backpressure
-  halt overlapped the interval (review m1: a #71 halt keeps the awaiting
-  set populated while the client deliberately stops ingesting — the
-  depressed tail rate would read as shortfall and double-throttle exactly
-  the weak-client population; the pre-halt TAPER regime is same-direction
-  and intended composition, documented not excluded), and the measured
-  rate < `ENGAGE_BELOW_BYTES_PER_SEC` (4 MB/s — faster sessions never engage,
-  the disarm posture).
-- **First engagement**: `desired = measured − STEP/2` (bootstrap-by-shortfall
-  — starts at the true measured rate, not DH's 50 KB/s slow ramp).
-- **Engaged AIMD** per qualifying interval: kept-up (measured ≥ 0.9 ×
-  desired) → `desired += STEP` (STEP = 256 KB/s); shortfall → `desired =
-  max(measured − STEP/2, MIN_RATE)` (MIN_RATE = 64 KB/s). Non-qualifying
-  intervals change nothing.
-- **Actuation**: the byte-denominated `desired` converts to a columns/s bound
-  via a per-session EWMA of received column wire size (the client knows every
-  frame's size; wire-denominated, same denomination as the measurement) and
-  feeds the SAME internal path the manual `lodColumnsPerSecondLimit` uses
-  (budget clamp + size-weighted fast-fire spacing). The conversion FLOORS AT
-  1 column/s (review m2: `columnRateCap`'s contract is `<= 0` = OFF, and
-  MIN_RATE ÷ a >64 KB column EWMA would integer-convert to the off sentinel
-  at exactly the moment the cap must bind hardest). Composition with the
-  manual knob: the EFFECTIVE cap is `min(manual, governed)` with BOTH
-  off-sentinels handled explicitly (manual=0 means "manual off", and must
-  not win a naive min) — the auto governor may go below the manual knob's
-  50-columns/s clamp floor (its own floor is MIN_RATE in bytes); the manual
-  knob keeps its meaning as a hard operator/user bound.
-- **Disengagement**: no shortfall for 10 consecutive qualifying intervals
-  with `desired` above `ENGAGE_BELOW_BYTES_PER_SEC` → drop the cap entirely,
-  return to UNENGAGED. Fast links carry zero permanent state.
+  CONGESTED-SHORTFALL interval — ALL of: (a) bytes were received; (b) the
+  awaiting set was non-empty at both interval edges (demand-backed — an
+  idle or converged interval must never adjust; the DH idle-collapse fix);
+  (c) NO #71 backpressure halt overlapped the interval (integration m1: a
+  halt keeps the awaiting set populated while the client deliberately
+  stops ingesting — the depressed tail rate would read as shortfall and
+  double-throttle exactly the weak-client population; the pre-halt TAPER
+  regime is same-direction and intended composition, documented not
+  excluded); (d) no reset/dimension-change spanned the interval (m3); (e)
+  **`pingExcess > ENGAGE_PING_EXCESS_MS` (250) — the congestion conjunct**
+  (review M1: a measured-rate shortfall alone CANNOT engage; measured rate
+  equals the demand or serve rate whenever the link is not the bottleneck,
+  so without this conjunct every walking player on a healthy link — LOD
+  trickle ~100-300 KB/s with a standing awaiting set — and every gen-bound
+  cold join would engage fleet-wide); (f) measured rate <
+  `ENGAGE_BELOW_BYTES_PER_SEC` (4 MB/s — faster sessions never engage).
+  Loopback ping ~0 never crosses (e), so harness inertness is structural
+  — and the governor is ADDITIONALLY property-gated off under `-Dlss.soak`
+  / `-Dlss.benchmark` (integration M1, the far-player harness-gate
+  precedent) as determinism armor, with the GATE pinned in T1.
+- **First engagement**: `desired = measured − STEP/2` (bootstrap-by-
+  shortfall — starts at the true measured rate, not DH's 50 KB/s ramp).
+- **Engaged AIMD** per qualifying interval (qualifying = (a)-(d); (e)/(f)
+  are engagement-only): SHORTFALL when `measured < desired − STEP/4` — an
+  ABSOLUTE band (review M3: the multiplicative 0.9 band admits equilibrium
+  ~1.11× capacity, which ratchets standing queue; the absolute band nets
+  zero queue per oscillation cycle) — OR when `pingExcess >
+  ENGAGE_PING_EXCESS_MS` (**the drain bias**, review M3's second defect: a
+  rate-matched loop never drains queue it INHERITED — the pre-engagement
+  burst can bank ~cap/4 — so while the queue signal stays elevated the
+  loop keeps cutting; over-cut from ping staleness is bounded by MIN_RATE
+  and recovers at +STEP per interval, the safe direction) → `desired =
+  max(measured − STEP/2, MIN_RATE)`. Otherwise KEPT-UP → `desired +=
+  STEP`. STEP = 256 KB/s; MIN_RATE = 64 KB/s.
+- **Actuation** (review M2 — the burst-quantum seam split): governed R
+  (columns/s) derives from `desired` via the size estimator below, then
+  the scanner's governed path supplies TWO values: `max(1, ceil(R/4))` at
+  the BUDGET-CLAMP site and `R` at the SPACING-GATE site, so the spacing
+  gate equilibrates at the 5-tick floor — 4 Hz quarter-batches, burst ≈
+  desired/4 ≈ 250 ms of link time at converged utilization. (The naive
+  single-supplier shape mathematically cannot express this: the spacing
+  gate is `ticks × cap < 20 × lastSentCount` and the walk fills the
+  clamped budget, so one value R yields 1 Hz FULL-second batches — a
+  burst ~4× the plan's target that grazes B's 750 ms threshold and
+  consumes the A/B separation margin. The MANUAL knob keeps its shipped
+  single-value shape and 1 Hz-full-batch behavior — its semantics are
+  released.) Composition with the manual knob: EFFECTIVE cap =
+  `min(manual, governed)` with BOTH off-sentinels handled explicitly
+  (`columnRateCap`'s contract is `<= 0` = off; manual=0 must not win a
+  naive min — integration m2), applied at both sites; the conversion
+  FLOORS at 1 column/s (m2/m5: a 0 governed budget would return -1 from
+  the walk — no declaration ever, killing the want-set's only self-heal;
+  the governor deliberately bypasses the manual knob's 50 clamp floor so
+  it must carry its own). The 1 Hz fallback stays un-gateable (shipped
+  invariant).
+- **Size estimator** (review M4): per-session ASYMMETRIC EWMA of received
+  column wire size — fast-up, slow-down — so a bimodal ocean→terrain
+  boundary (0.1-1 KB ghost-clears vs 3-30 KB terrain) under-counts R
+  transiently rather than over-bursting several× desired while a dragged-
+  down mean catches up; wire-denominated (same denomination as measurement
+  and desired — the pivot made the loop unit-consistent end to end, which
+  the v1 server-enforced shape was NOT: the server charges RAW bytes);
+  runs from session start (pre-engagement), division guarded until the
+  first sample.
+- **Disengagement**: (a) 10 consecutive qualifying intervals with
+  `desired` above `ENGAGE_BELOW_BYTES_PER_SEC`; OR (b) `pingExcess <
+  100 ms` for 30 consecutive intervals (~1 min of healthy link — review
+  m10: without a ping-normal exit a converged session freezes its last
+  `desired` forever, and a later teleport into heavy demand on a now-
+  healthy link resumes under the stale low cap). Either path drops the cap
+  entirely; fast links carry zero permanent state; re-engagement on a
+  still-slow link costs 1-2 intervals. Fully-stalled intervals (zero
+  bytes, demand-backed) are NON-QUALIFYING → no cut while totally stalled
+  (m11 — deliberate: B owns the total-stall class via server-side ping;
+  the stale `desired`'s recovery burst is bounded by the quarter-batch
+  quantum).
 - Kill switch: client config `enableAdaptiveTransferRate` (default true) —
   off = manual-knob-only, exactly today's shape. One INFO per session on
-  first engagement (rate + reason) and one on disengagement — the client-side
-  receipt.
+  first engagement (rate + reason) and one on disengagement — the
+  client-side receipt.
 - Sessions on legacy dialects (v16 fallback) are EXCLUDED (their pacing is
   the legacy drip-feed's own; the governor gates on a current-dialect
   session, mirroring the adaptive-cadence v16 exclusion).
@@ -133,6 +192,13 @@ recorded):
   change / `/lss reset` reads a negative or garbage delta — such intervals
   are NON-QUALIFYING and re-seed the interval baseline; first engagement
   after a rejoin starts fresh.
+- **Accepted tradeoff** (review n15): client-side actuation has no
+  server-side neutralizer for a buggy fleet-deployed governor (the
+  declaration design had one free). The kill switch is client config; B
+  bounds the damage server-side.
+- Diag attribution (review n14): the scanner's `rateGated` counter would
+  conflate manual-knob and governor refusals — the `getRateGated`
+  extension labels them separately.
 
 ## Mechanism B — the vanilla-ping backstop (server-side; ALL clients)
 
@@ -151,28 +217,56 @@ buffer LSS cannot see — the exact number the live sessions diagnosed with.
 - **Cut**: `ping − baseline > PING_BACKSTOP_EXCESS_MS` (default 750 — this is
   the timeout-and-multi-second-lag class, not fine tuning) AND LSS sent
   > 64 KB to that player in the last 5 s (attribution guard: never punish
-  LSS-idle sessions for someone else's congestion) → `pingFactor *= 0.5`
-  (floor: the factor that yields 64 KB/s effective).
+  LSS-idle sessions for someone else's congestion) → the FIRST cut BINDS
+  (review m7): `pingFactor = min(0.5 × pingFactor, 0.5 ×
+  recentSendRate / cap)` — from factor 1.0, blind halvings would need ~6
+  adjustments × ~15 s keepalive cadence ≈ 90 s+ before binding below a
+  ~500 KB/s link; anchoring the cut to the OBSERVED send rate makes the
+  first cut land below it, keeping the "~30 s to engage" live expectation
+  honest. Floor: the factor that yields 64 KB/s effective.
 - **Recover**: excess < 250 ms for 3 consecutive adjustments →
   `pingFactor = min(1.0, pingFactor * 1.25)`.
+- **Documented over-cut** (review m8): after a binding cut the standing
+  queue keeps excess elevated for many keepalives while it drains, and the
+  attribution guard passes even at the floor rate — congestion events may
+  drive the factor to floor, with recovery over minutes. Acceptable for a
+  coarse backstop. Keepalive latency also includes server MSPT stalls, so
+  a server lag spike mass-cuts every active player — the safe direction.
+- **Baseline seeding** (review m9): 0/absent latency samples are IGNORED
+  (never anchor a ~0 baseline that reads natural ping as excess); the
+  baseline seeds from the first nonzero sample. Accepted bias: a session
+  whose first sample lands after LSS congestion already began anchors HIGH
+  and under-reads excess until drain or drift catches up.
+- **Pre-implementation check** (shared with A's signal): verify 26.2's
+  keepalive latency smoothing — a smoothed field reads A's burst sawtooth
+  near its MEAN, which is silently load-bearing for the composition margin
+  on both platforms.
 - Composition rule — ONE governor per session where possible, but A is now
   INVISIBLE to the server (client-actuated), so strict suspension is
   impossible. The safe composition: B's cut threshold (750 ms excess) sits
   far above A's converged operating point (~hundreds of ms), so on an
   A-governed session B never reaches its trigger — the loops separate by
-  OPERATING REGION instead of population. If both ever act (A mis-converged
-  high), they push the same direction with B coarse and slow — bounded,
-  non-oscillatory (B cuts at most once per 5 s and recovers slower than A
-  adapts). Effective server cap: `min(alloc, cap × pingFactor)`.
+  OPERATING REGION instead of population. The margin DEPENDS on review
+  M2's quarter-batch actuation: A's converged burst is ~desired/4 ≈ 250 ms
+  of link time (a 1 Hz full-batch actuator would peak ~800 ms and graze
+  B's threshold — a constructible A-trips-B loop). If both ever act (A
+  mis-converged high), they push the same direction with B coarse and slow
+  — bounded, non-oscillatory (B cuts at most once per 5 s and recovers
+  slower than A adapts). Effective server cap: `min(alloc, cap ×
+  pingFactor)`.
 - Kill switch: `enablePingBackstop` (server config, default true) — ALSO a
   `/lsslod set` row (the registry's first boolean row; the AUTO ceiling's
   precedent made its kill switch a live row, and B's live A/B on the rig
   is this program's working method — a config-edit-plus-restart lever
   would make the live gate needlessly slow).
-- Integration precision (review m4): both services compute the per-player
-  cap once OUTSIDE the player loop — `cap × pingFactor` is per-player and
-  applies inside the per-state path (at the `flushSendQueue` allocation),
-  not to the shared cap. Fabric reads `player.connection.latency()` (the
+- Integration precision (review m4 + m12): both services compute the
+  per-player cap once OUTSIDE the player loop — `cap × pingFactor` is
+  per-player and MUST compose into the `allocationBytes` argument passed
+  to `flushSendQueue` inside the per-player loop: the per-player bandwidth
+  bucket's bank clamp is `burstCap = allocationBytes/4`, so only this
+  plumbing shrinks the banked burst (up to ~6.25 MB at default caps) on
+  the FIRST post-cut tick — applied anywhere else, a cut leaves the
+  old-cap bank intact for one full burst. Pinned in T1. Fabric reads `player.connection.latency()` (the
   move-tracer precedent, −1 = no signal); Paper reads the same NMS field
   off its ServerPlayer handle. B's per-player state (baseline, factor,
   5 s sent-bytes window) is pump-thread-confined on the state object —
@@ -216,7 +310,9 @@ Removed outright (same branch, before the new mechanisms land):
   pre-auto-ceiling compat ctor, and the full-line golden (also gains
   `pingf=`); `ConfigValidationTest`'s AUTO-comment context;
   `ServerConfigBase`'s 0=AUTO javadoc for the key; `check_soak.py`'s
-  config-allowlist comment naming AutoOutboundCeilingTest.
+  config-allowlist comment naming AutoOutboundCeilingTest; the
+  `RuntimeSettings` apply-note text for the key; the move-tracer boot-row
+  echo note naming the ceiling (verify at implementation — control n13).
 - Docs: auto-outbound-ceiling-design.md gets a terminal header (SUPERSEDED →
   this plan) and stays as the falsification record; CLAUDE.md's outbound-
   ceiling bullet rewritten (fixed-only + this plan's governors); the
@@ -254,16 +350,24 @@ Removed outright (same branch, before the new mechanisms land):
 
 - T1: governor AIMD unit suite (engagement gate incl. demand-backing, the
   no-idle-collapse pin, the #71-halt non-qualifying pin, the reset/negative-
-  delta non-qualifying pin, bootstrap-by-shortfall, kept-up/shortfall steps,
-  disengagement, the min(manual, governed) composition incl. BOTH
-  off-sentinel cases, the column-size EWMA conversion incl. the floor-at-1
-  pin, the v16-session exclusion, the soak/benchmark property gate, kill
-  switch); ping backstop unit suite (baseline drift, attribution guard,
-  cut/recover ladder, the operating-region separation constants, the
-  per-player factor application point, kill switch + its registry row);
-  deletion pins (the 7-arg flush overload's fixed-ceiling semantics
-  unchanged; `ceil=` renders fixed/off; set row 0 = OFF); diag token
-  goldens (`pingf=` insertion re-goldens the full line).
+  delta non-qualifying pin, **the congestion-conjunct pin — a demand-limited
+  shortfall with normal ping must NOT engage**, bootstrap-by-shortfall,
+  kept-up/shortfall steps with the ABSOLUTE band, the ping-driven drain
+  bias, disengagement both paths incl. the ping-normal exit, the
+  min(manual, governed) composition incl. BOTH off-sentinel cases, **the
+  seam-split pins — budget site gets ceil(R/4), spacing site gets R, the
+  4 Hz equilibrium; the manual knob's single-value shape unchanged**, the
+  asymmetric size-estimator pins (fast-up/slow-down, pre-first-sample
+  guard, the ocean→terrain no-over-burst case), the floor-at-1 pin, the
+  v16-session exclusion, the soak/benchmark property gate, kill switch,
+  the rateGated attribution split); ping backstop unit suite (baseline
+  drift + zero-sample seeding, attribution guard, the BINDING first cut,
+  cut/recover ladder, the operating-region separation constants, **the
+  allocationBytes plumbing pin — a cut shrinks the bank clamp on the first
+  post-cut tick**, kill switch + its registry row); deletion pins (the
+  7-arg flush overload's fixed-ceiling semantics unchanged; `ceil=`
+  renders fixed/off; set row 0 = OFF); diag token goldens (`pingf=`
+  insertion re-goldens the full line).
 - T2 re-run. Paper T1 is a CHANGED surface (review M2): the config-test
   AUTO block rewrites to 0=OFF and the new key rows land there too.
 - Guard soak: fresh-backfill (both governors must be structurally inert).
@@ -304,3 +408,41 @@ golden. Nits: `enablePingBackstop` promoted to a registry row (decision
 recorded — first boolean row); Sodium slider under-run is rendered via the
 `getRateGated` extension (no new slider row — the adaptive-cadence
 precedent); SOAK_DIALECT fidelity moot under the M1 gate.
+
+**Control lens (Fable, 2026-08-13) — IMPLEMENT WITH FIXES, all folded:**
+M1 the engagement gate could not distinguish link-limited from demand/
+server-limited delivery — every walking player on a healthy link (LOD
+trickle with a standing awaiting set) and every gen-bound cold join would
+have engaged fleet-wide, and loopback-soak inertness was false → the
+congestion conjunct (client tab-ping excess > 250 ms over a rolling-min
+baseline) is now an engagement requirement, making harness inertness
+structural (ping ~0) with the property gate as armor. M2 the governed
+actuator was 1 Hz × full-second batches by the spacing-gate math (burst
+~4× the plan's 220 ms claim, grazing B's 750 ms threshold — the A/B
+margin was consumed) → the seam split: ceil(R/4) at the budget site, R at
+the spacing site, equilibrating at the 5-tick floor = 4 Hz quarter-
+batches. M3 the multiplicative 0.9 kept-up band ratchets standing queue
+(equilibrium up to ~1.11× capacity) and a rate-matched loop never drains
+INHERITED queue (the pre-engagement bank ~cap/4) → absolute band
+(desired − STEP/4) + the ping-driven drain bias. M4 bimodal column sizes
+(ghost-clears vs terrain) make a symmetric mean over-burst several× at
+regime boundaries → asymmetric fast-up/slow-down estimator, seeded from
+session start, division guarded. m5 folded into the actuation floor/
+sentinel spec (the governed budget=0 walk-death case). m6 2 s measurement
+intervals (phase aliasing). m7 B's first cut now BINDS (anchored to
+observed send rate — blind halvings needed ~90 s). m8 B's over-cut-to-
+floor documented as accepted; MSPT mass-cut noted safe. m9 B baseline
+seeding specified (ignore zero samples; accepted high-anchor bias). m10
+frozen-engaged closed by the ping-normal disengage path. m11 stalled
+intervals non-qualifying, stated as deliberate (B owns total stalls). m12
+the pingFactor plumbing must ride allocationBytes into flushSendQueue so
+the bank clamp shrinks on the first post-cut tick — pinned. n13 residue
+inventoried. n14 rateGated attribution split. n15 no-neutralizer tradeoff
+recorded. n16 verified clean. Also verified by this lens: the v1 RAW-vs-
+WIRE unit mismatch (server charges RAW, client measures WIRE) would have
+ratcheted every zstd session to the floor under the declaration design —
+the pivot made the loop unit-consistent, an independent argument for
+client actuation. Two pre-implementation checks recorded: 26.2 tab-
+latency refresh cadence/smoothing (A's signal; >10 s staleness switches
+the drain bias to the deterministic every-8th-kept-up variant) and
+keepalive smoothing (load-bearing for the A/B margin).
