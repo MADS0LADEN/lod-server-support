@@ -85,6 +85,15 @@ public final class WireBytes {
             return (short) v;
         }
 
+        /** Big-endian signed int, the netty {@code readInt} shape. */
+        public int readInt() {
+            need(4, "int");
+            int v = ((buf[pos] & 0xFF) << 24) | ((buf[pos + 1] & 0xFF) << 16)
+                    | ((buf[pos + 2] & 0xFF) << 8) | (buf[pos + 3] & 0xFF);
+            pos += 4;
+            return v;
+        }
+
         /** Big-endian long, the netty {@code readLong} shape. */
         public long readLong() {
             need(8, "long");
@@ -170,6 +179,15 @@ public final class WireBytes {
 
         public Writer writeShort(int v) {
             ensure(2);
+            buf[pos++] = (byte) (v >>> 8);
+            buf[pos++] = (byte) v;
+            return this;
+        }
+
+        public Writer writeInt(int v) {
+            ensure(4);
+            buf[pos++] = (byte) (v >>> 24);
+            buf[pos++] = (byte) (v >>> 16);
             buf[pos++] = (byte) (v >>> 8);
             buf[pos++] = (byte) v;
             return this;

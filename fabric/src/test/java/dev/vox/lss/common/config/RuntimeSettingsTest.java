@@ -131,6 +131,34 @@ class RuntimeSettingsTest {
     }
 
     @Test
+    void farPlayersModeRowParsesStrictlyNormalizesAliasesAndAssignsNothingOnFailure(
+            @TempDir Path dir) {
+        var c = loaded(dir);
+        var key = RuntimeSettings.byName("farPlayers");
+        assertNotNull(key, "the R-9 privacy row exists");
+        assertEquals("on", apply(c, "farPlayers", "ON"), "case-normalized");
+        assertEquals("opt-in", apply(c, "farPlayers", "optin"),
+                "aliases normalize through the validate() helper (the R-2 rule)");
+        assertEquals("opt-in", apply(c, "farPlayers", "opt_in"));
+        String before = c.farPlayers;
+        assertThrows(IllegalArgumentException.class,
+                () -> RuntimeSettings.applyAndPersist(c, key, "sometimes"),
+                "a strict parse rejects garbage at the command line");
+        assertEquals(before, c.farPlayers, "a parse failure must assign nothing");
+    }
+
+    @Test
+    void farPlayersMaxDistanceRowClampsLikeBootValidation(@TempDir Path dir) {
+        var c = loaded(dir);
+        assertEquals("16384", apply(c, "farPlayersMaxDistanceBlocks", "999999"),
+                "clamps to the shared ceiling — a registry row can never clamp"
+                        + " differently from validate()");
+        assertEquals("128", apply(c, "farPlayersMaxDistanceBlocks", "1"),
+                "floors to the shared minimum");
+        assertEquals("4096", apply(c, "farPlayersMaxDistanceBlocks", "4096"));
+    }
+
+    @Test
     void listingsCoverEveryKeyExactlyOnce() {
         var names = RuntimeSettings.keyNames();
         assertEquals(names.size(), names.stream().distinct().count());
@@ -138,7 +166,7 @@ class RuntimeSettingsTest {
                 "lodDistanceChunks", "generationConcurrencyLimitGlobal",
                 "generationConcurrencyLimitPerPlayer", "mbPerSecondLimitPerPlayer",
                 "mbPerSecondLimitGlobal", "dirtyBroadcastIntervalSeconds",
-                "maxConcurrentDiskReads")));
+                "maxConcurrentDiskReads", "farPlayers", "farPlayersMaxDistanceBlocks")));
         var c = new TestServerConfig();
         assertEquals(names.size(), RuntimeSettings.listLines(c).size());
     }

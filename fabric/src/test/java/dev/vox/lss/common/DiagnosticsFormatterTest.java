@@ -345,6 +345,41 @@ class DiagnosticsFormatterTest {
     }
 
     @Test
+    void diagFarPlayersLineRendersAfterYieldOnlyWhenPresent() {
+        var d = new DiagnosticsFormatter.DiagData(
+                true, 24,
+                2048, 1_048_576,
+                100, 5000, 10_485_760,
+                11, 33, 44, 55, 66,
+                22,
+                "sent=9, disk=1/2",
+                "submitted=5, completed=5",
+                "active=1/32", true,
+                7, 3,
+                2_097_152,
+                512,
+                List.of());
+
+        var without = DiagnosticsFormatter.formatDiagnostics(d);
+        assertTrue(without.stream().noneMatch(l -> l.startsWith("FarPlayers")),
+                "an untouched far-player service (null line) must add nothing — the E1"
+                        + " inert diag surface stays byte-unchanged");
+
+        String line = "FarPlayers: subscribers=2, rosters=3, updates=40, entries=200,"
+                + " suppressed=5, bytes=8.0 KB";
+        var with = DiagnosticsFormatter.formatDiagnostics(
+                d.withYieldLine("Yield: armed=true, ticks_total=40, bytes_withheld=1.0 MB")
+                        .withFarPlayersLine(line));
+        int yIdx = indexOfPrefix(with, "Yield:");
+        int fpIdx = indexOfPrefix(with, "FarPlayers:");
+        int bwIdx = indexOfPrefix(with, "Bandwidth:");
+        assertTrue(yIdx < fpIdx && fpIdx < bwIdx,
+                "the FarPlayers line sits between Yield and Bandwidth: " + with);
+        assertEquals(line, with.get(fpIdx));
+        assertEquals(without.size() + 2, with.size());
+    }
+
+    @Test
     void yieldDiagLineProducerHonorsTheArmedOrFiredContract() {
         var diag = new dev.vox.lss.common.processing.TickDiagnostics();
         assertEquals(null, DiagnosticsFormatter.yieldDiagLineOrNull(false, diag),

@@ -65,6 +65,7 @@ public final class BenchmarkMetricsExporter {
         DirtyContentFilter dirtyContentFilter();
         SharedBandwidthLimiter bandwidthLimiter();
         Collection<? extends AbstractPlayerRequestState<?>> players();
+        dev.vox.lss.common.farplayers.FarPlayerBroadcastService farPlayerService();
     }
 
     static ServerSource asSource(RequestProcessingService service) {
@@ -76,6 +77,9 @@ public final class BenchmarkMetricsExporter {
             @Override public DirtyColumnTracker dirtyTracker() { return service.getDirtyTracker(); }
             @Override public DirtyContentFilter dirtyContentFilter() { return service.getDirtyContentFilter(); }
             @Override public SharedBandwidthLimiter bandwidthLimiter() { return service.getBandwidthLimiter(); }
+            @Override public dev.vox.lss.common.farplayers.FarPlayerBroadcastService farPlayerService() {
+                return service.getFarPlayerService();
+            }
             @Override public Collection<? extends AbstractPlayerRequestState<?>> players() {
                 return service.getPlayers().values();
             }
@@ -335,6 +339,22 @@ public final class BenchmarkMetricsExporter {
         var dedupMap = new LinkedHashMap<String, Object>();
         dedupMap.put("groups", internals.dedupGroups());
         result.put("dedup", dedupMap);
+
+        // Far players (E1, FARP §3.2): OWN counter group — the frames ride a dedicated
+        // lane, so these bytes are deliberately NOT part of service.bytes_sent/
+        // wire_bytes (which feed soak_report's cross-identity audits against client
+        // received counters). All-zero on every soak/benchmark run by construction (the
+        // client property gate keeps harness clients unsubscribed — E1 baseline
+        // neutrality, asserted by the checker's far-players zero check).
+        var farPlayers = src.farPlayerService();
+        var farMap = new LinkedHashMap<String, Object>();
+        farMap.put("subscribers", (long) farPlayers.subscriberCount());
+        farMap.put("roster_frames", farPlayers.rosterFramesSent());
+        farMap.put("update_frames", farPlayers.updateFramesSent());
+        farMap.put("entries", farPlayers.entriesSent());
+        farMap.put("suppressed", farPlayers.suppressedUnchanged());
+        farMap.put("bytes", farPlayers.bytesSent());
+        result.put("far_players", farMap);
 
         // LOD store (docs/planning/lod-store-implementation-plan.md): counters live on the
         // processor unconditionally (all-zero while lodStore=off) so this group's shape is

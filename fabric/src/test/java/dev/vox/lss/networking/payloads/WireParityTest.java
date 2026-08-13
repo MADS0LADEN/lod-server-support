@@ -530,10 +530,50 @@ class WireParityTest {
                 SessionConfigS2CPayload.TYPE.id().toString(),
                 DirtyColumnsS2CPayload.TYPE.id().toString(),
                 VoxelColumnS2CPayload.TYPE.id().toString(),
-                BatchResponseS2CPayload.TYPE.id().toString());
+                BatchResponseS2CPayload.TYPE.id().toString(),
+                dev.vox.lss.networking.payloads.FarPlayerPrefsC2SPayload.TYPE.id().toString(),
+                dev.vox.lss.networking.payloads.FarPlayerRosterS2CPayload.TYPE.id().toString(),
+                dev.vox.lss.networking.payloads.FarPlayerUpdatesS2CPayload.TYPE.id().toString());
         assertEquals(covered, declared,
                 "every LSS channel must map to exactly one payload with a reference frame in "
                 + "this suite — a new payload requires frames in BOTH WireParityTests");
-        assertEquals(7, declared.size());
+        assertEquals(10, declared.size());
+    }
+
+    // ---- Far players (E1): the carriers add NO framing — the FriendlyByteBuf body IS
+    // ---- the FarPlayerWire byte[] verbatim, in both directions. Parity with Paper
+    // ---- holds by construction (one shared codec); these frames pin the CARRIER.
+
+    @Test
+    void farPlayerCarriersShipTheSharedCodecBytesVerbatim() {
+        var prefs = dev.vox.lss.common.farplayers.FarPlayerWire.encodePrefs(
+                new dev.vox.lss.common.farplayers.FarPlayerWire.Prefs(true, 2048, 0, true, 512));
+        assertArrayEquals(prefs, encode(
+                dev.vox.lss.networking.payloads.FarPlayerPrefsC2SPayload.CODEC,
+                new dev.vox.lss.networking.payloads.FarPlayerPrefsC2SPayload(prefs)),
+                "the C2S carrier must add zero framing around the shared body");
+
+        var roster = dev.vox.lss.common.farplayers.FarPlayerWire.encodeRoster(
+                new dev.vox.lss.common.farplayers.FarPlayerWire.Roster(1, true,
+                        java.util.List.of(new dev.vox.lss.common.farplayers.FarPlayerWire.RosterEntry(
+                                0, new java.util.UUID(1L, 2L), "Alice")), new int[0]));
+        assertArrayEquals(roster, encode(
+                dev.vox.lss.networking.payloads.FarPlayerRosterS2CPayload.CODEC,
+                new dev.vox.lss.networking.payloads.FarPlayerRosterS2CPayload(roster)));
+
+        var updates = dev.vox.lss.common.farplayers.FarPlayerWire.encodeUpdates(
+                new dev.vox.lss.common.farplayers.FarPlayerWire.Updates(1,
+                        "minecraft:overworld", 10, java.util.List.of()));
+        byte[] carried = encode(
+                dev.vox.lss.networking.payloads.FarPlayerUpdatesS2CPayload.CODEC,
+                new dev.vox.lss.networking.payloads.FarPlayerUpdatesS2CPayload(updates));
+        assertArrayEquals(updates, carried);
+        // Round-trip through the carrier decode: the body must come back byte-identical.
+        var buf = new io.netty.buffer.UnpooledByteBufAllocator(false).buffer();
+        var fbb = new net.minecraft.network.FriendlyByteBuf(buf);
+        fbb.writeBytes(carried);
+        var decoded = dev.vox.lss.networking.payloads.FarPlayerUpdatesS2CPayload.CODEC.decode(fbb);
+        assertArrayEquals(updates, decoded.body());
+        buf.release();
     }
 }

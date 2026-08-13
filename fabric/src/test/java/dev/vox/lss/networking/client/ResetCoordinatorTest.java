@@ -25,15 +25,17 @@ class ResetCoordinatorTest {
                 () -> { log.add("voxy"); return outcome; },
                 () -> log.add("flush"),
                 () -> log.add("clearAll"),
+                () -> log.add("farp"),
                 feedback::add);
     }
 
     @Test
     void activeSessionRunsDrainVoxyFlushInThatOrder() {
         assertTrue(ResetCoordinator.run(deps(true, ModCompat.VoxyResetOutcome.RESET), false));
-        assertEquals(List.of("drain", "voxy", "flush"), log,
+        assertEquals(List.of("drain", "voxy", "flush", "farp"), log,
                 "drain FIRST (a late decode dispatch can open a store inside the wipe dir), "
-                        + "Voxy half SECOND, LSS flush LAST (re-serves land in the fresh engine)");
+                        + "Voxy half SECOND, LSS flush, then the R-3 far-player re-subscribe "
+                        + "AFTER the flush (the bumped-epoch roster repopulates fresh state)");
         assertEquals(1, feedback.size());
         assertTrue(feedback.get(0).startsWith("Voxy LODs cleared (disk + memory)."), feedback.get(0));
     }
@@ -102,6 +104,7 @@ class ResetCoordinatorTest {
                 () -> { throw new IllegalStateException("mixin drift"); },
                 () -> log.add("flush"),
                 () -> log.add("clearAll"),
+                () -> log.add("farp"),
                 feedback::add);
         assertTrue(ResetCoordinator.run(deps, false));
         assertTrue(log.contains("flush"),

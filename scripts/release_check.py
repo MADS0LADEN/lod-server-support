@@ -424,14 +424,15 @@ def check_vss_pair_paper(lss_jar, vss_jar, problems):
                             "(replaceFirst silently no-opped) — VSS would show the LSS "
                             "description / Modrinth link")
     # The rebrand must have swapped every LSS token for its VSS counterpart.
-    for tok in ("lsslod", "lss.admin", "LOD Server Support admin", "Access to LSS admin"):
+    for tok in ("lsslod", "lss.admin", "lss.farplayers.hidden",
+                "LOD Server Support admin", "Access to LSS admin"):
         if tok not in ltext:
             problems.append(f"{vbase}: LSS plugin.yml is missing expected token {tok!r} "
                             "(source shape changed — the VSS rewrite may silently no-op)")
         if tok in vtext:
             problems.append(f"{vbase}: VSS plugin.yml still contains LSS token {tok!r} "
                             "— the rebrand rewrite no-opped")
-    for tok in ("vsslod", "vss.admin", "Voxy Server Side"):
+    for tok in ("vsslod", "vss.admin", "vss.farplayers.hidden", "Voxy Server Side"):
         if tok not in vtext:
             problems.append(f"{vbase}: VSS plugin.yml is missing expected VSS token {tok!r} "
                             "— the rebrand did not fully apply")
@@ -1107,7 +1108,10 @@ def _selftest():
                           "    permission: lss.admin\n"
                           "permissions:\n  lss.admin:\n"
                           "    description: Access to LSS admin commands\n"
-                          "    default: op\n")
+                          "    default: op\n"
+                          "  lss.farplayers.hidden:\n"
+                          "    description: hidden\n"
+                          "    default: false\n")
         # Mirror vssJar's exact rewrites.
         VSS_PLUGIN_YML = (LSS_PLUGIN_YML
             .replace("description: LSS plugin.", "description: VSS plugin.", 1)
@@ -1116,7 +1120,8 @@ def _selftest():
             .replace("lsslod", "vsslod")
             .replace("LOD Server Support admin commands", "Voxy Server Side admin commands")
             .replace("Access to LSS admin commands", "Access to VSS admin commands")
-            .replace("lss.admin", "vss.admin"))
+            .replace("lss.admin", "vss.admin")
+            .replace("lss.farplayers.hidden", "vss.farplayers.hidden"))
         pair_lss_pap = os.path.join(td, "pair-lss-paper.jar")
         _make_jar(pair_lss_pap, {"plugin.yml": LSS_PLUGIN_YML})
         pair_ok_vpap = os.path.join(td, "pair-ok-vss-paper.jar")
@@ -1340,14 +1345,16 @@ def _selftest():
                   "    description: LOD Server Support admin commands\n"
                   "    usage: /lsslod <stats|diag>\n    permission: lss.admin\n"
                   "permissions:\n  lss.admin:\n"
-                  "    description: Access to LSS admin commands\n    default: op\n")
+                  "    description: Access to LSS admin commands\n    default: op\n"
+                  "  lss.farplayers.hidden:\n    description: hidden\n    default: false\n")
         PY_VSS = (PY_LSS
                   .replace("description: LSS plugin.", "description: VSS plugin.", 1)
                   .replace("plugin/lod-server-support", "plugin/voxy-server-side", 1)
                   .replace("lsslod", "vsslod")
                   .replace("LOD Server Support admin commands", "Voxy Server Side admin commands")
                   .replace("Access to LSS admin commands", "Access to VSS admin commands")
-                  .replace("lss.admin", "vss.admin"))
+                  .replace("lss.admin", "vss.admin")
+            .replace("lss.farplayers.hidden", "vss.farplayers.hidden"))
         BRAND_LSS = ("shortName=LSS\ndisplayName=LOD Server Support\n"
                      "clientCommand=lss\nserverCommand=lsslod\n")
         BRAND_VSS = ("shortName=VSS\ndisplayName=Voxy Server Side\n"

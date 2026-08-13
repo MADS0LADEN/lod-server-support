@@ -268,6 +268,7 @@ class LSSServerCommands {
                 service.getPlayers().values()
         ).withV16Line(service.getV16CompatManager().diagLineOrNull())
                 .withV18Line(service.getDialectTracker().diagLine())
+                .withFarPlayersLine(farPlayersDiagLineOrNull(service))
                 .withXrayLine(xrayDiagLine())
                 .withMoveTraceLine(moveTraceDiagLineOrNull())
                 .withYieldLine(DiagnosticsFormatter.yieldDiagLineOrNull(
@@ -289,5 +290,15 @@ class LSSServerCommands {
     private static String moveTraceDiagLineOrNull() {
         var tracer = dev.vox.lss.trace.MoveDesyncTracer.active();
         return tracer != null ? tracer.diagLine() : null;
+    }
+
+    /** Present ONLY once far players have been touched (a subscriber exists or frames
+     *  were ever sent) — inert servers render nothing, so soak/benchmark diag output is
+     *  byte-unchanged (E1 baseline neutrality). */
+    private static String farPlayersDiagLineOrNull(
+            RequestProcessingService service) {
+        var fp = service.getFarPlayerService();
+        if (fp == null) return null; // partial rigs (mocked service seams)
+        return fp.subscriberCount() > 0 || fp.rosterFramesSent() > 0 ? fp.diagLine() : null;
     }
 }

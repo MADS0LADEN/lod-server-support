@@ -57,6 +57,13 @@ public class RequestProcessingService {
 
     private final DirtyColumnTracker dirtyTracker;
     private final DirtyContentFilter dirtyContentFilter = new DirtyContentFilter();
+    // Far players (E1, FARP §3.2): subscription identity lives HERE (the dialect-tracker
+    // precedent) — subscribed at handshake, dropped only at the network DISCONNECT, and
+    // the dimension-change re-registration path notifies instead of removing. The vanish
+    // bridge seam stays null until the reflective melius-vanish ladder lands (E2/E3).
+    private final dev.vox.lss.common.farplayers.FarPlayerBroadcastService farPlayerService =
+            new dev.vox.lss.common.farplayers.FarPlayerBroadcastService(null);
+    private int farPlayerTickCounter;
     // Compressed-column shipping is live: useCompressedColumns AND the server-side zstd
     // native probe succeeded (latched once in the ctor — plan §0.11). A term of every
     // session's wantsCompressedColumns derivation at registration.
@@ -455,7 +462,61 @@ public class RequestProcessingService {
         this.drainGenerationTicketRequests();
         flushSendQueues(lifecycle.activeCount, config);
         tickDirtyBroadcast(config);
+        tickFarPlayers(config);
         tickDiagnosticsLog(config);
+    }
+
+    /** Far players (E1): one broadcast pass every {@code farPlayersUpdateIntervalTicks}
+     *  while the mode is armed and anyone subscribed. Mode "off" (the E1 compiled
+     *  default) short-circuits before any snapshot work — the inert path is free. */
+    private void tickFarPlayers(LSSServerConfig config) {
+        if ("off".equals(config.farPlayers) || this.farPlayerService.subscriberCount() == 0) {
+            return;
+        }
+        if (++this.farPlayerTickCounter < config.farPlayersUpdateIntervalTicks) return;
+        this.farPlayerTickCounter = 0;
+        try {
+            var online = new java.util.ArrayList<dev.vox.lss.common.farplayers
+                    .FarPlayerBroadcastService.PlayerSnapshot>();
+            for (var p : this.server.getPlayerList().getPlayers()) {
+                online.add(FabricFarPlayerSnapshots.snapshot(p));
+            }
+            this.farPlayerService.tick(System.currentTimeMillis(), online,
+                    new dev.vox.lss.common.farplayers.FarPlayerBroadcastService.Settings(
+                            config.farPlayers, config.farPlayersMaxDistanceBlocks,
+                            config.farPlayersMinDistanceBlocks, config.farPlayersSendSpectators,
+                            config.farPlayersExclude, config.farPlayersUpdateIntervalTicks),
+                    this::sendFarPlayerFrame);
+        } catch (Exception e) {
+            // Containment (review): END_SERVER_TICK has no catch of its own — a
+            // snapshot/encode bug here must degrade far players, never the server tick.
+            if (!this.farPlayerTickErrorWarned) {
+                this.farPlayerTickErrorWarned = true;
+                LSSLogger.error("Far-player broadcast pass failed — contained (once per session)", e);
+            }
+        }
+    }
+
+    private boolean farPlayerTickErrorWarned;
+
+    /** The dedicated far-player send lane (FARP §3.2 — never the column send queue):
+     *  consults channel writability (an unwritable channel WITHHOLDS — the service
+     *  retries next tick) and charges the shared bandwidth governor. */
+    private boolean sendFarPlayerFrame(UUID viewer, String channel, byte[] body) {
+        var player = this.server.getPlayerList().getPlayer(viewer);
+        if (player == null) return false;
+        var snap = FabricChannelPressure.forPlayer(player).snapshot();
+        if (snap.writable() == dev.vox.lss.common.processing.ChannelPressureProbe
+                .Writability.NOT_WRITABLE) {
+            return false;
+        }
+        net.minecraft.network.protocol.common.custom.CustomPacketPayload payload =
+                LSSConstants.CHANNEL_FAR_PLAYER_ROSTER.equals(channel)
+                        ? new dev.vox.lss.networking.payloads.FarPlayerRosterS2CPayload(body)
+                        : new dev.vox.lss.networking.payloads.FarPlayerUpdatesS2CPayload(body);
+        net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking.send(player, payload);
+        this.bandwidthLimiter.recordSend(body.length);
+        return true;
     }
 
     // /lsslod set support (v0.11.0 stage C — the tick-poll pattern): each formerly
@@ -603,6 +664,9 @@ public class RequestProcessingService {
                 int capabilities = state.getCapabilities();
                 removePlayer(player.getUUID());
                 registerPlayer(player, capabilities);
+                // Far players: identity SURVIVES the remove+register cycle (the v18-rung
+                // checklist); the roster does not — a bumped-epoch full roster follows.
+                this.farPlayerService.onViewerDimensionChange(player.getUUID());
                 continue;
             }
 
@@ -1042,6 +1106,10 @@ public class RequestProcessingService {
 
     public WireDialectTracker getDialectTracker() {
         return this.dialects;
+    }
+
+    public dev.vox.lss.common.farplayers.FarPlayerBroadcastService getFarPlayerService() {
+        return this.farPlayerService;
     }
 
     public ChunkDiskReader getDiskReader() {

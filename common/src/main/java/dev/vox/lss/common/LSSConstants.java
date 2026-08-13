@@ -50,6 +50,18 @@ public final class LSSConstants {
      *  input; never needed to decode v20 data. */
     public static final String CHANNEL_CLIENT_INFO = "lss:client_info";
 
+    // Far players (v0.11.0 stage E1, far-player-proxies-plan.md §3.1 as amended by the
+    // mega plan's R-7/R-10): capability-gated additive payloads — the server sends
+    // far-player frames only to sessions that declared CAPABILITY_FAR_PLAYERS, so no
+    // compat rung and no protocol bump. C2S prefs ride the CHANNEL_CLIENT_INFO sidecar
+    // doctrine (legacy servers silently discard unregistered channels; the send is
+    // containment-guarded client-side). Wire is MC-VERSION-NEUTRAL by construction:
+    // equipment/vehicle types cross as identity strings via a per-payload dictionary
+    // (the v20 pattern), never numeric registry ids.
+    public static final String CHANNEL_FAR_PLAYER_PREFS = "lss:far_player_prefs";
+    public static final String CHANNEL_FAR_PLAYER_ROSTER = "lss:far_player_roster";
+    public static final String CHANNEL_FAR_PLAYER_UPDATES = "lss:far_player_updates";
+
     // Time conversion constants
     public static final long NANOS_PER_SECOND = 1_000_000_000L;
     public static final long NANOS_PER_MS = 1_000_000L;
@@ -328,6 +340,12 @@ public final class LSSConstants {
      *  probe succeeds — see the client-side StoreCodec.zstdOrNull holder). The bit carries
      *  ABILITY only; the v19 layout (codec byte present) is version-agreed regardless. */
     public static final int CAPABILITY_ZSTD_COLUMNS = 2;
+    /** Far players (E1): the client wants far-player roster/update frames. The handshake
+     *  gate MASKS unknown bits ({@code HandshakeGate} — the in-repo precedent the FARP
+     *  review verified), so this bit at an older server is silently ignored and the
+     *  session registers normally: no compat rung, no version bump. INERT at E1 — the
+     *  client-side composition compiles the bit OFF until E2 flips the defaults. */
+    public static final int CAPABILITY_FAR_PLAYERS = 4;
 
     // VoxelColumn codec tag values (one wire byte, protocol 19+, after the source tag).
     // Unlike the source tag, unknown values are NOT passed through verbatim client-side:

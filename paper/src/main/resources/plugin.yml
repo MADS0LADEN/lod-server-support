@@ -26,3 +26,8 @@ permissions:
   lss.admin:
     description: Access to LSS admin commands
     default: op
+  # Far players (v0.11.0 E1): server-side privacy lever — holders are never served as
+  # far players regardless of the farPlayers mode (FARP §3.2).
+  lss.farplayers.hidden:
+    description: Players with this permission are never shown as far players
+    default: false

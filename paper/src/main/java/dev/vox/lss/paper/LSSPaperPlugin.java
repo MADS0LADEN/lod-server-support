@@ -133,6 +133,8 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                         LSSPaperPlugin.this, LSSConstants.CHANNEL_CHUNK_REQUEST, LSSPaperPlugin.this);
                 getServer().getMessenger().registerIncomingPluginChannel(
                         LSSPaperPlugin.this, LSSConstants.CHANNEL_CLIENT_INFO, LSSPaperPlugin.this);
+                getServer().getMessenger().registerIncomingPluginChannel(
+                        LSSPaperPlugin.this, LSSConstants.CHANNEL_FAR_PLAYER_PREFS, LSSPaperPlugin.this);
             }
 
             @Override
@@ -226,7 +228,17 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                 data -> handleHandshake(player, nmsPlayer, data),
                 data -> handleBatchChunkRequest(nmsPlayer, data),
                 data -> CLIENT_DATA_VERSIONS.put(nmsPlayer.getUUID(),
-                        PaperPayloadHandler.decodeClientInfo(data)));
+                        PaperPayloadHandler.decodeClientInfo(data)),
+                // Far players (E1): decode on the messenger thread (pure), apply on the
+                // PUMP via the runtime-task queue — drained AFTER the lifecycle mailbox,
+                // so a prefs frame racing its own Register lands post-registration and
+                // the broadcast core's single-threaded contract holds on Folia too.
+                data -> {
+                    var prefs = dev.vox.lss.common.farplayers.FarPlayerWire.decodePrefs(data);
+                    var uuid = nmsPlayer.getUUID();
+                    service.enqueueRuntimeTask(
+                            () -> service.getFarPlayerService().onPrefs(uuid, prefs));
+                });
     }
 
     /** Test seam: a per-channel message handler; hostile-frame decodes may throw. */
@@ -253,12 +265,14 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
     static void dispatchPluginMessage(String channel, String playerName, byte[] message,
                                       PluginMessageHandler handshakeHandler,
                                       PluginMessageHandler chunkRequestHandler,
-                                      PluginMessageHandler clientInfoHandler) {
+                                      PluginMessageHandler clientInfoHandler,
+                                      PluginMessageHandler farPlayerPrefsHandler) {
         try {
             switch (channel) {
                 case LSSConstants.CHANNEL_HANDSHAKE -> handshakeHandler.handle(message);
                 case LSSConstants.CHANNEL_CHUNK_REQUEST -> chunkRequestHandler.handle(message);
                 case LSSConstants.CHANNEL_CLIENT_INFO -> clientInfoHandler.handle(message);
+                case LSSConstants.CHANNEL_FAR_PLAYER_PREFS -> farPlayerPrefsHandler.handle(message);
             }
         } catch (Exception e) {
             long released = hostileFrameLog.recordAndTryAcquire(System.nanoTime() / 1_000_000);

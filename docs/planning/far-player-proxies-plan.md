@@ -2,8 +2,10 @@
 
 **Status: PLANNED, unimplemented** (2026-08-12). Design for rendering distant players
 beyond vanilla entity-tracking range as a native LSS feature — the player-entity
-complement to LOD terrain. Informed by a full source read of SeeU 0.7.3 (clone at the
-session scratchpad; upstream https://github.com/cat4blep/SeeU) and a live compat test
+complement to LOD terrain. Informed by a full source read of SeeU 0.7.3 (vendored at
+`research/seeu/`, commit `8d79f9a` = the 0.7.3 version bump, upstream
+https://github.com/cat4blep/SeeU — the `research/voxy` gitignored-checkout
+precedent, re-cloned at E1 per the mega plan's prerequisite) and a live compat test
 on the LSS rig (2026-08-12: both mods coexist cleanly — so this feature competes on
 merit, not necessity; shipping it must also play nice with SeeU installed, see §6).
 
@@ -336,7 +338,10 @@ system).
   like every LSS compat surface).
 - 26.2's `LevelRenderContext`/submit API is what SeeU targets today; MC rendering
   APIs churn per version — the renderer needs the same per-MC-line porting budget as
-  the rest of the client (support-line backports likely skip Phase B initially).
+  the rest of the client. **SUPERSEDED (mega plan R-7 v1.4, §6.1 pair — this pointer
+  edit rides E1's PR): far players ship on ALL THREE lines**, backed by the measured
+  SeeU per-line diffs (26.2→26.1.2 = 6 lines; 26.2→1.21.11 = 60/43 lines of symbol
+  renames, same render architecture); "backports likely skip Phase B" no longer holds.
 - Folia cross-region position reads from the pump are stale-tolerant by design
   (positions are plain fields; a 1-tick-stale snapshot is invisible at 500 ms
   cadence) — document rather than synchronize, matching the Folia experimental

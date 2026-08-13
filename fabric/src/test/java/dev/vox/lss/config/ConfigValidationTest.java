@@ -552,7 +552,9 @@ class ConfigValidationTest {
                         // maxConcurrentDiskReads is the same shape (store-conditional
                         // AUTO — disk-read-concurrency-gate-plan.md).
                         "diskReaderThreads", "perDimensionTimestampCacheSizeMB",
-                        "maxConcurrentDiskReads" -> 0;
+                        "maxConcurrentDiskReads",
+                        // 0 = no inner ring (the default) — E1 far players.
+                        "farPlayersMinDistanceBlocks" -> 0;
                 case "xrayMaxBlockHeight" -> LSSConstants.MIN_XRAY_MAX_BLOCK_HEIGHT;
                 default -> 1;
             };
@@ -897,4 +899,36 @@ class ConfigValidationTest {
                 "validate clamps nonzero to the shared ceiling; the pool clamp is at derivation");
     }
 
+
+    /** Far players (E1): the mode normalizes through the shared helper (unknown -> off,
+     *  the inert compiled default), and the min ring drags under the CONFIGURED max —
+     *  the cross-field rule the table sweeps cannot express (an inverted ring would
+     *  hide everyone). */
+    @Test
+    void farPlayersModeNormalizesAndMinRingDragsUnderTheConfiguredMax() {
+        var c = serverConfig();
+        assertEquals("off", c.farPlayers, "E1 ships INERT — the compiled default is off");
+        c.farPlayers = "ON";
+        c.validate();
+        assertEquals("on", c.farPlayers, "case-insensitive canonical spelling");
+        c.farPlayers = "optin";
+        c.validate();
+        assertEquals("opt-in", c.farPlayers, "alias spellings normalize");
+        c.farPlayers = "banana";
+        c.validate();
+        assertEquals("off", c.farPlayers, "unknown modes fail SAFE to off");
+        c.farPlayers = null;
+        c.validate();
+        assertEquals("off", c.farPlayers);
+
+        c.farPlayersMaxDistanceBlocks = 1024;
+        c.farPlayersMinDistanceBlocks = 9000;
+        c.validate();
+        assertEquals(1024, c.farPlayersMinDistanceBlocks,
+                "min drags under the configured max — never an inverted ring");
+        c.farPlayersExclude = null;
+        c.validate();
+        assertEquals(java.util.List.of(), c.farPlayersExclude,
+                "a malformed null exclude list restores the empty default");
+    }
 }

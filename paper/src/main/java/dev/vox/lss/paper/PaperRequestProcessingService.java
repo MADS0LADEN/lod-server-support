@@ -63,6 +63,14 @@ public class PaperRequestProcessingService {
     // shim). Marked ONLY on the pump (the dialectFlip runnable) — see
     // docs/planning/v18-compat-design.md §2.3.
     private final WireDialectTracker dialects = new WireDialectTracker();
+    // Far players (E1, FARP §3.2): subscription identity at the service level (the
+    // dialect-tracker precedent) — subscribed on the PUMP in the Register drain (after
+    // the dialectFlip, so the CURRENT-dialect gate reads post-flip state), dropped at
+    // the quit-originated mailbox Remove, notified (never removed) on dimension change.
+    // Vanish bridge seam null until the reflective ladder lands (E2/E3).
+    private final dev.vox.lss.common.farplayers.FarPlayerBroadcastService farPlayerService =
+            new dev.vox.lss.common.farplayers.FarPlayerBroadcastService(null);
+    private int farPlayerTickCounter;
 
     private final long startTimeNanos = System.nanoTime();
     // Keyed by the lightweight ResourceKey (not ServerLevel): a ServerLevel key strongly
@@ -708,6 +716,20 @@ public class PaperRequestProcessingService {
                         r.beforeRegister().run();
                         try {
                             registerPlayer(r.player(), r.capabilities());
+                            // Far players: post-flip, so the CURRENT-dialect gate is
+                            // reliable (legacy layouts predate the capability bit).
+                            if ((r.capabilities() & LSSConstants.CAPABILITY_FAR_PLAYERS) != 0
+                                    && !this.dialects.isV16(r.player().getUUID())
+                                    && !this.dialects.isV18(r.player().getUUID())
+                                    && !this.dialects.isV19(r.player().getUUID())) {
+                                this.farPlayerService.subscribeViewer(r.player().getUUID());
+                            } else {
+                                // Re-handshake without the bit / on a legacy dialect
+                                // sheds any prior subscription (review: a same-session
+                                // downgrade must not keep streaming far-player frames
+                                // to a decoder that no longer expects them).
+                                this.farPlayerService.removeViewer(r.player().getUUID());
+                            }
                         } finally {
                             if (this.players.containsKey(r.player().getUUID())) {
                                 // State exists from this line on — the deferred SessionConfig
@@ -726,6 +748,7 @@ public class PaperRequestProcessingService {
                         // the network-disconnect semantics and cannot break the
                         // identity-survives-dim-change contract.
                         this.dialects.onDisconnect(r.uuid());
+                        this.farPlayerService.removeViewer(r.uuid());
                     }
                 }
             } catch (Exception e) {
@@ -978,6 +1001,10 @@ public class PaperRequestProcessingService {
                 // sweep was the one removal path that leaked it).
                 this.dialects.onDisconnect(uuid);
                 this.v16Compat.onDisconnect(uuid);
+                // E1 review M1: the sweep must shed the far-player subscription like
+                // the other two identities, or a swept viewer's roster state leaks and
+                // keeps charging the broadcast loop until a same-UUID rejoin.
+                this.farPlayerService.removeViewer(uuid);
             }
         }
 
@@ -992,6 +1019,7 @@ public class PaperRequestProcessingService {
         this.drainGenerationTicketRequests();
         flushSendQueues(lifecycle.activeCount);
         this.dirtyBroadcaster.tick(this.config);
+        tickFarPlayers();
         tickDiagnosticsLog();
     }
 
@@ -1076,6 +1104,9 @@ public class PaperRequestProcessingService {
                 int capabilities = state.getCapabilities();
                 removePlayer(changed.getUUID());
                 registerPlayer(changed, capabilities);
+                // Far players: identity SURVIVES the cycle (v18-rung checklist); the
+                // roster does not — a bumped-epoch full roster follows.
+                this.farPlayerService.onViewerDimensionChange(changed.getUUID());
                 continue;
             }
 
@@ -1386,6 +1417,72 @@ public class PaperRequestProcessingService {
 
     public V16CompatManager getV16CompatManager() {
         return this.v16Compat;
+    }
+
+    /** Far players (E1): one broadcast pass every farPlayersUpdateIntervalTicks while
+     *  armed and subscribed — mode "off" (the E1 compiled default) short-circuits
+     *  before any snapshot work. Pump thread (Folia: cross-region position/equipment
+     *  reads are stale-tolerant by design — accepted for display-only data, the
+     *  experimental label covers it). */
+    private void tickFarPlayers() {
+        if ("off".equals(this.config.farPlayers)
+                || this.farPlayerService.subscriberCount() == 0) {
+            return;
+        }
+        if (++this.farPlayerTickCounter < this.config.farPlayersUpdateIntervalTicks) return;
+        this.farPlayerTickCounter = 0;
+        try {
+            var online = new java.util.ArrayList<dev.vox.lss.common.farplayers
+                    .FarPlayerBroadcastService.PlayerSnapshot>();
+            for (var p : this.server.getPlayerList().getPlayers()) {
+                online.add(PaperFarPlayerSnapshots.snapshot(p));
+            }
+            this.farPlayerService.tick(System.currentTimeMillis(), online,
+                    new dev.vox.lss.common.farplayers.FarPlayerBroadcastService.Settings(
+                            this.config.farPlayers, this.config.farPlayersMaxDistanceBlocks,
+                            this.config.farPlayersMinDistanceBlocks,
+                            this.config.farPlayersSendSpectators,
+                            this.config.farPlayersExclude,
+                            this.config.farPlayersUpdateIntervalTicks),
+                    this::sendFarPlayerFrame);
+        } catch (Exception e) {
+            // Containment (review): a snapshot/encode bug must degrade far players,
+            // never the pump tick (which owns lifecycle + column serving).
+            if (!this.farPlayerTickErrorWarned) {
+                this.farPlayerTickErrorWarned = true;
+                LSSLogger.error("Far-player broadcast pass failed — contained (once per session)", e);
+            }
+        }
+    }
+
+    private boolean farPlayerTickErrorWarned;
+
+    /** The dedicated far-player send lane — twin of the Fabric sender: writability
+     *  consult (NOT_WRITABLE withholds) + bandwidth governor charge; NMS DiscardedPayload
+     *  (no outgoing Bukkit registration needed — the FARP §3.1 doctrine). */
+    private boolean sendFarPlayerFrame(UUID viewer, String channel, byte[] body) {
+        var player = this.server.getPlayerList().getPlayer(viewer);
+        if (player == null || player.connection == null) return false;
+        var snap = PaperChannelPressure.forPlayer(player).snapshot();
+        if (snap.writable() == dev.vox.lss.common.processing.ChannelPressureProbe
+                .Writability.NOT_WRITABLE) {
+            return false;
+        }
+        player.connection.send(new net.minecraft.network.protocol.common.ClientboundCustomPayloadPacket(
+                new net.minecraft.network.protocol.common.custom.DiscardedPayload(
+                        FAR_PLAYER_CHANNEL_IDS.computeIfAbsent(channel,
+                                net.minecraft.resources.Identifier::parse), body)));
+        this.bandwidthLimiter.recordSend(body.length);
+        return true;
+    }
+
+    // Two entries ever (roster + updates) — parse once, not per frame (review NIT).
+    private static final java.util.concurrent.ConcurrentHashMap<String,
+            net.minecraft.resources.Identifier> FAR_PLAYER_CHANNEL_IDS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    public dev.vox.lss.common.farplayers.FarPlayerBroadcastService getFarPlayerService() {
+        return this.farPlayerService;
     }
 
     public WireDialectTracker getDialectTracker() {

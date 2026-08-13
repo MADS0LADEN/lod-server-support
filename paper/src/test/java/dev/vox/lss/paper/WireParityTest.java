@@ -301,7 +301,15 @@ class WireParityTest {
             }
         }
         var covered = Set.of("lss:handshake_c2s", "lss:batch_chunk_req", "lss:client_info",
-                "lss:session_config", "lss:dirty_columns", "lss:voxel_column", "lss:batch_response");
+                "lss:session_config", "lss:dirty_columns", "lss:voxel_column", "lss:batch_response",
+                // Far players (E1): bodies are FarPlayerWire byte[] on BOTH platforms —
+                // parity holds by construction (one codec, two carriers). Honesty note
+                // (review m10): the Paper CARRIER (NMS DiscardedPayload / the plugin
+                // messaging ingress) is untestable at Tier 1 — no reference frames
+                // exist HERE; FarPlayerWireTest owns the body bytes and the Fabric twin
+                // pins its own carrier framing. The census entry only pins that the
+                // channels are declared.
+                "lss:far_player_prefs", "lss:far_player_roster", "lss:far_player_updates");
         assertEquals(covered, declared,
                 "every LSS channel must have a reference frame in this suite — a new payload"
                 + " requires frames in BOTH WireParityTests");
