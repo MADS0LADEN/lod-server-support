@@ -15,10 +15,10 @@ import net.minecraft.world.entity.player.Player;
  */
 final class PaperFarPlayerSnapshots {
 
-    // Pose flag bits (the SeeU trio, FarPlayerWire.UpdateEntry.poseFlags).
-    static final byte POSE_SNEAK = 1;
-    static final byte POSE_GLIDE = 2;
-    static final byte POSE_SWIM = 4;
+    // Pose flag bits live in FarPlayerWire (shared with the E2 renderer).
+    static final byte POSE_SNEAK = FarPlayerWire.POSE_SNEAK;
+    static final byte POSE_GLIDE = FarPlayerWire.POSE_GLIDE;
+    static final byte POSE_SWIM = FarPlayerWire.POSE_SWIM;
 
     private static final EquipmentSlot[] WIRE_SLOTS = {
             EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS,
@@ -59,7 +59,12 @@ final class PaperFarPlayerSnapshots {
                     FarPlayerWire.angleToByte(v.getXRot()));
         }
 
-        var delta = p.getDeltaMovement(); // blocks/tick -> blocks/second
+        // getKnownMovement, NOT getDeltaMovement (E2 review M1): player motion is
+        // client-authoritative — ServerPlayer.deltaMovement carries knockback and
+        // little else, so the hint would read ~0 for an elytra player at 40 b/s and
+        // extrapolation would ship inert. ServerPlayer overrides getKnownMovement to
+        // return the move-packet-reported motion (and the vehicle's when ridden).
+        var delta = p.getKnownMovement(); // blocks/tick -> blocks/second
         return new FarPlayerBroadcastService.PlayerSnapshot(
                 p.getUUID(), p.getName().getString(),
                 p.level().dimension().identifier().toString(),
@@ -73,8 +78,38 @@ final class PaperFarPlayerSnapshots {
                 // per-player privacy lever the exclude LIST can't express for LuckPerms
                 // groups. Read on the pump via the Bukkit entity (thread-fine: Folia
                 // permission reads are region-safe for online players).
-                p.getBukkitEntity().hasPermission("lss.farplayers.hidden"),
+                // OR the vanish bridge (E2, decisions log entry 5 — landed WITH the
+                // default flip): SuperVanish/PremiumVanish/EssentialsX all publish the
+                // "vanished" metadata key; a vanished staff member must not leak a
+                // position through the LOD view. Pair-wise Player#hideEntity remains
+                // uncovered (documented: per-viewer filtering would break the
+                // once-per-tick snapshot inversion) — target-level vanish is the
+                // staff-invisibility case.
+                p.getBukkitEntity().hasPermission("lss.farplayers.hidden")
+                        || isVanished(p.getBukkitEntity()),
                 hash, equipmentIds, equipmentCounts, vehicle);
+    }
+
+    private static volatile boolean vanishReadWarned;
+
+    private static boolean isVanished(org.bukkit.entity.Player bukkit) {
+        try {
+            for (var meta : bukkit.getMetadata("vanished")) {
+                if (meta.asBoolean()) return true;
+            }
+        } catch (Exception e) {
+            // Fail OPEN (throw -> not-vanished): fail-closed would mass-hide players
+            // on any broken plugin. But a silently dead privacy lever violates the
+            // once-bounded-logging convention (E2 review m-4) — warn once per JVM.
+            if (!vanishReadWarned) {
+                vanishReadWarned = true;
+                dev.vox.lss.common.LSSLogger.warn(
+                        "Vanish metadata read failed — vanish detection degraded for this"
+                                + " session; the lss.farplayers.hidden permission and"
+                                + " farPlayersExclude still apply (" + e + ")");
+            }
+        }
+        return false;
     }
 
     private PaperFarPlayerSnapshots() {}

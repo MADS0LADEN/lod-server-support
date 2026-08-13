@@ -1420,7 +1420,7 @@ public class PaperRequestProcessingService {
     }
 
     /** Far players (E1): one broadcast pass every farPlayersUpdateIntervalTicks while
-     *  armed and subscribed — mode "off" (the E1 compiled default) short-circuits
+     *  armed and subscribed — mode "off" short-circuits
      *  before any snapshot work. Pump thread (Folia: cross-region position/equipment
      *  reads are stale-tolerant by design — accepted for display-only data, the
      *  experimental label covers it). */

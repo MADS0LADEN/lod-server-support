@@ -120,6 +120,19 @@ installs the built LSS jars (Folia gets the same Paper plugin jar), and stages
 offline-mode config under `test-server/<platform>/`. For joining with a real client and
 eyeballing LOD behavior — the automated gates are the test tiers and the soak harness above.
 
+### The SoakPlayer dummy rig (far-player live gates)
+
+`./gradlew :fabric:runSoakClient -Psoak.server=localhost:25564` launches the headless
+soak client as a **far-player TARGET dummy**: its `-Dlss.soak=true` property-gates the
+far-player capability bit OFF (it never becomes a viewer and never shifts baselines),
+but its player entity is an ordinary target the real GUI clients can see as a proxy.
+Stable name `SoakPlayer` (pinned via `--username` — rejoins keep identity/playerdata).
+`-Psoak.server` defaults to `localhost:25565` (the harness port), so soak.sh behavior
+is unchanged; point it at the test-server.sh Fabric server (`:25564`) for live-gate
+sessions. The E2/E3 live gates use TWO real GUI clients + this dummy (elytra
+extrapolation, tracking-boundary handoff, vanish/spectator via RCON, the mounted
+scenario) — user-scheduled, tracked on the manual-verification checklist.
+
 ## Architecture
 
 ### Entry Points

@@ -81,22 +81,35 @@ public class LSSClientConfig extends JsonConfig {
     // bit-identical to pre-cap behavior.
     public int lodColumnsPerSecondLimit = 0;
 
-    // ---- Far players (v0.11.0 stage E1, FARP §3.3 — INERT until E2 arms the client
+    // ---- Far players (v0.11.0, FARP §3.3 — ARMED since E2 via the client
     // ---- capability bit; these keys exist so upgrading users can pre-configure).
 
-    /** Receive far-player proxies (the capability bit's config term). E1 ships the bit
-     *  compiled OFF regardless; E2 arms it. */
+    /** Receive far-player proxies (the RENDERER's master toggle). Deliberately NOT a
+     *  term of the capability bit (E2 review M2): the subscription doubles as the
+     *  prefs carrier for the shareSelf opt-out, so a disabled viewer still
+     *  subscribes — it just renders nothing and the server skips serving it. */
     public boolean farPlayersEnabled = true;
     /** Client-side visibility ring overrides in blocks (0 = server-controlled). */
     public int farPlayersMaxDistanceBlocks = 0;
     public int farPlayersMinDistanceBlocks = 0;
     /** Render name tags over proxies (consumed by the E2 renderer). */
     public boolean farPlayersNameTags = true;
-    /** Allow OTHER players to see me as a far player (target-side privacy — the server
-     *  honors it in every mode; opt-in mode REQUIRES it). */
+    /** Share my position with other players' LOD view (target-side privacy — the
+     *  server honors it in every mode; opt-in mode REQUIRES it). Default TRUE was
+     *  consciously CONFIRMED at the E2 defaults flip (decisions log 2026-08-13):
+     *  the server's mode/exclude/permission levers own the policy, and a false
+     *  default would hide modded players while vanilla players stay visible —
+     *  the inverted outcome. */
     public boolean farPlayersShareSelf = true;
     /** Cap the distance others may see me at, blocks (0 = no extra cap). */
     public int farPlayersShareDistanceBlocks = 0;
+    /** Renderer cap in blocks (0 = follow the server ring). The fog-alignment knob:
+     *  LSS ships NO fog mixin — align this with your fog if proxies fading at the
+     *  horizon bothers you (FARP §3.3 fog stance). */
+    public int farPlayersMaxRenderDistanceBlocks = 0;
+    /** Walk-animation distance cap in blocks (0 = never animate; animation beyond
+     *  ~a few hundred blocks is invisible sub-pixel work). */
+    public int farPlayersMaxAnimationDistanceBlocks = 256;
 
     @Override
     protected String getFileName() {
@@ -133,6 +146,8 @@ public class LSSClientConfig extends JsonConfig {
         farPlayersMinDistanceBlocks = Math.clamp(farPlayersMinDistanceBlocks, 0,
                 farPlayersMaxDistanceBlocks > 0 ? farPlayersMaxDistanceBlocks : 16384);
         farPlayersShareDistanceBlocks = Math.clamp(farPlayersShareDistanceBlocks, 0, 16384);
+        farPlayersMaxRenderDistanceBlocks = Math.clamp(farPlayersMaxRenderDistanceBlocks, 0, 16384);
+        farPlayersMaxAnimationDistanceBlocks = Math.clamp(farPlayersMaxAnimationDistanceBlocks, 0, 16384);
         if (lodColumnsPerSecondLimit <= 0) {
             lodColumnsPerSecondLimit = 0;
         } else {

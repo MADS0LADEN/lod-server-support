@@ -87,7 +87,72 @@ public class LSSConfigMenu implements ConfigEntryPoint {
         rateGroup.addOption(rateOption);
         page.addOptionGroup(rateGroup);
 
+        // ---- Far players (E2, FARP §3.3): its own page — a distinct feature with
+        //      its own privacy semantics, not another LOD slider ----
+        // Save handler for far-player options: persist AND push the prefs NOW (E2
+        // review M2/m4 — a mid-session "Share My Position" flip must not wait for a
+        // rejoin; maybeSendPrefs's changed-guard makes redundant calls free).
+        StorageEventHandler fpSave = () -> {
+            cfg.save();
+            dev.vox.lss.networking.client.FarPlayerClientSupport.onClientConfigChanged();
+        };
+        var fpPage = builder.createOptionPage();
+        fpPage.setName(Component.translatable("lss.config.far_players.page"));
+
+        var fpGroup = builder.createOptionGroup();
+        var fpEnabled = builder.createBooleanOption(Identifier.parse("lss:far_players_enabled"));
+        fpEnabled.setName(Component.translatable("lss.config.far_players_enabled"));
+        fpEnabled.setTooltip(Component.translatable("lss.config.far_players_enabled.tooltip"));
+        fpEnabled.setImpact(OptionImpact.LOW);
+        fpEnabled.setDefaultValue(true);
+        fpEnabled.setBinding(v -> cfg.farPlayersEnabled = v, () -> cfg.farPlayersEnabled);
+        fpEnabled.setStorageHandler(fpSave);
+        fpGroup.addOption(fpEnabled);
+
+        var fpDep = new Identifier[]{Identifier.parse("lss:far_players_enabled")};
+
+        // "Share your position with other players' LOD view" — the E2 defaults
+        // decision's wording obligation (decisions log 2026-08-13): plain words, no
+        // jargon, because default-true at server-default-on means installing = sharing.
+        var fpShare = builder.createBooleanOption(Identifier.parse("lss:far_players_share_self"));
+        fpShare.setName(Component.translatable("lss.config.far_players_share_self"));
+        fpShare.setTooltip(Component.translatable("lss.config.far_players_share_self.tooltip"));
+        fpShare.setImpact(OptionImpact.LOW);
+        fpShare.setDefaultValue(true);
+        fpShare.setBinding(v -> cfg.farPlayersShareSelf = v, () -> cfg.farPlayersShareSelf);
+        fpShare.setStorageHandler(fpSave);
+        fpGroup.addOption(fpShare);
+
+        var fpTags = builder.createBooleanOption(Identifier.parse("lss:far_players_name_tags"));
+        fpTags.setName(Component.translatable("lss.config.far_players_name_tags"));
+        fpTags.setTooltip(Component.translatable("lss.config.far_players_name_tags.tooltip"));
+        fpTags.setImpact(OptionImpact.LOW);
+        fpTags.setDefaultValue(true);
+        fpTags.setBinding(v -> cfg.farPlayersNameTags = v, () -> cfg.farPlayersNameTags);
+        fpTags.setStorageHandler(fpSave);
+        fpTags.setEnabledProvider(s -> s.readBooleanOption(fpDep[0]), fpDep);
+        fpGroup.addOption(fpTags);
+
+        var fpRender = builder.createIntegerOption(Identifier.parse("lss:far_players_render_distance"));
+        fpRender.setName(Component.translatable("lss.config.far_players_render_distance"));
+        fpRender.setTooltip(Component.translatable("lss.config.far_players_render_distance.tooltip"));
+        fpRender.setImpact(OptionImpact.LOW);
+        fpRender.setDefaultValue(0);
+        fpRender.setRange(new Range(0, 16384, 128));
+        fpRender.setValueFormatter(v -> v == 0
+                ? Component.translatable("lss.config.far_players_render_distance.server")
+                : Component.literal(Integer.toString(v)));
+        fpRender.setBinding(v -> cfg.farPlayersMaxRenderDistanceBlocks = v,
+                () -> cfg.farPlayersMaxRenderDistanceBlocks);
+        fpRender.setStorageHandler(fpSave);
+        fpRender.setEnabledProvider(s -> s.readBooleanOption(fpDep[0]), fpDep);
+        fpGroup.addOption(fpRender);
+
+        fpPage.addOptionGroup(fpGroup);
+
+        // Main LSS page first (n12) — far players is the secondary page.
         mod.addPage(page);
+        mod.addPage(fpPage);
     }
 
     /** The descriptor's `icon` path as a resource Identifier ("assets/&lt;ns&gt;/&lt;path&gt;" →

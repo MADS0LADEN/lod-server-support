@@ -9,10 +9,10 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 
 /**
  * The client half of far players, phase A (E1, FARP §3.3 — tracker + prefs, no
- * rendering). SHIPS INERT: {@link #CLIENT_ARMED} is compiled {@code false}, so the
- * capability bit is never sent and every path below is dead until E2 flips it (the
- * v0.10.0 transport-yield default-FALSE pattern — E1's inert shipping deliberately
- * overrides FARP §3.3's "active from Phase A" wording, per the mega plan's E1 row).
+ * rendering at E1; the E2 renderer consumes the tracker). ARMED since E2 (the
+ * defaults flip, user decision 2026-08-12): the capability bit composes when the
+ * config enables it and the soak/benchmark property gate passes. E1 shipped this
+ * compiled false (the v0.10.0 transport-yield default-FALSE pattern).
  *
  * <p>R-5 (decided at E1): the tracker lives HERE, outside the request-manager
  * lifecycle — a mid-session SessionConfig re-push (stage C's {@code /lsslod set})
@@ -22,9 +22,9 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
  */
 public final class FarPlayerClientSupport {
 
-    /** E2 flips this to true (with the defaults decision); until then the bit is never
-     *  composed and the prefs sender never fires. Package-visible for the pin test. */
-    static final boolean CLIENT_ARMED = false;
+    /** Flipped true at E2 (the defaults decision — E1 shipped false/inert).
+     *  Package-visible for the pin test. */
+    static final boolean CLIENT_ARMED = true;
 
     private static final FarPlayerClientTracker TRACKER = new FarPlayerClientTracker();
     private static volatile FarPlayerWire.Prefs lastSentPrefs;
@@ -32,17 +32,39 @@ public final class FarPlayerClientSupport {
     /** The handshake-composition term. The soak/benchmark property gate (FARP §3.3):
      *  those clients are full Loom clients distinguished only by the system
      *  properties — without the explicit check they would subscribe and shift soak
-     *  baselines. */
+     *  baselines. DELIBERATELY independent of {@code farPlayersEnabled} (E2 review
+     *  M2, both reviewers): the subscription is the PREFS CARRIER — a client whose
+     *  master toggle is off but whose shareSelf opt-out is set must still deliver
+     *  that opt-out, and the server already skips serving disabled subscribers
+     *  before any frame work. Coupling the bit to `enabled` made "turn everything
+     *  off" strand the opt-out: MORE visible, not less. */
     public static int capabilityBit() {
-        return capabilityBitFor(CLIENT_ARMED, LSSClientConfig.CONFIG.farPlayersEnabled,
+        return capabilityBitFor(CLIENT_ARMED,
                 Boolean.getBoolean("lss.soak"), Boolean.getBoolean("lss.benchmark"));
     }
 
     /** Pure form for the Tier 1 property-gate pin. */
-    static int capabilityBitFor(boolean armed, boolean enabled, boolean soakJvm,
-                                boolean benchmarkJvm) {
-        if (!armed || !enabled || soakJvm || benchmarkJvm) return 0;
+    static int capabilityBitFor(boolean armed, boolean soakJvm, boolean benchmarkJvm) {
+        if (!armed || soakJvm || benchmarkJvm) return 0;
         return LSSConstants.CAPABILITY_FAR_PLAYERS;
+    }
+
+    /**
+     * Called by the Sodium screen's storage handler for the far-player options (E2
+     * review m4): a mid-session "Share My Position" flip must reach the server NOW,
+     * not on the next rejoin — maybeSendPrefs's changed-guard makes this free when
+     * nothing changed. Sessions that never handshook (receiveServerLods off, no LOD
+     * consumer) have no channel to send on; the tooltip documents that residue.
+     */
+    public static void onClientConfigChanged() {
+        maybeSendPrefs();
+    }
+
+    /** Monotonic millis for motion state (E2 review m6): wall clock steps freeze or
+     *  teleport every proxy; nanoTime is the SeeU-proven source. All motion writers
+     *  and samplers must use THIS. */
+    public static long monotonicMillis() {
+        return System.nanoTime() / 1_000_000L;
     }
 
     /**
@@ -80,7 +102,7 @@ public final class FarPlayerClientSupport {
     /** Updates frame, main client thread. */
     static void onUpdatesFrame(byte[] body) {
         try {
-            TRACKER.onUpdates(FarPlayerWire.decodeUpdates(body), System.currentTimeMillis());
+            TRACKER.onUpdates(FarPlayerWire.decodeUpdates(body), monotonicMillis());
         } catch (Exception e) {
             LSSLogger.warn("Malformed far-player updates frame — ignored (" + e + ")");
         }
@@ -97,10 +119,32 @@ public final class FarPlayerClientSupport {
         lastSentPrefs = null;
     }
 
-    /** Disconnect: the tracker + the prefs-sent latch die with the connection. */
+    /** Disconnect: the tracker + the prefs-sent latch + the renderer's proxy set die
+     *  with the connection. */
     static void onSessionEnd() {
         TRACKER.clear();
         lastSentPrefs = null;
+        FarPlayerRenderer.clearInstance();
+    }
+
+    /**
+     * E2 renderer wiring, called once from {@link dev.vox.lss.LSSClient}: the
+     * COLLECT_SUBMITS pass (contained — a renderer bug degrades to no proxies) plus
+     * the ENTITY_LOAD edge trigger (a real player entity appearing kills its proxy the
+     * same frame — the crossfade guard; UNLOAD needs no hook, the per-frame
+     * real-present conjunct picks it up next pass).
+     */
+    public static void initRenderer() {
+        var renderer = new FarPlayerRenderer();
+        FarPlayerRenderer.install(renderer);
+        net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents
+                .COLLECT_SUBMITS.register(renderer::render);
+        net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientEntityEvents
+                .ENTITY_LOAD.register((entity, world) -> {
+                    if (entity instanceof net.minecraft.world.entity.player.Player p) {
+                        FarPlayerRenderer.onRealPlayerLoad(p.getUUID());
+                    }
+                });
     }
 
     /**

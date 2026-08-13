@@ -168,7 +168,10 @@ loom {
             vmArg "-Dlss.soak.clientActionAt=${findProperty('soak.clientActionAt') ?: ''}"
             vmArg "-Dlss.soak.dialect=${findProperty('soak.dialect') ?: ''}"
             programArg "--quickPlayMultiplayer"
-            programArg "localhost:25565"
+            // Overridable so the same task doubles as the FARP live-gate dummy against
+            // a test-server.sh instance (harness runs keep the default and are
+            // byte-unchanged): -Psoak.server=localhost:25564
+            programArg "${findProperty('soak.server') ?: 'localhost:25565'}"
         }
     }
 }
