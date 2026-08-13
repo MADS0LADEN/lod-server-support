@@ -124,14 +124,24 @@ public abstract class AbstractPlayerRequestState<T> {
     public static final long AUTO_CEILING_DISARM_BYTES = 2L * 1024 * 1024;
     /** Floor: below this a ceiling is meaninglessly small (one payload's headroom). */
     public static final long AUTO_CEILING_FLOOR_BYTES = 64L * 1024;
-    /** EWMA time constant ~2 s: fast enough to track a degrading link within seconds,
-     *  slow enough that one stalled tick does not collapse the ceiling. */
-    static final double AUTO_CEILING_EWMA_TAU_NANOS = 2_000_000_000.0;
+    /** Windowed-MEDIAN estimator (round 4 — the kernel-absorption finding): the ring
+     *  holds the last N valid pure-drain rate samples; the derived rate is their
+     *  median. An EWMA was falsified live TWICE: netty's pending gauge measures drain
+     *  into the KERNEL socket buffer, not the network — right after each burst window
+     *  the kernel has room and absorbs hundreds of KB at memory speed, so a minority
+     *  of hold-tick samples read 10-30 MB/s and any mean-family estimator integrates
+     *  them into a permanent multi-MB/s bias (measured: ceil=1.2-1.5 MB on a
+     *  500 KB/s link across two builds). The median ignores a bounded minority of
+     *  arbitrarily-large spikes: most hold ticks drain at true network pace. */
+    static final int AUTO_CEILING_RING_SIZE = 41;
+    /** Samples needed before AUTO arms (~0.75 s of hold ticks). */
+    static final int AUTO_CEILING_RING_MIN = 15;
     private long ceilPendingPrev = -1;       // -1 = poisoned/no valid previous read
     private long ceilWireWrittenSinceProbe;  // reset at every probe read
     private long ceilLastProbeNanos;         // 0 = never probed
-    private double ceilDrainEwmaBytesPerSec;
-    private boolean ceilTrained;             // a genuine 0-rate sample still trains
+    private final double[] ceilRateRing = new double[AUTO_CEILING_RING_SIZE];
+    private int ceilRingCount;               // total inserted (capped at ring size)
+    private int ceilRingIdx;
     private int autoCeilingHeldTicks;        // consecutive whole-tick AUTO holds
     /** Rendered `ceil=` gauge: -1 = off (untrained, disarmed, or AUTO not in use). */
     private volatile long autoCeilingGauge = -1;
@@ -169,11 +179,12 @@ public abstract class AbstractPlayerRequestState<T> {
      *
      * <p>UP-recovery (pure-drain sampling alone cannot observe an IMPROVED link — a
      * converged flush writes every tick): {@link #AUTO_CEILING_UP_STREAK_TICKS}
-     * consecutive intervals of "wrote ≥ 32 KB and the gauge still reads ≤ 4 KB" double
-     * the EWMA — bounded probing whose overshoot is corrected within one hold tick's
-     * real sample, climbing a genuinely-fast link to the disarm threshold in a few
-     * seconds. Visibility lag cannot sustain the streak (~2 s of consistently-empty
-     * reads after MB-scale writes is genuine drain, not a millisecond hand-off).
+     * consecutive intervals of "wrote ≥ 32 KB and the gauge still reads ≤ 4 KB"
+     * CLEAR the sample ring — a graceful retrain: a genuinely improved link
+     * re-learns its true rate (or stays inert if it never queues again — correct),
+     * a false streak retrains right back within a second of holds. Visibility lag
+     * cannot sustain the streak (~2 s of consistently-empty reads after MB-scale
+     * writes is genuine drain, not a millisecond hand-off).
      * Returns the derived ceiling in bytes, or -1 when AUTO is disarmed/untrained.
      */
     private long updateDrainEstimatorAndDeriveCeiling(long pendingNow) {
@@ -188,34 +199,32 @@ public abstract class AbstractPlayerRequestState<T> {
         if (probedBefore && dtNanos > 0 && pendingNow >= 0) {
             if (written == 0 && prev > 0) {
                 // Pure-drain sample: the only interval shape whose arithmetic the async
-                // write hand-off cannot corrupt.
+                // write hand-off cannot corrupt. Kernel-absorption spikes still land
+                // here as a bounded minority — the MEDIAN below ignores them.
                 long drained = prev - pendingNow;
                 if (drained >= 0) {
-                    double rate = drained * 1e9 / dtNanos;
-                    if (!this.ceilTrained) {
-                        this.ceilDrainEwmaBytesPerSec = rate;
-                        this.ceilTrained = true;
-                    } else {
-                        double alpha = 1 - Math.exp(-dtNanos / AUTO_CEILING_EWMA_TAU_NANOS);
-                        this.ceilDrainEwmaBytesPerSec =
-                                alpha * rate + (1 - alpha) * this.ceilDrainEwmaBytesPerSec;
-                    }
+                    this.ceilRateRing[this.ceilRingIdx] = drained * 1e9 / dtNanos;
+                    this.ceilRingIdx = (this.ceilRingIdx + 1) % AUTO_CEILING_RING_SIZE;
+                    if (this.ceilRingCount < AUTO_CEILING_RING_SIZE) this.ceilRingCount++;
                 }
                 this.ceilFastStreak = 0;
-            } else if (this.ceilTrained
+            } else if (this.ceilRingCount >= AUTO_CEILING_RING_MIN
                     && written >= AUTO_CEILING_UP_EVIDENCE_MIN_WRITE
                     && pendingNow <= AUTO_CEILING_UP_EVIDENCE_EPSILON) {
                 if (++this.ceilFastStreak >= AUTO_CEILING_UP_STREAK_TICKS) {
                     this.ceilFastStreak = 0;
-                    this.ceilDrainEwmaBytesPerSec *= 2;
+                    this.ceilRingCount = 0; // retrain from scratch (see javadoc)
+                    this.ceilRingIdx = 0;
                 }
             } else {
                 this.ceilFastStreak = 0;
             }
         }
-        if (!this.ceilTrained) return -1; // optimistic start: no ceiling until evidence
-        double computed = this.ceilDrainEwmaBytesPerSec
-                * (AUTO_CEILING_TARGET_LATENCY_NANOS / 1e9);
+        if (this.ceilRingCount < AUTO_CEILING_RING_MIN) return -1; // untrained
+        double[] window = java.util.Arrays.copyOf(this.ceilRateRing, this.ceilRingCount);
+        java.util.Arrays.sort(window);
+        double median = window[window.length / 2];
+        double computed = median * (AUTO_CEILING_TARGET_LATENCY_NANOS / 1e9);
         if (computed >= AUTO_CEILING_DISARM_BYTES) return -1; // fast link: stand down
         return Math.max(AUTO_CEILING_FLOOR_BYTES, (long) computed);
     }
@@ -804,11 +813,19 @@ public abstract class AbstractPlayerRequestState<T> {
         if (autoOutboundCeiling) {
             long ceil = updateDrainEstimatorAndDeriveCeiling(pending);
             this.autoCeilingGauge = ceil;
-            if (ceil > 0) {
-                autoBudget = Math.max(0L, ceil - Math.max(pending, 0L));
+            // pending == -1 (broken/no-signal probe) imposes NO budget — the
+            // no-signal-fail-open convention the fixed gate and yield honor (post-hoc
+            // review m3): a trained ceiling must never keep throttling blind.
+            if (ceil > 0 && pending >= 0) {
+                autoBudget = Math.max(0L, ceil - pending);
             }
         } else {
-            this.ceilWireWrittenSinceProbe = 0; // keep the accumulator from growing stale
+            // Post-hoc review m2/MINOR-3: poison the estimator across non-AUTO ticks —
+            // a later mode flip back to AUTO must not take a "pure-drain" sample across
+            // a minutes-long fixed-mode span (stale prev, huge dt).
+            this.ceilWireWrittenSinceProbe = 0;
+            this.ceilPendingPrev = -1;
+            this.ceilLastProbeNanos = 0;
         }
 
         long[] dropped = prunedPositions;
@@ -901,10 +918,10 @@ public abstract class AbstractPlayerRequestState<T> {
         // payload ships (allowed into whatever channel state — the yield floor's
         // precedent; here the channel is writable anyway).
         if (autoBudget == 0 && !floorSendThisTick && !this.sendQueue.isEmpty()) {
-            this.sendDeferrals++;
             if (++this.autoCeilingHeldTicks >= YIELD_FLOOR_TICKS) {
-                floorSendThisTick = true;
+                floorSendThisTick = true; // the floor tick ships a payload — not a hold
             } else {
+                this.sendDeferrals++; // whole-tick holds only (round-2 attribution rule)
                 sweepDepartedColumns();
                 return dropped;
             }

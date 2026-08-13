@@ -85,7 +85,10 @@ probing and never hurts the player to learn. AIMD is for unobservable capacity
 
 ## The drain-rate estimator (v1 core + review amendments)
 
-    drained_sample = pending_prev + lss_wire_written_prev_flush - pending_now
+    drained_sample = pending_prev - pending_now       (PURE-DRAIN intervals only:
+                                                       written == 0 since the last
+                                                       probe — rounds 3-4)
+    rate = windowed MEDIAN of the last 41 valid samples (armed at 15 — round 4)
 
 - Fed at the existing SINGLE per-tick probe read in `flushSendQueue`
   (per-player flush-thread-confined; the diag renders cached volatiles, and the
@@ -109,19 +112,22 @@ probing and never hurts the player to learn. AIMD is for unobservable capacity
   sessions (the fleet) are ~1:1 through deflate. On the ACTUATOR side the
   same over-count stops the loop EARLIER (budget consumed faster) —
   conservative there.
-- **EWMA over wall-clock** (nanoTime deltas, injected-clock test seam), time
-  constant ~2 s. Stability (control review, both regimes): on a slow link the
-  standing queue keeps `pending_prev > 0`, so samples flow WHILE the ceiling
-  binds — no shrink→starve spiral; fixed point = 250 ms × true rate. On a fast
-  link a wrongly-binding ceiling makes samples read ≈ ceiling/50 ms → the
-  ceiling self-inflates ~5x per time constant until it unbinds. No
-  under-throttle trap. A multi-second tick hitch produces one low-biased
-  sample (conservative) and recovers within ~τ.
+- **Windowed MEDIAN over wall-clock samples** (round 4; the round-1/2 EWMA and
+  the round-3 written-inclusive sample are both RETIRED — see the review log:
+  async netty writes poisoned written-inclusive samples, and the kernel socket
+  buffer's burst absorption poisons a bounded MINORITY of even pure-drain
+  samples with 10-30 MB/s readings that any mean-family estimator integrates
+  into a permanent bias; the median ignores them). Stability: on a slow link
+  hold ticks dominate and sample continuously; in converged partial-flush
+  states samples pause and the ceiling FREEZES at full throughput (degradation
+  re-samples via the holds it creates; improvement recovers via the
+  fast-streak ring clear). A multi-second hitch contributes one low sample —
+  one ring slot.
 - **Optimistic start**: no valid sample → no AUTO ceiling (today's behavior).
   The cap-paced-below-link-rate session never samples (pending always 0) —
   and has no queue, hence no latency to bound: benign by construction.
-- Send-failure ticks may half-enter a payload into netty → one noisy sample,
-  absorbed by the negative guard.
+- Send-failure ticks may half-enter a payload into netty — excluded outright by
+  the pure-drain gate (the tick wrote).
 
 ## Config semantics (`outboundBufferCeilingKB`)
 
@@ -129,7 +135,7 @@ probing and never hurts the player to learn. AIMD is for unobservable capacity
 |---|---|---|
 | 0 (default) | OFF | **AUTO** |
 | explicit 64..262144 | clamped 4096..262144, fixed entry-gate ceiling | fixed ceiling, exact old semantics (entry-gate, no floor), min re-clamp 4096 → **64** |
-| 262144 | fixed 256 MB (inert) | the documented OFF idiom (never binds; estimator still runs, cost ~arithmetic) |
+| 262144 | fixed 256 MB (inert) | the documented OFF idiom (never binds; fixed mode — the estimator does not run and its state is poisoned across the mode flip) |
 
 - **Runtime kill switch (review MAJOR)**: `outboundBufferCeilingKB` joins the
   `/lsslod set` registry — `set outboundBufferCeilingKB 262144` is the live
@@ -216,10 +222,9 @@ deferred = LSS said stop.
 
 ## Observability
 
-Per-player diag line gains `ceil=<bytes>|off` after `obuf=`: `off` = no
-effective AUTO ceiling (untrained, or ≥ the 2 MB cap boundary case) or the
-262144 OFF idiom; an operator-FIXED ceiling renders its value too (`ceil=` +
-`deferred=` together disambiguate mode per the table above). Diag-only — never
+Per-player diag line gains `ceil=<bytes>|off` after `obuf=`: `off` = AUTO
+untrained or disarmed; ANY fixed ceiling — the 262144 OFF idiom included —
+renders its byte value (honest: it IS a fixed ceiling, however inert). Diag-only — never
 exported (loopback makes it meaningless in soaks). The move tracer's boot-row
 config echo keeps the raw key value (0 now meaning AUTO — noted, not changed).
 
@@ -259,11 +264,18 @@ config echo keeps the raw key value (0 now meaning AUTO — noted, not changed).
 T1 as §Registrations 2/4/5/6 (estimator truth table via scripted probe +
 injected clock; budget arithmetic incl. presence gate; floor counters + resets;
 clamp table; CI-inertness both paths). One no-op soak guard (fresh-backfill).
-Live gate: the 4 Mbps throttled proxy session — acceptance: near-vanilla action
-latency with LODs streaming, `deferred=` climbing, `yielded=` near-quiet,
-`ceil=` ~100-150 KB, `obuf=` peak bounded ~ceiling + one payload OUTSIDE
-vanilla burst windows (respawn//tp bursts are channel-wide and legitimately
-exceed it — round-2 nit).
+Live gate: the 4 Mbps throttled proxy session. **The healthy-slow-link
+signature UNDER SHIPPED DEFAULTS (post-hoc review MINOR-1 — the earlier
+deferred-climbing expectation was geometrically impossible): every armed
+ceiling ≥ the 64 KB floor = netty's high-water mark, and a writable-tick probe
+never reads above the watermark, so budget-0 whole-tick holds are unreachable —
+holds book `yielded=`, and `deferred=` stays ~0.** Acceptance: near-vanilla
+action latency (tab ping in the hundreds of ms, not seconds), `ceil=` ~100-150
+KB, `yielded=` climbing steadily, `deferred=` ~0, `obuf=` peak bounded
+~ceiling + one payload OUTSIDE vanilla burst windows (respawn//tp bursts are
+channel-wide and legitimately exceed it). The budget's work has NO dedicated
+counter — it shows as the bounded obuf peak and the restored latency.
+(`deferred=` climbs only with yield disabled or an operator-FIXED ceiling.)
 
 ## Review-round log
 
@@ -286,6 +298,35 @@ exceed it — round-2 nit).
   switch, the ChannelAccessorContractTest pin, the inverted Paper floor
   assert, the full docs/notes sweep, `deferred=` meaning flip, volatile
   `ceil=` gauge, Paper goldens verified unaffected. ALL folded into this v2.
+- **Post-hoc whole-feature round (2026-08-13, 2 Fable reviewers, user-ordered —
+  reviewed the round-3 tree, reconciled against round 4):** verdicts FIX
+  FORWARD ×2, nothing blocking. Mechanism lens: pure-drain sampling proven
+  one-sided (no over-read constructible), the streak un-fakeable, the composed
+  yield+AUTO default regime verified convergent by tick-walk (~180-320 ms
+  standing queue on the target link) — and the HEADLINE: the acceptance
+  signature was corrected (deferred=0 under defaults; see §Test plan).
+  Integration lens: its MAJOR (unbounded EWMA doubling on fast links) was
+  already structurally resolved by round 4's ring-clear; remaining minors
+  folded same-branch: non-AUTO ticks poison the estimator (the mode-flip junk
+  sample), a broken probe (-1) imposes NO budget (no-signal fail-open), the
+  floor tick no longer books deferred=, the composed-regime and ceil=-value
+  pins added, the design body de-staled (this fold), the Fabric config-suite
+  comment fixed. Registration audit: complete; fixed-ceiling semantics
+  byte-identical; the live-rig cap restore verified residue-free.
+
+- **Round 4 (2026-08-13, SECOND live falsification — same session):** the
+  round-3 build still measured `ceil=1.2 MB` (user ping 6000 ms). Pure-drain
+  samples were themselves poisoned: **netty's pending gauge measures drain into
+  the KERNEL socket buffer, not the network** — after each burst window the
+  kernel has accumulated room and absorbs hundreds of KB at memory speed, so a
+  bounded MINORITY of hold-tick samples read 10-30 MB/s and ANY mean-family
+  estimator (the EWMA) integrates them into a permanent multi-MB/s bias. FIX:
+  the estimator is now a WINDOWED MEDIAN (ring of the last 41 valid pure-drain
+  samples, armed at 15) — most hold ticks drain at true network pace, so the
+  median ignores the spike minority entirely. The fast-streak up-recovery now
+  CLEARS the ring (graceful retrain) instead of doubling a scalar. The EWMA
+  and its tau are retired.
+
 - **Round 3 (2026-08-13, LIVE FALSIFICATION on the rig — the acceptance gate
   earning its keep):** the first deployed build measured `ceil=1.5 MB,
   deferred=0, yielded=668` on the 4 Mbps session — the EWMA trained to ~6 MB/s

@@ -586,4 +586,28 @@ class DiagnosticsFormatterTest {
         // Hours never roll into days; leftover seconds are truncated from the h/m form.
         assertEquals("25h 1m", DiagnosticsFormatter.formatUptime(25 * 3600 + 60 + 5));
     }
+
+    /** The ceil= VALUE branch (post-hoc review n1): an armed AUTO gauge or a fixed
+     *  ceiling renders bytes, never "off" — a dropped fixedCeilingBytes fallback or a
+     *  broken gauge plumb would silently render off forever. */
+    @Test
+    void ceilTokenRendersValuesWhenArmed() {
+        var d = new DiagnosticsFormatter.DiagData(
+                true, 24,
+                2048, 1_048_576,
+                100, 5000, 10_485_760,
+                11, 33, 44, 55, 66,
+                22,
+                "sent=9, disk=1/2",
+                "submitted=5, completed=5",
+                "active=1/32", true,
+                7, 3,
+                2_097_152,
+                512,
+                List.of(new DiagnosticsFormatter.PlayerDiag("Alex", 1, 4000, 0, 0, 10, 1000,
+                        50_000L, 60_000L, 0L, 3L, 125_000L)));
+        assertTrue(DiagnosticsFormatter.formatDiagnostics(d).stream()
+                        .anyMatch(l -> l.contains("ceil=122.1 KB")),
+                "an armed ceiling renders its byte value");
+    }
 }

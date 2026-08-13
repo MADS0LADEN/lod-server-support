@@ -540,8 +540,8 @@ class ConfigValidationTest {
             c.validate();
             // missMemoTtlSeconds and lodStoreResweepSeconds have a legal floor of 0
             // (each 0 is that feature's kill switch), as does lodStoreMaxMB (0 =
-            // uncapped, the default), outboundBufferCeilingKB (0 = transport
-            // deference off, the default), and dirtyBroadcastIntervalSeconds (0 = dirty
+            // uncapped, the default), outboundBufferCeilingKB (0 = the AUTO outbound
+            // ceiling, the default — auto-outbound-ceiling-design.md), and dirtyBroadcastIntervalSeconds (0 = dirty
             // pushes off since v0.11.0; the drain keeps its fallback cadence);
             // xrayMaxBlockHeight's floor is a world Y and
             // deliberately negative — every other numeric floor is >= 1.
