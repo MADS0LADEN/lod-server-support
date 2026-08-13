@@ -74,8 +74,11 @@ recorded):
   adaptive scan cadence ~110 KB per burst ≈ 220 ms of transient queue at a
   500 KB/s link (server pacing would smooth to ~25 KB/tick). Bounded and
   acceptable; server-side pacing remains addable LATER as a pure enhancement
-  (the declaration idea is shelved, not rejected — this plan's design keeps
-  the option open by keeping the rate byte-denominated internally).
+  — and the later shape needs NO declaration either: the server can INFER
+  the client's self-imposed pace from the want-set's own size/cadence and
+  smooth its sends to match (user direction 2026-08-13: leave it out for
+  now unless it proves easy to get right; this plan's design keeps the
+  option open by keeping the rate byte-denominated internally).
 - Mid-flight degradation still delivers the already-declared outstanding set
   before the cut bites (bounded by one scan's budget; the #71 edge-triggered
   backpressure clear remains the escape hatch for the pathological case).
