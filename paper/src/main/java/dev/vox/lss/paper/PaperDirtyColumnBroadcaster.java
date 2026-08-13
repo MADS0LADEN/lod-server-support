@@ -51,7 +51,18 @@ class PaperDirtyColumnBroadcaster {
     }
 
     void tick(PaperConfig config) {
-        int intervalTicks = config.dirtyBroadcastIntervalSeconds * LSSConstants.TICKS_PER_SECOND;
+        // Read the config field ONCE per tick: cadence and send-gate must agree (a torn
+        // read across a mid-tick config flip could drain on the off cadence yet send).
+        // The live-read-per-tick contract is pinned by midRunConfigIntervalChangeTakesEffectImmediately.
+        int intervalSeconds = config.dirtyBroadcastIntervalSeconds;
+        // 0 = sends disabled, but the drain must still run: it carries the invalidation
+        // fan-out (store rows, tscache, in-flight taints) and the per-player clears. A raw
+        // 0 would compute intervalTicks = 0 and drain EVERY tick, so the fallback cadence
+        // is required, not cosmetic.
+        boolean sendsEnabled = intervalSeconds > 0;
+        int cadenceSeconds = sendsEnabled ? intervalSeconds
+                : LSSConstants.DIRTY_DRAIN_ONLY_INTERVAL_SECONDS;
+        int intervalTicks = cadenceSeconds * LSSConstants.TICKS_PER_SECOND;
         if (++this.counter < intervalTicks) return;
         this.counter = 0;
 
@@ -109,6 +120,7 @@ class PaperDirtyColumnBroadcaster {
                     // (before this broadcast ran) must not outlive the edit — see
                     // clearProbeSuppress (three-lens review, concurrency MINOR).
                     state.clearProbeSuppress(result);
+                    if (!sendsEnabled) continue; // interval 0: drain + clears only, no wire
                     try {
                         this.dirtySender.send(player, result);
                     } catch (Exception e) {

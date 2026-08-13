@@ -225,12 +225,25 @@ class ConfigValidationTest {
         assertEquals(600, c.generationTimeoutSeconds);
     }
 
+    /** v0.11.0 (dirty-broadcast-interval-zero-plan.md): 0 = dirty pushes disabled is a
+     *  first-class value — the lodStoreMaxMB idiom. 0 stays 0 (was: clamped to 1, the
+     *  FASTEST cadence — the opposite of what an operator writing 0 means), negatives
+     *  normalize to 0, and 1 stays the floor for a NONZERO (sending) interval. */
     @Test
-    void dirtyBroadcastIntervalSecondsClamped() {
+    void dirtyBroadcastIntervalSecondsZeroDisablesSendsAndNonzeroFloorsAt1() {
         var c = serverConfig();
         c.dirtyBroadcastIntervalSeconds = 0;
         c.validate();
-        assertEquals(1, c.dirtyBroadcastIntervalSeconds);
+        assertEquals(0, c.dirtyBroadcastIntervalSeconds, "0 = sends off, must survive validate");
+
+        c.dirtyBroadcastIntervalSeconds = -5;
+        c.validate();
+        assertEquals(0, c.dirtyBroadcastIntervalSeconds,
+                "negative nonsense must mean sends off, not a 1 s cadence");
+
+        c.dirtyBroadcastIntervalSeconds = 1;
+        c.validate();
+        assertEquals(1, c.dirtyBroadcastIntervalSeconds, "1 is the nonzero floor, kept exactly");
 
         c.dirtyBroadcastIntervalSeconds = 9999;
         c.validate();
@@ -527,12 +540,14 @@ class ConfigValidationTest {
             c.validate();
             // missMemoTtlSeconds and lodStoreResweepSeconds have a legal floor of 0
             // (each 0 is that feature's kill switch), as does lodStoreMaxMB (0 =
-            // uncapped, the default) and outboundBufferCeilingKB (0 = transport
-            // deference off, the default); xrayMaxBlockHeight's floor is a world Y and
+            // uncapped, the default), outboundBufferCeilingKB (0 = transport
+            // deference off, the default), and dirtyBroadcastIntervalSeconds (0 = dirty
+            // pushes off since v0.11.0; the drain keeps its fallback cadence);
+            // xrayMaxBlockHeight's floor is a world Y and
             // deliberately negative — every other numeric floor is >= 1.
             int floor = switch (f.getName()) {
                 case "missMemoTtlSeconds", "lodStoreResweepSeconds", "lodStoreMaxMB",
-                        "outboundBufferCeilingKB",
+                        "outboundBufferCeilingKB", "dirtyBroadcastIntervalSeconds",
                         // 0 = AUTO (derived), the default for both since 2026-08-02.
                         "diskReaderThreads", "perDimensionTimestampCacheSizeMB" -> 0;
                 case "xrayMaxBlockHeight" -> LSSConstants.MIN_XRAY_MAX_BLOCK_HEIGHT;

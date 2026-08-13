@@ -404,6 +404,105 @@ class DirtyColumnBroadcasterTest {
         assertArrayEquals(new long[]{pos}, only(sentTo(rig, healthy)));
     }
 
+    // ---- DIRTY0 (v0.11.0): interval 0 = sends off, drain keeps the fallback cadence ----
+
+    /** Interval 0: after one full fallback interval the tracker is drained, the
+     *  invalidation fan-out fired, and the per-player done-bit + probe-suppress clears
+     *  applied for the in-range player — and ZERO sends recorded. The drain is the whole
+     *  point of the fallback cadence: skipping the tick outright would leave stale
+     *  tscache stamps answering up_to_date all boot and grow the tracker unboundedly. */
+    @Test
+    void intervalZeroDrainsInvalidatesAndClearsWithZeroSends() {
+        var rig = new Rig(List.of(Level.OVERWORLD));
+        rig.config.dirtyBroadcastIntervalSeconds = 0;
+        var player = rig.addPlayer(Level.OVERWORLD, 0, 0);
+        long pos = PositionUtil.packPosition(1, 2);
+        player.stampProbeSuppress(pos);
+        assertTrue(player.isProbeSuppressed(pos), "precondition: the suppress stamp is armed");
+        rig.tracker.markDirty(LSSConstants.DIM_STR_OVERWORLD, 1, 2);
+
+        for (int i = 0; i < LSSConstants.DIRTY_DRAIN_ONLY_INTERVAL_SECONDS * LSSConstants.TICKS_PER_SECOND; i++) {
+            rig.broadcaster.tick(rig.config);
+        }
+
+        assertEquals(0, rig.tracker.pendingCount(), "the fallback tick drains the tracker");
+        assertArrayEquals(new long[]{pos},
+                only(invalidationsFor(rig, LSSConstants.DIM_STR_OVERWORLD)),
+                "the invalidation fan-out must still run with sends off");
+        assertArrayEquals(new long[]{pos}, only(clearsFor(rig, player)),
+                "the in-range player's done-bit clear must still be queued with sends off");
+        // NOTE: isProbeSuppressed also reads false once PROBE_SUPPRESS_TTL_NANOS (1.5 s)
+        // expires — 200 no-op ticks run in microseconds, so the clear is what's pinned.
+        assertFalse(player.isProbeSuppressed(pos),
+                "the probe-suppress stamp must be cleared by the fallback tick");
+        assertFalse(player.skipProbe(pos), "the edited column must be probe-eligible again");
+        assertEquals(0, count(rig, e -> e instanceof Sent),
+                "interval 0 means NO DirtyColumnsS2CPayload ever leaves the server");
+    }
+
+    /** Interval 0 fires on exactly the DIRTY_DRAIN_ONLY_INTERVAL_SECONDS tick, not
+     *  before (twin of firesOnExactlyTheIntervalTickAndCounterRestartsFromZero) — a raw
+     *  interval of 0 would otherwise compute intervalTicks = 0 and drain EVERY tick. */
+    @Test
+    void intervalZeroFiresOnExactlyTheFallbackCadenceTick() {
+        var rig = new Rig(List.of(Level.OVERWORLD));
+        rig.config.dirtyBroadcastIntervalSeconds = 0;
+        rig.addPlayer(Level.OVERWORLD, 0, 0);
+        rig.tracker.markDirty(LSSConstants.DIM_STR_OVERWORLD, 3, 4);
+
+        int fallbackTicks = LSSConstants.DIRTY_DRAIN_ONLY_INTERVAL_SECONDS * LSSConstants.TICKS_PER_SECOND;
+        for (int t = 1; t < fallbackTicks; t++) {
+            rig.broadcaster.tick(rig.config);
+            assertEquals(1, rig.tracker.pendingCount(),
+                    "tick " + t + " must not drain — the fallback cadence is "
+                            + LSSConstants.DIRTY_DRAIN_ONLY_INTERVAL_SECONDS + " s, not every tick");
+            assertTrue(rig.events.isEmpty(), "tick " + t + " must not invalidate, clear, or send");
+        }
+        rig.broadcaster.tick(rig.config); // the fallback-interval tick
+        assertEquals(0, rig.tracker.pendingCount(), "the fallback-interval tick drains");
+        assertEquals(1, count(rig, e -> e instanceof Invalidated));
+        assertEquals(0, count(rig, e -> e instanceof Sent));
+    }
+
+    /** Mid-run flips BOTH ways (the live-read-per-tick contract): 0 -> 1 resumes sends on
+     *  the next interval; nonzero -> 0 stops sends while the drain continues at the
+     *  fallback cadence. */
+    @Test
+    void midRunFlipsBetweenZeroAndNonzeroSwitchSendsBothWays() {
+        var rig = new Rig(List.of(Level.OVERWORLD));
+        var player = rig.addPlayer(Level.OVERWORLD, 0, 0);
+        long pos = PositionUtil.packPosition(1, 2);
+
+        // Start off (0): a drain happens at the fallback cadence, silently.
+        rig.config.dirtyBroadcastIntervalSeconds = 0;
+        rig.tracker.markDirty(LSSConstants.DIM_STR_OVERWORLD, 1, 2);
+        for (int i = 0; i < LSSConstants.DIRTY_DRAIN_ONLY_INTERVAL_SECONDS * LSSConstants.TICKS_PER_SECOND; i++) {
+            rig.broadcaster.tick(rig.config);
+        }
+        assertEquals(0, rig.tracker.pendingCount());
+        assertEquals(0, count(rig, e -> e instanceof Sent), "no sends while off");
+
+        // Flip 0 -> 1: sends resume on the next (1 s) interval.
+        rig.events.clear();
+        rig.config.dirtyBroadcastIntervalSeconds = 1;
+        rig.tracker.markDirty(LSSConstants.DIM_STR_OVERWORLD, 1, 2);
+        rig.fire();
+        assertArrayEquals(new long[]{pos}, only(sentTo(rig, player)),
+                "flipping back to nonzero resumes sends live — no restart needed");
+
+        // Flip 1 -> 0: sends stop, the drain keeps running at the fallback cadence.
+        rig.events.clear();
+        rig.config.dirtyBroadcastIntervalSeconds = 0;
+        rig.tracker.markDirty(LSSConstants.DIM_STR_OVERWORLD, 5, 6);
+        for (int i = 0; i < LSSConstants.DIRTY_DRAIN_ONLY_INTERVAL_SECONDS * LSSConstants.TICKS_PER_SECOND; i++) {
+            rig.broadcaster.tick(rig.config);
+        }
+        assertEquals(0, rig.tracker.pendingCount(), "the drain continues after the flip to 0");
+        assertEquals(1, count(rig, e -> e instanceof Invalidated),
+                "invalidation fan-out continues after the flip to 0");
+        assertEquals(0, count(rig, e -> e instanceof Sent), "no sends after the flip to 0");
+    }
+
     // ---- seam-guard: eligibility gates ----
 
     @Test
