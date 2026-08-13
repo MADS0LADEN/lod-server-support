@@ -261,7 +261,7 @@ Ordered by information-per-effort:
   unACKed batches — retain-in-backlog semantics already exist (the obuf-ceiling path).
   Real terrain always outranks LOD on the shared channel; the client stops receiving LOD
   exactly when it's too busy to ingest it anyway.
-- **M2 — arm `outboundBufferCeilingKB` by default** if E3 shows obuf buildup on real links — **RESOLVED 2026-08-13: shipped as AUTO (0 = per-player drain-rate ceiling), auto-outbound-ceiling-design.md**
+- **M2 — arm `outboundBufferCeilingKB` by default** if E3 shows obuf buildup on real links — **RESOLVED 2026-08-13: the AUTO detour was live-falsified and deleted the same day; slow-link protection ships as the client transfer governor + server ping backstop instead (adaptive-transfer-rate-plan.md)**
   (the mechanism was measured absent on the LAN rig; the live internet is the test that counts).
 - **M3 — speed-aware LOD throttle:** above ~15 blocks/s sustained, cut the per-player LOD
   rate to a trickle; restore on slowdown. Crude but targets the exact regime.

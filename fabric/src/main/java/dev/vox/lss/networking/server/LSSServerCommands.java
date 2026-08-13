@@ -266,8 +266,8 @@ class LSSServerCommands {
                         : (service.getLodStore() != null ? service.getLodStore().mode() : null),
                 service.getOffThreadProcessor().getStoreDiagnostics(),
                 service.getPlayers().values(),
-                // ceil= fixed-mode fallback: an operator-FIXED ceiling renders its
-                // configured value (AUTO's gauge lives on the state; 0 = AUTO here).
+                // ceil= : an operator-FIXED ceiling renders its configured value;
+                // 0 = off (the AUTO mode was deleted — adaptive-transfer-rate-plan.md).
                 config.outboundBufferCeilingKB > 0
                         ? (long) config.outboundBufferCeilingKB * 1024L : 0L
         ).withV16Line(service.getV16CompatManager().diagLineOrNull())
