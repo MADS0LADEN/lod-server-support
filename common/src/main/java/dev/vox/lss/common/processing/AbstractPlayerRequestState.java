@@ -108,126 +108,12 @@ public abstract class AbstractPlayerRequestState<T> {
      *  accepted corner of state-scoped latching. */
     private boolean sustainedYieldNoted;
 
-    // ---- AUTO outbound ceiling (auto-outbound-ceiling-design.md v2, 2026-08-13) ----
-    // Per-player drain-rate estimator + derived latency ceiling. Working state is
-    // flush-thread-confined (the departedSweepMarkNanos contract); only the rendered
-    // gauge is volatile (Paper reads diag off-pump). Dies with the state on dimension
-    // change — the EWMA cold-starts and a slow link eats one today-shaped burst per
-    // trip (design §Plumbing, documented).
-    /** 250 ms: the standing-LOD-queue latency target the AUTO ceiling bounds. */
-    public static final long AUTO_CEILING_TARGET_LATENCY_NANOS = 250_000_000L;
-    /** DISARM threshold, not a clamp (design round 2): a computed ceiling at/above
-     *  this means the link is fast enough that the bandwidth cap governs — AUTO
-     *  stands down entirely (a CLAMPED 2 MB ceiling would silently govern healthy
-     *  fast clients at ~40 MB/s wire whenever the operator raises the cap, and the
-     *  EWMA's self-inflation cannot climb past a clamp). */
-    public static final long AUTO_CEILING_DISARM_BYTES = 2L * 1024 * 1024;
-    /** Floor: below this a ceiling is meaninglessly small (one payload's headroom). */
-    public static final long AUTO_CEILING_FLOOR_BYTES = 64L * 1024;
-    /** Windowed-MEDIAN estimator (round 4 — the kernel-absorption finding): the ring
-     *  holds the last N valid pure-drain rate samples; the derived rate is their
-     *  median. An EWMA was falsified live TWICE: netty's pending gauge measures drain
-     *  into the KERNEL socket buffer, not the network — right after each burst window
-     *  the kernel has room and absorbs hundreds of KB at memory speed, so a minority
-     *  of hold-tick samples read 10-30 MB/s and any mean-family estimator integrates
-     *  them into a permanent multi-MB/s bias (measured: ceil=1.2-1.5 MB on a
-     *  500 KB/s link across two builds). The median ignores a bounded minority of
-     *  arbitrarily-large spikes: most hold ticks drain at true network pace. */
-    static final int AUTO_CEILING_RING_SIZE = 41;
-    /** Samples needed before AUTO arms (~0.75 s of hold ticks). */
-    static final int AUTO_CEILING_RING_MIN = 15;
-    private long ceilPendingPrev = -1;       // -1 = poisoned/no valid previous read
-    private long ceilWireWrittenSinceProbe;  // reset at every probe read
-    private long ceilLastProbeNanos;         // 0 = never probed
-    private final double[] ceilRateRing = new double[AUTO_CEILING_RING_SIZE];
-    private int ceilRingCount;               // total inserted (capped at ring size)
-    private int ceilRingIdx;
-    private int autoCeilingHeldTicks;        // consecutive whole-tick AUTO holds
-    /** Rendered `ceil=` gauge: -1 = off (untrained, disarmed, or AUTO not in use). */
-    private volatile long autoCeilingGauge = -1;
-    /** Injectable clock for the estimator/EWMA tests (the frontier-damper pattern). */
-    private java.util.function.LongSupplier ceilClock = System::nanoTime;
+    // ---- The vanilla-ping backstop (adaptive-transfer-rate-plan.md Mechanism B) ----
+    // Per player per session by construction (dies with this state); observed on the
+    // service pump, applied to the flush allocation (the m12 plumbing).
+    private final PingBackstop pingBackstop = new PingBackstop();
 
-    void setCeilClockForTest(java.util.function.LongSupplier clock) {
-        this.ceilClock = clock;
-    }
-
-    /** The `ceil=` diag gauge: derived AUTO ceiling in bytes, or -1 = off. */
-    public long getAutoCeilingGauge() {
-        return this.autoCeilingGauge;
-    }
-
-    /** Fast-streak up-recovery (round-3 amendment): consecutive probe intervals where
-     *  LSS wrote at least this much AND the channel gauge still read ~empty. */
-    static final long AUTO_CEILING_UP_EVIDENCE_MIN_WRITE = 32L * 1024;
-    static final long AUTO_CEILING_UP_EVIDENCE_EPSILON = 4L * 1024;
-    static final int AUTO_CEILING_UP_STREAK_TICKS = 40; // ~2 s at 20 Hz
-    private int ceilFastStreak;
-
-    /**
-     * One estimator step at the authoritative probe read (design §Estimator, as amended
-     * round 3 — the LIVE rig falsified the written-term arithmetic): netty writes are
-     * ASYNC, so bytes handed to the event loop may not be reflected in the pending
-     * gauge for milliseconds — a burst tick's sample {@code prev + written − now} then
-     * reads a phantom multi-MB/s drain (measured live: EWMA 6 MB/s on a 500 KB/s link,
-     * ceil=1.5 MB, the ceiling never bound). The estimator therefore samples ONLY
-     * PURE-DRAIN intervals ({@code written == 0} since the last probe — hold ticks,
-     * which dominate on exactly the links the ceiling exists for):
-     * {@code drained = pending_prev − pending_now}, no written term at all. Busy guard
-     * ({@code prev > 0}), negative guard (another writer grew the queue), and the
-     * no-signal poison are unchanged; a genuine zero-drain sample still trains.
-     *
-     * <p>UP-recovery (pure-drain sampling alone cannot observe an IMPROVED link — a
-     * converged flush writes every tick): {@link #AUTO_CEILING_UP_STREAK_TICKS}
-     * consecutive intervals of "wrote ≥ 32 KB and the gauge still reads ≤ 4 KB"
-     * CLEAR the sample ring — a graceful retrain: a genuinely improved link
-     * re-learns its true rate (or stays inert if it never queues again — correct),
-     * a false streak retrains right back within a second of holds. Visibility lag
-     * cannot sustain the streak (~2 s of consistently-empty reads after MB-scale
-     * writes is genuine drain, not a millisecond hand-off).
-     * Returns the derived ceiling in bytes, or -1 when AUTO is disarmed/untrained.
-     */
-    private long updateDrainEstimatorAndDeriveCeiling(long pendingNow) {
-        long now = this.ceilClock.getAsLong();
-        long written = this.ceilWireWrittenSinceProbe;
-        this.ceilWireWrittenSinceProbe = 0;
-        long prev = this.ceilPendingPrev;
-        this.ceilPendingPrev = pendingNow; // -1 flows through and poisons the next step
-        long dtNanos = now - this.ceilLastProbeNanos;
-        boolean probedBefore = this.ceilLastProbeNanos != 0;
-        this.ceilLastProbeNanos = now;
-        if (probedBefore && dtNanos > 0 && pendingNow >= 0) {
-            if (written == 0 && prev > 0) {
-                // Pure-drain sample: the only interval shape whose arithmetic the async
-                // write hand-off cannot corrupt. Kernel-absorption spikes still land
-                // here as a bounded minority — the MEDIAN below ignores them.
-                long drained = prev - pendingNow;
-                if (drained >= 0) {
-                    this.ceilRateRing[this.ceilRingIdx] = drained * 1e9 / dtNanos;
-                    this.ceilRingIdx = (this.ceilRingIdx + 1) % AUTO_CEILING_RING_SIZE;
-                    if (this.ceilRingCount < AUTO_CEILING_RING_SIZE) this.ceilRingCount++;
-                }
-                this.ceilFastStreak = 0;
-            } else if (this.ceilRingCount >= AUTO_CEILING_RING_MIN
-                    && written >= AUTO_CEILING_UP_EVIDENCE_MIN_WRITE
-                    && pendingNow <= AUTO_CEILING_UP_EVIDENCE_EPSILON) {
-                if (++this.ceilFastStreak >= AUTO_CEILING_UP_STREAK_TICKS) {
-                    this.ceilFastStreak = 0;
-                    this.ceilRingCount = 0; // retrain from scratch (see javadoc)
-                    this.ceilRingIdx = 0;
-                }
-            } else {
-                this.ceilFastStreak = 0;
-            }
-        }
-        if (this.ceilRingCount < AUTO_CEILING_RING_MIN) return -1; // untrained
-        double[] window = java.util.Arrays.copyOf(this.ceilRateRing, this.ceilRingCount);
-        java.util.Arrays.sort(window);
-        double median = window[window.length / 2];
-        double computed = median * (AUTO_CEILING_TARGET_LATENCY_NANOS / 1e9);
-        if (computed >= AUTO_CEILING_DISARM_BYTES) return -1; // fast link: stand down
-        return Math.max(AUTO_CEILING_FLOOR_BYTES, (long) computed);
-    }
+    public PingBackstop getPingBackstop() { return this.pingBackstop; }
 
     // ---- Want-set mailbox + backlog (protocol v17) ----
 
@@ -748,26 +634,6 @@ public abstract class AbstractPlayerRequestState<T> {
                                   TickDiagnostics diag, PayloadSender<T> sender,
                                   long outboundCeilingBytes, boolean yieldToTransport,
                                   int pruneRadiusChunks) {
-        return flushSendQueue(allocationBytes, globalLimiter, diag, sender,
-                outboundCeilingBytes, false, yieldToTransport, pruneRadiusChunks);
-    }
-
-    /**
-     * Fullest overload adding the AUTO outbound ceiling mode
-     * (auto-outbound-ceiling-design.md v2: {@code outboundBufferCeilingKB} 0 = AUTO).
-     * The mode is an EXPLICIT parameter, never inferred from a 0 ceiling value — the
-     * shorter overloads' 0 keeps meaning "no ceiling at all" (the S-9a defaults pin:
-     * only the platform services arm mechanisms, with live config). In AUTO mode the
-     * per-player drain-rate estimator derives a latency ceiling (250 ms of measured
-     * drain) enforced as an IN-LOOP write budget — the v3 lever: the banked-token
-     * burst is bounded at ceiling + one payload, not admitted wholesale through the
-     * one open tick. Operator-FIXED ceilings ({@code outboundCeilingBytes > 0}) keep
-     * their exact entry-gate-only, no-floor semantics (F2-7).
-     */
-    public long[] flushSendQueue(long allocationBytes, SharedBandwidthLimiter globalLimiter,
-                                  TickDiagnostics diag, PayloadSender<T> sender,
-                                  long outboundCeilingBytes, boolean autoOutboundCeiling,
-                                  boolean yieldToTransport, int pruneRadiusChunks) {
         QueuedPayload<T> ready;
         while ((ready = this.readyPayloads.poll()) != null) {
             this.sendQueue.add(ready);
@@ -804,29 +670,6 @@ public abstract class AbstractPlayerRequestState<T> {
         }
         this.outboundPendingBytes = pending;
         if (pending > this.outboundPendingHighWater) this.outboundPendingHighWater = pending;
-
-        // AUTO ceiling: one estimator step per probe read (the accumulator resets
-        // inside — it must, at the READ, because four paths below return early). The
-        // derived budget is consumed by the send loop; MAX_VALUE = unbounded (fixed
-        // mode, untrained, or disarmed-fast-link).
-        long autoBudget = Long.MAX_VALUE;
-        if (autoOutboundCeiling) {
-            long ceil = updateDrainEstimatorAndDeriveCeiling(pending);
-            this.autoCeilingGauge = ceil;
-            // pending == -1 (broken/no-signal probe) imposes NO budget — the
-            // no-signal-fail-open convention the fixed gate and yield honor (post-hoc
-            // review m3): a trained ceiling must never keep throttling blind.
-            if (ceil > 0 && pending >= 0) {
-                autoBudget = Math.max(0L, ceil - pending);
-            }
-        } else {
-            // Post-hoc review m2/MINOR-3: poison the estimator across non-AUTO ticks —
-            // a later mode flip back to AUTO must not take a "pure-drain" sample across
-            // a minutes-long fixed-mode span (stale prev, huge dt).
-            this.ceilWireWrittenSinceProbe = 0;
-            this.ceilPendingPrev = -1;
-            this.ceilLastProbeNanos = 0;
-        }
 
         long[] dropped = prunedPositions;
 
@@ -905,39 +748,10 @@ public abstract class AbstractPlayerRequestState<T> {
             // zero-allocation tick erased the counter with nothing flowed. A tick with
             // queued work now resets ONLY where a payload actually leaves (in the loop).
             this.yieldNoSendTicks = 0;
-            this.autoCeilingHeldTicks = 0;
-        }
-
-        // AUTO ceiling whole-tick hold (design §Actuator/§Floor): evaluated AFTER the
-        // yield gate — an unwritable tick books yielded= (yield semantics + pins
-        // unchanged), and AUTO binds only on WRITABLE ticks, which is exactly the
-        // banked-burst window the v3 lever bounds. budget == 0 means pending is already
-        // at/over the ceiling: withhold the whole flush (counted deferred=, today's
-        // "withheld work" meaning — budget-stopped PARTIAL flushes below are not holds),
-        // with the AUTO floor as liveness: after 100 consecutive held ticks exactly one
-        // payload ships (allowed into whatever channel state — the yield floor's
-        // precedent; here the channel is writable anyway).
-        if (autoBudget == 0 && !floorSendThisTick && !this.sendQueue.isEmpty()) {
-            if (++this.autoCeilingHeldTicks >= YIELD_FLOOR_TICKS) {
-                floorSendThisTick = true; // the floor tick ships a payload — not a hold
-            } else {
-                this.sendDeferrals++; // whole-tick holds only (round-2 attribution rule)
-                sweepDepartedColumns();
-                return dropped;
-            }
         }
 
         while (!this.sendQueue.isEmpty()) {
             if (!this.bandwidth.canSend(allocationBytes)) break;
-            // The AUTO in-loop budget (the v3 lever): stop once this flush's written
-            // wire bytes reach it — checked BEFORE each send except the first (the
-            // one-payload presence gate: a legal oversized column must never wedge
-            // behind a small budget; it ships whole and the next flush waits).
-            if (autoBudget != Long.MAX_VALUE && !floorSendThisTick
-                    && this.ceilWireWrittenSinceProbe > 0
-                    && this.ceilWireWrittenSinceProbe >= autoBudget) {
-                break;
-            }
 
             var queued = this.sendQueue.peek();
             try {
@@ -959,15 +773,11 @@ public abstract class AbstractPlayerRequestState<T> {
                 // makes /lsslod diag match observed bandwidth (design §5: the limiter
                 // keeps charging raw; this counter is the observability half).
                 diag.recordWireSent(queued.wireBytes());
-                // The AUTO estimator's written term AND the in-loop budget's spend —
-                // one accumulator, reset at every probe read.
-                this.ceilWireWrittenSinceProbe += queued.wireBytes();
-                // Round-2 send-success reset (design §Floor): a payload actually LEFT,
-                // so both floor counters restart — the ONLY resets besides the
+                // Round-2 reset rescope (yield design §Floor): a payload actually LEFT,
+                // so the floor counter restarts — the ONLY reset besides the
                 // empty-queue-at-entry one. A refused/zero-allocation tick resets
                 // nothing (review A-1/B-5: a floor window must not be silently spent).
                 this.yieldNoSendTicks = 0;
-                this.autoCeilingHeldTicks = 0;
                 if (floorSendThisTick) {
                     // The starvation floor sends EXACTLY ONE payload (§1.4) — the
                     // holding governor is still holding; this send only proves liveness.

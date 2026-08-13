@@ -139,6 +139,16 @@ class SpiralScanner {
      * fallback alone stays {@code <= R/sec} anyway.
      */
     IntSupplier columnRateCap = () -> LSSClientConfig.CONFIG.lodColumnsPerSecondLimit;
+    /**
+     * The BUDGET-CLAMP half of the cap seam (the transfer governor's seam split —
+     * adaptive-transfer-rate-plan.md review M2). Defaults to whatever
+     * {@link #columnRateCap} supplies, so the manual knob keeps its shipped
+     * single-value shape (budget = R, spacing = R → 1 Hz full batches). The governed
+     * path supplies {@code ceil(R/4)} here while {@link #columnRateCap} carries R:
+     * the spacing gate then equilibrates at the 5-tick floor — 4 Hz quarter-batches,
+     * burst ≈ a quarter-second of the governed rate instead of a full second.
+     */
+    IntSupplier columnBurstCap = () -> this.columnRateCap.getAsInt();
     private boolean lastScanWasFast;
     private long fastScans; // session-scoped diagnostic counter (reset() zeroes it)
     /** Ticks the rate cap's spacing gate refused when every OTHER fast-fire condition had
@@ -216,14 +226,16 @@ class SpiralScanner {
         // until arrivals match the consumer's real drain rate — a proportional controller
         // whose equilibrium IS rate-matching (docs/planning/ingest-backpressure-design.md).
         int budget = LSSConstants.WANT_SET_BUDGET;
-        // Manual column-rate cap, burst half (docs/planning/client-column-rate-cap-design.md):
-        // at most R columns outstanding, so at most ~R can arrive inside one declaration
-        // interval. MIN-composes with the pressure taper below — the scale applies to the
-        // already-clamped base, which is <= both, the same composition rule as the taper's
-        // own two factors. The sustained-rate half lives in fastRescanDue's spacing gate.
-        int rateCap = this.columnRateCap.getAsInt();
-        if (rateCap > 0) {
-            budget = Math.min(budget, rateCap);
+        // Column-rate cap, burst half (client-column-rate-cap-design.md; the burst/
+        // sustained SEAM SPLIT is adaptive-transfer-rate-plan.md review M2): at most
+        // burstCap columns outstanding, so at most ~burstCap can arrive inside one
+        // declaration interval. MIN-composes with the pressure taper below — the scale
+        // applies to the already-clamped base, which is <= both, the same composition
+        // rule as the taper's own two factors. The sustained-rate half lives in
+        // fastRescanDue's spacing gate (columnRateCap).
+        int burstCap = this.columnBurstCap.getAsInt();
+        if (burstCap > 0) {
+            budget = Math.min(budget, burstCap);
         }
         float scale = 1f;
         if (columnQueueSize > 0) {

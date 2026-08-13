@@ -211,12 +211,14 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     # box whose AUTO pool exceeds it, needs the opt-in or a K=pool pin).
     "maxConcurrentDiskReads",
     "sendQueueLimitPerPlayer", "bytesPerSecondLimitGlobal",
-    # Outbound ceiling (0 = AUTO since auto-outbound-ceiling-design.md; explicit =
-    # operator-fixed, 262144 = off). AUTO is structurally inert on loopback (the
-    # estimator's busy-period guard never passes — pinned in AutoOutboundCeilingTest),
-    # so no scenario baseline moved with the default flip. Listed so an A/B scenario
-    # can pin it — the R4 lesson below is exactly this omission.
+    # Outbound ceiling (0 = off, the default; explicit = operator-fixed entry
+    # gate — the AUTO mode was deleted, adaptive-transfer-rate-plan.md). Listed so
+    # an A/B scenario can pin it — the R4 lesson below is exactly this omission.
     "outboundBufferCeilingKB",
+    # The ping backstop's kill switch (adaptive-transfer-rate-plan.md Mechanism B) —
+    # structurally inert on loopback (latency 0 never seeds a baseline), listed so a
+    # live-shaped A/B scenario can pin it (the S-8 same-commit allowlist rule).
+    "enablePingBackstop",
     "generationConcurrencyLimitGlobal", "generationTimeoutSeconds",
     "dirtyBroadcastIntervalSeconds",
     "generationConcurrencyLimitPerPlayer", "perDimensionTimestampCacheSizeMB",

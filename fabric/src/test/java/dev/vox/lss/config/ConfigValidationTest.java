@@ -66,6 +66,18 @@ class ConfigValidationTest {
         assertTrue(serverConfig().enableViaMismatchGuard);
     }
 
+    /** Both adaptive-transfer-rate mechanisms ship ON (adaptive-transfer-rate-plan.md):
+     *  the server ping backstop protects ANY client on a congested link, and the
+     *  client governor paces itself against every released v17+ server. Each has its
+     *  own kill switch. */
+    @Test
+    void adaptiveTransferRateMechanismsDefaultOn() {
+        assertTrue(serverConfig().enablePingBackstop,
+                "the ping backstop must ship enabled");
+        assertTrue(clientConfig().enableAdaptiveTransferRate,
+                "the client transfer governor must ship enabled");
+    }
+
     @Test
     void lodDistanceChunksClamped() {
         var c = serverConfig();
@@ -540,8 +552,8 @@ class ConfigValidationTest {
             c.validate();
             // missMemoTtlSeconds and lodStoreResweepSeconds have a legal floor of 0
             // (each 0 is that feature's kill switch), as does lodStoreMaxMB (0 =
-            // uncapped, the default), outboundBufferCeilingKB (0 = the AUTO outbound
-            // ceiling, the default — auto-outbound-ceiling-design.md), and dirtyBroadcastIntervalSeconds (0 = dirty
+            // uncapped, the default), outboundBufferCeilingKB (0 = no ceiling, the
+            // default), and dirtyBroadcastIntervalSeconds (0 = dirty
             // pushes off since v0.11.0; the drain keeps its fallback cadence);
             // xrayMaxBlockHeight's floor is a world Y and
             // deliberately negative — every other numeric floor is >= 1.

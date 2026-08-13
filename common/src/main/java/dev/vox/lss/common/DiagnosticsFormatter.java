@@ -19,15 +19,26 @@ public final class DiagnosticsFormatter {
             int pendingSync, int pendingGen,
             long sent, long bytes,
             long outboundPending, long outboundHighWater, long sendDeferrals,
-            long yielded, long ceilBytes
+            long yielded, long ceilBytes, double pingFactor
     ) {
-        /** Pre-auto-ceiling shape — keeps existing constructions/tests intact
+        /** Pre-ping-backstop shape — keeps existing constructions/tests intact
+         *  (pingf renders 1.00). */
+        public PlayerDiag(String name, int sendQueue, int maxSendQueue, int pendingSync,
+                          int pendingGen, long sent, long bytes, long outboundPending,
+                          long outboundHighWater, long sendDeferrals, long yielded,
+                          long ceilBytes) {
+            this(name, sendQueue, maxSendQueue, pendingSync, pendingGen, sent, bytes,
+                    outboundPending, outboundHighWater, sendDeferrals, yielded, ceilBytes,
+                    1.0);
+        }
+
+        /** No-ceiling shape — keeps existing constructions/tests intact
          *  (ceil renders "off"). */
         public PlayerDiag(String name, int sendQueue, int maxSendQueue, int pendingSync,
                           int pendingGen, long sent, long bytes, long outboundPending,
                           long outboundHighWater, long sendDeferrals, long yielded) {
             this(name, sendQueue, maxSendQueue, pendingSync, pendingGen, sent, bytes,
-                    outboundPending, outboundHighWater, sendDeferrals, yielded, -1L);
+                    outboundPending, outboundHighWater, sendDeferrals, yielded, -1L, 1.0);
         }
 
         /** Pre-transport-yield shape — keeps existing constructions/tests intact. */
@@ -272,18 +283,17 @@ public final class DiagnosticsFormatter {
         for (var p : d.players) {
             double pRate = d.uptimeSec > 0 ? (double) p.sent / d.uptimeSec : 0;
             lines.add(String.format(
-                    "  %s: sq=%d/%d, psync=%d, pgen=%d, sent=%d (%s), rate=%s/s, obuf=%s/%s, ceil=%s, deferred=%d, yielded=%d",
+                    "  %s: sq=%d/%d, psync=%d, pgen=%d, sent=%d (%s), rate=%s/s, obuf=%s/%s, ceil=%s, pingf=%.2f, deferred=%d, yielded=%d",
                     p.name, p.sendQueue, p.maxSendQueue,
                     p.pendingSync, p.pendingGen,
                     p.sent, formatBytes(p.bytes),
                     formatRate(pRate),
                     formatOutbound(p.outboundPending), formatOutbound(p.outboundHighWater),
-                    // ceil= (auto-outbound-ceiling-design.md): the effective outbound
-                    // ceiling — AUTO's derived value, an operator-FIXED value, or "off"
-                    // (untrained/disarmed AUTO, or the 262144 OFF idiom renders its
-                    // huge fixed value honestly). Beside deferred= it disambiguates
-                    // mode: value+deferred = AUTO working; off+deferred = fixed hold.
+                    // ceil= : the operator-FIXED outbound ceiling, or "off" (the AUTO
+                    // mode was deleted — adaptive-transfer-rate-plan.md).
                     p.ceilBytes >= 0 ? formatBytes(p.ceilBytes) : "off",
+                    // pingf= : Mechanism B's receipt — 1.00 = no cut.
+                    p.pingFactor,
                     p.sendDeferrals, p.yielded
             ));
         }
@@ -356,10 +366,10 @@ public final class DiagnosticsFormatter {
                     state.getTotalSectionsSent(), state.getTotalBytesSent(),
                     state.getOutboundPendingBytes(), state.getOutboundPendingHighWater(),
                     state.getSendDeferrals(), state.getYieldedTicks(),
-                    // AUTO's per-player derived gauge; -1 = off. An operator-FIXED
-                    // ceiling never trains the gauge, so it renders through the
-                    // fixedCeilingBytes fallback the caller resolves from config.
-                    fixedCeilingBytes > 0 ? fixedCeilingBytes : state.getAutoCeilingGauge()
+                    // Operator-FIXED ceiling from config, or -1 = off (the AUTO ceiling
+                    // was deleted — adaptive-transfer-rate-plan.md).
+                    fixedCeilingBytes > 0 ? fixedCeilingBytes : -1L,
+                    state.getPingBackstop().factor()
             ));
         }
 

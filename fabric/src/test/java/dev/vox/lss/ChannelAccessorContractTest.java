@@ -83,17 +83,40 @@ class ChannelAccessorContractTest {
                 "src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
         assertTrue(fabric.contains("config.outboundBufferCeilingKB * 1024L"),
                 "Fabric must pass the CONFIGURED ceiling, in bytes, into flushSendQueues");
-        // The AUTO mode term (auto-outbound-ceiling-design.md): 0 = AUTO must be wired
-        // as the EXPLICIT mode parameter — dropping it reverts the fleet to fixed-only
-        // and the AUTO ceiling silently never arms (successor to this pin's intent).
-        assertTrue(fabric.contains("config.outboundBufferCeilingKB == 0"),
-                "Fabric must wire the 0 = AUTO mode term into the flush");
         String paper = Files.readString(Path.of(
                 "../paper/src/main/java/dev/vox/lss/paper/PaperRequestProcessingService.java"));
         assertTrue(paper.contains("this.config.outboundBufferCeilingKB * 1024L"),
                 "Paper twin must pass the same configured ceiling in bytes");
-        assertTrue(paper.contains("this.config.outboundBufferCeilingKB == 0"),
-                "Paper twin must wire the same 0 = AUTO mode term");
+    }
+
+    @Test
+    void bothPlatformsPlumbThePingFactorThroughTheFlushAllocation() throws Exception {
+        // The m12 plumbing pin (adaptive-transfer-rate-plan.md): the ping backstop's
+        // factor must ride the ALLOCATION argument into flushSendQueue — the
+        // per-player bucket clamps its banked burst to allocation/4, so only this
+        // placement shrinks the bank (up to ~6.25 MB at default caps) on the FIRST
+        // post-cut tick. Applied anywhere else, a cut leaves the old-cap bank intact
+        // for one full burst.
+        String fabric = Files.readString(Path.of(
+                "src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
+        assertTrue(fabric.contains("state.getPingBackstop().apply(perPlayerCap)"),
+                "Fabric must apply the ping factor to the flush allocation");
+        String paper = Files.readString(Path.of(
+                "../paper/src/main/java/dev/vox/lss/paper/PaperRequestProcessingService.java"));
+        assertTrue(paper.contains("state.getPingBackstop().apply(perPlayerCap)"),
+                "Paper twin must apply the ping factor to the flush allocation");
+        // The OBSERVE pass (impl review: with it deleted, the factor stays 1.0 forever
+        // and the apply pin above stays green — Mechanism B silently inert), plus the
+        // diag plumb (the golden constructs PlayerDiag through the compat ctor, so a
+        // literal 1.0 in fromStates would keep every rendering test green).
+        assertTrue(fabric.contains("state.getPingBackstop().observe("),
+                "Fabric must run the backstop observe pass");
+        assertTrue(paper.contains("state.getPingBackstop().observe("),
+                "Paper twin must run the backstop observe pass");
+        String formatter = Files.readString(Path.of(
+                "../common/src/main/java/dev/vox/lss/common/DiagnosticsFormatter.java"));
+        assertTrue(formatter.contains("state.getPingBackstop().factor()"),
+                "the diag builder must read the LIVE factor into pingf=");
     }
 
     @Test

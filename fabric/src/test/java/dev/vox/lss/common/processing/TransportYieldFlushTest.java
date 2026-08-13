@@ -181,6 +181,36 @@ class TransportYieldFlushTest {
         assertEquals(List.of("a", "b"), sent);
     }
 
+    @Test
+    void refusedTickDoesNotResetTheFloorCounter() throws Exception {
+        // Review A-1/B-5 (re-pinned here after the AUTO suite's only such test was
+        // deleted with the mechanism): a zero-allocation tick with queued work resets
+        // NOTHING — the floor counter resets only on send-success or empty-queue-at-
+        // entry. A revert to the pre-v2 any-non-yield-tick reset would let refused
+        // ticks silently spend the starvation window.
+        state.setChannelPressureProbe(probe(500_000, ChannelPressureProbe.Writability.NOT_WRITABLE));
+        state.addReadyPayload(new QueuedPayload<>("a", 10, 0, POS_1));
+        Thread.sleep(50);
+        int half = AbstractPlayerRequestState.YIELD_FLOOR_TICKS / 2;
+        for (int i = 0; i < half; i++) {
+            flush(true, 0);
+        }
+        // A WRITABLE tick whose allocation is 0: the limiter refuses, nothing sends,
+        // the queue stays — and the counter must survive it.
+        state.setChannelPressureProbe(probe(0, ChannelPressureProbe.Writability.WRITABLE));
+        state.flushSendQueue(0L, limiter, diag, sent::add, 0L, true, 0);
+        assertTrue(sent.isEmpty(), "the refused tick sent nothing");
+        state.setChannelPressureProbe(probe(500_000, ChannelPressureProbe.Writability.NOT_WRITABLE));
+        for (int i = 0; i < AbstractPlayerRequestState.YIELD_FLOOR_TICKS - half - 1; i++) {
+            flush(true, 0);
+        }
+        assertTrue(sent.isEmpty(), "one short of the floor");
+        flush(true, 0);
+        assertEquals(List.of("a"), sent,
+                "the floor fires at " + AbstractPlayerRequestState.YIELD_FLOOR_TICKS
+                        + " WITHHELD ticks total — the refused tick reset nothing");
+    }
+
     // ---- ordering: ceiling first, yield second (S-6/F2-7) ----
 
     @Test

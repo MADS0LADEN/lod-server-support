@@ -123,7 +123,7 @@ class DiagnosticsFormatterTest {
                 "DiskReader: submitted=5, completed=5",
                 "Generation: active=1/32, order_gated=7, inversions=3",
                 "Bandwidth: 512 B/s / 1.0 MB/s global (2.0 MB total, 0 B wire, cols zstd=0 raw=0)",
-                "  Steve: sq=3/4000, psync=2, pgen=1, sent=2000 (4.0 KB), rate=20/s, obuf=64.0 KB/128.0 KB, ceil=off, deferred=7, yielded=0"
+                "  Steve: sq=3/4000, psync=2, pgen=1, sent=2000 (4.0 KB), rate=20/s, obuf=64.0 KB/128.0 KB, ceil=off, pingf=1.00, deferred=7, yielded=0"
         ), DiagnosticsFormatter.formatDiagnostics(d));
     }
 
@@ -587,9 +587,8 @@ class DiagnosticsFormatterTest {
         assertEquals("25h 1m", DiagnosticsFormatter.formatUptime(25 * 3600 + 60 + 5));
     }
 
-    /** The ceil= VALUE branch (post-hoc review n1): an armed AUTO gauge or a fixed
-     *  ceiling renders bytes, never "off" — a dropped fixedCeilingBytes fallback or a
-     *  broken gauge plumb would silently render off forever. */
+    /** The ceil= VALUE branch: a fixed ceiling renders bytes, never "off" — a dropped
+     *  fixedCeilingBytes fallback would silently render off forever. */
     @Test
     void ceilTokenRendersValuesWhenArmed() {
         var d = new DiagnosticsFormatter.DiagData(
@@ -609,5 +608,28 @@ class DiagnosticsFormatterTest {
         assertTrue(DiagnosticsFormatter.formatDiagnostics(d).stream()
                         .anyMatch(l -> l.contains("ceil=122.1 KB")),
                 "an armed ceiling renders its byte value");
+    }
+
+    /** The pingf= VALUE branch: a live backstop cut renders its factor (the full-line
+     *  golden above only covers the 1.00 default through the compat ctor). */
+    @Test
+    void pingfTokenRendersACutFactor() {
+        var d = new DiagnosticsFormatter.DiagData(
+                true, 24,
+                2048, 1_048_576,
+                100, 5000, 10_485_760,
+                11, 33, 44, 55, 66,
+                22,
+                "sent=9, disk=1/2",
+                "submitted=5, completed=5",
+                "active=1/32", true,
+                7, 3,
+                2_097_152,
+                512,
+                List.of(new DiagnosticsFormatter.PlayerDiag("Alex", 1, 4000, 0, 0, 10, 1000,
+                        50_000L, 60_000L, 0L, 3L, -1L, 0.0833)));
+        assertTrue(DiagnosticsFormatter.formatDiagnostics(d).stream()
+                        .anyMatch(l -> l.contains("pingf=0.08")),
+                "a cut factor renders through the %.2f format");
     }
 }

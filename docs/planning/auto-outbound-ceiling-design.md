@@ -1,9 +1,21 @@
 # Auto outbound ceiling — per-player latency-bounded LOD sending — design
 
-**Status: DESIGN v2** (2026-08-13, the v0.11.0 pause's found-feature loop;
-user-directed from the live 4 Mbps throttled-link session). v1's review round
-(2 reviewers: control lens → REDESIGN, blast-radius lens → IMPLEMENT WITH
-FIXES) is folded in below; §Review-round log records what changed and why.
+**Status: SUPERSEDED AND DELETED** (2026-08-13, same day — see
+`adaptive-transfer-rate-plan.md`). Three consecutive live falsifications on the
+4 Mbps rig (async-write phantom drain → kernel-buffer absorption → vanilla
+write interleaving starving the sample ring), then the structural finding that
+ends the approach rather than the estimator: bounding netty-queue DEPTH cannot
+deliver low latency at all — the kernel send buffer and middle boxes sit BELOW
+the gauge and stay full whenever the sender writes at link rate. Latency comes
+from pacing UNDER capacity. The AUTO machinery was deleted; the operator-FIXED
+ceiling, the 64 KB floor, the `set` row (0 = off again), and the `ceil=` token
+survive. This document stays as the falsification record.
+
+**Original status line:** DESIGN v2 (2026-08-13, the v0.11.0 pause's
+found-feature loop; user-directed from the live 4 Mbps throttled-link session).
+v1's review round (2 reviewers: control lens → REDESIGN, blast-radius lens →
+IMPLEMENT WITH FIXES) is folded in below; §Review-round log records what
+changed and why.
 
 ## The problem (measured live 2026-08-13, premise CORRECTED by review)
 

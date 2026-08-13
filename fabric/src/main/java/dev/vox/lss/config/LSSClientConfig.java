@@ -80,6 +80,14 @@ public class LSSClientConfig extends JsonConfig {
     // Sodium settings slider ("Max LOD Download Rate"). 0 (and any non-positive value) = OFF,
     // bit-identical to pre-cap behavior.
     public int lodColumnsPerSecondLimit = 0;
+    // The client transfer governor (docs/planning/adaptive-transfer-rate-plan.md,
+    // Mechanism A): on a congested slow link — detected by the client's own tab-list
+    // ping rising >250 ms over its session baseline while LOD delivery measures under
+    // 4 MB/s — an AIMD loop paces LOD downloads BELOW link capacity through the same
+    // machinery as lodColumnsPerSecondLimit (min-composes with it; the manual knob
+    // stays a hard bound). Fast links never engage; a governed session logs one INFO.
+    // Kill switch: false = manual-knob-only, exactly the pre-governor shape.
+    public boolean enableAdaptiveTransferRate = true;
 
     // ---- Far players (v0.11.0, FARP §3.3 — ARMED since E2 via the client
     // ---- capability bit; these keys exist so upgrading users can pre-configure).

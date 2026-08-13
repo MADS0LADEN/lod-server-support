@@ -182,9 +182,10 @@ public class LSSClientCommands {
         }
 
         source.sendFeedback(Component.literal(String.format(
-                "Budget: used=%d/%d, ingest_backlog=%d, rate_cap=%d, rate_gated=%d",
+                "Budget: used=%d/%d, ingest_backlog=%d, rate_cap=%d, governed=%s, rate_gated=%d",
                 lastQueued, budget, manager.getLastIngestBacklog(),
-                LSSClientConfig.CONFIG.lodColumnsPerSecondLimit, manager.getRateGated()
+                LSSClientConfig.CONFIG.lodColumnsPerSecondLimit,
+                manager.getGovernedRateLabel(), manager.getRateGated()
         )).withStyle(ChatFormatting.GRAY));
     }
 }

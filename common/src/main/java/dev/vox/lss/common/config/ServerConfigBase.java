@@ -115,24 +115,30 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public int sendQueueLimitPerPlayer = LSSConstants.MAX_BATCH_CHUNK_REQUESTS;
     /**
-     * Outbound ceiling (auto-outbound-ceiling-design.md, superseding the
-     * flight-cadence plan's §11.4 fixed-only shape): bounds the standing LOD queue
-     * ahead of vanilla's packets on the shared channel.
+     * Outbound ceiling (flight-cadence plan §11.4; the AUTO mode that briefly
+     * occupied 0 was deleted — adaptive-transfer-rate-plan.md records the
+     * falsification): bounds the standing LOD queue ahead of vanilla's packets on
+     * the shared channel.
      *
-     * <p><b>Default 0 = AUTO</b> (since the auto outbound ceiling): a per-player
-     * drain-rate estimator derives a ~250 ms latency ceiling, enforced as an in-loop
-     * write budget — slow links get a bounded head-of-line delay, fast links disarm
-     * automatically (computed ceiling ≥ 2 MB = stand down; the bandwidth cap governs
-     * there). An EXPLICIT value (64..262144 KB) is an operator-FIXED entry-gate
-     * ceiling with the original no-floor semantics; 262144 is the documented OFF
-     * idiom (never binds). Runtime-mutable via {@code /lsslod set} — the AUTO kill
-     * switch is {@code set outboundBufferCeilingKB 262144}. On slow links nonzero
-     * {@code deferred=} is the mechanism WORKING (the pre-AUTO "red flag" reading is
-     * retired; {@code ceil=} in diag disambiguates the mode).
+     * <p><b>Default 0 = OFF</b> (no ceiling — slow-link pacing is owned by the
+     * client transfer governor and the server ping backstop). An EXPLICIT value
+     * (64..262144 KB) is an operator-FIXED entry-gate ceiling with no-floor
+     * semantics — a manual lever for special transports. Runtime-mutable via
+     * {@code /lsslod set outboundBufferCeilingKB} (0 = off).
      */
     public int outboundBufferCeilingKB = 0;
+    /**
+     * The vanilla-ping backstop (adaptive-transfer-rate-plan.md, Mechanism B): when a
+     * player's keepalive ping rises >750 ms over its session baseline while LSS was
+     * actually sending to them, their LOD bandwidth allocation is cut (first cut lands
+     * below the observed send rate) and recovers slowly once ping normalizes. Coarse
+     * and universal — it protects ANY client on a congested link, including old ones
+     * without the client-side transfer governor. Runtime-mutable via
+     * {@code /lsslod set enablePingBackstop} (the live A/B lever).
+     */
+    public boolean enablePingBackstop = true;
 
-    /** R-2 shared clamp: 0 (and any negative) = AUTO; explicit values clamp to
+    /** R-2 shared clamp: 0 (and any negative) = OFF; explicit values clamp to
      *  [MIN=64, MAX=262144] KB. Used by validate() AND the /lsslod set registry so
      *  a registry row can never clamp differently from boot validation. */
     public static int clampOutboundBufferCeilingKB(int v) {

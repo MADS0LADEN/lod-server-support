@@ -678,6 +678,69 @@ class LodRequestManagerTickTest {
         assertEquals(1, sent.size(), "a converged client stays silent throughout");
     }
 
+    // ---- transfer governor wiring (adaptive-transfer-rate-plan.md, impl review M1:
+    // ---- every one of these call sites could previously be unplugged with the whole
+    // ---- unit suite green) ----
+
+    /** Engage the manager's own governor directly with a known shape: measured
+     *  400 KB/s over 8 KB columns → desired 272 KB/s, R = 34, burst = ceil(34/4) = 9. */
+    private void engageGovernor() {
+        manager.transferGovernorEnabled = () -> true; // the local-config note above
+        manager.governor.tick(1, 0, 0, 0, 1, false, 50, true);
+        manager.governor.tick(1 + TransferRateGovernor.INTERVAL_MILLIS,
+                800 * 1024, 100, 20_000, 1, false, 2_000, true);
+        assertTrue(manager.governor.isEngaged(), "rig engagement");
+    }
+
+    @Test
+    void engagedGovernorShrinksTheDeclaredBatchThroughTheProductionWiring() {
+        // The ctor's two supplier bindings, THIS way round: the budget site must read
+        // the governed BURST (9), the spacing site the sustained R (34). Deleting
+        // either binding declares the full 24-position annulus; SWAPPING the lambdas
+        // declares min(24, 34) = 24 — both red here.
+        var overworld = dim("overworld");
+        enableAdaptiveSeam(); // the burst path is cadence-conditional (impl MAJOR-1)
+        engageGovernor();
+        plainTick(overworld);
+        assertEquals(1, sent.size());
+        assertEquals(9, sent.get(0).count(),
+                "the governed burst cap (ceil(R/4)) must reach the scanner's budget site");
+    }
+
+    @Test
+    void governorKillSwitchBindsThroughTheProductionConfigRead() {
+        // The production binding pin (the adaptive-cadence pattern): the manager's
+        // DEFAULT seam must read LSSClientConfig.CONFIG.enableAdaptiveTransferRate — a
+        // hardcoded true would keep a governed cap alive with the shipped kill switch off.
+        var overworld = dim("overworld");
+        boolean old = LSSClientConfig.CONFIG.enableAdaptiveTransferRate;
+        LSSClientConfig.CONFIG.enableAdaptiveTransferRate = false;
+        try {
+            manager.governor.tick(1, 0, 0, 0, 1, false, 50, true);
+            manager.governor.tick(1 + TransferRateGovernor.INTERVAL_MILLIS,
+                    800 * 1024, 100, 20_000, 1, false, 2_000, true);
+            assertTrue(manager.governor.isEngaged(), "rig engagement");
+            plainTick(overworld); // the production tick reads config false → hard reset
+            assertFalse(manager.governor.isEngaged(),
+                    "config false must hard-reset through the DEFAULT seam");
+            assertEquals(24, sent.get(0).count(), "no governed cap: the full annulus declares");
+        } finally {
+            LSSClientConfig.CONFIG.enableAdaptiveTransferRate = old;
+        }
+    }
+
+    @Test
+    void legacySessionExcludesTheGovernor() {
+        // The v16 exclusion is a MANAGER conjunct (isLegacySession), not a governor
+        // param — a legacy-fallback session's pacing is the drip-feed's own.
+        setupManager(new SessionConfigS2CPayload(
+                LSSConstants.V16_COMPAT_PROTOCOL_VERSION, true, 2, true));
+        engageGovernor();
+        plainTick(dim("overworld"));
+        assertFalse(manager.governor.isEngaged(),
+                "a v16 session must exclude (and hard-reset) the governor");
+    }
+
     @Test
     void killSwitchBindsThroughTheProductionConfigRead() {
         // The production binding pin (the #71 config-gate pattern): the scanner's DEFAULT

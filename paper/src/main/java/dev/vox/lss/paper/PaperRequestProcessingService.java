@@ -1156,15 +1156,33 @@ public class PaperRequestProcessingService {
         long perPlayerAllocation = this.bandwidthLimiter.getPerPlayerAllocation(activeCount);
         long perPlayerCap = Math.min(perPlayerAllocation, this.config.bytesPerSecondPerPlayer());
 
+        // The ping backstop's observe pass (Mechanism B) — the Fabric twin's comment:
+        // observed on the pump, applied to the flush allocation (m12), reset when the
+        // kill switch is off so a live flip cannot leave a stale cut.
+        if (this.config.enablePingBackstop) {
+            long now = System.currentTimeMillis();
+            for (var state : this.players.values()) {
+                int ping = -1;
+                try {
+                    ping = state.getPlayer().connection.latency();
+                } catch (Throwable ignored) {
+                }
+                state.getPingBackstop().observe(now, ping, state.getTotalBytesSent(),
+                        perPlayerCap);
+            }
+        } else {
+            for (var state : this.players.values()) {
+                state.getPingBackstop().resetFactor();
+            }
+        }
+
         for (var state : this.players.values()) {
             if (!state.hasCompletedHandshake())
                 continue;
-            long[] dropped = state.flushSendQueue(perPlayerCap, this.bandwidthLimiter, this.diag,
+            long[] dropped = state.flushSendQueue(
+                    state.getPingBackstop().apply(perPlayerCap), this.bandwidthLimiter, this.diag,
                     data -> this.columnPayloadSender.send(state, data),
                     (long) this.config.outboundBufferCeilingKB * 1024L,
-                    // AUTO outbound ceiling: 0 = AUTO, mode passed explicitly (S-9a) —
-                    // the Fabric twin's comment.
-                    this.config.outboundBufferCeilingKB == 0,
                     this.config.lodYieldsToVanillaTransport,
                     // Prune gated on the yield (review B-2) — the Fabric twin's comment.
                     this.config.lodYieldsToVanillaTransport

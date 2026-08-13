@@ -167,27 +167,43 @@ class RuntimeSettingsTest {
                 "generationConcurrencyLimitPerPlayer", "mbPerSecondLimitPerPlayer",
                 "mbPerSecondLimitGlobal", "dirtyBroadcastIntervalSeconds",
                 "maxConcurrentDiskReads", "farPlayers", "farPlayersMaxDistanceBlocks",
-                "outboundBufferCeilingKB")));
+                "outboundBufferCeilingKB", "enablePingBackstop")));
         var c = new TestServerConfig();
         assertEquals(names.size(), RuntimeSettings.listLines(c).size());
     }
 
-    /** The AUTO outbound ceiling's kill switch (auto-outbound-ceiling-design.md — the
-     *  design round's disarm requirement): 262144 disarms live, 0 returns to AUTO, and
-     *  the row clamps exactly like boot validation (the R-2 rule: sub-floor values
-     *  clamp UP to the 64 KB fixed floor, never down to AUTO). */
+    /** The registry's first BOOLEAN row (adaptive-transfer-rate-plan.md — the ping
+     *  backstop's live A/B lever): strict parse, so a typo is a command-line error,
+     *  never a silent disable. */
     @Test
-    void outboundCeilingRowIsTheAutoKillSwitchAndClampsLikeValidate() {
+    void pingBackstopRowParsesStrictBooleans() {
+        var c = new TestServerConfig();
+        apply(c, "enablePingBackstop", "false");
+        assertEquals(false, c.enablePingBackstop, "false applies");
+        apply(c, "enablePingBackstop", "TRUE");
+        assertEquals(true, c.enablePingBackstop, "case-insensitive true applies");
+        assertThrows(IllegalArgumentException.class,
+                () -> apply(c, "enablePingBackstop", "yes"),
+                "anything but true/false is a parse error");
+        assertEquals(true, c.enablePingBackstop, "a rejected value changes nothing");
+    }
+
+    /** The fixed outbound ceiling row (the AUTO mode was deleted —
+     *  adaptive-transfer-rate-plan.md): 0 = OFF, and the row clamps exactly like boot
+     *  validation (the R-2 rule: sub-floor values clamp UP to the 64 KB fixed floor,
+     *  never down to off). */
+    @Test
+    void outboundCeilingRowClampsLikeValidateWithZeroMeaningOff() {
         var c = new TestServerConfig();
         apply(c, "outboundBufferCeilingKB", "262144");
-        assertEquals(262144, c.outboundBufferCeilingKB, "the live disarm (the OFF idiom)");
+        assertEquals(262144, c.outboundBufferCeilingKB, "a large fixed ceiling is legal");
         apply(c, "outboundBufferCeilingKB", "0");
-        assertEquals(0, c.outboundBufferCeilingKB, "0 returns to AUTO");
+        assertEquals(0, c.outboundBufferCeilingKB, "0 = off (the default)");
         apply(c, "outboundBufferCeilingKB", "1");
         assertEquals(dev.vox.lss.common.LSSConstants.MIN_OUTBOUND_BUFFER_CEILING_KB,
                 c.outboundBufferCeilingKB,
                 "a sub-floor fixed value clamps up exactly like validate() (R-2)");
         apply(c, "outboundBufferCeilingKB", "-3");
-        assertEquals(0, c.outboundBufferCeilingKB, "negatives normalize to AUTO");
+        assertEquals(0, c.outboundBufferCeilingKB, "negatives normalize to off");
     }
 }

@@ -134,14 +134,12 @@ public final class LSSConstants {
      *  half-pooling would hand store-off servers pure downside on exactly the workloads
      *  where disk reads dominate (both gate reviews' convergent MAJOR). */
     public static final int AUTO_DISK_READ_GATE_DIVISOR = 2;
-    /** Transport-deference ceiling bounds (0 = AUTO, the default since the auto
-     *  outbound ceiling — auto-outbound-ceiling-design.md; explicit values are
-     *  operator-FIXED ceilings; 262144 is the documented OFF idiom). The old 4096 KB
-     *  floor's rationale ("well above one legal maximum-size column so a single
-     *  admissible payload can never trip the gate") is SUPERSEDED by the one-payload
-     *  presence gate: an oversized payload ships whole past any small ceiling and the
-     *  next flush waits, so small fixed ceilings are safe — the floor now only rules
-     *  out meaninglessly tiny values. The transport YIELD still needs no floor at all
+    /** Transport-deference ceiling bounds (0 = OFF, the default — the AUTO mode that
+     *  briefly occupied 0 was deleted, adaptive-transfer-rate-plan.md; explicit
+     *  values are operator-FIXED entry-gate ceilings). The 64 KB floor only rules out
+     *  meaninglessly tiny values: under the surviving entry gate an oversized payload
+     *  still ships whole once {@code pending <= ceiling}, so a small fixed ceiling
+     *  cannot wedge on one legal payload. The transport YIELD needs no floor at all
      *  (writability-gated; yield plan §1.2). */
     public static final int MIN_OUTBOUND_BUFFER_CEILING_KB = 64;
     public static final int MAX_OUTBOUND_BUFFER_CEILING_KB = 262_144;
