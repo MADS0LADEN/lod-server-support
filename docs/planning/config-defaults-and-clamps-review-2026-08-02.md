@@ -422,6 +422,14 @@ stays.
 
 ### 8.2 `outboundBufferCeilingKB` stays at 0 (off)
 
+> **ERRATUM (2026-08-13, auto-outbound-ceiling-design.md):** superseded — 0 now
+> means AUTO (a per-player drain-rate latency ceiling, self-disarming on fast
+> links), the fixed minimum re-clamped 4096 → 64 KB, and the key joined the
+> `/lsslod set` registry (262144 = the live disarm). This section's
+> ships-off rationale (the mechanism measured absent on healthy links) still
+> explains why AUTO self-disarms there; the slow-link evidence that overturned
+> ships-off is the design doc's 4 Mbps live session.
+
 This is not a performance feature — it is a protective gate for a condition that was
 **measured absent**. Flat 20–26 ms ping across a full elytra flight is a direct and
 sensitive probe of shared-queue depth, and the server's send queue read empty throughout.

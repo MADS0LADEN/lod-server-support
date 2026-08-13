@@ -115,21 +115,30 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public int sendQueueLimitPerPlayer = LSSConstants.MAX_BATCH_CHUNK_REQUESTS;
     /**
-     * Transport deference (docs/planning/flight-cadence-and-transport-backpressure-plan.md
-     * §11.4): when a player's network outbound buffer holds more than this many KB, LSS
-     * skips that tick's column flush and retains its queue, so LSS payloads stop deepening
-     * the head-of-line delay ahead of vanilla's own chunk packets on the shared channel.
+     * Outbound ceiling (auto-outbound-ceiling-design.md, superseding the
+     * flight-cadence plan's §11.4 fixed-only shape): bounds the standing LOD queue
+     * ahead of vanilla's packets on the shared channel.
      *
-     * <p><b>Default 0 = OFF, deliberately.</b> The elytra-wall investigation measured this
-     * mechanism ABSENT — flat 20–26 ms ping across a full flight is a direct and sensitive
-     * probe of shared-queue depth, and the server's send queue read empty throughout. The
-     * gate ships correct and tested so it can be armed the moment {@code obuf_hw} in
-     * {@code /lsslod diag} shows a real buffer building, and so that arming it does not
-     * confound the adaptive-cadence A/B it was written alongside. Nonzero {@code deferred=}
-     * on a healthy link is a red flag (the retired movement-cadence-debounce failure mode
-     * was "LOD silently stops during fast travel"), not the gate doing its job.
+     * <p><b>Default 0 = AUTO</b> (since the auto outbound ceiling): a per-player
+     * drain-rate estimator derives a ~250 ms latency ceiling, enforced as an in-loop
+     * write budget — slow links get a bounded head-of-line delay, fast links disarm
+     * automatically (computed ceiling ≥ 2 MB = stand down; the bandwidth cap governs
+     * there). An EXPLICIT value (64..262144 KB) is an operator-FIXED entry-gate
+     * ceiling with the original no-floor semantics; 262144 is the documented OFF
+     * idiom (never binds). Runtime-mutable via {@code /lsslod set} — the AUTO kill
+     * switch is {@code set outboundBufferCeilingKB 262144}. On slow links nonzero
+     * {@code deferred=} is the mechanism WORKING (the pre-AUTO "red flag" reading is
+     * retired; {@code ceil=} in diag disambiguates the mode).
      */
     public int outboundBufferCeilingKB = 0;
+
+    /** R-2 shared clamp: 0 (and any negative) = AUTO; explicit values clamp to
+     *  [MIN=64, MAX=262144] KB. Used by validate() AND the /lsslod set registry so
+     *  a registry row can never clamp differently from boot validation. */
+    public static int clampOutboundBufferCeilingKB(int v) {
+        return v <= 0 ? 0 : Math.clamp(v, LSSConstants.MIN_OUTBOUND_BUFFER_CEILING_KB,
+                LSSConstants.MAX_OUTBOUND_BUFFER_CEILING_KB);
+    }
     /**
      * Transport yield (vanilla-first-lod-yield-plan.md v2.1, v0.10.0 stage A2): while the
      * player's netty channel reports NOT WRITABLE, the per-tick column flush is skipped
@@ -772,9 +781,7 @@ public abstract class ServerConfigBase extends JsonConfig {
                 LSSConstants.MIN_SEND_QUEUE_SIZE, LSSConstants.MAX_SEND_QUEUE_SIZE);
         // 0 = disabled is a first-class value (the default); any nonzero opt-in clamps into
         // the supported band — same shape as lodStoreMaxMB.
-        outboundBufferCeilingKB = outboundBufferCeilingKB <= 0 ? 0 : Math.clamp(
-                outboundBufferCeilingKB, LSSConstants.MIN_OUTBOUND_BUFFER_CEILING_KB,
-                LSSConstants.MAX_OUTBOUND_BUFFER_CEILING_KB);
+        outboundBufferCeilingKB = clampOutboundBufferCeilingKB(outboundBufferCeilingKB);
         mbPerSecondLimitGlobal = clampMbGlobal(mbPerSecondLimitGlobal);
         // Far players (E1): mode normalizes through the shared helper (R-2/R-9); the
         // ring stays well-formed (min dragged under max — an inverted ring hides

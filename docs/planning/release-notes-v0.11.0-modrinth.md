@@ -12,7 +12,9 @@ Credit: SeeU (MIT) as prior art. Folia remains experimental.
 `maxConcurrentDiskReads` (bounds disk CPU independently of bandwidth, auto),
 `dirtyBroadcastIntervalSeconds: 0` = broadcasts off, `lodDistanceChunks` default
 now 300, LOD yields to vanilla transport by default
-(`lodYieldsToVanillaTransport: true`), client cache in `.lss/` for fresh installs.
+(`lodYieldsToVanillaTransport: true`), automatic per-player outbound pacing on
+slow connections (`outboundBufferCeilingKB` 0 = AUTO — responsive gameplay while
+LODs stream; fast links self-disarm), client cache in `.lss/` for fresh installs.
 
 **Fixed**: a "Packet was larger than I expected" disconnect right after joining
 on slow connections (a protocol-discovery race with the server's legacy-client

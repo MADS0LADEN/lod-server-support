@@ -83,10 +83,17 @@ class ChannelAccessorContractTest {
                 "src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
         assertTrue(fabric.contains("config.outboundBufferCeilingKB * 1024L"),
                 "Fabric must pass the CONFIGURED ceiling, in bytes, into flushSendQueues");
+        // The AUTO mode term (auto-outbound-ceiling-design.md): 0 = AUTO must be wired
+        // as the EXPLICIT mode parameter — dropping it reverts the fleet to fixed-only
+        // and the AUTO ceiling silently never arms (successor to this pin's intent).
+        assertTrue(fabric.contains("config.outboundBufferCeilingKB == 0"),
+                "Fabric must wire the 0 = AUTO mode term into the flush");
         String paper = Files.readString(Path.of(
                 "../paper/src/main/java/dev/vox/lss/paper/PaperRequestProcessingService.java"));
         assertTrue(paper.contains("this.config.outboundBufferCeilingKB * 1024L"),
                 "Paper twin must pass the same configured ceiling in bytes");
+        assertTrue(paper.contains("this.config.outboundBufferCeilingKB == 0"),
+                "Paper twin must wire the same 0 = AUTO mode term");
     }
 
     @Test

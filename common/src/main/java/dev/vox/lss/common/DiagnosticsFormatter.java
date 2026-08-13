@@ -19,14 +19,23 @@ public final class DiagnosticsFormatter {
             int pendingSync, int pendingGen,
             long sent, long bytes,
             long outboundPending, long outboundHighWater, long sendDeferrals,
-            long yielded
+            long yielded, long ceilBytes
     ) {
+        /** Pre-auto-ceiling shape — keeps existing constructions/tests intact
+         *  (ceil renders "off"). */
+        public PlayerDiag(String name, int sendQueue, int maxSendQueue, int pendingSync,
+                          int pendingGen, long sent, long bytes, long outboundPending,
+                          long outboundHighWater, long sendDeferrals, long yielded) {
+            this(name, sendQueue, maxSendQueue, pendingSync, pendingGen, sent, bytes,
+                    outboundPending, outboundHighWater, sendDeferrals, yielded, -1L);
+        }
+
         /** Pre-transport-yield shape — keeps existing constructions/tests intact. */
         public PlayerDiag(String name, int sendQueue, int maxSendQueue, int pendingSync,
                           int pendingGen, long sent, long bytes, long outboundPending,
                           long outboundHighWater, long sendDeferrals) {
             this(name, sendQueue, maxSendQueue, pendingSync, pendingGen, sent, bytes,
-                    outboundPending, outboundHighWater, sendDeferrals, 0L);
+                    outboundPending, outboundHighWater, sendDeferrals, 0L, -1L);
         }
     }
 
@@ -263,12 +272,18 @@ public final class DiagnosticsFormatter {
         for (var p : d.players) {
             double pRate = d.uptimeSec > 0 ? (double) p.sent / d.uptimeSec : 0;
             lines.add(String.format(
-                    "  %s: sq=%d/%d, psync=%d, pgen=%d, sent=%d (%s), rate=%s/s, obuf=%s/%s, deferred=%d, yielded=%d",
+                    "  %s: sq=%d/%d, psync=%d, pgen=%d, sent=%d (%s), rate=%s/s, obuf=%s/%s, ceil=%s, deferred=%d, yielded=%d",
                     p.name, p.sendQueue, p.maxSendQueue,
                     p.pendingSync, p.pendingGen,
                     p.sent, formatBytes(p.bytes),
                     formatRate(pRate),
                     formatOutbound(p.outboundPending), formatOutbound(p.outboundHighWater),
+                    // ceil= (auto-outbound-ceiling-design.md): the effective outbound
+                    // ceiling — AUTO's derived value, an operator-FIXED value, or "off"
+                    // (untrained/disarmed AUTO, or the 262144 OFF idiom renders its
+                    // huge fixed value honestly). Beside deferred= it disambiguates
+                    // mode: value+deferred = AUTO working; off+deferred = fixed hold.
+                    p.ceilBytes >= 0 ? formatBytes(p.ceilBytes) : "off",
                     p.sendDeferrals, p.yielded
             ));
         }
@@ -308,6 +323,24 @@ public final class DiagnosticsFormatter {
                                            dev.vox.lss.common.store.LodStoreMode storeMode,
                                            dev.vox.lss.common.store.LodStoreDiagnostics storeDiag,
                                            Collection<? extends AbstractPlayerRequestState<?>> states) {
+        return collectDiagData(enabled, lodDistanceChunks, bwPerPlayer, bwGlobal,
+                sendQueueLimitPerPlayer, uptimeSec, tickDiagnostics, windowBandwidthRate,
+                serviceTotalSent, serviceTotalBytes, serviceWireBytes, diag, diskReader,
+                bwLimiter, generationDiagnosticsOrNull, storeMode, storeDiag, states, 0L);
+    }
+
+    public static DiagData collectDiagData(boolean enabled, int lodDistanceChunks,
+                                           long bwPerPlayer, long bwGlobal, int sendQueueLimitPerPlayer,
+                                           long uptimeSec, String tickDiagnostics, long windowBandwidthRate,
+                                           long serviceTotalSent, long serviceTotalBytes,
+                                           long serviceWireBytes,
+                                           ProcessingDiagnostics diag, AbstractChunkDiskReader diskReader,
+                                           SharedBandwidthLimiter bwLimiter,
+                                           String generationDiagnosticsOrNull,
+                                           dev.vox.lss.common.store.LodStoreMode storeMode,
+                                           dev.vox.lss.common.store.LodStoreDiagnostics storeDiag,
+                                           Collection<? extends AbstractPlayerRequestState<?>> states,
+                                           long fixedCeilingBytes) {
         // The Throughput totals are SERVICE-scoped (TickDiagnostics — they exist to survive
         // per-player state teardown): summing the live states' counters here (the pre-R2-9
         // shape) collapsed after every dimension change/rejoin while uptime kept the service
@@ -322,7 +355,11 @@ public final class DiagnosticsFormatter {
                     state.getHeldSyncSlots(), state.getHeldGenSlots(),
                     state.getTotalSectionsSent(), state.getTotalBytesSent(),
                     state.getOutboundPendingBytes(), state.getOutboundPendingHighWater(),
-                    state.getSendDeferrals(), state.getYieldedTicks()
+                    state.getSendDeferrals(), state.getYieldedTicks(),
+                    // AUTO's per-player derived gauge; -1 = off. An operator-FIXED
+                    // ceiling never trains the gauge, so it renders through the
+                    // fixedCeilingBytes fallback the caller resolves from config.
+                    fixedCeilingBytes > 0 ? fixedCeilingBytes : state.getAutoCeilingGauge()
             ));
         }
 

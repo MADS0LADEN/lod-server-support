@@ -369,7 +369,7 @@ shipped bug, one falsified formula, and one arithmetic error that inverted a thr
 |---|---|---|
 | **A** | **Keep, re-specified** | Premise confirmed by all three; instrument replaced (§11.2) |
 | **B** | **Keep, formula corrected** | The measurement that retires this line of investigation; §3.1's identity was wrong (§11.3) |
-| **C** | **Keep, DEFAULT OFF** (`outboundBufferCeilingKB = 0`) | Guards a mechanism measured absent; armed-by-default makes the live A/B uninterpretable (§11.4) |
+| **C** | **Keep, DEFAULT OFF** (`outboundBufferCeilingKB = 0`) — *superseded 2026-08-13: 0 = AUTO per auto-outbound-ceiling-design.md (slow-link live evidence overturned ships-off; AUTO self-disarms on the healthy links this row's rationale measured)* | Guards a mechanism measured absent; armed-by-default makes the live A/B uninterpretable (§11.4) |
 | **D** | **CUT** | Its signal cannot discriminate, and the one that can already ships (§11.5) |
 
 ## 11.2 Change A — predict the walk, don't remember it
@@ -457,6 +457,12 @@ and unflushed writes, which exercises the real `ChannelOutboundBuffer`.
 Diag renders `obuf=n/a` on no-signal rather than a plausible-looking number.
 
 ## 11.4 Change C — placement was a shipped bug; default off
+
+> **SUPERSEDED (2026-08-13):** `0` now means AUTO — see
+> auto-outbound-ceiling-design.md, which also replaced the entry-only gate with
+> the in-loop write budget this section's v3 lever anticipated. The clamp table
+> above (256..65536) predates even the v0.10.0 shipped clamp (4096..262144) and
+> is historical; the live clamp is 64..262144 with 262144 as the off idiom.
 
 **The bug (all 3 reviewers).** §4.1's "before any send … return" sits above three things
 that live outside the send loop (`AbstractPlayerRequestState.java:547-551`, `:588`):
