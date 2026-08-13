@@ -1,9 +1,13 @@
 # Adaptive transfer rate — client-measured pacing + ping backstop — plan
 
-**Status: PLANNED, awaiting the 2-Fable review round** (2026-08-13, the v0.11.0
-pause's found-feature loop, round 5 of the slow-link latency program;
+**Status: PLANNED v2, under the 2-Fable review round** (2026-08-13, the
+v0.11.0 pause's found-feature loop, round 5 of the slow-link latency program;
 supersedes and DELETES the AUTO outbound ceiling of
-auto-outbound-ceiling-design.md).
+auto-outbound-ceiling-design.md). **v2 (user direction, mid-review): the
+governor is CLIENT-ACTUATED through the existing want-set rate-cap machinery —
+the server-enforced declaration is shelved** (tradeoffs recorded in
+§Mechanism A; the user's live experiment — manual client cap 50 resolving the
+4 Mbps session — validated the actuator directly).
 
 ## Why the ceiling program is being deleted (the evidence)
 
@@ -42,65 +46,74 @@ up-probe is cheap here (+step for one interval ≈ ~100 ms of queue at the
 target link, corrected within a second) — unlike the yield-signal AIMD the
 ceiling design rejected, whose probes rebuilt multi-second queues.
 
-## Mechanism A — the client transfer governor (primary; updated clients only)
+## Mechanism A — the client transfer governor (primary; CLIENT-ACTUATED)
 
-The DH loop with three LSS amendments (their known weaknesses: an ~8-minute
-additive ramp from a 50 KB/s start, and idle intervals collapsing the rate).
+**Revised at plan time (user direction + live experiment):** the governor's
+actuator is the CLIENT'S OWN want-set sizing, not a server-enforced rate. The
+user set the existing manual column-rate cap (`lodColumnsPerSecondLimit`, the
+Sodium "Max LOD Download Rate" machinery — budget clamp + size-weighted
+fast-fire spacing) to 50 on the live 4 Mbps session and the latency problem
+resolved — the actuator is already shipped and field-validated. The AIMD loop
+drives that machinery automatically.
 
-**Client side** (`common`-free client code beside `LodRequestManager`):
+Why client actuation beats the server-enforced declaration (the tradeoffs,
+recorded):
 
-- Each 1 s wall-clock interval, measure `wireBytesReceived` delta (the gate
-  already counts every column frame's shipped size; non-column S2C traffic is
-  negligible and uncounted — documented).
-- **Engagement gate**: the governor stays UNENGAGED (no declaration, server
-  unconstrained) until a qualifying SHORTFALL interval: bytes were received,
-  the awaiting set was non-empty at both interval edges (demand existed all
-  interval — an idle or converged interval must never adjust; the DH
-  idle-collapse fix), and measured rate < the current desired rate (when
-  engaged) or < the harness-observable engagement bound (first engagement:
-  any demand-backed interval whose delivery was slower than
-  `ENGAGE_BELOW_BYTES_PER_SEC` = 4 MB/s — a link comfortably above any
-  latency-relevant regime; faster sessions never engage at all, the
-  disarm-posture equivalent).
-- **First engagement**: `desired = measured − STEP/2` (DH's bootstrap-by-
-  shortfall, without their slow ramp — we START at the true measured rate).
-- **Engaged AIMD** per qualifying interval: kept-up (measured ≥ 0.9 × desired)
-  → `desired += STEP` (STEP = 256 KB/s — reaches a 25 MB/s cap in ~90 s,
-  vs DH's 8 min); shortfall → `desired = max(measured − STEP/2,
-  MIN_DECLARED)` (MIN_DECLARED = 64 KB/s). Non-qualifying intervals (no
-  demand / no data) change nothing.
-- **Disengagement**: `desired` climbing past `ENGAGE_BELOW_BYTES_PER_SEC`
-  with no shortfall for 10 consecutive qualifying intervals → send rate 0
-  (= unconstrained) and return to UNENGAGED. Fast links carry zero permanent
-  state.
-- **Declaration wire**: re-send `ClientInfoC2SPayload` with an APPENDED
-  optional field (the codec drains trailing bytes by design — "a future
-  client may append fields"; old servers discard silently, no protocol bump,
-  no new channel): `[dataVersion:VarInt][declaredRateBytesPerSec:VarLong]`
-  where 0 = no constraint. Sent on change only, with 10% hysteresis + a 1 s
-  min spacing; also re-sent once after any (re-)handshake (declaration state
-  survives the client's ladder heals). The server's client-info handler must
-  be repeat-tolerant (verify at implementation: the Via-guard input is
-  read-idempotent).
+- ZERO wire changes and zero server-side governor: no sidecar append, no
+  declaration lifecycle/trust boundary/repeat-tolerance, no Paper pump
+  marshalling. The loop is one client-side class.
+- Fixes the REVERSE population: an updated client is governed against EVERY
+  released v17+ server (v0.7-v0.10) — the server-enforced design required
+  both sides updated, and the slow-link player controls the client side.
+- Cheaper for the server: an unasked column is never read, serialized, or
+  queued at all (vs paced-after-resolving).
+- Tighter loop: the next scan applies the adjustment; no round-trip.
+- The cost — burstiness (the tradeoff that favored server enforcement,
+  quantified and accepted): the server answers each declared batch at line
+  rate then idles, so arrivals burst at ~interval x rate — at the 4 Hz
+  adaptive scan cadence ~110 KB per burst ≈ 220 ms of transient queue at a
+  500 KB/s link (server pacing would smooth to ~25 KB/tick). Bounded and
+  acceptable; server-side pacing remains addable LATER as a pure enhancement
+  (the declaration idea is shelved, not rejected — this plan's design keeps
+  the option open by keeping the rate byte-denominated internally).
+- Mid-flight degradation still delivers the already-declared outstanding set
+  before the cut bites (bounded by one scan's budget; the #71 edge-triggered
+  backpressure clear remains the escape hatch for the pathological case).
+
+**The loop** (client-side, beside the scanner/manager; all state per session):
+
+- Each 1 s wall-clock interval, measure received LSS wire bytes (the session
+  gate already counts every column frame's shipped size).
+- **Engagement gate**: UNENGAGED (no cap applied) until a qualifying
+  SHORTFALL interval: bytes were received, the awaiting set was non-empty at
+  both interval edges (demand existed all interval — an idle or converged
+  interval must never adjust; the DH idle-collapse fix), and the measured
+  rate < `ENGAGE_BELOW_BYTES_PER_SEC` (4 MB/s — faster sessions never engage,
+  the disarm posture).
+- **First engagement**: `desired = measured − STEP/2` (bootstrap-by-shortfall
+  — starts at the true measured rate, not DH's 50 KB/s slow ramp).
+- **Engaged AIMD** per qualifying interval: kept-up (measured ≥ 0.9 ×
+  desired) → `desired += STEP` (STEP = 256 KB/s); shortfall → `desired =
+  max(measured − STEP/2, MIN_RATE)` (MIN_RATE = 64 KB/s). Non-qualifying
+  intervals change nothing.
+- **Actuation**: the byte-denominated `desired` converts to a columns/s bound
+  via a per-session EWMA of received column wire size (the client knows every
+  frame's size) and feeds the SAME internal path the manual
+  `lodColumnsPerSecondLimit` uses (budget clamp + size-weighted fast-fire
+  spacing). Composition with the manual knob: the EFFECTIVE cap is
+  `min(manual, governed)` — the auto governor may go below the manual knob's
+  50-columns/s clamp floor (its own floor is MIN_RATE in bytes); the manual
+  knob keeps its meaning as a hard operator/user bound.
+- **Disengagement**: no shortfall for 10 consecutive qualifying intervals
+  with `desired` above `ENGAGE_BELOW_BYTES_PER_SEC` → drop the cap entirely,
+  return to UNENGAGED. Fast links carry zero permanent state.
 - Kill switch: client config `enableAdaptiveTransferRate` (default true) —
-  off = never declare, exactly the legacy-client shape.
-
-**Server side**:
-
-- Per-player `declaredRateBytesPerSec` (volatile; network thread writes,
-  flush reads), clamped server-side to
-  `[MIN_DECLARED, bytesPerSecondPerPlayer()]` — a hostile/buggy declaration
-  can neither stall a session below the floor nor raise its cap.
-- The per-tick flush already computes
-  `perPlayerCap = min(allocation, config cap)`; the declaration joins as a
-  third `min` term when nonzero. The banked-token burst divisor applies to
-  the effective cap, so a declared 400 KB/s session banks at most ~100 KB —
-  the burst amplitude collapse the 0.4-cap experiment measured.
-- Sessions that never declare (v0.7-v0.10 clients, kill-switched clients,
-  legacy dialects): unconstrained by A — Mechanism B and the yield gate are
-  their protection. No regression versus any released version.
-- Server kill switch: `enableAdaptiveTransferRate` (server config, default
-  true) — off = ignore declarations entirely.
+  off = manual-knob-only, exactly today's shape. One INFO per session on
+  first engagement (rate + reason) and one on disengagement — the client-side
+  receipt.
+- Sessions on legacy dialects (v16 fallback) are EXCLUDED (their pacing is
+  the legacy drip-feed's own; the governor gates on a current-dialect
+  session, mirroring the adaptive-cadence v16 exclusion).
 
 ## Mechanism B — the vanilla-ping backstop (server-side; ALL clients)
 
@@ -123,11 +136,15 @@ buffer LSS cannot see — the exact number the live sessions diagnosed with.
   (floor: the factor that yields 64 KB/s effective).
 - **Recover**: excess < 250 ms for 3 consecutive adjustments →
   `pingFactor = min(1.0, pingFactor * 1.25)`.
-- Composition rule — ONE governor per session, populations disjoint:
-  **B is SUSPENDED while a live declaration exists** (A owns updated
-  clients; two loops on one plant oscillate — the night's lesson). Effective
-  cap: A-sessions `min(alloc, cap, declared)`; B-sessions
-  `min(alloc, cap × pingFactor)`.
+- Composition rule — ONE governor per session where possible, but A is now
+  INVISIBLE to the server (client-actuated), so strict suspension is
+  impossible. The safe composition: B's cut threshold (750 ms excess) sits
+  far above A's converged operating point (~hundreds of ms), so on an
+  A-governed session B never reaches its trigger — the loops separate by
+  OPERATING REGION instead of population. If both ever act (A mis-converged
+  high), they push the same direction with B coarse and slow — bounded,
+  non-oscillatory (B cuts at most once per 5 s and recovers slower than A
+  adapts). Effective server cap: `min(alloc, cap × pingFactor)`.
 - Kill switch: `enablePingBackstop` (server config, default true).
 
 ## Deletion inventory (the confirmed-dead AUTO ceiling)
@@ -164,8 +181,10 @@ Removed outright (same branch, before the new mechanisms land):
 
 ## Observability
 
-- Server per-player diag line: `pace=<declared bytes/s|off>` and
-  `pingf=<factor|1.0>` after `ceil=`. Always rendered.
+- Server per-player diag line: `pingf=<factor|1.0>` after `ceil=` (B's
+  receipt). A's receipt is CLIENT-side: the engagement/disengagement INFOs +
+  the existing `/lss` client rate diagnostics (`getRateGated` already renders
+  the manual cap's gating — extended to show the governed rate).
 - Client: the governor logs one INFO per session on first engagement (rate +
   reason) and one on disengagement — the client-side receipt the estimator
   rounds never had. Diag-level state (`desired`, interval measurements) at
@@ -179,22 +198,20 @@ Removed outright (same branch, before the new mechanisms land):
 
 - T1: governor AIMD unit suite (engagement gate incl. demand-backing, the
   no-idle-collapse pin, bootstrap-by-shortfall, kept-up/shortfall steps,
-  disengagement, hysteresis + min-spacing on declarations, kill switch);
-  sidecar codec append/roundtrip + old-server tolerance pin; server-side
-  declaration clamp + min-composition into the flush cap (both platforms'
-  call sites); ping backstop unit suite (baseline drift, attribution guard,
-  cut/recover ladder, the A-suspends-B rule, kill switch); deletion pins
-  (the 7-arg flush overload's fixed-ceiling semantics unchanged; `ceil=`
-  renders fixed/off); diag token goldens.
+  disengagement, the min(manual, governed) composition, the column-size EWMA
+  conversion, the v16-session exclusion, kill switch); ping backstop unit
+  suite (baseline drift, attribution guard, cut/recover ladder, the
+  operating-region separation constants, kill switch); deletion pins (the
+  7-arg flush overload's fixed-ceiling semantics unchanged; `ceil=` renders
+  fixed/off); diag token goldens.
 - T2 + Paper T1: unchanged surfaces re-run.
 - Guard soak: fresh-backfill (both governors must be structurally inert).
 - **Live gate — the 4 Mbps throttled session**: tab ping settling to
-  ~300-600 ms while LODs stream at ~0.35-0.45 MB/s wire; diag shows
-  `pace=` ~350-450 KB/s on the player line; `yielded=` low (paced sends
-  rarely hit the watermark); disconnect/rejoin re-engages within ~2 s. A
-  second check with the CLIENT kill switch off: behavior degrades to
-  yield-only (today's shape) and `pingf=` engages within ~30 s if ping
-  balloons — B's live receipt.
+  ~300-600 ms while LODs stream at ~0.35-0.45 MB/s wire (the client INFO
+  logs the engaged rate); `yielded=` low; disconnect/rejoin re-engages
+  within ~2 s. A second check with the CLIENT kill switch off: behavior
+  degrades to yield-only (today's shape) and `pingf=` engages within ~30 s
+  if ping balloons — B's live receipt.
 
 ## Process
 
