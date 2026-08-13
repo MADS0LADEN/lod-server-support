@@ -36,9 +36,20 @@ one open tick still admits the whole banked burst past it.
 
 ## Decision (v2): per-player AUTO ceiling enforced as an IN-LOOP write budget
 
-    ceiling_bytes = OUTBOUND_TARGET_LATENCY_MS (250) x drain_rate_ewma
-    clamped to [64 KB, 2 MB]           (2 MB = a CONSTANT absolute cap —
-                                        NOT watermark-sourced; see review log)
+    computed = OUTBOUND_TARGET_LATENCY_MS (250) x drain_rate_ewma
+    computed >= 2 MB  =>  AUTO DISARMED this tick (status quo; yield backstop)
+    else ceiling_bytes = max(64 KB, computed)
+
+The 2 MB constant is a DISARM THRESHOLD, not a clamp (round-2 fix): a clamped
+ceiling would become a silent ~40 MB/s wire-throughput governor on healthy
+fast clients whenever an operator raises the bandwidth cap past ~40 MB/s, and
+the EWMA's self-inflation property cannot climb past a clamp — a larger
+constant only moves the cliff. Disarming instead costs nothing on slow links
+(their computed ceilings are far below 2 MB), keeps fast links at today's
+behavior, and makes `ceil=off` for the fast-link case literally true. Note the
+fast-vs-slow comparison is WIRE-denominated on the budget side and
+RAW-denominated on the bandwidth cap side — at shipped defaults the cap binds
+first a fortiori.
 
 **Actuator — the v3 lever, per-payload**: at flush entry compute
 `budget = max(0, ceiling − pending)`; inside the send loop stop as soon as
@@ -95,7 +106,9 @@ probing and never hurts the player to learn. AIMD is for unobservable capacity
   sections well (~1.5-3x), so `written` OVER-counts and the ceiling oversizes
   by that factor. Accepted and documented (no haircut factor): the 2 MB
   absolute cap bounds the damage to today's burst amplitude, and codec-1
-  sessions (the fleet) are ~1:1 through deflate.
+  sessions (the fleet) are ~1:1 through deflate. On the ACTUATOR side the
+  same over-count stops the loop EARLIER (budget consumed faster) —
+  conservative there.
 - **EWMA over wall-clock** (nanoTime deltas, injected-clock test seam), time
   constant ~2 s. Stability (control review, both regimes): on a slow link the
   standing queue keeps `pending_prev > 0`, so samples flow WHILE the ceiling
@@ -132,14 +145,20 @@ probing and never hurts the player to learn. AIMD is for unobservable capacity
 ## The AUTO floor (liveness; own counter — review MAJOR)
 
 AUTO ceiling holds get their OWN consecutive-held counter (they cannot ride
-`yieldNoSendTicks`: ceiling holds happen on WRITABLE ticks, which reset that
-counter, and the ceiling branch returns before the yield machinery). At 100
-consecutive AUTO-held ticks, the ceiling branch itself ships exactly ONE
-payload (allowed into an unwritable channel — the yield floor's precedent).
-Reset rule for BOTH floors: only where a payload actually LEAVES (send-success)
-— the existing else-branch reset fires before any send is attempted and a
-zero-allocation tick can erase the counter with nothing flowed (review's
-unbounded-starvation interleave). Fixed ceilings keep no-floor (F2-7).
+`yieldNoSendTicks`: the two governors hold in different channel states and a
+shared counter admits both spurious resets and shadowed holds). At 100
+consecutive AUTO-held ticks, exactly ONE payload ships (allowed into an
+unwritable channel — the yield floor's precedent). Reset rules (round-2 fix —
+the v2 blanket send-success-only rule over-corrected): BOTH floor counters
+reset (a) where a payload actually LEAVES (send-success), and (b) when the
+send queue is EMPTY at flush entry (nothing withheld = trivially not
+starving; without this, sparse single-tick holds on a healthy link accumulate
+across idle gaps and fire a spurious floor send). A refused-send /
+zero-allocation tick resets NOTHING — that interleave was the round-1
+unbounded-starvation finding. Worst-case silence under two independent
+counters is ~199 ticks (~10 s) when alternating governor stretches each stay
+under 100 — bounded, accepted, stated here because v1's shared-counter shape
+bounded it at 100. Fixed ceilings keep no-floor (F2-7).
 
 ## Plumbing
 
@@ -161,10 +180,20 @@ unbounded-starvation interleave). Fixed ceilings keep no-floor (F2-7).
 Yield gate (backstop, unchanged incl. its floor and counters); bandwidth caps
 (the rate guard — note the in-loop budget composes with, never replaces, the
 limiter); issue #71 ingest backpressure (slow decoders); wire; store; router;
-want-set. `deferred=` counts ceiling holds as today — but its MEANING flips
-from "operator red flag" to "the mechanism working" on slow links; every doc
-that calls nonzero `deferred=` a red flag is updated, and `ceil=` disambiguates
-(value ⇒ AUTO; `off` + deferred>0 ⇒ operator-fixed ceiling).
+want-set. `deferred=` counts only WHOLE-TICK holds
+(budget == 0 at entry), never budget-stopped partial flushes — today's
+"withheld work" meaning (round-2 nit). Its MEANING still flips from "operator
+red flag" to "the mechanism working" on slow links; every doc that calls
+nonzero `deferred=` a red flag is updated, and `ceil=` disambiguates (value ⇒
+AUTO; `off` + deferred>0 ⇒ operator-fixed ceiling).
+
+**Ordering (implementation decision, logged):** the AUTO budget evaluates
+AFTER the yield gate — an unwritable tick books `yielded=` (yield semantics
+and every existing yield pin unchanged), and AUTO binds only on WRITABLE
+ticks, which is exactly the burst window the v3 lever exists to bound. The
+operator-FIXED ceiling keeps its pinned ceiling-FIRST order (F2-7 exact
+semantics). Attribution stays clean: yielded = the channel said stop,
+deferred = LSS said stop.
 
 ## Known limitations
 
@@ -232,7 +261,9 @@ injected clock; budget arithmetic incl. presence gate; floor counters + resets;
 clamp table; CI-inertness both paths). One no-op soak guard (fresh-backfill).
 Live gate: the 4 Mbps throttled proxy session — acceptance: near-vanilla action
 latency with LODs streaming, `deferred=` climbing, `yielded=` near-quiet,
-`ceil=` ~100-150 KB, `obuf=` peak bounded ~ceiling + one payload.
+`ceil=` ~100-150 KB, `obuf=` peak bounded ~ceiling + one payload OUTSIDE
+vanilla burst windows (respawn//tp bursts are channel-wide and legitimately
+exceed it — round-2 nit).
 
 ## Review-round log
 
@@ -255,3 +286,16 @@ latency with LODs streaming, `deferred=` climbing, `yielded=` near-quiet,
   switch, the ChannelAccessorContractTest pin, the inverted Paper floor
   assert, the full docs/notes sweep, `deferred=` meaning flip, volatile
   `ceil=` gauge, Paper goldens verified unaffected. ALL folded into this v2.
+- **Round 2 (2026-08-13, delta review by the round-1 control reviewer):**
+  IMPLEMENT WITH FIXES. Fixes folded: the 2 MB constant is a DISARM threshold,
+  not a clamp (a clamp silently governs fast clients under a raised bandwidth
+  cap; self-inflation cannot pass a clamp — resolves the v2-fresh
+  ceil=off-vs-clamp inconsistency); floor resets rescoped (queue-empty resets
+  restored, refused-send ticks still never reset); `deferred=` counts only
+  whole-tick holds; wire-vs-raw units named in the fast-link argument; the
+  v18 actuator-side conservatism clause; the ~199-tick two-counter silence
+  bound stated; the obuf acceptance criterion scoped to non-vanilla-burst
+  windows. Implementation decision logged post-round: AUTO evaluates AFTER
+  the yield gate (yield pins and unwritable semantics unchanged; AUTO bounds
+  the writable-tick burst window, which is the v3 lever's whole target);
+  fixed ceilings keep ceiling-first (F2-7).
