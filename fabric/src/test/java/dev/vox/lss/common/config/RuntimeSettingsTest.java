@@ -166,8 +166,28 @@ class RuntimeSettingsTest {
                 "lodDistanceChunks", "generationConcurrencyLimitGlobal",
                 "generationConcurrencyLimitPerPlayer", "mbPerSecondLimitPerPlayer",
                 "mbPerSecondLimitGlobal", "dirtyBroadcastIntervalSeconds",
-                "maxConcurrentDiskReads", "farPlayers", "farPlayersMaxDistanceBlocks")));
+                "maxConcurrentDiskReads", "farPlayers", "farPlayersMaxDistanceBlocks",
+                "outboundBufferCeilingKB")));
         var c = new TestServerConfig();
         assertEquals(names.size(), RuntimeSettings.listLines(c).size());
+    }
+
+    /** The AUTO outbound ceiling's kill switch (auto-outbound-ceiling-design.md — the
+     *  design round's disarm requirement): 262144 disarms live, 0 returns to AUTO, and
+     *  the row clamps exactly like boot validation (the R-2 rule: sub-floor values
+     *  clamp UP to the 64 KB fixed floor, never down to AUTO). */
+    @Test
+    void outboundCeilingRowIsTheAutoKillSwitchAndClampsLikeValidate() {
+        var c = new TestServerConfig();
+        apply(c, "outboundBufferCeilingKB", "262144");
+        assertEquals(262144, c.outboundBufferCeilingKB, "the live disarm (the OFF idiom)");
+        apply(c, "outboundBufferCeilingKB", "0");
+        assertEquals(0, c.outboundBufferCeilingKB, "0 returns to AUTO");
+        apply(c, "outboundBufferCeilingKB", "1");
+        assertEquals(dev.vox.lss.common.LSSConstants.MIN_OUTBOUND_BUFFER_CEILING_KB,
+                c.outboundBufferCeilingKB,
+                "a sub-floor fixed value clamps up exactly like validate() (R-2)");
+        apply(c, "outboundBufferCeilingKB", "-3");
+        assertEquals(0, c.outboundBufferCeilingKB, "negatives normalize to AUTO");
     }
 }

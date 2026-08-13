@@ -265,7 +265,11 @@ class LSSServerCommands {
                         ? dev.vox.lss.common.store.LodStoreMode.OFF
                         : (service.getLodStore() != null ? service.getLodStore().mode() : null),
                 service.getOffThreadProcessor().getStoreDiagnostics(),
-                service.getPlayers().values()
+                service.getPlayers().values(),
+                // ceil= fixed-mode fallback: an operator-FIXED ceiling renders its
+                // configured value (AUTO's gauge lives on the state; 0 = AUTO here).
+                config.outboundBufferCeilingKB > 0
+                        ? (long) config.outboundBufferCeilingKB * 1024L : 0L
         ).withV16Line(service.getV16CompatManager().diagLineOrNull())
                 .withV18Line(service.getDialectTracker().diagLine())
                 .withFarPlayersLine(farPlayersDiagLineOrNull(service))

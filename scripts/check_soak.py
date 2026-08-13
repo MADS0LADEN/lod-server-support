@@ -211,8 +211,11 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     # box whose AUTO pool exceeds it, needs the opt-in or a K=pool pin).
     "maxConcurrentDiskReads",
     "sendQueueLimitPerPlayer", "bytesPerSecondLimitGlobal",
-    # Transport deference (0 = off, the shipped default). Listed so an A/B scenario can
-    # arm it — the R4 lesson below is exactly this omission.
+    # Outbound ceiling (0 = AUTO since auto-outbound-ceiling-design.md; explicit =
+    # operator-fixed, 262144 = off). AUTO is structurally inert on loopback (the
+    # estimator's busy-period guard never passes — pinned in AutoOutboundCeilingTest),
+    # so no scenario baseline moved with the default flip. Listed so an A/B scenario
+    # can pin it — the R4 lesson below is exactly this omission.
     "outboundBufferCeilingKB",
     "generationConcurrencyLimitGlobal", "generationTimeoutSeconds",
     "dirtyBroadcastIntervalSeconds",

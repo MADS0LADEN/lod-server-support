@@ -134,13 +134,16 @@ public final class LSSConstants {
      *  half-pooling would hand store-off servers pure downside on exactly the workloads
      *  where disk reads dominate (both gate reviews' convergent MAJOR). */
     public static final int AUTO_DISK_READ_GATE_DIVISOR = 2;
-    /** Transport-deference ceiling bounds (0 = disabled, the default — see
-     *  {@code outboundBufferCeilingKB}). The floor is well above one legal maximum-size
-     *  column so a single admissible payload can never trip the gate on its own. The
-     *  transport YIELD needs no such floor at all: it gates on netty's writability flag,
-     *  so a payload is only ever written to a writable channel and the single-payload
-     *  invariant holds by construction (yield plan §1.2). */
-    public static final int MIN_OUTBOUND_BUFFER_CEILING_KB = 4_096;
+    /** Transport-deference ceiling bounds (0 = AUTO, the default since the auto
+     *  outbound ceiling — auto-outbound-ceiling-design.md; explicit values are
+     *  operator-FIXED ceilings; 262144 is the documented OFF idiom). The old 4096 KB
+     *  floor's rationale ("well above one legal maximum-size column so a single
+     *  admissible payload can never trip the gate") is SUPERSEDED by the one-payload
+     *  presence gate: an oversized payload ships whole past any small ceiling and the
+     *  next flush waits, so small fixed ceilings are safe — the floor now only rules
+     *  out meaninglessly tiny values. The transport YIELD still needs no floor at all
+     *  (writability-gated; yield plan §1.2). */
+    public static final int MIN_OUTBOUND_BUFFER_CEILING_KB = 64;
     public static final int MAX_OUTBOUND_BUFFER_CEILING_KB = 262_144;
     public static final long MAX_BYTES_PER_SECOND_GLOBAL_LIMIT = 1_073_741_824;
     public static final int MIN_CONCURRENT_GENERATIONS = 1;
