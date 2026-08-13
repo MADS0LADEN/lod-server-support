@@ -63,18 +63,23 @@ class AutoOutboundCeilingTest {
         clock.addAndGet(50_000_000L); // one 50 ms tick
     }
 
-    /** Train the estimator to ~500 KB/s (the 4 Mbps live-session shape): one busy read,
-     *  then a 25 KB drain over one 50 ms tick. Derived ceiling = 250 ms x 500 KB/s =
+    /** Train the estimator to ~500 KB/s (the 4 Mbps live-session shape): a run of
+     *  pure-drain ticks at 25 KB/50 ms. The windowed MEDIAN (round 4) needs
+     *  RING_MIN samples before it arms. Derived ceiling = 250 ms x 500 KB/s =
      *  125 KB. */
     private void trainTo500KBps() {
         state.setCeilClockForTest(clock::get);
-        setPending(100_000);
+        long pending = 700_000;
+        setPending(pending);
         autoFlush(); // first read: sets pending_prev, no sample yet
-        tickClock();
-        setPending(75_000); // 25 KB drained over 50 ms = 500 KB/s
-        autoFlush();
+        for (int i = 0; i <= AbstractPlayerRequestState.AUTO_CEILING_RING_MIN; i++) {
+            tickClock();
+            pending -= 25_000; // 25 KB drained per 50 ms tick = 500 KB/s
+            setPending(pending);
+            autoFlush();
+        }
         assertEquals(125_000, state.getAutoCeilingGauge(),
-                "premise: 500 KB/s trains a 250 ms x rate = 125 KB ceiling");
+                "premise: a median of 500 KB/s samples derives the 125 KB ceiling");
     }
 
     // ---- CI-inertness (both paths — the design's structural soak/gametest argument) ----
@@ -101,11 +106,15 @@ class AutoOutboundCeilingTest {
         // 2 MB → AUTO stands down entirely (the round-2 DISARM decision: a CLAMPED
         // ceiling would silently govern fast clients under a raised bandwidth cap).
         state.setCeilClockForTest(clock::get);
-        setPending(1_000_000);
+        long pending = 20_000_000;
+        setPending(pending);
         autoFlush();
-        tickClock();
-        setPending(0); // 1 MB drained in 50 ms = 20 MB/s → computed 5 MB >= 2 MB
-        autoFlush();
+        for (int i = 0; i <= AbstractPlayerRequestState.AUTO_CEILING_RING_MIN; i++) {
+            tickClock();
+            pending -= 1_000_000; // 1 MB per 50 ms tick = 20 MB/s
+            setPending(pending);
+            autoFlush();
+        }
         assertEquals(-1, state.getAutoCeilingGauge(),
                 "a fast link disarms AUTO — the bandwidth cap governs there");
 
@@ -143,12 +152,8 @@ class AutoOutboundCeilingTest {
         autoFlush(); // prev == -1 → no sample (the poisoned NEXT)
         assertEquals(-1, state.getAutoCeilingGauge(),
                 "the read after a no-signal read must not train either");
-        // …but the one after that may.
-        tickClock();
-        setPending(75_000);
-        autoFlush();
-        assertEquals(125_000, state.getAutoCeilingGauge(),
-                "sampling resumes one read after the signal returns");
+        // …but sampling resumes after that: a full training run arms normally.
+        trainTo500KBps();
     }
 
     // ---- the actuator (the v3 lever) ----
@@ -296,7 +301,8 @@ class AutoOutboundCeilingTest {
         // arithmetic looks.
         trainTo500KBps(); // ceil 125 KB from pure-drain samples
         tickClock();
-        setPending(75_000); // steady: this tick's own sample is 0-drain (tiny decay)
+        setPending(75_000); // budget = 50 KB; this tick's sample enters the ring but
+                            // cannot move a median of a full 500 KB/s window
         state.addReadyPayload(new QueuedPayload<>("burst", 100_000, 0, POS_1));
         Thread.sleep(50);
         autoFlush(); // probe first (gauge settles), THEN writes 100 KB
@@ -312,30 +318,64 @@ class AutoOutboundCeilingTest {
     }
 
     @Test
-    void fastStreakDoublesTheEwmaTowardDisarm() throws Exception {
+    void fastStreakClearsTheRingForRetrain() throws Exception {
         // Pure-drain sampling cannot observe an IMPROVED link (a converged flush
-        // writes every tick) — the bounded up-recovery: 40 consecutive intervals of
-        // "wrote >= 32 KB, gauge still ~empty" double the EWMA; a genuinely fast
-        // link climbs to the disarm threshold in a few rounds, and an overshoot is
-        // corrected by the next hold tick's real sample.
-        trainTo500KBps(); // EWMA ~500 KB/s, ceil ~125 KB
-        // Each 40-iteration round yields ~one doubling (the round's first interval has
-        // written=0 from the previous probe and samples instead, resetting the streak);
-        // ~5 doublings take the EWMA past the 8 MB/s that computes over the 2 MB bar.
-        for (int round = 0; round < 7 && state.getAutoCeilingGauge() != -1; round++) {
-            for (int i = 0; i <= AbstractPlayerRequestState.AUTO_CEILING_UP_STREAK_TICKS; i++) {
-                tickClock();
-                setPending(0); // gauge empty every read
-                state.addReadyPayload(new QueuedPayload<>("w" + round + "_" + i,
-                        40_000, 100 + round * 100 + i, POS_1));
-                Thread.sleep(1);
-                autoFlush(); // writes 40 KB; next probe sees pending 0 → streak++
-            }
+        // writes every tick) — the round-4 up-recovery: 40 consecutive intervals of
+        // "wrote >= 32 KB, gauge still ~empty" CLEAR the sample ring. A genuinely
+        // improved link retrains at its true rate (or stays inert if it never queues
+        // again — correct); a false streak retrains right back within a second of
+        // holds. Visibility lag cannot sustain a 2 s streak of empty reads.
+        trainTo500KBps(); // median ~500 KB/s, ceil ~125 KB
+        for (int i = 0; i <= AbstractPlayerRequestState.AUTO_CEILING_UP_STREAK_TICKS + 1; i++) {
+            tickClock();
+            setPending(0); // gauge empty every read
+            state.addReadyPayload(new QueuedPayload<>("w" + i, 40_000, 100 + i, POS_1));
+            Thread.sleep(1);
+            autoFlush(); // writes 40 KB; next probe sees pending 0 → streak++
         }
         assertEquals(-1, state.getAutoCeilingGauge(),
-                "sustained wrote-and-vanished evidence must climb the EWMA to the "
-                        + "disarm threshold (500 KB/s x2 x2 x2 crosses 8 MB/s > the "
-                        + "2 MB-computed bar) — an improved link is never left clipped");
+                "sustained wrote-and-vanished evidence clears the ring — the stale "
+                        + "slow-link ceiling is gone and the estimator retrains from "
+                        + "scratch instead of clipping an improved link");
+    }
+
+    @Test
+    void composedYieldPlusAutoSawtoothBoundsTheOpenTickBurst() throws Exception {
+        // The SHIPPED default regime (post-hoc review MINOR-2: yield ON + AUTO): armed
+        // ceilings sit at/above netty's 64 KiB high water, so holds book yielded= (the
+        // yield gate runs first) and deferred= stays 0 — the budget's work is visible
+        // ONLY as the bounded open-tick burst. This walks one full sawtooth period:
+        // unwritable holds (sampling), the writable flip, and the budget-stopped open
+        // tick that would have shipped the whole banked queue pre-feature.
+        trainTo500KBps();
+        // Deep queue: five 30 KB payloads ready (150 KB > the 125 KB ceiling).
+        for (int i = 0; i < 5; i++) {
+            state.addReadyPayload(new QueuedPayload<>("p" + i, 30_000, i, POS_1));
+        }
+        Thread.sleep(50);
+        // Unwritable stretch: yield holds, deferred stays 0, samples keep flowing.
+        for (int i = 0; i < 3; i++) {
+            tickClock();
+            state.setChannelPressureProbe(
+                    probe(90_000 - i * 25_000, ChannelPressureProbe.Writability.NOT_WRITABLE));
+            state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 0L, true, true, 0);
+        }
+        assertTrue(sent.isEmpty(), "unwritable ticks hold everything");
+        assertEquals(3, state.getYieldedTicks(), "holds book yielded= in the default regime");
+        assertEquals(0, state.getSendDeferrals(), "deferred= stays 0 — the healthy signature");
+
+        // The writable flip: budget = ceiling − pending bounds the open tick to ~three
+        // payloads (30k+30k+30k >= 110k budget stops the fourth) instead of the whole
+        // queue — the banked-token burst amplitude is the ceiling, not the bank.
+        tickClock();
+        state.setChannelPressureProbe(
+                probe(15_000, ChannelPressureProbe.Writability.WRITABLE));
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 0L, true, true, 0);
+        assertEquals(List.of("p0", "p1", "p2", "p3"), sent,
+                "the open tick ships only up to the budget (110 KB admits four 30 KB "
+                        + "payloads via the stop-check-before-send rule) — never the "
+                        + "whole banked queue");
+        assertEquals(1, state.getSendQueueSize(), "the tail is retained for the next cycle");
     }
 
     @Test
