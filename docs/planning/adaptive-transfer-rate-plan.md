@@ -378,10 +378,17 @@ Removed outright (same branch, before the new mechanisms land):
 - T2 re-run. Paper T1 is a CHANGED surface (review M2): the config-test
   AUTO block rewrites to 0=OFF and the new key rows land there too.
 - Guard soak: fresh-backfill (both governors must be structurally inert).
-- **Live gate — the 4 Mbps throttled session**: tab ping settling to
-  ~300-600 ms while LODs stream at ~0.35-0.45 MB/s wire (the client INFO
-  logs the engaged rate); `yielded=` low; disconnect/rejoin re-engages
-  within ~2 s. A second check with the CLIENT kill switch off: behavior
+- **Live gate — the 4 Mbps throttled session: PASS (2026-08-13, user-run,
+  exceeded the criteria)** — ping settled to ~30 ms (the target was
+  300-600 ms) with LODs still streaming on the throttled proxy. The server
+  receipts told the ideal story: `sq=0/1024, obuf=4.0 KB, pingf=1.00,
+  yielded=0, paced=0` — the CLIENT governor alone held the rate under link
+  capacity, so no server mechanism ever fired (the backstops backstopped);
+  the only queue evidence was one bounded pre-engagement burst (obuf
+  high-water 348 KB). Original expectations kept below for the record:
+  tab ping settling to ~300-600 ms while LODs stream at ~0.35-0.45 MB/s
+  wire (the client INFO logs the engaged rate); `yielded=` low;
+  disconnect/rejoin re-engages within ~2 s. A second check with the CLIENT kill switch off: behavior
   degrades to yield-only (today's shape) and `pingf=` engages within ~30 s
   if ping balloons — B's live receipt. **Expected limit cycle (impl review
   m4, documented not fixed)**: on a permanently slow link the ping-normal

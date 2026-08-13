@@ -283,6 +283,10 @@ allocation the flush already receives:
   expectation is UNCHANGED verdicts because every law is conservation- or
   quiescence-based at 5 s scale and the churn ceilings carry 2× headroom —
   but a moved baseline is a FINDING to diagnose, not a re-baseline.
+- Live gate note (2026-08-13): on the combined build's 4 Mbps session the
+  governor held the rate and the pacer never fired (`paced=0` — correct:
+  the client-owned rate leaves no burst to shape). The pacer's OWN live
+  case (governor off, medium link, store-warm join) remains open below.
 - Live gate (the rig, proxy at a MEDIUM rate ~4-10 Mbps): client governor
   kill-switched off to isolate the pacer; the SPECIFIC measurement is the
   store-warm rejoin first seconds (v1's uncovered corner): expect the join
