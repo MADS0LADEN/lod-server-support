@@ -190,10 +190,17 @@ class OffThreadProcessorDiskResultTest {
     private record Response(UUID player, byte type, long packed) {}
 
     /** Poll drainSendActions until {@code done} holds over everything drained so far. */
+    // 30 s, NOT 5 s (the loadedProbeBeatsAFreshMissMemo hardening precedent, catalog
+    // 2026-08-03; this suite fired the same waitFor-timeout shape under box
+    // contention 2026-08-13): the deadline exists to fail a WEDGED condition, not to
+    // measure runner load — the passing path costs milliseconds either way. Tier 1
+    // has NO CI retry, so a timing flake here reds the whole run.
+    private static final long POLL_DEADLINE_NANOS = 30_000_000_000L;
+
     private static List<Response> drainUntil(TestProcessor proc, Predicate<List<Response>> done)
             throws InterruptedException {
         var collected = new ArrayList<Response>();
-        long deadline = System.nanoTime() + 5_000_000_000L;
+        long deadline = System.nanoTime() + POLL_DEADLINE_NANOS;
         while (!done.test(collected)) {
             if (System.nanoTime() > deadline) fail("timed out draining responses; got " + collected);
             proc.drainSendActions((state, types, positions, count) -> {
@@ -228,7 +235,7 @@ class OffThreadProcessorDiskResultTest {
 
     private static void waitFor(java.util.function.BooleanSupplier condition, String what)
             throws InterruptedException {
-        long deadline = System.nanoTime() + 5_000_000_000L;
+        long deadline = System.nanoTime() + POLL_DEADLINE_NANOS;
         while (!condition.getAsBoolean()) {
             if (System.nanoTime() > deadline) fail("timed out waiting for: " + what);
             Thread.sleep(10);
@@ -646,7 +653,7 @@ class OffThreadProcessorDiskResultTest {
                     rig.proc.clearDiskReadDone(rig.uuid, new long[]{packed}));
             rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
 
-            long deadline = System.nanoTime() + 5_000_000_000L;
+            long deadline = System.nanoTime() + POLL_DEADLINE_NANOS;
             while (rig.state.hasDiskReadDone(3, 3) && System.nanoTime() < deadline) {
                 rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of()); // drive the retry
                 Thread.sleep(10);
