@@ -94,14 +94,17 @@ recorded):
   (PlayerInfo latency — the vanilla keepalive path, so it excludes LSS
   server processing time) against a session-rolling minimum baseline with a
   +1 ms/s upward drift — the client-side mirror of Mechanism B's signal.
-  `pingExcess = ping − baseline`. **Pre-implementation check**: verify
-  26.2's tab-latency refresh cadence and smoothing (historically the
-  latency broadcast is periodic and the field smoothed (3·old+new)/4 —
-  staleness only DELAYS engagement, the safe direction, but it makes the
-  ping-driven drain bias below over-cut for up to one refresh period; if
-  the measured staleness exceeds ~10 s, the drain bias falls back to the
-  deterministic every-8th-kept-up drain interval, decision recorded at
-  implementation).
+  `pingExcess = ping − baseline`. **Pre-implementation check, RESOLVED
+  (26.2 bytecode, 2026-08-13)**: the keepalive smoothing is
+  `latency = (3·latency + sample)/4` on a 15 s send cadence
+  (`ServerCommonPacketListenerImpl.handleKeepAlive`), and the tab-list
+  UPDATE_LATENCY broadcast is every **600 ticks = 30 s**
+  (`PlayerList.sendAllPlayerInfoIn`). Staleness only DELAYS engagement
+  (the safe direction; the severe multi-second-excess class still crosses
+  the 250 ms conjunct on its first refresh, ~15-45 s), but 30 s exceeds
+  the ~10 s trust window for a ping-DRIVEN drain bias — so per the
+  recorded decision rule the drain bias is the DETERMINISTIC variant (see
+  the AIMD bullet).
 - **Engagement gate**: UNENGAGED (no cap applied) until a qualifying
   CONGESTED-SHORTFALL interval — ALL of: (a) bytes were received; (b) the
   awaiting set was non-empty at both interval edges (demand-backed — an
@@ -129,14 +132,18 @@ recorded):
   are engagement-only): SHORTFALL when `measured < desired − STEP/4` — an
   ABSOLUTE band (review M3: the multiplicative 0.9 band admits equilibrium
   ~1.11× capacity, which ratchets standing queue; the absolute band nets
-  zero queue per oscillation cycle) — OR when `pingExcess >
-  ENGAGE_PING_EXCESS_MS` (**the drain bias**, review M3's second defect: a
-  rate-matched loop never drains queue it INHERITED — the pre-engagement
-  burst can bank ~cap/4 — so while the queue signal stays elevated the
-  loop keeps cutting; over-cut from ping staleness is bounded by MIN_RATE
-  and recovers at +STEP per interval, the safe direction) → `desired =
-  max(measured − STEP/2, MIN_RATE)`. Otherwise KEPT-UP → `desired +=
-  STEP`. STEP = 256 KB/s; MIN_RATE = 64 KB/s.
+  zero queue per oscillation cycle) → `desired = max(measured − STEP/2,
+  MIN_RATE)`. Otherwise KEPT-UP → `desired += STEP`. **The drain bias**
+  (review M3's second defect: a rate-matched loop never drains queue it
+  INHERITED — the pre-engagement burst can bank ~cap/4): every 8th
+  consecutive kept-up interval is instead a deliberate DRAIN interval —
+  `desired = measured − STEP/4`, no +STEP — bleeding standing queue at
+  ~STEP/4 per 8 intervals. The DETERMINISTIC variant was chosen over the
+  ping-driven one because the resolved 30 s tab-latency staleness would
+  over-cut for up to ~45 s past actual drain (staleness + smoothing
+  decay); the deterministic bleed is slower (~6-7 min for a full
+  inherited bank) but monotone and testable, and B backstops the severe
+  class meanwhile. STEP = 256 KB/s; MIN_RATE = 64 KB/s.
 - **Actuation** (review M2 — the burst-quantum seam split): governed R
   (columns/s) derives from `desired` via the size estimator below, then
   the scanner's governed path supplies TWO values: `max(1, ceil(R/4))` at
@@ -237,10 +244,10 @@ buffer LSS cannot see — the exact number the live sessions diagnosed with.
   baseline seeds from the first nonzero sample. Accepted bias: a session
   whose first sample lands after LSS congestion already began anchors HIGH
   and under-reads excess until drain or drift catches up.
-- **Pre-implementation check** (shared with A's signal): verify 26.2's
-  keepalive latency smoothing — a smoothed field reads A's burst sawtooth
-  near its MEAN, which is silently load-bearing for the composition margin
-  on both platforms.
+- **Pre-implementation check, RESOLVED** (shared with A's signal): 26.2's
+  keepalive smoothing is confirmed `(3·latency + sample)/4` — a smoothed
+  field reads A's burst sawtooth near its MEAN, which is silently
+  load-bearing for the composition margin on both platforms.
 - Composition rule — ONE governor per session where possible, but A is now
   INVISIBLE to the server (client-actuated), so strict suspension is
   impossible. The safe composition: B's cut threshold (750 ms excess) sits
@@ -352,8 +359,8 @@ Removed outright (same branch, before the new mechanisms land):
   no-idle-collapse pin, the #71-halt non-qualifying pin, the reset/negative-
   delta non-qualifying pin, **the congestion-conjunct pin — a demand-limited
   shortfall with normal ping must NOT engage**, bootstrap-by-shortfall,
-  kept-up/shortfall steps with the ABSOLUTE band, the ping-driven drain
-  bias, disengagement both paths incl. the ping-normal exit, the
+  kept-up/shortfall steps with the ABSOLUTE band, the every-8th-kept-up
+  drain interval, disengagement both paths incl. the ping-normal exit, the
   min(manual, governed) composition incl. BOTH off-sentinel cases, **the
   seam-split pins — budget site gets ceil(R/4), spacing site gets R, the
   4 Hz equilibrium; the manual knob's single-value shape unchanged**, the
