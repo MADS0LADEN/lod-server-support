@@ -7,5 +7,15 @@
   "lss.config.lod_distance.server_default": "Server Default",
   "lss.config.column_rate_limit": "Max LOD Download Rate",
   "lss.config.column_rate_limit.tooltip": "Caps how many LOD columns per second the server streams to you. Lower this if receiving LODs stutters your game or saturates your connection. Automatic backpressure still applies on top. Set to 0 for unlimited.",
-  "lss.config.column_rate_limit.unlimited": "Unlimited"
+  "lss.config.column_rate_limit.unlimited": "Unlimited",
+  "lss.config.far_players.page": "Far Players",
+  "lss.config.far_players_enabled": "Show Far Players",
+  "lss.config.far_players_enabled.tooltip": "Show other players beyond normal render distance as simple player models in your LOD terrain. Only works on servers running LOD Server Support with far players enabled.",
+  "lss.config.far_players_share_self": "Share My Position",
+  "lss.config.far_players_share_self.tooltip": "Share your position with other players' LOD view. When enabled, players far away from you can see where you are (as a distant player model). Turn this off to stay invisible beyond normal render distance. Server exclude lists and permissions always apply on top.",
+  "lss.config.far_players_name_tags": "Far Player Name Tags",
+  "lss.config.far_players_name_tags.tooltip": "Show name tags over far-player models.",
+  "lss.config.far_players_render_distance": "Far Player Render Limit",
+  "lss.config.far_players_render_distance.tooltip": "Maximum distance (blocks) at which far players are drawn. Set this to roughly your fog distance if distant players fading at the horizon bothers you. 0 follows the server's limit.",
+  "lss.config.far_players_render_distance.server": "Server limit"
 }
