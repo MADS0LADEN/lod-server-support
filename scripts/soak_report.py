@@ -69,6 +69,11 @@ SERVER_MECHANISM = {
     # (cap full / capacity reject / ghost delivery) — a transient silent drop, re-declared
     # at 1 Hz until a slot frees. The dedicated law-A5 term (subset of superseded events).
     "gen-miss drops": "service.miss_dropped",
+    # DiskReadGate refusals (disk-read-concurrency-gate-plan.md): an expensive read
+    # bounced at the permit check — a silent superseded drop healed by re-declaration.
+    # Mechanism, not concern: nonzero is expected exactly where the gate binds (K < pool
+    # under cold-region load); every no-op-pinned scenario holds it at 0 via A7.
+    "gate-refused reads": "disk.gated",
     # Declared positions outside the server's lodDistance (client/server distance-config
     # mismatch or a teleport mid-declaration) — dropped at backlog replace, healed like any
     # supersession. Persistent growth means a config mismatch, not data loss.

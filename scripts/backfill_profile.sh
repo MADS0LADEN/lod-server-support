@@ -63,6 +63,7 @@ stage_server_config() { # <path>
   "enabled": true,
   "lodDistanceChunks": ${PROFILE_LOD_R:-256},
   "diskReaderThreads": 5,
+  "maxConcurrentDiskReads": 5,
   "enableChunkGeneration": false,
   "missMemoTtlSeconds": 30,
   "useBackgroundReadPriority": true,
@@ -245,9 +246,17 @@ PROPS
     local arm_valid=true
     [[ "$echo_line" == *"useNbtTranscode=${PROFILE_NBT_TRANSCODE:-true}"* ]] || arm_valid=false
     [[ "$echo_line" == *"diskReaderThreads=5"* ]] || arm_valid=false
+    # Same ref-predates-the-key tolerance for the disk-read gate's K (v0.11.0 stage B —
+    # the staged no-op pin is 5 = the pool, so an explicit different value is a staging
+    # bug, while an absent key is just an older ref). Reset per arm — not a local.
+    __gate_echo_bad=false
+    if [[ "$echo_line" == *"maxConcurrentDiskReads="* ]]; then
+        [[ "$echo_line" == *"maxConcurrentDiskReads=5"* ]] || __gate_echo_bad=true
+    fi
     if [[ "$echo_line" == *"useSelectiveNbtParse="* ]]; then
         [[ "$echo_line" == *"useSelectiveNbtParse=${PROFILE_SELECTIVE_PARSE:-true}"* ]] || arm_valid=false
     fi
+    [[ "${__gate_echo_bad:-false}" != "true" ]] || arm_valid=false
     # A walk that never STARTED is a vacuous run (leftover store marks, staging bug),
     # and an INCOMPLETE walk has no defined deposits/s (M2) — both invalidate the arm.
     [[ -n "$start_line" ]] || arm_valid=false

@@ -194,8 +194,11 @@ afterEvaluate {
             task.doFirst {
                 def cfgDir = new File(project.file(dir ?: "run"), "config")
                 cfgDir.mkdirs()
+                // maxConcurrentDiskReads: a large no-op (>= any pool) — the parity and
+                // fault gametests expect every submitted read to resolve; a surprise
+                // gate drop would flake them (disk-read-concurrency-gate-plan.md).
                 new File(cfgDir, "lss-server-config.json").text =
-                        '{\n  "lodStore": "off",\n  "lodStoreBackfill": false\n}\n'
+                        '{\n  "lodStore": "off",\n  "lodStoreBackfill": false,\n  "maxConcurrentDiskReads": 64\n}\n'
             }
         }
     }

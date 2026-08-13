@@ -12,6 +12,7 @@ public class DiskReaderDiagnostics {
     private final AtomicLong errorCount = new AtomicLong();
     private final AtomicLong saturationCount = new AtomicLong();
     private final AtomicLong successCount = new AtomicLong();
+    private final AtomicLong gatedCount = new AtomicLong();
     private final AtomicLong totalReadTimeNanos = new AtomicLong();
 
     public void recordSubmitted() { this.submittedCount.incrementAndGet(); }
@@ -24,6 +25,14 @@ public class DiskReaderDiagnostics {
     public void recordError() { this.errorCount.incrementAndGet(); }
     public void recordSaturation() { this.saturationCount.incrementAndGet(); }
     public void recordSuccess() { this.successCount.incrementAndGet(); }
+    /** A read refused by the DiskReadGate with the park list FULL (the overflow bounce
+     *  — permit-less refusals normally park and run on release, see the reader's
+     *  gateParked comment). NEVER counted into submitted/completed — the store-hit
+     *  exclusion precedent: law A5's second clause derives successful from the
+     *  completed-minus-outcomes partition, and a bounced read ran no read at all.
+     *  Distinct from {@code saturated}, which is recorded at the pool-rejection SUBMIT
+     *  site — the two share the silent-drop ChunkReadResult flavor but never a counter. */
+    public void recordGated() { this.gatedCount.incrementAndGet(); }
 
     public String formatDiagnostics(int pendingCount) {
         long completed = this.completedCount.get();
@@ -45,6 +54,7 @@ public class DiskReaderDiagnostics {
         return this.successCount.get();
     }
 
+    public long getGatedCount() { return this.gatedCount.get(); }
     public long getSubmittedCount() { return this.submittedCount.get(); }
     public long getCompletedCount() { return this.completedCount.get(); }
     public long getNotFoundCount() { return this.notFoundCount.get(); }

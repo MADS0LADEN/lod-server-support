@@ -36,7 +36,7 @@ RESULTS_ROOT="$PROJECT_ROOT/soak-results"
 WORLDS_DIR="$PROJECT_ROOT/soak-worlds"
 SCENARIOS_DIR="$PROJECT_ROOT/scripts/soak-scenarios"
 ALL_SCENARIOS=(fresh-backfill warm-rejoin dimension-trip dirty-broadcast
-               rate-limit-storm disk-saturation generation-disabled
+               rate-limit-storm disk-saturation disk-read-gate generation-disabled
                generation-capacity-stress bandwidth-throttle
                cold-restart-resync enabled-false teleport-prune
                dirty-range-filter dirty-during-backfill dirty-while-offline
@@ -147,7 +147,7 @@ fi
 
 case "$SCENARIO" in
     fresh-backfill|warm-rejoin|dimension-trip|dirty-broadcast) ;;
-    rate-limit-storm|disk-saturation|generation-disabled|generation-capacity-stress|bandwidth-throttle) ;;
+    rate-limit-storm|disk-saturation|disk-read-gate|generation-disabled|generation-capacity-stress|bandwidth-throttle) ;;
     cold-restart-resync|enabled-false|teleport-prune|dirty-range-filter) ;;
     dirty-during-backfill|dirty-while-offline|clearcache-mid-session|dimension-rejoin-warm) ;;
     store-second-join) ;;
@@ -193,6 +193,11 @@ case "$SCENARIO" in
     dirty-broadcast)            CLIENT_RUNS=1; EXPECTED_SECONDS=270 ;;
     rate-limit-storm)           CLIENT_RUNS=1; EXPECTED_SECONDS=370 ;;
     disk-saturation)            CLIENT_RUNS=1; EXPECTED_SECONDS=250 ;;
+    # K=1 over the prebuilt annulus: with the park list feeding the permit, healthy IO
+    # converges in seconds; degraded WSL2 IO (107-131 ms/read) serializes ~2112 reads
+    # to ~4-5 min — the 400 s timeline budgets that plus the >=25 s converged tail
+    # (v1.3 sizing decision + the stage-B park deviation's margin).
+    disk-read-gate)             CLIENT_RUNS=1; EXPECTED_SECONDS=450 ;;
     generation-disabled)        CLIENT_RUNS=1; EXPECTED_SECONDS=230 ;;
     generation-capacity-stress) CLIENT_RUNS=1; EXPECTED_SECONDS=330 ;;
     bandwidth-throttle)         CLIENT_RUNS=1; EXPECTED_SECONDS=290 ;;

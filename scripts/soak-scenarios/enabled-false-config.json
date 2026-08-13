@@ -3,6 +3,7 @@
   "lodDistanceChunks": 24,
   "dirtyBroadcastIntervalSeconds": 5,
   "diskReaderThreads": 5,
+  "maxConcurrentDiskReads": 5,
   "lodStore": "off",
   "lodStoreBackfill": false
 }

@@ -165,6 +165,12 @@ conservatism — above it the number would describe something the reader cannot 
 | `lodDistanceChunks` | `256` | 1..2048 | Generous already. The 2048 ceiling costs nothing now that the fast-rescan gate is predicted-walk-cost based rather than distance-based. |
 | Paper `updateEvents` | 7 events | — | Correct. Excluding `BlockFromToEvent` (fluid flow) by default is right. |
 
+> **Erratum (2026-08-13, v0.11.0 stage B):** a NEW key joins the audited set —
+> `maxConcurrentDiskReads` (default `0` = AUTO, store-conditional: store armed →
+> ceil(pool/2), store-less → pool = no-op; nonzero clamps `1..64` in validate() plus
+> to the resolved pool at derivation; disable idiom = set ≥ pool — 0 is AUTO, not
+> off). See `docs/planning/disk-read-concurrency-gate-plan.md`.
+
 > **Erratum (2026-08-13, v0.11.0 stage A):** two rows above are superseded.
 > `dirtyBroadcastIntervalSeconds`' clamp is now **`0` or `1..300`** — `0` disables
 > dirty pushes entirely (previously it clamped to 1 s, the *fastest* cadence — the

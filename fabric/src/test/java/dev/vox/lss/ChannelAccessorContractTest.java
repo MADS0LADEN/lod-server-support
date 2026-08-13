@@ -139,17 +139,34 @@ class ChannelAccessorContractTest {
         // starts failing its arm_valid check (or worse: two identical arms compare as
         // a valid A/B). Pin the call sites: resolved thread count + the LIVE post-probe
         // compression state, on both platforms.
+        // Stage B (disk-read gate): the third argument is the RESOLVED store-conditional
+        // K — gateCapacity is computed from effectiveMaxConcurrentDiskReads against the
+        // post-degrade store right above the echo, so pinning the argument NAME pins the
+        // resolution path.
         var echoCall = java.util.regex.Pattern.compile(
                 "LSSLogger\\.info\\(config\\.effectiveConfigEcho\\(readerThreads,\\s*"
-                        + "wireCompressionLive\\)\\)");
+                        + "wireCompressionLive,\\s*gateCapacity\\)\\)");
         String fabric = Files.readString(
                 Path.of("src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
         assertTrue(echoCall.matcher(fabric).find(),
-                "Fabric must echo effectiveConfigEcho(readerThreads, wireCompressionLive)");
+                "Fabric must echo effectiveConfigEcho(readerThreads, wireCompressionLive, gateCapacity)");
         String paper = Files.readString(
                 Path.of("../paper/src/main/java/dev/vox/lss/paper/PaperRequestProcessingService.java"));
         assertTrue(echoCall.matcher(paper).find(),
-                "Paper twin must echo effectiveConfigEcho(readerThreads, wireCompressionLive)");
+                "Paper twin must echo effectiveConfigEcho(readerThreads, wireCompressionLive, gateCapacity)");
+        // Ordering half (v1.3 review MAJOR): the echo must sit AFTER store attachment on
+        // both platforms — an echo before LodStores.createOrNull reports K computed
+        // store-less on every store-armed server, in a script-consumed contract (the
+        // same bug class the echo's "deliberately AFTER the zstd probe" comment covers).
+        for (var entry : java.util.Map.of("Fabric", fabric, "Paper", paper).entrySet()) {
+            String src = entry.getValue();
+            int storeAttach = src.indexOf("LodStores.createOrNull");
+            var echoAt = echoCall.matcher(src);
+            assertTrue(echoAt.find() && storeAttach >= 0, entry.getKey() + " source anchors");
+            assertTrue(echoAt.start() > storeAttach,
+                    entry.getKey() + ": the config echo must run AFTER store attachment"
+                            + " (the echoed K is the store-conditional resolution)");
+        }
     }
 
     @Test

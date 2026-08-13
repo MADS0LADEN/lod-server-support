@@ -548,8 +548,11 @@ class ConfigValidationTest {
             int floor = switch (f.getName()) {
                 case "missMemoTtlSeconds", "lodStoreResweepSeconds", "lodStoreMaxMB",
                         "outboundBufferCeilingKB", "dirtyBroadcastIntervalSeconds",
-                        // 0 = AUTO (derived), the default for both since 2026-08-02.
-                        "diskReaderThreads", "perDimensionTimestampCacheSizeMB" -> 0;
+                        // 0 = AUTO (derived), the default for both since 2026-08-02;
+                        // maxConcurrentDiskReads is the same shape (store-conditional
+                        // AUTO — disk-read-concurrency-gate-plan.md).
+                        "diskReaderThreads", "perDimensionTimestampCacheSizeMB",
+                        "maxConcurrentDiskReads" -> 0;
                 case "xrayMaxBlockHeight" -> LSSConstants.MIN_XRAY_MAX_BLOCK_HEIGHT;
                 default -> 1;
             };
@@ -836,19 +839,62 @@ class ConfigValidationTest {
         c.useCompressedColumns = false;
         assertEquals("Effective config: useNbtTranscode=false, diskReaderThreads=7,"
                         + " useCompressedColumns=true, useBackgroundReadSplit=true,"
-                        + " useSelectiveNbtParse=true",
-                c.effectiveConfigEcho(7, true),
+                        + " useSelectiveNbtParse=true, maxConcurrentDiskReads=4",
+                c.effectiveConfigEcho(7, true, 4),
                 "key order and key=value spelling are what the harnesses grep");
         // The thread count echoed is the RESOLVED one the caller passes (0=AUTO already
         // applied) — the scripts assert the staged explicit value appears verbatim.
+        // Same rule for the gate's K (the store-conditional resolution, post-degrade).
         c.useNbtTranscode = true;
         c.useCompressedColumns = true;
         c.useBackgroundReadSplit = false;
         c.useSelectiveNbtParse = false;
         assertEquals("Effective config: useNbtTranscode=true, diskReaderThreads=5,"
                         + " useCompressedColumns=false, useBackgroundReadSplit=false,"
-                        + " useSelectiveNbtParse=false",
-                c.effectiveConfigEcho(5, false));
+                        + " useSelectiveNbtParse=false, maxConcurrentDiskReads=5",
+                c.effectiveConfigEcho(5, false, 5));
+    }
+
+    /** The disk-read gate's K resolver (disk-read-concurrency-gate-plan.md): 0 = AUTO is
+     *  STORE-CONDITIONAL — no store attached resolves to the pool (a no-op gate; the
+     *  store-off population must never pay the half-pool tax — both gate reviews'
+     *  convergent MAJOR), store attached resolves to ceil(pool/2); an explicit override
+     *  clamps to the pool (a K above it cannot bind — the documented OFF idiom). */
+    @Test
+    void effectiveMaxConcurrentDiskReadsIsStoreConditionalWithPoolClampedOverride() {
+        var c = serverConfig();
+
+        c.maxConcurrentDiskReads = 0; // AUTO
+        assertEquals(8, c.effectiveMaxConcurrentDiskReads(8, false),
+                "AUTO with no store attached must be the pool — a structural no-op");
+        assertEquals(3, c.effectiveMaxConcurrentDiskReads(3, false));
+        assertEquals(4, c.effectiveMaxConcurrentDiskReads(8, true),
+                "AUTO with a store: half the pool, reserving the rest for store lookups");
+        assertEquals(2, c.effectiveMaxConcurrentDiskReads(3, true), "ceil(3/2) = 2");
+        assertEquals(1, c.effectiveMaxConcurrentDiskReads(1, true),
+                "pool 1: K=1 — exactly today's behavior, nothing regresses");
+
+        c.maxConcurrentDiskReads = 2;
+        assertEquals(2, c.effectiveMaxConcurrentDiskReads(8, true), "explicit override wins");
+        assertEquals(2, c.effectiveMaxConcurrentDiskReads(8, false),
+                "an explicit override binds regardless of store attachment");
+        c.maxConcurrentDiskReads = 64;
+        assertEquals(8, c.effectiveMaxConcurrentDiskReads(8, true),
+                "override >= pool clamps to the pool — the disable idiom");
+
+        // The diskReaderThreads negative-normalizes-to-AUTO mirror: -1 must mean AUTO
+        // (store-conditional), never clamp up to the tightest possible gate (1).
+        c.maxConcurrentDiskReads = -1;
+        c.validate();
+        assertEquals(0, c.maxConcurrentDiskReads, "negative normalizes to AUTO");
+        assertEquals(8, c.effectiveMaxConcurrentDiskReads(8, false));
+        c.maxConcurrentDiskReads = 3;
+        c.validate();
+        assertEquals(3, c.maxConcurrentDiskReads, "in-band explicit value survives validate");
+        c.maxConcurrentDiskReads = 9999;
+        c.validate();
+        assertEquals(LSSConstants.MAX_DISK_READER_THREADS, c.maxConcurrentDiskReads,
+                "validate clamps nonzero to the shared ceiling; the pool clamp is at derivation");
     }
 
 }

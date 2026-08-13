@@ -400,12 +400,6 @@ public class PaperRequestProcessingService {
                 wireCompressionLive = true;
             }
         }
-        // Script-consumed contract: the measurement harnesses assert their staged knobs
-        // against this line (ServerConfigBase.effectiveConfigEcho). Deliberately AFTER
-        // the zstd probe so the compression value echoed is the LIVE state, not the
-        // request (B0 review M1).
-        LSSLogger.info(config.effectiveConfigEcho(readerThreads, wireCompressionLive));
-
         // LOD store: memory tier for "memory", memory + SQLite for "full" — attached to
         // both consumers BEFORE the processor starts / any submit. Environment resolved
         // eagerly on the construction thread (levels loaded at plugin enable); the
@@ -471,6 +465,23 @@ public class PaperRequestProcessingService {
                 offThreadProcessor.attachStore(lodStore);
             }
         }
+
+        // Disk-read concurrency gate K (twin of the Fabric wiring): resolved against
+        // the POST-DEGRADE store state — `lodStore != null`, never the config string,
+        // or half-pool K would re-arm on exactly the store-less servers the
+        // store-conditional AUTO carves out (failed codec probe, enabled=false).
+        int gateCapacity = config.effectiveMaxConcurrentDiskReads(readerThreads,
+                lodStore != null);
+        diskReader.configureReadGate(gateCapacity);
+        // Script-consumed contract: the measurement harnesses assert their staged knobs
+        // against this line (ServerConfigBase.effectiveConfigEcho). Deliberately AFTER
+        // the zstd probe (the compression value echoed is the LIVE state, not the
+        // request — B0 review M1) and AFTER store attachment (the echoed K is the
+        // store-conditional resolution, which does not exist until the store's own
+        // degrade ladder has run — v1.3 review MAJOR).
+        LSSLogger.info(config.effectiveConfigEcho(readerThreads, wireCompressionLive,
+                gateCapacity));
+
         offThreadProcessor.start();
 
         var dirtyTracker = new DirtyColumnTracker();

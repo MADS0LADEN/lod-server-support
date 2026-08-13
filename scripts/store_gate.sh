@@ -63,6 +63,7 @@ stage_config() { # <lodStore-value>
   "enabled": true,
   "lodDistanceChunks": $distance,
   "diskReaderThreads": 5,
+  "maxConcurrentDiskReads": 5,
   "enableChunkGeneration": false,
   "missMemoTtlSeconds": 30,
   "useBackgroundReadPriority": true,

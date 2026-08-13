@@ -175,6 +175,12 @@ class PaperConfigValidationTest {
                     new Bounds(0, LSSConstants.MAX_DIRTY_BROADCAST_INTERVAL)),
             Map.entry("sendQueueLimitPerPlayer",
                     new Bounds(LSSConstants.MIN_SEND_QUEUE_SIZE, LSSConstants.MAX_SEND_QUEUE_SIZE)),
+            // maxConcurrentDiskReads' legal floor is 0 (= AUTO, store-conditional —
+            // disk-read-concurrency-gate-plan.md); the 1 floor applies to nonzero
+            // explicit values only, and the pool clamp lives at derivation (named
+            // resolver tests in both twins).
+            Map.entry("maxConcurrentDiskReads",
+                    new Bounds(0, LSSConstants.MAX_DISK_READER_THREADS)),
             // generationConcurrencyLimitPerPlayer and perDimensionTimestampCacheSizeMB left the
             // table-driven sweep 2026-08-02: the first clamps to the CONFIGURED global (§9.1) and
             // the second treats 0 as AUTO, so neither has fixed both-ends bounds. Named tests in
@@ -310,8 +316,23 @@ class PaperConfigValidationTest {
         c.useCompressedColumns = false;
         assertEquals("Effective config: useNbtTranscode=false, diskReaderThreads=7,"
                         + " useCompressedColumns=true, useBackgroundReadSplit=true,"
-                        + " useSelectiveNbtParse=true",
-                c.effectiveConfigEcho(7, true));
+                        + " useSelectiveNbtParse=true, maxConcurrentDiskReads=4",
+                c.effectiveConfigEcho(7, true, 4));
+    }
+
+    /** Twin of the Fabric store-conditional K resolver pins (the shared resolver runs
+     *  through the Paper subclass; the SHARED_BOUNDS row covers the validate clamp). */
+    @Test
+    void effectiveMaxConcurrentDiskReadsResolvesThroughThePaperSubclass() {
+        PaperConfig c = new PaperConfig();
+        c.maxConcurrentDiskReads = 0;
+        assertEquals(8, c.effectiveMaxConcurrentDiskReads(8, false),
+                "AUTO, no store: the pool (no-op gate)");
+        assertEquals(4, c.effectiveMaxConcurrentDiskReads(8, true),
+                "AUTO, store armed: half the pool");
+        c.maxConcurrentDiskReads = 64;
+        assertEquals(8, c.effectiveMaxConcurrentDiskReads(8, true),
+                "override >= pool clamps to the pool — the disable idiom");
     }
 
     /** Phase 4 twin of the Fabric default pin (shared key, Fabric-only in effect). */

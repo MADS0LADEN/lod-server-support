@@ -108,6 +108,20 @@ public final class LSSConstants {
      *  scale with cores but stop well short of starving the rest of the server. */
     public static final int AUTO_DISK_READER_THREADS_PRIORITIZED_MAX = 8;
     public static final int MAX_DISK_READER_THREADS = 64;
+    /** Disk-read concurrency gate floor (disk-read-concurrency-gate-plan.md). 0 is a
+     *  first-class value above it — AUTO, see
+     *  ServerConfigBase.effectiveMaxConcurrentDiskReads — so validate() clamps only
+     *  nonzero values; the ceiling rides MAX_DISK_READER_THREADS (a K above the pool is
+     *  structurally a no-op, the documented OFF idiom). */
+    public static final int MIN_MAX_CONCURRENT_DISK_READS = 1;
+    /** AUTO K on a STORE-ARMED server = ceil(pool / this): ≤ half the reader pool runs
+     *  the expensive NBT phase (region read → inflate → parse → transcode → compress) at
+     *  any instant, reserving the other half for ~44 µs store-hit serves — the structural
+     *  fix for "cold-region reads starve the cheap store rung on the shared pool". With
+     *  no store attached AUTO = pool (a no-op gate): no cheap path exists to protect and
+     *  half-pooling would hand store-off servers pure downside on exactly the workloads
+     *  where disk reads dominate (both gate reviews' convergent MAJOR). */
+    public static final int AUTO_DISK_READ_GATE_DIVISOR = 2;
     /** Transport-deference ceiling bounds (0 = disabled, the default — see
      *  {@code outboundBufferCeilingKB}). The floor is well above one legal maximum-size
      *  column so a single admissible payload can never trip the gate on its own. The
