@@ -36,6 +36,22 @@ class FarPlayerClientSupportTest {
     }
 
     @Test
+    void coexistTruthTableSuppressesOnlyWithSeeUAndWithoutTheOverride() {
+        // E3: the SeeU gate composes the EFFECTIVE enabled term (renderer + the
+        // prefs `enabled` field), never the capability bit. The four live rows:
+        assertTrue(FarPlayerClientSupport.effectiveEnabledFor(true, false, false),
+                "no SeeU: config rules");
+        assertFalse(FarPlayerClientSupport.effectiveEnabledFor(true, true, false),
+                "SeeU without the override suppresses (the double-proxy guard)");
+        assertTrue(FarPlayerClientSupport.effectiveEnabledFor(true, true, true),
+                "farPlayersWithSeeU explicitly prefers LSS");
+        assertFalse(FarPlayerClientSupport.effectiveEnabledFor(false, true, true),
+                "the override must NEVER resurrect a user-disabled master toggle");
+        assertFalse(FarPlayerClientSupport.effectiveEnabledFor(false, false, false),
+                "config off stays off");
+    }
+
+    @Test
     void capabilityBitIsDeliberatelyIndependentOfTheEnabledToggle() {
         // E2 review M2 (both reviewers): the subscription is the PREFS CARRIER. A
         // client with the master toggle OFF but shareSelf=false set must still

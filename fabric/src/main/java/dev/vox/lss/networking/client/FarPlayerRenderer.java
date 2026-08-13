@@ -50,8 +50,14 @@ import java.util.concurrent.ConcurrentHashMap;
  *       entity pop (the exact crossfade), so no hysteresis band is needed;
  *       {@code ClientEntityEvents.ENTITY_LOAD} stays as the same-frame kill when a
  *       real entity spawns in.</li>
- *   <li><b>Vehicles render at E3</b> — a mounted target renders UNMOUNTED at its own
- *       wire position (the R-10 pre-rendering scenario: no crash, no seat math).</li>
+ *   <li><b>Mounts (E3, R-10 v1.3)</b>: the rider renders at its OWN wire position
+ *       (the server-side seated position already encodes the seat offset); the mount
+ *       renders once per vehicle UUID at its own wire position driven by the RIDER's
+ *       velocity hint; an edge-triggered persistent ride link (never per-frame
+ *       eject/re-seat) makes isPassenger() true at extraction — vanilla's one path
+ *       to seated legs. Degrade ladder in {@link FarPlayerMountLadder}: unknown/
+ *       uncreatable types render the rider unmounted, ride-link failure renders
+ *       standing at the mounted position — never a crash, never a floating sit.</li>
  *   <li><b>Containment</b>: the whole pass is latch-guarded — a renderer bug degrades
  *       to "no proxies" for the session, never a render-thread crash loop.</li>
  * </ul>
@@ -74,10 +80,32 @@ public final class FarPlayerRenderer {
     private static volatile FarPlayerRenderer instance;
 
     private final Map<UUID, Proxy> proxies = new HashMap<>();
+    /** Render-only mount instances by vehicle UUID (R-10): rider-velocity motion,
+     *  evicted when no rider references the UUID in the current frame. Two riders
+     *  sharing a vehicle render it ONCE (multi-passenger dedup = render dedup). */
+    private final Map<UUID, MountInstance> vehicles = new HashMap<>();
+    private final Set<UUID> activeVehicles = new HashSet<>();
+    private final Set<UUID> submittedVehicles = new HashSet<>();
+    private final FarPlayerMountLadder mountLadder = FarPlayerMountLadder.production();
     /** Small identity→Item cache (equipment strings repeat every frame). */
     private final Map<String, Item> itemCache = new ConcurrentHashMap<>();
     private int nextProxyId = PROXY_ID_BASE;
     private boolean crashLatched;
+
+    private static final class MountInstance {
+        final net.minecraft.world.entity.Entity entity;
+        final String typeIdentity;
+        final dev.vox.lss.common.farplayers.FarPlayerMotion motion;
+        long appliedStamp;
+        Vec3 lastWalkPosition;
+
+        MountInstance(net.minecraft.world.entity.Entity entity, String typeIdentity,
+                      dev.vox.lss.common.farplayers.FarPlayerMotion motion) {
+            this.entity = entity;
+            this.typeIdentity = typeIdentity;
+            this.motion = motion;
+        }
+    }
 
     /** Installed by {@link FarPlayerClientSupport#initRenderer()} (called from
      *  {@code LSSClient}); static so the session-end path can clear it. */
@@ -92,6 +120,7 @@ public final class FarPlayerRenderer {
         if (r != null) {
             r.clear();
             r.crashLatched = false;
+            r.mountLadder.reset(); // m7: type latches are per-session, as documented
         }
     }
 
@@ -100,12 +129,30 @@ public final class FarPlayerRenderer {
     static void onRealPlayerLoad(UUID uuid) {
         var r = instance;
         if (r != null) {
-            r.proxies.remove(uuid);
+            var removed = r.proxies.remove(uuid);
+            if (removed != null && removed.isPassenger()) {
+                removed.stopRiding(); // m2: never leave the link on the live mount
+            }
         }
     }
 
     void clear() {
+        // Break ride links before dropping the maps. Per-mount containment (E3
+        // review m5): eject runs virtual methods on possibly-modded entities, and
+        // clear() is called from the crash-latch CATCH and from session end — a
+        // throwing override must neither escape those paths nor strand the other
+        // mounts' links.
+        for (var mount : vehicles.values()) {
+            try {
+                mount.entity.ejectPassengers();
+            } catch (Exception ignored) {
+                // The maps drop either way; a stuck link dies with the instance.
+            }
+        }
         proxies.clear();
+        vehicles.clear();
+        activeVehicles.clear();
+        submittedVehicles.clear();
     }
 
     /** The COLLECT_SUBMITS pass. */
@@ -123,12 +170,14 @@ public final class FarPlayerRenderer {
 
     private void renderContained(LevelRenderContext context) {
         var config = LSSClientConfig.CONFIG;
-        // The bit gate covers arm + the soak/benchmark properties; farPlayersEnabled
-        // is checked HERE because the bit deliberately no longer carries it (the
-        // subscription is the prefs carrier — E2 review M2): a disabled viewer still
-        // delivers its shareSelf opt-out, it just renders nothing.
-        if (FarPlayerClientSupport.capabilityBit() == 0 || !config.farPlayersEnabled) {
-            if (!proxies.isEmpty()) clear();
+        // The bit gate covers arm + the soak/benchmark properties; the EFFECTIVE
+        // enabled term (config AND the SeeU-coexist gate, E3) is checked HERE because
+        // the bit deliberately no longer carries it (the subscription is the prefs
+        // carrier — E2 review M2): a disabled viewer still delivers its shareSelf
+        // opt-out, it just renders nothing.
+        if (FarPlayerClientSupport.capabilityBit() == 0
+                || !FarPlayerClientSupport.effectiveFarPlayersEnabled()) {
+            if (!proxies.isEmpty() || !vehicles.isEmpty()) clear();
             return;
         }
         Minecraft minecraft = Minecraft.getInstance();
@@ -191,6 +240,29 @@ public final class FarPlayerRenderer {
                     itemCache);
             active.add(tracked.uuid());
 
+            // R-10 v1.3 mounts: the rider renders at its OWN wire position (the
+            // server-side seated position already encodes the seat offset); the ride
+            // link exists ONLY to make isPassenger() true at render-state extraction
+            // (the one vanilla path to seated legs). Edge-triggered — never SeeU's
+            // per-frame eject/re-seat.
+            var wireVehicle = tracked.latest().vehicle();
+            if (wireVehicle != null) {
+                // Per-type render containment (E3 review m6, symmetric with rung 2):
+                // a modded mount whose link/extract/submit THROWS latches ITS type and
+                // this rider falls through to unmounted — never the global crash latch
+                // (which would take the whole feature down for one bad mount type).
+                try {
+                    renderMount(wireVehicle, tracked, proxy, level, now, animationTick,
+                            dispatcher, partialTick, cameraPosition, poseStack, context);
+                } catch (Exception e) {
+                    mountLadder.latchRenderFailure(wireVehicle.typeIdentity(), e);
+                    vehicles.remove(wireVehicle.uuid());
+                    if (proxy.isPassenger()) proxy.stopRiding();
+                }
+            } else if (proxy.isPassenger()) {
+                proxy.stopRiding(); // dismount edge
+            }
+
             var renderState = dispatcher.extractEntity(proxy, partialTick);
             dispatcher.submit(
                     renderState,
@@ -201,7 +273,168 @@ public final class FarPlayerRenderer {
                     poseStack,
                     context.submitNodeCollector());
         }
-        proxies.keySet().removeIf(uuid -> !active.contains(uuid));
+        // Prune with the ride link BROKEN (E3 review m2): a proxy dropped while
+        // riding otherwise stays in the mount's passenger list — no ghost render
+        // (no 26.2 renderer reads passengers), but each anchored-mount flicker
+        // cycle would strand another RemotePlayer reachable from the live mount.
+        var proxyIt = proxies.entrySet().iterator();
+        while (proxyIt.hasNext()) {
+            var entry = proxyIt.next();
+            if (!active.contains(entry.getKey())) {
+                if (entry.getValue().isPassenger()) entry.getValue().stopRiding();
+                proxyIt.remove();
+            }
+        }
+        // Vehicle lifecycle (R-10): evict instances no rider referenced this frame
+        // (level-change/type-change recreation happens in mountFor).
+        vehicles.keySet().removeIf(uuid -> !activeVehicles.contains(uuid));
+        activeVehicles.clear();
+        submittedVehicles.clear();
+    }
+
+    /** The per-rider mount pass: resolve/create/link/submit. Throws propagate to the
+     *  per-type containment at the call site. */
+    private void renderMount(dev.vox.lss.common.farplayers.FarPlayerWire.Vehicle wireVehicle,
+                             FarPlayerClientTracker.TrackedFarPlayer tracked, Proxy proxy,
+                             ClientLevel level, long now, int animationTick,
+                             net.minecraft.client.renderer.entity.EntityRenderDispatcher dispatcher,
+                             float partialTick, Vec3 cameraPosition,
+                             com.mojang.blaze3d.vertex.PoseStack poseStack,
+                             LevelRenderContext context) {
+        var mount = mountFor(wireVehicle, tracked, level, now);
+        if (mount == null) {
+            if (proxy.isPassenger()) {
+                proxy.stopRiding(); // ladder-degraded: render unmounted
+            }
+            return;
+        }
+        activeVehicles.add(wireVehicle.uuid());
+        if (proxy.getVehicle() != mount.entity) {
+            proxy.stopRiding();
+            // 26.2's 3-arg overload: the 1-arg form delegates to (entity, false,
+            // true) — bytecode-checked (the third arg emits a GameEvent, a client
+            // no-op) — so this passes force=TRUE (render-only instances can fail
+            // vanilla's canRide/distance checks) and keeps the third at its vanilla
+            // default. A false return is rung 3 of the ladder — mounted-position
+            // standing pose, never a floating sit.
+            proxy.startRiding(mount.entity, true, true);
+        }
+        if (submittedVehicles.add(wireVehicle.uuid())) {
+            var vSample = mount.motion.sample(now);
+            applyMountState(mount, vSample, animationTick);
+            var vState = dispatcher.extractEntity(mount.entity, partialTick);
+            dispatcher.submit(
+                    vState,
+                    context.levelState().cameraRenderState,
+                    vSample.x() - cameraPosition.x,
+                    vSample.y() - cameraPosition.y,
+                    vSample.z() - cameraPosition.z,
+                    poseStack,
+                    context.submitNodeCollector());
+        }
+    }
+
+    /** Resolves/creates/updates the render-only mount instance for one rider's wire
+     *  vehicle block. Null = ladder-degraded (render the rider unmounted). */
+    private MountInstance mountFor(dev.vox.lss.common.farplayers.FarPlayerWire.Vehicle wire,
+                                   FarPlayerClientTracker.TrackedFarPlayer rider,
+                                   ClientLevel level, long now) {
+        MountInstance mount = vehicles.get(wire.uuid());
+        if (mount != null
+                && (mount.entity.level() != level || !mount.typeIdentity.equals(wire.typeIdentity()))) {
+            mount = null; // level change pins the old ClientLevel; same-UUID new type recreates
+        }
+        if (mount == null) {
+            var entity = mountLadder.createMount(wire.typeIdentity(), level);
+            if (entity == null) return null;
+            entity.setId(nextEntityId(level));
+            entity.noPhysics = true;
+            entity.setNoGravity(true);
+            entity.setInvisible(false);
+            var seedEntry = rider.latest();
+            mount = new MountInstance(entity, wire.typeIdentity(),
+                    new dev.vox.lss.common.farplayers.FarPlayerMotion(
+                            FarPlayerWire.dequantizePos(wire.quantX()),
+                            FarPlayerWire.dequantizePos(wire.quantY()),
+                            FarPlayerWire.dequantizePos(wire.quantZ()),
+                            FarPlayerWire.byteToAngle(wire.yaw()),
+                            FarPlayerWire.byteToAngle(wire.pitch()),
+                            // The RIDER's velocity from creation (E3 review m3): a
+                            // zero-velocity seed held the mount still for one full
+                            // window while the rider dead-reckoned ahead — exactly
+                            // the shear the rider-velocity design exists to prevent.
+                            FarPlayerWire.shortToVelocity(seedEntry.velX()),
+                            FarPlayerWire.shortToVelocity(seedEntry.velY()),
+                            FarPlayerWire.shortToVelocity(seedEntry.velZ()),
+                            rider.cadenceTicks(), now));
+            mount.appliedStamp = rider.receivedAtMillis();
+            vehicles.put(wire.uuid(), mount);
+        } else if (rider.receivedAtMillis() > mount.appliedStamp) {
+            // STRICTLY newer (E3 review m4): with two riders whose stamps diverge
+            // (delta suppression), != alternated newer/older every frame, rewinding
+            // the lerp origin — > makes the mount follow the freshest frame only.
+            // A new updates frame for this rider: feed the mount's wire position with
+            // the RIDER's velocity hint (R-10 v1.3 — they share a velocity by
+            // definition; separate hints shear visibly at horse/boat speeds).
+            var e = rider.latest();
+            mount.motion.applyRaw(
+                    FarPlayerWire.dequantizePos(wire.quantX()),
+                    FarPlayerWire.dequantizePos(wire.quantY()),
+                    FarPlayerWire.dequantizePos(wire.quantZ()),
+                    FarPlayerWire.byteToAngle(wire.yaw()),
+                    FarPlayerWire.byteToAngle(wire.yaw()),
+                    FarPlayerWire.byteToAngle(wire.pitch()),
+                    FarPlayerWire.shortToVelocity(e.velX()),
+                    FarPlayerWire.shortToVelocity(e.velY()),
+                    FarPlayerWire.shortToVelocity(e.velZ()),
+                    rider.cadenceTicks(), rider.receivedAtMillis());
+            mount.appliedStamp = rider.receivedAtMillis();
+        }
+        return mount;
+    }
+
+    private static void applyMountState(MountInstance mount,
+                                        dev.vox.lss.common.farplayers.FarPlayerMotion.Sample s,
+                                        int animationTick) {
+        var entity = mount.entity;
+        Vec3 position = new Vec3(s.x(), s.y(), s.z());
+        boolean advanceTick = entity.tickCount != animationTick;
+        entity.tickCount = animationTick;
+        entity.setOldPosAndRot(position, s.yaw(), s.pitch());
+        entity.xo = position.x;
+        entity.yo = position.y;
+        entity.zo = position.z;
+        entity.xOld = position.x;
+        entity.yOld = position.y;
+        entity.zOld = position.z;
+        entity.snapTo(position, s.yaw(), s.pitch());
+        entity.setYRot(s.yaw());
+        entity.yRotO = s.yaw();
+        entity.setXRot(s.pitch());
+        entity.xRotO = s.pitch();
+        if (entity instanceof net.minecraft.world.entity.LivingEntity living) {
+            // E3 review MAJOR (a deliberate SeeU deviation — theirs omits this): body
+            // rot is only ever written by tick logic render-only entities never run,
+            // and 26.2's solveBodyRot reads yBodyRot for BOTH the living mount AND
+            // (via the passenger branch) its rider — unset, a horse renders locked
+            // facing south with the rider's torso wrenched along. Vehicles have no
+            // separate head, mirroring the vehicle-seed doc.
+            living.setYBodyRot(s.yaw());
+            living.yBodyRotO = s.yaw();
+            living.setYHeadRot(s.yaw());
+            living.yHeadRotO = s.yaw();
+            // n9: drive leg animation from positional deltas (the Proxy's own
+            // pattern) — otherwise a galloping horse's legs are frozen.
+            if (mount.lastWalkPosition != null && advanceTick) {
+                float movement = (float) Mth.length(position.x - mount.lastWalkPosition.x,
+                        0, position.z - mount.lastWalkPosition.z);
+                living.walkAnimation.update(Math.min(movement * 4.0f, 1.0f),
+                        WALK_ANIMATION_SCALE, 1.0f);
+            }
+            if (advanceTick || mount.lastWalkPosition == null) {
+                mount.lastWalkPosition = position;
+            }
+        }
     }
 
     /** Monotonic id from the LSS block, probed against the live level (a taken id —
@@ -266,7 +499,9 @@ public final class FarPlayerRenderer {
             applyEquipment(tracked, itemCache);
             this.setCustomName(Component.literal(tracked.name()));
             this.setCustomNameVisible(nameTags);
-            updateWalkAnimation(position, allowWalk, gliding || swimming, animationTick);
+            updateWalkAnimation(position, allowWalk,
+                    gliding || swimming || tracked.latest().vehicle() != null,
+                    animationTick);
         }
 
         private void applyEquipment(FarPlayerClientTracker.TrackedFarPlayer tracked,

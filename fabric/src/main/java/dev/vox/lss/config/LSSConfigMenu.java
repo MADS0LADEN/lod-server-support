@@ -100,9 +100,14 @@ public class LSSConfigMenu implements ConfigEntryPoint {
         fpPage.setName(Component.translatable("lss.config.far_players.page"));
 
         var fpGroup = builder.createOptionGroup();
+        boolean seeu = dev.vox.lss.networking.client.FarPlayerClientSupport.isSeeuPresent();
         var fpEnabled = builder.createBooleanOption(Identifier.parse("lss:far_players_enabled"));
         fpEnabled.setName(Component.translatable("lss.config.far_players_enabled"));
-        fpEnabled.setTooltip(Component.translatable("lss.config.far_players_enabled.tooltip"));
+        // With SeeU installed the coexist gate overrides this toggle — say so where
+        // the user is looking (E3, the plan §6 discoverability requirement).
+        fpEnabled.setTooltip(Component.translatable(seeu
+                ? "lss.config.far_players_enabled.tooltip.seeu"
+                : "lss.config.far_players_enabled.tooltip"));
         fpEnabled.setImpact(OptionImpact.LOW);
         fpEnabled.setDefaultValue(true);
         fpEnabled.setBinding(v -> cfg.farPlayersEnabled = v, () -> cfg.farPlayersEnabled);
@@ -147,6 +152,18 @@ public class LSSConfigMenu implements ConfigEntryPoint {
         fpRender.setStorageHandler(fpSave);
         fpRender.setEnabledProvider(s -> s.readBooleanOption(fpDep[0]), fpDep);
         fpGroup.addOption(fpRender);
+
+        if (seeu) {
+            var fpWithSeeU = builder.createBooleanOption(
+                    Identifier.parse("lss:far_players_with_seeu"));
+            fpWithSeeU.setName(Component.translatable("lss.config.far_players_with_seeu"));
+            fpWithSeeU.setTooltip(Component.translatable("lss.config.far_players_with_seeu.tooltip"));
+            fpWithSeeU.setImpact(OptionImpact.LOW);
+            fpWithSeeU.setDefaultValue(false);
+            fpWithSeeU.setBinding(v -> cfg.farPlayersWithSeeU = v, () -> cfg.farPlayersWithSeeU);
+            fpWithSeeU.setStorageHandler(fpSave);
+            fpGroup.addOption(fpWithSeeU);
+        }
 
         fpPage.addOptionGroup(fpGroup);
 
