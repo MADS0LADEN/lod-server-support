@@ -415,13 +415,14 @@ class VoxyCompatTest {
     void resetLadderHappyPathRunsInThePinnedOrder() {
         var log = new java.util.ArrayList<String>();
         var root = java.nio.file.Path.of("srv");
-        var outcome = VoxyCompat.resetVoxy(hooks(log, new Object(), root, null, null, true, OK, OK));
+        var outcome = VoxyCompat.resetVoxy(hooks(log, new Object(), root, root, null, true, OK, OK));
         assertEquals(ModCompat.VoxyResetOutcome.RESET, outcome);
-        assertEquals(java.util.List.of("instance", "storagePath", "resolveRenderer",
-                        "rendererShutdown", "shutdownInstance", "wipe:srv", "gc",
-                        "createInstance", "allChanged"), log,
-                "the ladder order is load-bearing: wipe root read BEFORE shutdown, renderer "
-                        + "down BEFORE the instance, wipe inside the down-window");
+        assertEquals(java.util.List.of("instance", "storagePath", "fallbackPath",
+                        "resolveRenderer", "rendererShutdown", "shutdownInstance", "wipe:srv",
+                        "gc", "createInstance", "allChanged"), log,
+                "the ladder order is load-bearing: wipe root read BEFORE shutdown and "
+                        + "cross-checked against the derived root, renderer down BEFORE the "
+                        + "instance, wipe inside the down-window");
     }
 
     @Test
@@ -454,8 +455,9 @@ class VoxyCompatTest {
     @Test
     void shutdownThrowSkipsTheWipeButStillAttemptsRecoveryCreate() {
         var log = new java.util.ArrayList<String>();
-        var outcome = VoxyCompat.resetVoxy(hooks(log, new Object(), java.nio.file.Path.of("srv"),
-                null, null, true, () -> { throw new IllegalStateException("world-cleaner join"); }, OK));
+        var srv = java.nio.file.Path.of("srv");
+        var outcome = VoxyCompat.resetVoxy(hooks(log, new Object(), srv,
+                srv, null, true, () -> { throw new IllegalStateException("world-cleaner join"); }, OK));
         assertEquals(ModCompat.VoxyResetOutcome.SHUTDOWN_FAILED, outcome);
         assertFalse(log.stream().anyMatch(l -> l.startsWith("wipe:")),
                 "storage may hold open handles — deleting over them is the Windows partial-wipe trap");
@@ -478,8 +480,9 @@ class VoxyCompatTest {
     @Test
     void createThrowOnTheHappyPathIsRestartFailedAfterTheWipe() {
         var log = new java.util.ArrayList<String>();
-        var outcome = VoxyCompat.resetVoxy(hooks(log, new Object(), java.nio.file.Path.of("srv"),
-                null, null, true, OK, () -> { throw new IllegalStateException("create"); }));
+        var srv2 = java.nio.file.Path.of("srv");
+        var outcome = VoxyCompat.resetVoxy(hooks(log, new Object(), srv2,
+                srv2, null, true, OK, () -> { throw new IllegalStateException("create"); }));
         assertEquals(ModCompat.VoxyResetOutcome.RESTART_FAILED, outcome);
         assertTrue(log.contains("wipe:srv"), "the wipe already happened — only the restart failed");
     }
@@ -497,7 +500,8 @@ class VoxyCompatTest {
                 target -> log.add("wipe"),
                 () -> log.add("gc"),
                 () -> log.add("allChanged"));
-        assertEquals(ModCompat.VoxyResetOutcome.RESET, VoxyCompat.resetVoxy(hooks));
+        assertEquals(ModCompat.VoxyResetOutcome.RESET_WIPE_SKIPPED, VoxyCompat.resetVoxy(hooks),
+                "a skipped wipe must not report the full-RESET line (stage-D review m1/m4)");
         assertFalse(log.contains("wipe"), "no resolvable root -> no wipe, everything else runs");
         assertTrue(log.contains("createInstance"));
     }
@@ -563,10 +567,112 @@ class VoxyCompatTest {
                 "the saves root itself would wipe EVERY server");
         assertFalse(VoxyCompat.isWipeContained(game, game), "never the game dir");
         assertFalse(VoxyCompat.isWipeContained(tmp.resolve("elsewhere").resolve("voxy2"), game),
-                "outside the game dir entirely (a Flashback replay override) -> skip, fail-safe");
+                "outside the game dir entirely -> refused");
         assertFalse(VoxyCompat.isWipeContained(
                 game.resolve(".voxy").resolve("saves").resolve("..").resolve("..").resolve("x"), game),
                 "traversal normalizes out of containment");
+        // m3 tightening: the singleplayer rung is anchored under <gameDir>/saves —
+        // a voxy-NAMED dir anywhere else under the game dir is refused.
+        assertFalse(VoxyCompat.isWipeContained(game.resolve("mods").resolve("voxy"), game),
+                "a voxy-named dir outside saves/ is not world storage");
+        assertFalse(VoxyCompat.isWipeContained(game.resolve("voxy"), game),
+                "a bare <gameDir>/voxy is not world storage");
+    }
+
+    /** The stage-D review MAJOR: a Flashback replay's storage override is the ORIGIN's
+     *  REAL store path (recorded into the replay meta), which PASSES directory
+     *  containment — only the derived-root cross-check protects it. A live root that
+     *  differs from this connection's own derivation must skip the wipe. */
+    @Test
+    void storageOverrideMismatchSkipsTheWipeWithTheHonestOutcome() {
+        var log = new java.util.ArrayList<String>();
+        var outcome = VoxyCompat.resetVoxy(hooks(log, new Object(),
+                java.nio.file.Path.of("origin-real-store"),
+                java.nio.file.Path.of("current-derived"), null, true, OK, OK));
+        assertEquals(ModCompat.VoxyResetOutcome.RESET_WIPE_SKIPPED, outcome,
+                "the feedback must not claim disk was cleared");
+        assertFalse(log.stream().anyMatch(l -> l.startsWith("wipe:")),
+                "wiping the override target would destroy the ORIGIN server's store");
+        assertTrue(log.contains("shutdownInstance") && log.contains("createInstance"),
+                "the memory half (teardown + rebuild) still runs — it is override-safe");
+    }
+
+    /** "Can't tell" must abort, never route into the destructive fallback-wipe branch
+     *  (review n1): an instance probe that THROWS is UNAVAILABLE, not not-running. */
+    @Test
+    void instanceProbeThrowAbortsInsteadOfFallbackWiping() {
+        var log = new java.util.ArrayList<String>();
+        var h = new VoxyCompat.ResetHooks(
+                () -> { throw new IllegalStateException("probe dead"); },
+                inst -> java.nio.file.Path.of("x"),
+                () -> { log.add("fallbackPath"); return java.nio.file.Path.of("fb"); },
+                () -> () -> {},
+                () -> log.add("shutdownInstance"),
+                () -> log.add("createInstance"),
+                target -> log.add("wipe"),
+                () -> {},
+                () -> {});
+        assertEquals(ModCompat.VoxyResetOutcome.UNAVAILABLE, VoxyCompat.resetVoxy(h));
+        assertTrue(log.isEmpty(), "no fallback wipe, no lifecycle calls on an unreadable probe");
+    }
+
+    /** Post-wipe throws must still resolve to a feedback-driving outcome (review m2):
+     *  an allChanged throw is contained to RESTART_FAILED, never propagated (the
+     *  coordinator's LSS flush depends on the ladder returning). */
+    @Test
+    void allChangedThrowIsContainedToRestartFailed() {
+        var log = new java.util.ArrayList<String>();
+        var srv = java.nio.file.Path.of("srv");
+        var h = new VoxyCompat.ResetHooks(
+                () -> new Object(),
+                inst -> srv,
+                () -> srv,
+                () -> () -> {},
+                () -> {},
+                () -> {},
+                target -> log.add("wipe"),
+                () -> {},
+                () -> { throw new IllegalStateException("render-extract gone"); });
+        assertEquals(ModCompat.VoxyResetOutcome.RESTART_FAILED, VoxyCompat.resetVoxy(h),
+                "renderer rebuild never triggered -> the rejoin-to-recover guidance");
+        assertTrue(log.contains("wipe"), "the throw came after the wipe — outcome stays honest");
+    }
+
+    /** Drive the RESOLVED MethodHandles end-to-end against the stubs (review m3 — the
+     *  plan's call-recording requirement): an asType/cast shape bug in the production
+     *  glue would pass every hook-injected test and surface only at the live smoke. */
+    @Test
+    void productionHandleHooksDriveTheResolvedHandlesAgainstTheStubs(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        VoxyCompat.resetResetDomainForTest();
+        assertTrue(VoxyCompat.initResetDomain());
+        try {
+            var game = tmp.resolve("game");
+            var serverStore = game.resolve(".voxy").resolve("saves").resolve("localhost_25565");
+            java.nio.file.Files.createDirectories(serverStore.resolve("deadbeef"));
+            java.nio.file.Files.writeString(serverStore.resolve("deadbeef").resolve("s.db"), "x");
+
+            var client = new me.cortex.voxy.client.VoxyClientInstance();
+            client.storageBasePath = serverStore;
+            me.cortex.voxy.commonImpl.VoxyCommon.instance = client;
+            var lifecycle = new java.util.ArrayList<String>();
+            me.cortex.voxy.commonImpl.VoxyCommon.shutdownBody = () -> lifecycle.add("shutdown");
+            me.cortex.voxy.commonImpl.VoxyCommon.createBody = () -> lifecycle.add("create");
+            me.cortex.voxy.client.core.IVoxyRenderSystemHolder.HOLDER.set(
+                    () -> lifecycle.add("rendererShutdown"));
+
+            var hooks = VoxyCompat.productionHandleHooks(game, () -> serverStore,
+                    () -> null, () -> lifecycle.add("allChanged"));
+            assertEquals(ModCompat.VoxyResetOutcome.RESET, VoxyCompat.resetVoxy(hooks));
+            assertEquals(java.util.List.of("rendererShutdown", "shutdown", "create", "allChanged"),
+                    lifecycle, "every resolved handle invoked, in ladder order");
+            assertFalse(java.nio.file.Files.exists(serverStore),
+                    "the real wipe ran against the handle-resolved storage path");
+        } finally {
+            me.cortex.voxy.client.core.IVoxyRenderSystemHolder.HOLDER.set(null);
+            me.cortex.voxy.commonImpl.VoxyCommon.reset();
+            VoxyCompat.resetResetDomainForTest();
+        }
     }
 
     @Test
@@ -587,5 +693,29 @@ class VoxyCompatTest {
         java.nio.file.Files.createDirectories(outside);
         VoxyCompat.wipeVoxyStore(outside, game);
         assertTrue(java.nio.file.Files.exists(outside), "outside the containment roots -> refused");
+    }
+
+    /** Symlink pin (review n2): Files.walk without FOLLOW_LINKS deletes a symlink as a
+     *  LINK — the foreign target tree must survive. A future "fix" adding FOLLOW_LINKS
+     *  would turn the wipe into a foreign-tree deleter; this test is the tripwire. */
+    @Test
+    void wipeDeletesSymlinksAsLinksAndNeverFollowsThem(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        var game = tmp.resolve("game");
+        var server = game.resolve(".voxy").resolve("saves").resolve("localhost_25565");
+        var foreign = tmp.resolve("foreign");
+        java.nio.file.Files.createDirectories(server);
+        java.nio.file.Files.createDirectories(foreign);
+        java.nio.file.Files.writeString(foreign.resolve("precious.txt"), "keep me");
+        try {
+            java.nio.file.Files.createSymbolicLink(server.resolve("link"), foreign);
+        } catch (UnsupportedOperationException | java.io.IOException | SecurityException e) {
+            org.junit.jupiter.api.Assumptions.assumeTrue(false,
+                    "symlinks unavailable on this filesystem: " + e);
+        }
+        VoxyCompat.wipeVoxyStore(server, game);
+        assertFalse(java.nio.file.Files.exists(server), "the store tree (incl. the link) is gone");
+        assertTrue(java.nio.file.Files.exists(foreign.resolve("precious.txt")),
+                "the foreign target tree must survive the wipe");
     }
 }

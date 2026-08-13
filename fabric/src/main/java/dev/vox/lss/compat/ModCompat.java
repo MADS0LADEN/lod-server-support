@@ -30,6 +30,12 @@ public final class ModCompat {
     public enum VoxyResetOutcome {
         /** Full teardown + disk wipe + rebuild — "LODs visibly disappear". */
         RESET,
+        /** Teardown + rebuild succeeded but the DISK wipe was skipped: the storage root
+         *  was unresolvable, or a storage override (Flashback replay redirect — the
+         *  origin's REAL store path, which passes directory containment) was detected
+         *  by the derived-root cross-check. The feedback must not claim disk was
+         *  cleared (stage-D review). */
+        RESET_WIPE_SKIPPED,
         /** No live instance (config-disabled / GPU-unsupported): disk wiped via the
          *  fallback derivation, no shutdown/create (never create an instance Voxy
          *  itself didn't have). */

@@ -45,7 +45,9 @@ final class ResetCoordinator {
                         + Brand.clientCommand() + " reset confirm' to proceed.");
                 return false;
             }
-            var outcome = deps.voxyReset().get();
+            deps.drainAndAwaitDecode().run(); // a reset racing a just-died session's final
+                                              // dispatch must still close the wipe window
+            var outcome = voxyResetContained(deps);
             deps.clearAllCaches().run();
             deps.feedback().accept(voxyLine(outcome) + Brand.shortName() + " caches cleared for "
                     + "ALL servers. No " + Brand.shortName() + " server on this connection — "
@@ -54,7 +56,7 @@ final class ResetCoordinator {
         }
 
         deps.drainAndAwaitDecode().run();
-        var outcome = deps.voxyReset().get();
+        var outcome = voxyResetContained(deps);
         deps.lssFlush().run();
         // R-3 SEAM (v0.11.0 mega plan): once far players land (stage E1), the reset
         // coordinator must ALSO clear the far-player tracker + seen-epoch state and
@@ -65,11 +67,28 @@ final class ResetCoordinator {
         return true;
     }
 
-    /** The per-outcome Voxy prefix of the feedback line. The UNAVAILABLE branch must not
-     *  claim LODs visibly disappeared — they did not. */
+    /** The last containment belt (stage-D review m2): a throw escaping the Voxy half
+     *  must never skip the LSS flush — a wiped Voxy plus surviving LSS stamps is the
+     *  persisted-false-stamps hole the feedback branches exist to prevent. */
+    private static ModCompat.VoxyResetOutcome voxyResetContained(Deps deps) {
+        try {
+            return deps.voxyReset().get();
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError vme) throw vme;
+            dev.vox.lss.common.LSSLogger.error("Voxy reset threw — treating as restart failure "
+                    + "so the " + Brand.shortName() + " flush still runs", t);
+            return ModCompat.VoxyResetOutcome.RESTART_FAILED;
+        }
+    }
+
+    /** The per-outcome Voxy prefix of the feedback line. The UNAVAILABLE and
+     *  RESET_WIPE_SKIPPED branches must not claim more than actually happened. */
     private static String voxyLine(ModCompat.VoxyResetOutcome outcome) {
         return switch (outcome) {
             case RESET -> "Voxy LODs cleared (disk + memory). ";
+            case RESET_WIPE_SKIPPED -> "Voxy engine reset (memory cleared) — the disk wipe was "
+                    + "SKIPPED (storage unavailable or overridden, e.g. during a replay); "
+                    + "rejoin or re-run to clear disk. ";
             case WIPED_NO_INSTANCE -> "Voxy disk cache cleared (Voxy not running). ";
             case NOT_PRESENT -> "";
             case UNAVAILABLE -> "Voxy reset unavailable on this Voxy version — clearing the "

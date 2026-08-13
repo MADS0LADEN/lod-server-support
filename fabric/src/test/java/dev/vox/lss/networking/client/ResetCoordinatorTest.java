@@ -86,8 +86,37 @@ class ResetCoordinatorTest {
     @Test
     void confirmedNoManagerFallbackClearsAllAndSaysThereIsNoRestream() {
         assertTrue(ResetCoordinator.run(deps(false, ModCompat.VoxyResetOutcome.WIPED_NO_INSTANCE), true));
-        assertEquals(List.of("voxy", "clearAll"), log,
-                "no LSS session: clearAll (every server) + the Voxy half; no drain, no flush");
+        assertEquals(List.of("drain", "voxy", "clearAll"), log,
+                "no LSS session: drain still closes the wipe window (a reset racing a "
+                        + "just-died session's final dispatch), then the Voxy half + clearAll");
         assertTrue(feedback.get(0).contains("vanilla chunk loading"), feedback.get(0));
+    }
+
+    /** Review m2: a throw escaping the Voxy half must never skip the LSS flush — the
+     *  coordinator belts it to RESTART_FAILED and the flush + feedback still run. */
+    @Test
+    void voxyHalfThrowStillRunsTheFlushAndFeedback() {
+        var deps = new ResetCoordinator.Deps(
+                true,
+                () -> log.add("drain"),
+                () -> { throw new IllegalStateException("mixin drift"); },
+                () -> log.add("flush"),
+                () -> log.add("clearAll"),
+                feedback::add);
+        assertTrue(ResetCoordinator.run(deps, false));
+        assertTrue(log.contains("flush"),
+                "a skipped flush after a wipe persists false stamps — the belt is load-bearing");
+        assertEquals(1, feedback.size());
+        assertTrue(feedback.get(0).contains("rejoin to recover"), feedback.get(0));
+    }
+
+    /** The RESET_WIPE_SKIPPED line must admit the disk was NOT cleared. */
+    @Test
+    void wipeSkippedOutcomeIsHonestAboutTheDisk() {
+        ResetCoordinator.run(deps(true, ModCompat.VoxyResetOutcome.RESET_WIPE_SKIPPED), false);
+        assertTrue(feedback.get(0).contains("disk wipe was SKIPPED"), feedback.get(0));
+        assertFalse(feedback.get(0).contains("disk + memory"),
+                "must not claim the full-RESET disk line");
+        assertTrue(log.contains("flush"), "the LSS half still runs");
     }
 }

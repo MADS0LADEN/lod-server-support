@@ -76,11 +76,14 @@ public class LSSClientCommands {
                 () -> {
                     if (manager != null) {
                         LSSClientNetworking.reportUndispatchedColumns(manager);
-                        if (!LSSClientNetworking.awaitDecodeIdle(2_000)) {
-                            dev.vox.lss.common.LSSLogger.warn(
-                                    "Reset: decode drain still busy after 2s — proceeding "
-                                            + "(the wipe is IO-contained regardless)");
-                        }
+                    }
+                    // Await even without a manager (review n4): a reset typed right
+                    // after a disconnect can race the disconnect drain's final dispatch
+                    // into the wipe window.
+                    if (!LSSClientNetworking.awaitDecodeIdle(2_000)) {
+                        dev.vox.lss.common.LSSLogger.warn(
+                                "Reset: decode drain still busy after 2s — proceeding "
+                                        + "(the wipe is IO-contained regardless)");
                     }
                 },
                 dev.vox.lss.compat.ModCompat::resetVoxyLods,

@@ -73,10 +73,12 @@ decode-drain's in-flight column; and both mid-sequence failure paths
 - **`VoxyClientInstance.getStorageBasePath()` is public in all three versions**
   (javap-verified in both shipped jars; dev `VoxyClientInstance.java:73-75`) and
   returns the path the live instance is ACTUALLY using — including the Flashback
-  replay override (`:33-38`), where the basePath is the replay's storage, not the
-  server's. The wipe root must come from it (read reflectively BEFORE
-  `shutdownInstance()`); a hand-duplicated `getBasePath` derivation would wipe the
-  real server's cache while the user watches a replay.
+  replay override (`:33-38`). **CORRECTED at stage D review (2026-08-13, §6.1
+  pair):** the override path is the ORIGIN's real store path recorded at replay
+  capture time, so reading it is necessary but NOT sufficient — wiping it during
+  playback would destroy the origin server's store. The ladder therefore
+  cross-checks the live root against the current connection's own derivation and
+  skips the wipe on any mismatch (`RESET_WIPE_SKIPPED`).
 - The renderer holder is **the one unstable name**: mixin interface,
   `me.cortex.voxy.client.core.IGetVoxyRenderSystem.shutdownRenderer()` in 0.2.11/dev
   (on vanilla `LevelRenderer`) vs `IVoxyRenderSystemHolder.voxy$shutdownRenderer()` in
@@ -135,8 +137,9 @@ mixins run on, so no concurrent-lifecycle race):
       BEFORE shutdown — the only source that is correct under a Flashback replay);
       fall back to the hand-derived `getBasePath` logic only when the instance is
       null (config-disabled case, no live path to ask);
-   b. two-rung holder resolve → null-check `Minecraft.getInstance().levelRenderer`
-      (as Voxy's own reload does, `VoxyCommands.java:86-89`) → `shutdownRenderer()` —
+   b. two-rung holder resolve (AMENDED 2026-08-13, see the facts block: primary =
+      the static `IVoxyRenderSystemHolder.getNullableHolder()`; the levelRenderer
+      instanceof shape is the 0.2.11/dev fallback rung) → `shutdownRenderer()` —
       **if the holder is unresolvable, ABORT the Voxy half with a once-warn**
       (skipping renderer-first teardown risks the `isWorldUsed` busy-wait freezing the
       main thread — see the facts above; fail-safe direction), still run step 3;
@@ -154,9 +157,10 @@ mixins run on, so no concurrent-lifecycle race):
       (a replay path failing containment → skip wipe = fail-safe); any IO failure is
       contained + logged, never thrown;
    e. `System.gc()` (parity with `/voxy reload` — native storage handles), then
-      `createInstance()`, then `Minecraft.getInstance().levelRenderer.allChanged()`
-      (vanilla literal; rebuilds the renderer against the new instance exactly as
-      Voxy's own reload does). **If `createInstance()` throws** (contained): the
+      `createInstance()`, then the renderer rebuild trigger (AMENDED 2026-08-13, see
+      the facts block: on MC 26.2 that is `Minecraft.levelExtractor.allChanged()`;
+      older lines keep `levelRenderer.allChanged()` — vanilla literal either way,
+      exactly as Voxy's own reload does). **If `createInstance()` throws** (contained): the
       renderer stays down and every re-served column will fail ingest (bounded by the
       ingest-failure parking caps) — feedback must say "Voxy failed to restart —
       rejoin to recover", not the happy-path line.
@@ -185,8 +189,9 @@ stands — the wipe is recoverable by construction.
 ### New `VoxyCompat` surface
 
 - New handles, resolved lazily in their **own all-or-nothing failure domain**
-  (pattern: `initBacklogProbe`, `VoxyCompat.java:191-215`): `VoxyCommon.isAvailable`,
-  `getInstance` (reuse existing), `shutdownInstance`, `createInstance`,
+  (pattern: `initBacklogProbe`, `VoxyCompat.java:191-215`): `getInstance`
+  (`isAvailable` dropped at implementation — the null-instance branch already
+  discriminates, review n1), `shutdownInstance`, `createInstance`,
   `VoxyClientInstance.getStorageBasePath` (the wipe-root source — public in all three
   versions), plus the two-rung renderer-holder resolve
   (`IVoxyRenderSystemHolder.voxy$shutdownRenderer` →
@@ -314,8 +319,15 @@ stands — the wipe is recoverable by construction.
   (`voxy$shutdownRenderer`) is the primary; 0.2.11-era rung is best-effort.
 - **Wipe-path drift**: the live wipe root comes from `getStorageBasePath()` (no drift
   possible); the duplicated `getBasePath` logic survives only as the instance-null
-  fallback, contained to `.voxy` subtrees by construction. A Flashback replay's
-  override path fails containment → wipe skipped (fail-safe).
+  fallback, contained to `.voxy` subtrees by construction. **CORRECTED at stage D
+  review (2026-08-13, MAJOR, §6.1 pair — see the progress doc):** a Flashback
+  replay's override path does NOT fail containment — Voxy records the ORIGIN's real
+  store path into the replay meta (`MixinFlashbackRecorder`), so during same-box
+  playback `getStorageBasePath()` returns a path that PASSES the directory checks.
+  The shipped protection is the derived-root CROSS-CHECK in the ladder: the live
+  root must equal this connection's own `getBasePath` derivation (true in every
+  non-override session), else the wipe is skipped with the honest
+  `RESET_WIPE_SKIPPED` feedback.
 - **Ingest-disabled Voxy** (config off / replay): reset leaves LODs empty until the
   user re-enables — LSS's ingest-failure containment reports and re-declares; document
   in the README line.

@@ -51,6 +51,10 @@ public class ColumnCacheStore {
      * migration — user decision). Deliberately UNBRANDED either way (jar-swap
      * continuity, ci-dual-publish.md). Lazy so tests can drive both branches of the
      * pure function without a loaded FabricLoader path baked in at class-init.
+     * Accepted corner (review n7): if a backup restore recreates config/lss/cache
+     * after .lss/cache was populated, the .lss bytes are orphaned (adoption flips
+     * back; load and clear both use the resolved root, so no dishonest stamps —
+     * just dead disk until hand-deleted).
      */
     private static volatile Path cacheDir;
 

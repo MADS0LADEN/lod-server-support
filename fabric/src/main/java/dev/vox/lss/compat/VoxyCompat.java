@@ -273,7 +273,13 @@ class VoxyCompat {
      * instance-down window. Order is load-bearing and review-pinned:
      * <ol>
      *   <li>wipe root read from the LIVE instance's {@code getStorageBasePath()} BEFORE
-     *       shutdown — the only source correct under a Flashback replay override;</li>
+     *       shutdown, then CROSS-CHECKED against this connection's own derived path
+     *       (the stage-D review MAJOR): a Flashback replay's storage override is the
+     *       ORIGIN server's real store path recorded into the replay meta — it PASSES
+     *       directory containment, so containment alone cannot protect it. The two
+     *       paths are equal in every non-override session (the live path is computed by
+     *       the same derivation); a mismatch means an override is active and the wipe
+     *       is SKIPPED with the {@code RESET_WIPE_SKIPPED} outcome;</li>
      *   <li>renderer down BEFORE the instance (the {@code isWorldUsed} busy-wait trap);
      *       unresolvable holder = abort the Voxy half entirely (fail-safe);</li>
      *   <li>{@code shutdownInstance()} — a throw means the instance is already nulled
@@ -285,10 +291,20 @@ class VoxyCompat {
      * </ol>
      * A null live instance skips shutdown AND create (never create an instance Voxy
      * itself didn't have — config-disabled/GPU cases) but still wipes via the fallback
-     * derivation (no live storage to race).
+     * derivation (no live storage to race). Every non-{@link VirtualMachineError} throw
+     * from a hook is contained to a feedback-driving outcome — the coordinator's LSS
+     * flush must always run (a skipped flush after a wipe persists false stamps).
      */
     static ModCompat.VoxyResetOutcome resetVoxy(ResetHooks h) {
-        Object instance = h.instance().get();
+        Object instance;
+        try {
+            instance = h.instance().get();
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError vme) throw vme;
+            // "Can't tell" must never route into the destructive fallback-wipe branch.
+            LSSLogger.warn("Voxy reset: instance probe failed — aborting the Voxy half (" + t + ")");
+            return ModCompat.VoxyResetOutcome.UNAVAILABLE;
+        }
         if (instance == null) {
             java.nio.file.Path root = h.fallbackPath().get();
             if (root != null) h.wipe().accept(root);
@@ -302,11 +318,34 @@ class VoxyCompat {
             LSSLogger.warn("Voxy reset: getStorageBasePath failed — wipe will be skipped (" + t + ")");
             root = null;
         }
+        if (root == null) {
+            LSSLogger.warn("Voxy reset: no resolvable storage root — the disk wipe is skipped");
+        } else {
+            // The override cross-check (step 1 above). expected == null (underivable)
+            // also skips — an unverifiable root is not a wipeable root.
+            java.nio.file.Path expected = h.fallbackPath().get();
+            if (expected == null || !root.toAbsolutePath().normalize()
+                    .equals(expected.toAbsolutePath().normalize())) {
+                LSSLogger.warn("Voxy reset: live storage root " + root + " does not match this "
+                        + "connection's derived root " + expected + " — a storage override "
+                        + "(replay?) is active; the disk wipe is skipped (fail-safe)");
+                root = null;
+            }
+        }
+        boolean wipeSkipped = root == null;
         Runnable rendererShutdown = h.rendererShutdown().get();
         if (rendererShutdown == null) {
             return ModCompat.VoxyResetOutcome.UNAVAILABLE;
         }
-        rendererShutdown.run();
+        try {
+            rendererShutdown.run();
+        } catch (Throwable t) {
+            // A partial renderer shutdown may leave acquired sections — proceeding to
+            // shutdownInstance risks the isWorldUsed busy-wait freeze. Abort.
+            if (t instanceof VirtualMachineError vme) throw vme;
+            LSSLogger.warn("Voxy reset: renderer shutdown failed — aborting the Voxy half", t);
+            return ModCompat.VoxyResetOutcome.UNAVAILABLE;
+        }
         try {
             h.shutdownInstance().run();
         } catch (Throwable t) {
@@ -321,7 +360,7 @@ class VoxyCompat {
                 LSSLogger.error("Voxy reset: createInstance failed after a failed shutdown", t2);
                 return ModCompat.VoxyResetOutcome.RESTART_FAILED;
             }
-            h.allChanged().run();
+            if (!runAllChangedContained(h)) return ModCompat.VoxyResetOutcome.RESTART_FAILED;
             return ModCompat.VoxyResetOutcome.SHUTDOWN_FAILED;
         }
         if (root != null) h.wipe().accept(root);
@@ -335,23 +374,39 @@ class VoxyCompat {
             LSSLogger.error("Voxy reset: createInstance failed — Voxy is down until rejoin", t);
             return ModCompat.VoxyResetOutcome.RESTART_FAILED;
         }
-        h.allChanged().run();
-        return ModCompat.VoxyResetOutcome.RESET;
+        if (!runAllChangedContained(h)) return ModCompat.VoxyResetOutcome.RESTART_FAILED;
+        return wipeSkipped ? ModCompat.VoxyResetOutcome.RESET_WIPE_SKIPPED
+                : ModCompat.VoxyResetOutcome.RESET;
+    }
+
+    /** allChanged containment: a throw means the renderer rebuild never triggered —
+     *  the RESTART_FAILED "rejoin to recover" guidance is the honest one. */
+    private static boolean runAllChangedContained(ResetHooks h) {
+        try {
+            h.allChanged().run();
+            return true;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError vme) throw vme;
+            LSSLogger.error("Voxy reset: renderer rebuild (allChanged) failed", t);
+            return false;
+        }
     }
 
     /**
      * Wipe containment: the target must be strictly inside {@code <gameDir>/.voxy/saves}
-     * (multiplayer/realms/UNKNOWN shapes) or be a {@code voxy} directory under the game
-     * dir (the singleplayer {@code <world>/voxy} shape). A Flashback replay's override
-     * path fails both and the wipe is skipped — the fail-safe direction. Pure and
-     * package-visible for the containment tests.
+     * (multiplayer/realms/UNKNOWN shapes) or be a {@code voxy} directory under
+     * {@code <gameDir>/saves} (the singleplayer {@code <world>/voxy} shape — worlds
+     * always live under {@code saves/}, review m3). NOTE containment is the SECOND
+     * fence: a Flashback replay's override path is the origin's REAL store path and
+     * passes these checks — the override cross-check in {@link #resetVoxy} is what
+     * protects it (stage-D review MAJOR). Pure and package-visible for the tests.
      */
     static boolean isWipeContained(java.nio.file.Path target, java.nio.file.Path gameDir) {
         java.nio.file.Path t = target.toAbsolutePath().normalize();
         java.nio.file.Path g = gameDir.toAbsolutePath().normalize();
         java.nio.file.Path saves = g.resolve(".voxy").resolve("saves");
         if (t.startsWith(saves) && !t.equals(saves)) return true;
-        return t.startsWith(g) && !t.equals(g)
+        return t.startsWith(g.resolve("saves"))
                 && t.getFileName() != null && t.getFileName().toString().equals("voxy");
     }
 
@@ -369,15 +424,26 @@ class VoxyCompat {
         }
         java.nio.file.Path t = target.toAbsolutePath().normalize();
         if (!java.nio.file.Files.exists(t)) return;
+        // NOTE Files.walk deliberately does NOT follow links: a symlink inside the
+        // store is deleted as a LINK, its foreign target tree survives (empirically
+        // verified + test-pinned). Adding FileVisitOption.FOLLOW_LINKS here would turn
+        // this into a foreign-tree deleter — never do that.
+        var failures = new java.util.concurrent.atomic.AtomicInteger();
         try (var walk = java.nio.file.Files.walk(t)) {
             walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
                 try {
                     java.nio.file.Files.deleteIfExists(p);
                 } catch (java.io.IOException e) {
+                    failures.incrementAndGet();
                     LSSLogger.warn("Voxy reset: could not delete " + p + " (" + e + ")");
                 }
             });
-            LSSLogger.info("Voxy reset: wiped " + t);
+            if (failures.get() == 0) {
+                LSSLogger.info("Voxy reset: wiped " + t);
+            } else {
+                LSSLogger.warn("Voxy reset: partial wipe of " + t + " (" + failures.get()
+                        + " paths could not be deleted)");
+            }
         } catch (java.io.IOException e) {
             LSSLogger.warn("Voxy reset: wipe of " + t + " failed", e);
         }
@@ -444,7 +510,7 @@ class VoxyCompat {
                 holderStaticGetH = lookup.findStatic(holderClass, "getNullableHolder",
                         MethodType.methodType(holderClass))
                         .asType(MethodType.methodType(Object.class));
-            } catch (ClassNotFoundException | NoSuchMethodException e) {
+            } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException e) {
                 holderClass = classResolver.resolve("me.cortex.voxy.client.core.IGetVoxyRenderSystem");
                 holderShutdownH = lookup.findVirtual(holderClass, "shutdownRenderer",
                         MethodType.methodType(void.class))
@@ -475,21 +541,9 @@ class VoxyCompat {
     static ModCompat.VoxyResetOutcome resetVoxyProduction() {
         if (!initResetDomain()) return ModCompat.VoxyResetOutcome.UNAVAILABLE;
         var gameDir = net.fabricmc.loader.api.FabricLoader.getInstance().getGameDir();
-        return resetVoxy(new ResetHooks(
-                VoxyCompat::resetDomainInstance,
-                inst -> {
-                    try {
-                        return (java.nio.file.Path) resetGetStorageBasePath.invokeExact(inst);
-                    } catch (Throwable t) {
-                        throw new IllegalStateException(t);
-                    }
-                },
+        return resetVoxy(productionHandleHooks(gameDir,
                 VoxyCompat::fallbackVoxyBasePath,
-                VoxyCompat::resolveRendererShutdown,
-                () -> resetShutdownInstance.invokeExact(),
-                () -> resetCreateInstance.invokeExact(),
-                target -> wipeVoxyStore(target, gameDir),
-                System::gc,
+                () -> net.minecraft.client.Minecraft.getInstance().levelRenderer,
                 () -> {
                     // 26.2's render-extract rework moved allChanged() off LevelRenderer
                     // onto Minecraft.levelExtractor — this is what the 26.2 Voxy
@@ -500,33 +554,83 @@ class VoxyCompat {
                 }));
     }
 
+    /**
+     * The handle-invoking half of the production wiring, with only the
+     * Minecraft-touching pieces injected — so the test can drive the RESOLVED
+     * MethodHandles end-to-end against the stub classes (the plan's call-recording
+     * requirement; an asType/cast shape bug here would otherwise pass every test and
+     * surface only at the live smoke — review m3). Call after a successful
+     * {@link #initResetDomain}.
+     */
+    static ResetHooks productionHandleHooks(java.nio.file.Path gameDir,
+                                            java.util.function.Supplier<java.nio.file.Path> fallbackPath,
+                                            java.util.function.Supplier<Object> levelRendererSupplier,
+                                            Runnable allChanged) {
+        return new ResetHooks(
+                VoxyCompat::resetDomainInstance,
+                inst -> {
+                    try {
+                        return (java.nio.file.Path) resetGetStorageBasePath.invokeExact(inst);
+                    } catch (Throwable t) {
+                        throw new IllegalStateException(t);
+                    }
+                },
+                fallbackPath,
+                () -> resolveRendererShutdown(levelRendererSupplier),
+                // Block-bodied ON PURPOSE: an EXPRESSION lambda (`() -> h.invokeExact()`)
+                // makes javac emit a ()Object call-site signature against the ()void
+                // handle — WrongMethodTypeException at runtime. Caught by the stub-drive
+                // test; do not "simplify" these back.
+                () -> { resetShutdownInstance.invokeExact(); },
+                () -> { resetCreateInstance.invokeExact(); },
+                target -> wipeVoxyStore(target, gameDir),
+                System::gc,
+                allChanged);
+    }
+
+    /** The instance probe THROWS on a failed handle invoke (never null — "can't tell"
+     *  must abort in the ladder, not route into the destructive fallback-wipe branch). */
     private static Object resetDomainInstance() {
         try {
             return (Object) resetGetInstance.invokeExact();
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError vme) throw vme;
-            return null;
+            throw new IllegalStateException("Voxy instance probe failed", t);
         }
     }
 
-    /** Null = holder unresolvable at runtime (abort); no-op = no live renderer (nothing
-     *  holds sections — Voxy's own reload skips the same way). Rung 1 asks the
-     *  interface's static getNullableHolder(); rung 2 (0.2.11/dev) instanceof-checks
-     *  Minecraft.levelRenderer, the class those versions mix into. */
-    private static Runnable resolveRendererShutdown() {
+    // Once-latch for the runtime holder-resolution warn (plan: "abort ... with a
+    // once-warn" — the smoke greps latest.log for exactly one warn on a failed rung).
+    private static final AtomicBoolean HOLDER_RESOLVE_WARNED = new AtomicBoolean();
+
+    /** Null = holder unresolvable at runtime (abort, once-warned); no-op = no live
+     *  renderer (nothing holds sections — Voxy's own reload skips the same way).
+     *  Rung 1 asks the interface's static getNullableHolder(); rung 2 (0.2.11/dev)
+     *  instanceof-checks the supplied levelRenderer, the class those versions mix into. */
+    private static Runnable resolveRendererShutdown(java.util.function.Supplier<Object> levelRendererSupplier) {
         Object holder;
         if (rendererHolderStaticGet != null) {
             try {
                 holder = (Object) rendererHolderStaticGet.invokeExact();
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError vme) throw vme;
+                if (HOLDER_RESOLVE_WARNED.compareAndSet(false, true)) {
+                    LSSLogger.warn("Voxy reset: renderer holder lookup failed — the Voxy half "
+                            + "is unavailable this session (" + t + ")");
+                }
                 return null; // live resolution failed — abort the Voxy half, fail-safe
             }
             if (holder == null) return () -> {};
         } else {
-            var lr = net.minecraft.client.Minecraft.getInstance().levelRenderer;
+            var lr = levelRendererSupplier.get();
             if (lr == null) return () -> {};
-            if (!rendererHolderInterface.isInstance(lr)) return null;
+            if (!rendererHolderInterface.isInstance(lr)) {
+                if (HOLDER_RESOLVE_WARNED.compareAndSet(false, true)) {
+                    LSSLogger.warn("Voxy reset: levelRenderer does not carry the Voxy holder "
+                            + "interface — the Voxy half is unavailable this session");
+                }
+                return null;
+            }
             holder = lr;
         }
         Object boundHolder = holder;
