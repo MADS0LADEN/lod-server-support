@@ -116,12 +116,15 @@ the priority queue, and buys nothing over B's memoryless per-tick division.
 column ceiling IS an artificial rate limit.
 
 **F. In-loop writability checks (let netty's writability flag stop the
-send loop mid-tick).** Tempting — the kernel becomes the pacer — but
-netty's flush is async: a burst of writes can flip writability transiently
-even on fast links, capping per-tick writes near the 64 KiB watermark on
-links that could take megabytes. Unpredictable, and it is precisely the
-netty-gauge-driven pacing family the AUTO ceiling's falsifications closed.
-Rejected; the ENTRY-check yield gate stays the only writability consumer.
+send loop mid-tick).** Tempting — the kernel becomes the pacer — but the
+load-bearing objection stands on its own arithmetic: vanilla sets no water
+marks, so netty's defaults (32/64 KiB) apply, and an intra-tick writability
+check caps per-tick writes near the 64 KiB watermark — an artificial
+~1.3 MB/s ceiling on links that could take megabytes (netty's async flush
+makes the flip routine mid-burst even on fast links). The AUTO-ceiling
+falsification record's gauge-SEMANTICS half (rounds 1-2) applies as a
+supporting caution, no further. Rejected; the ENTRY-check yield gate stays
+the only writability consumer.
 
 ## 3. The chosen design: refill-floored proportional drain (always on)
 
@@ -158,10 +161,10 @@ allocation the flush already receives:
   refill share (~1.25 MB raw at the default 25 MB/s cap) instead of the full
   ~6.25 MB bank. The kernel send buffer below the gauge (~0.5-0.7 MB
   measured on the rig path) still absorbs its own depth at memory speed —
-  **~0.5-1 s of head-of-line at 10 Mbps is the irreducible floor of ANY
-  server-side mechanism in this family** (the companion program's structural
-  finding); pacing lands the first-tick dump at that floor instead of ~5×
-  above it.
+  the honest bound is **~0.5-1.3 s at 10 Mbps** (kernel depth + up to two
+  wire shares before yield engages; the kernel term is the irreducible floor
+  of ANY server-side mechanism in this family — the companion program's
+  structural finding); versus the old ~3-5 s dump, a 3-4× improvement.
 - **Denomination: RAW bytes** (`QueuedPayload.estimatedBytes`), matching the
   limiter and the allocation the floor derives from. Wire ≤ raw, so the
   socket-facing amplitude is bounded a fortiori; no raw/wire mixing anywhere
@@ -174,7 +177,12 @@ allocation the flush already receives:
   pace budget bounds the writable tick's send loop → bandwidth limiter
   charges per payload as today. The pingf-cut allocation composes
   automatically: the floor derives from the CUT allocation, so a backstop cut
-  shrinks the pace floor with it — same direction, no interaction term. The
+  shrinks the pace floor with it. When a big backlog makes `Q/HORIZON` exceed
+  the cut share, the budget merely becomes NON-BINDING — the pace budget only
+  VETOES sends; authority still requires `canSend(cutAllocation)` per payload,
+  whose bank re-clamps to cutAllocation/4 on the first post-cut tick (the m12
+  plumbing) — so the max() cannot leak a byte past a cut, and `paced=`
+  honestly books only budget-stopped ticks (delta round, verified). The
   starvation-floor tick is structurally exempt (it breaks after exactly one
   send, and the budget skips the first payload) — an explicit guard
   documents it.
@@ -209,10 +217,15 @@ allocation the flush already receives:
   if pacing ever slowed a governed session's delivery, the governor's
   offer-backing reads the under-offer and FREEZES (never ratchets), and the
   refill floor clears any governed quarter-batch within 1-3 ticks so the
-  cadence recovers immediately. The coupling invariant worth pinning:
-  the pace floor at the governor's engage-boundary allocation must clear a
-  quarter-batch inside the fast-fire floor (true by orders of magnitude at
-  defaults; the pin keeps constant drift honest).
+  cadence recovers immediately. The coupling invariant, pinned as a STATIC
+  inequality over compiled defaults (delta round — the floor's allocation is
+  a runtime variable, so a runtime phrasing is unpinnable):
+  `(defaultPerPlayerCapBytes/TICKS_PER_SECOND) × FAST_RESCAN_MIN_INTERVAL_TICKS
+  ≥ ENGAGE_BELOW_BYTES_PER_SEC/4` (~6× headroom at defaults). Documented
+  NON-guarantee: under a deep pingf cut or heavy global dilution the share
+  shrinks below a quarter-batch and the cadence slips — the degrade path is
+  the governor's offer-backing FREEZE (never a ratchet), healed by B's
+  recovery.
 - **The 1 Hz fallback** is untouched by construction (it is time-based, not
   delivery-based) — the want-set's self-heal never waits on the pacer.
 - **v16/legacy sessions:** no interaction — pacing is below the dialect
@@ -226,7 +239,9 @@ allocation the flush already receives:
   ships whole), leftover retained not dropped, the starvation-floor-tick
   exemption guard, `paced=` counts budget-stopped PARTIAL ticks only,
   MIN-composition with the limiter (whichever binds first stops the loop —
-  incl. a pingf-cut allocation shrinking the floor), RAW denomination pin,
+  incl. a pingf-cut allocation shrinking the floor, AND the Q/HORIZON-above-
+  the-cut-share case where the limiter stays the binding authority), RAW
+  denomination pin,
   kill switch OFF = bit-identical flush, short overloads pin pacing off
   (S-9a), the m7 constants-coupling pin (a governed quarter-batch at the
   engage boundary clears within the fast-fire floor at the floored budget).
@@ -236,7 +251,10 @@ allocation the flush already receives:
   pin); config default-ON pins in both suites; the registry row (containsAll
   + apply test); the move-tracer boot-row echo (`enableSendPacing` joins
   `enablePingBackstop` — same partition-the-collections rationale).
-- Guard soaks: fresh-backfill + disk-saturation + rate-limit-storm.
+- Guard soaks: fresh-backfill + disk-saturation + rate-limit-storm +
+  **store-second-join** (delta round: the only guard where loopback pacing
+  actually BINDS — the store-warm wave is the bank-burst shape; without it
+  the triple asserts headroom on runs where the mechanism never fires).
   Inertness is NOT structural in v2 (the budget binds exactly where the bank
   used to burst — wave-completion ticks stretch from 1 to ≤5 ticks): the
   expectation is UNCHANGED verdicts because every law is conservation- or
@@ -296,3 +314,14 @@ MINOR-3 the lazy per-tick sum chosen over the running counter (zero drift
 risk; cost negligible). MINOR-4 moot in v2 (no arming state to place across
 the early returns); the surgery-placement, counter-mutation, composition,
 and column-lane-only claims all verified TRUE against the live tree.
+
+**Delta round (control lens on v2) — IMPLEMENT WITH FIXES, folded:** the
+refill-share floor confirmed scale-invariant against the bank at every
+runtime allocation; M1/M2/M3 closed by construction; loopback law sweep
+found nothing that moves (pacing retains, never drops; slower delivery only
+LOWERS supersession churn — the safe side of every ceiling). Fixes: the
+guard soaks gain store-second-join (the one loopback surface where pacing
+binds), the m7 pin reformulated as a static defaults inequality with the
+pingf-cut degrade documented, the Q/10-during-cut limiter-bound property
+made explicit (+T1 case), the first-tick bound honesty-widened to
+~0.5-1.3 s, §2.F re-grounded on the watermark arithmetic.
