@@ -69,6 +69,34 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public int diskReaderThreads = 0;
     /**
+     * Disk-read concurrency gate (disk-read-concurrency-gate-plan.md): at most this many
+     * reader-pool threads may run the EXPENSIVE serve phase (region read → zlib inflate →
+     * NBT parse → transcode → zstd compress — milliseconds of CPU per column) at any
+     * instant. Store-hit serves (~44 µs SQLite blob + frame reuse) never consume a
+     * permit. A read refused by the gate is a silent drop healed by the client's ≤1 s
+     * re-declaration (the standard transient-drop path, counted {@code disk.gated}).
+     *
+     * <p><b>The CPU-vs-bandwidth separation:</b> the bandwidth caps bound the CLIENT
+     * (raw bytes ≈ decode work); this bounds the SERVER (concurrent expensive reads ≈
+     * CPU). Before this key the bandwidth caps were the only throughput governor on the
+     * serve path, so raising them for fast warm store serves also uncapped the disk
+     * path's CPU bill on cold regions.
+     *
+     * <p><b>0 = AUTO (the default), store-conditional:</b> with a store attached, K =
+     * half the resolved reader pool (rounded up — pool 8 → 4, pool 3 → 2, pool 1 → 1),
+     * reserving the rest for store lookups; with NO store attached, K = the pool — a
+     * structural no-op, because there is no cheap path to protect and every upgrading
+     * (store-off) server would otherwise pay pure downside on fresh worlds. See
+     * {@link #effectiveMaxConcurrentDiskReads(int, boolean)}.
+     *
+     * <p><b>Disable idiom: set it ≥ the reader pool size</b> (e.g. 64) — a K at or above
+     * the pool cannot bind (the {@code lodColumnsPerSecondLimit} large-value-inert
+     * precedent). 0 is NOT off here — it is AUTO, exactly like the adjacent
+     * {@code diskReaderThreads}; nonzero clamps 1..64 and additionally to the resolved
+     * pool at derivation.
+     */
+    public int maxConcurrentDiskReads = 0;
+    /**
      * Per-player send-queue cap. The default is the wire batch cap: under v17 replace
      * semantics a player's backlog is at most ONE wire batch, and a payload only enqueues
      * for an admitted backlog position, so enqueued payloads per player structurally
@@ -422,6 +450,32 @@ public abstract class ServerConfigBase extends JsonConfig {
     }
 
     /**
+     * Resolved disk-read gate capacity K, honouring the 0 = AUTO default
+     * (disk-read-concurrency-gate-plan.md — the {@code effectiveDiskReaderThreads}
+     * three-part pattern: field + runtime-parameter resolver + clamps-nonzero-only).
+     *
+     * @param resolvedReaderThreads the RESOLVED pool size (0=AUTO already applied via
+     *        {@link #effectiveDiskReaderThreads(boolean)}) — deriving from it inherits
+     *        the read-path-aware sizing, and an explicit override clamps to it (a K
+     *        above the pool cannot bind)
+     * @param storeAttached the POST-DEGRADE store state ({@code store != null} at the
+     *        service, never {@code lodStore != "off"}): a store that failed to init has
+     *        no cheap rung to protect, and half-pooling a store-less server is the
+     *        convergent-MAJOR regression both gate reviews carved out
+     */
+    public int effectiveMaxConcurrentDiskReads(int resolvedReaderThreads, boolean storeAttached) {
+        if (maxConcurrentDiskReads > 0) {
+            return Math.clamp(maxConcurrentDiskReads, LSSConstants.MIN_MAX_CONCURRENT_DISK_READS,
+                    resolvedReaderThreads);
+        }
+        if (!storeAttached) return resolvedReaderThreads; // AUTO, no store: no-op gate
+        return Math.clamp(
+                (resolvedReaderThreads + LSSConstants.AUTO_DISK_READ_GATE_DIVISOR - 1)
+                        / LSSConstants.AUTO_DISK_READ_GATE_DIVISOR, // ceil(pool/2)
+                LSSConstants.MIN_MAX_CONCURRENT_DISK_READS, resolvedReaderThreads);
+    }
+
+    /**
      * Resolved per-dimension timestamp-cache size in MB, honouring the 0 = AUTO default.
      *
      * <p>The scan is a Chebyshev (square) ring walk, so the tracked region is
@@ -473,14 +527,24 @@ public abstract class ServerConfigBase extends JsonConfig {
      *        native probe, not the config request — a probe-failed server ships raw for
      *        every session, and echoing the request would let compress_gate.sh compare
      *        two identical raw arms with both marked valid (B0 review M1)
+     * @param effectiveMaxConcurrentDiskReads the RESOLVED gate capacity K — 0=AUTO and
+     *        the store-conditional already applied via
+     *        {@link #effectiveMaxConcurrentDiskReads(int, boolean)}. Because K depends
+     *        on POST-DEGRADE store attachment, the echo call site sits AFTER store
+     *        attachment on both platforms (an earlier echo would report K computed
+     *        store-less on every store-armed server — the same resolved-not-requested
+     *        rule as the zstd argument; ordering source-pinned in
+     *        ChannelAccessorContractTest)
      */
     public String effectiveConfigEcho(int effectiveReaderThreads,
-                                      boolean effectiveCompressedColumns) {
+                                      boolean effectiveCompressedColumns,
+                                      int effectiveMaxConcurrentDiskReads) {
         return "Effective config: useNbtTranscode=" + useNbtTranscode
                 + ", diskReaderThreads=" + effectiveReaderThreads
                 + ", useCompressedColumns=" + effectiveCompressedColumns
                 + ", useBackgroundReadSplit=" + useBackgroundReadSplit
-                + ", useSelectiveNbtParse=" + useSelectiveNbtParse;
+                + ", useSelectiveNbtParse=" + useSelectiveNbtParse
+                + ", maxConcurrentDiskReads=" + effectiveMaxConcurrentDiskReads;
     }
     /**
      * LOD x-ray masking (docs/planning/antixray-compat-design.md §3). "auto" (default)
@@ -593,6 +657,12 @@ public abstract class ServerConfigBase extends JsonConfig {
         // clamps into the supported band — the same shape as lodStoreMaxMB.
         diskReaderThreads = diskReaderThreads <= 0 ? 0 : Math.clamp(diskReaderThreads,
                 LSSConstants.MIN_DISK_READER_THREADS, LSSConstants.MAX_DISK_READER_THREADS);
+        // Same 0 = AUTO shape (negative normalizes to AUTO, mirroring diskReaderThreads —
+        // never to 1, which would be the TIGHTEST gate); the pool clamp applies at
+        // derivation, where the resolved pool size is known.
+        maxConcurrentDiskReads = maxConcurrentDiskReads <= 0 ? 0 : Math.clamp(
+                maxConcurrentDiskReads, LSSConstants.MIN_MAX_CONCURRENT_DISK_READS,
+                LSSConstants.MAX_DISK_READER_THREADS);
         sendQueueLimitPerPlayer = Math.clamp(sendQueueLimitPerPlayer,
                 LSSConstants.MIN_SEND_QUEUE_SIZE, LSSConstants.MAX_SEND_QUEUE_SIZE);
         // 0 = disabled is a first-class value (the default); any nonzero opt-in clamps into

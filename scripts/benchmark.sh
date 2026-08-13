@@ -77,7 +77,8 @@ if [[ -z "${BENCHMARK_CONFIG_STAGED:-}" ]]; then
   "enableChunkGeneration": true,
   "lodDistanceChunks": 512,
   "lodStore": "off",
-  "lodStoreBackfill": false
+  "lodStoreBackfill": false,
+  "maxConcurrentDiskReads": 64
 }
 EOF
     echo "[benchmark] Staged neutral config (lodStore=off, lodDistance=512 pinned) — export BENCHMARK_CONFIG_STAGED=1 to keep your own"

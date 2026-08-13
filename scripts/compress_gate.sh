@@ -51,6 +51,7 @@ stage_config() { # <useCompressedColumns-value>
   "enabled": true,
   "lodDistanceChunks": $distance,
   "diskReaderThreads": 5,
+  "maxConcurrentDiskReads": 5,
   "enableChunkGeneration": false,
   "missMemoTtlSeconds": 30,
   "useBackgroundReadPriority": true,
@@ -98,6 +99,12 @@ run_arm() { # <arm-label> <useCompressedColumns-value> <rep>
     echo_line="$(grep -o 'Effective config: .*' "$out/server.log" 2>/dev/null | tail -1 || true)"
     local arm_valid=true
     [[ "$echo_line" == *"useCompressedColumns=$value"* ]] || arm_valid=false
+    # Ref-predates-the-key tolerance for the disk-read gate's K (v0.11.0 stage B): the
+    # staged no-op pin is 5 = the pool, so an explicit different value is a staging bug
+    # while an absent key is just an older ref.
+    if [[ "$echo_line" == *"maxConcurrentDiskReads="* ]]; then
+        [[ "$echo_line" == *"maxConcurrentDiskReads=5"* ]] || arm_valid=false
+    fi
     cat > "$out/meta.json" <<EOF
 {"mode":"$MODE","arm":"$arm","useCompressedColumns":$value,"lodStore":"$STORE_MODE",
  "rep":$rep,"duration_s":$DURATION,

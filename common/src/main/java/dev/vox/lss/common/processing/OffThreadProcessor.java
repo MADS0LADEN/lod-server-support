@@ -975,13 +975,16 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
         var pending = state.removePendingByPosition(cx, cz);
 
         if (result.saturated()) {
-            // Residual only: the router's headroom gate prevents submits into a full pool,
-            // so this fires only on races/shutdown. Silent drop — the pending slot was
-            // already freed above, no dedup/stale-guard teardown is needed for a result
-            // that already drained, and the client's next want-set re-declares the position.
+            // Two bounce sources share this flavor: the residual pool rejection (the
+            // router's headroom gate prevents submits into a full pool, so races/shutdown
+            // only) and the DiskReadGate's expensive-path refusal (read_gate pegged —
+            // counted disk.gated at the bounce site, never here). Silent drop either way —
+            // the pending slot was already freed above, no dedup/stale-guard teardown is
+            // needed for a result that already drained, and the client's next want-set
+            // re-declares the position.
             this.ctx.diagnostics().addSuperseded(1);
             if (LSSLogger.isDebugEnabled()) {
-                LSSLogger.debug("Disk-saturated result dropped silently (superseded) for "
+                LSSLogger.debug("Disk saturated/gated result dropped silently (superseded) for "
                         + playerUuid + ": chunk [" + cx + ", " + cz + "]");
             }
         } else if (result.notFound()) {

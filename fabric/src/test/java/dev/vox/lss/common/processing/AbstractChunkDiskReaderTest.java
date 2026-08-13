@@ -30,6 +30,8 @@ class AbstractChunkDiskReaderTest {
     private static final class TestDiskReader extends AbstractChunkDiskReader {
         TestDiskReader() { super(1); }
 
+        TestDiskReader(int threads) { super(threads); }
+
         void submit(UUID player, int cx, int cz, long order, ReadOperation op) {
             submitRead(player, cx, cz, DIM, order, op);
         }
@@ -279,6 +281,265 @@ class AbstractChunkDiskReaderTest {
         assertTrue(on.startsWith(off), "the engaged line only appends to the base diagnostics: " + on);
         assertTrue(on.contains("read_throttle=ENGAGED(33/33)"),
                 "engaged line shows the current/max limit (fresh throttle starts at the pool ceiling): " + on);
+    }
+
+    // ---- Disk-read concurrency gate (disk-read-concurrency-gate-plan.md) ----
+
+    /** Minimal store stub for the gate seam tests: answers what it is told to. */
+    private static final class GateStubStore implements dev.vox.lss.common.store.LodStoreService {
+        final dev.vox.lss.common.store.LodStoreDiagnostics sdiag =
+                new dev.vox.lss.common.store.LodStoreDiagnostics();
+        volatile dev.vox.lss.common.store.LodStoreService.StoreHit answer;
+
+        @Override public dev.vox.lss.common.store.LodStoreMode mode() {
+            return dev.vox.lss.common.store.LodStoreMode.MEMORY;
+        }
+        @Override public StoreHit get(String dimension, long packed) { return this.answer; }
+        @Override public boolean deposit(String d, long p, byte[] b, long ts, long acq) { return true; }
+        @Override public void invalidate(String d, long[] p) {}
+        @Override public void delete(String d, long p) {}
+        @Override public dev.vox.lss.common.store.LodStoreDiagnostics diagnostics() { return this.sdiag; }
+        @Override public void shutdown() {}
+    }
+
+    /**
+     * The load-bearing seam property: with the gate pegged (K=1 held by a blocked read),
+     * store HITS keep flowing (they never consume a permit) while store MISSES PARK —
+     * no result until the permit releases, then the parked read RUNS (real data, no
+     * drop). Counted into {@code submitted} only when it actually runs; {@code gated}
+     * stays 0 (it counts park-OVERFLOW bounces only, covered by the next test).
+     */
+    @Test
+    void peggedGateParksMissesWhileStoreHitsKeepFlowingAndDrainsOnRelease() throws Exception {
+        var gated = new TestDiskReader(2);
+        gated.registerPlayer(player);
+        try {
+            gated.configureReadGate(1);
+            var store = new GateStubStore(); // answer=null: every lookup is a miss
+            gated.attachStore(store);
+
+            var opStarted = new CountDownLatch(1);
+            var holdOpen = new CountDownLatch(1);
+            gated.submit(player, 0, 0, 1L, () -> {
+                opStarted.countDown();
+                if (!holdOpen.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("never released");
+                return new byte[]{1};
+            });
+            assertTrue(opStarted.await(5, TimeUnit.SECONDS), "the permit-holding read must start");
+
+            // Store miss while pegged: PARKS (delivers nothing yet).
+            store.answer = null;
+            var parkedRan = new CountDownLatch(1);
+            gated.submit(player, 2, 0, 3L, () -> {
+                parkedRan.countDown();
+                return new byte[]{7};
+            });
+            var q = gated.getPlayerQueue(player);
+            assertFalse(parkedRan.await(300, TimeUnit.MILLISECONDS),
+                    "the parked miss must NOT run while the permit is held");
+            assertNull(q.poll(), "a parked read delivers no result while parked");
+
+            // Store hit while pegged AND with a read parked: still served immediately.
+            store.answer = new dev.vox.lss.common.store.LodStoreService.StoreHit(new byte[]{9}, 42L);
+            gated.submit(player, 1, 0, 2L, () -> {
+                throw new AssertionError("a store hit must not run the NBT op");
+            });
+            ChunkReadResult hit = null;
+            long deadline = System.nanoTime() + 5_000_000_000L;
+            while (hit == null && System.nanoTime() < deadline) { hit = q.poll(); }
+            assertNotNull(hit, "the store hit must be served while the gate is pegged");
+            assertTrue(hit.fromStore());
+            assertEquals(0, gated.getDiag().getGatedCount(),
+                    "parking is not a bounce — gated counts overflow only");
+
+            // Release: the parked read drains on the freed permit and delivers REAL data.
+            holdOpen.countDown();
+            assertTrue(parkedRan.await(5, TimeUnit.SECONDS),
+                    "the release must feed the parked read to the freed permit");
+            var rest = new ArrayList<ChunkReadResult>();
+            deadline = System.nanoTime() + 5_000_000_000L;
+            while (rest.size() < 2 && System.nanoTime() < deadline) {
+                var r = q.poll();
+                if (r != null) rest.add(r);
+            }
+            assertEquals(2, rest.size(), "the held read AND the parked read both deliver");
+            assertTrue(rest.stream().noneMatch(ChunkReadResult::saturated),
+                    "neither is a drop — the parked read produced real data");
+            assertEquals(2, gated.getDiag().getSubmittedCount(),
+                    "both expensive reads entered the NBT path exactly once");
+            assertEquals(0, gated.getDiag().getSaturationCount());
+            assertEquals(0, gated.getDiag().getGatedCount());
+        } finally {
+            gated.shutdown();
+        }
+    }
+
+    /**
+     * Park OVERFLOW is the bounce (the gate-site wiring pin): with the permit held and
+     * the park list full (threads×32 = 64 for this reader), the next miss delivers the
+     * saturated flavor — counted {@code gated}, never {@code submitted}/{@code
+     * saturated} — which the processor's existing silent-superseded routing consumes.
+     */
+    @Test
+    void parkOverflowBouncesAsSaturatedFlavorAndCountsGated() throws Exception {
+        var gated = new TestDiskReader(2);
+        gated.registerPlayer(player);
+        try {
+            gated.configureReadGate(1);
+            var store = new GateStubStore(); // every lookup is a miss
+            gated.attachStore(store);
+
+            var opStarted = new CountDownLatch(1);
+            var holdOpen = new CountDownLatch(1);
+            gated.submit(player, 0, 0, 1L, () -> {
+                opStarted.countDown();
+                if (!holdOpen.await(15, TimeUnit.SECONDS)) throw new IllegalStateException("never released");
+                return new byte[]{1};
+            });
+            assertTrue(opStarted.await(5, TimeUnit.SECONDS));
+
+            // Fill the park list to capacity (64), then one more: the 65th bounces.
+            // Spin on pool headroom between submits — the free worker parks each task in
+            // µs, but a starved test runner could otherwise outrun it into the 64-slot
+            // pool queue and trip a SUBMIT-site saturation instead of the gate's bounce.
+            int parkCapacity = 2 * 32;
+            for (int i = 1; i <= parkCapacity + 1; i++) {
+                long spinDeadline = System.nanoTime() + 5_000_000_000L;
+                while (!gated.hasHeadroom() && System.nanoTime() < spinDeadline) {
+                    Thread.onSpinWait();
+                }
+                gated.submit(player, i, 1, 10L + i, () -> new byte[]{2});
+            }
+            var q = gated.getPlayerQueue(player);
+            ChunkReadResult bounce = null;
+            long deadline = System.nanoTime() + 5_000_000_000L;
+            while (bounce == null && System.nanoTime() < deadline) { bounce = q.poll(); }
+            assertNotNull(bounce, "the overflow miss must deliver the bounce");
+            assertTrue(bounce.saturated(), "the bounce reuses the saturated flavor");
+            assertEquals(1, gated.getDiag().getGatedCount(), "exactly the overflow counted gated");
+            assertEquals(1, gated.getDiag().getSubmittedCount(),
+                    "only the permit holder entered the NBT path so far");
+            assertEquals(0, gated.getDiag().getSaturationCount(),
+                    "disk.saturated is the SUBMIT-site pool bounce, never the gate's");
+
+            // Release: all 64 parked reads drain and deliver real data.
+            holdOpen.countDown();
+            int expected = 1 + parkCapacity; // the held read + every parked read
+            var results = new ArrayList<ChunkReadResult>();
+            deadline = System.nanoTime() + 10_000_000_000L;
+            while (results.size() < expected && System.nanoTime() < deadline) {
+                var r = q.poll();
+                if (r != null) results.add(r);
+            }
+            assertEquals(expected, results.size(), "every parked read drains after release");
+            assertTrue(results.stream().noneMatch(ChunkReadResult::saturated));
+            assertEquals(1, gated.getDiag().getGatedCount(), "no further bounces during the drain");
+        } finally {
+            gated.shutdown();
+        }
+    }
+
+    /**
+     * Concurrent park/drain hammer (review B-6 — the class of race the poll-null
+     * `continue` fix closes): 4 workers race 1 permit over a few thousand store-miss
+     * submits from concurrent submitters. Conservation envelope: EXACTLY one result per
+     * submit (a stranded parked entry times the await out; a double-drained one
+     * overshoots), and the gate is fully at rest afterwards (no held permit, no parked
+     * entry). Ops are trivially fast so park/drain interleavings churn maximally.
+     */
+    @Test
+    void concurrentParkDrainHammerDeliversExactlyOneResultPerSubmit() throws Exception {
+        var gated = new TestDiskReader(4);
+        gated.registerPlayer(player);
+        try {
+            gated.configureReadGate(1);
+            var store = new GateStubStore(); // every lookup is a miss
+            gated.attachStore(store);
+
+            final int perSubmitter = 600;
+            final int submitters = 3;
+            var submittersDone = new CountDownLatch(submitters);
+            for (int s = 0; s < submitters; s++) {
+                final int base = s * perSubmitter;
+                new Thread(() -> {
+                    try {
+                        for (int i = 0; i < perSubmitter; i++) {
+                            long spin = System.nanoTime() + 10_000_000_000L;
+                            while (!gated.hasHeadroom() && System.nanoTime() < spin) {
+                                Thread.onSpinWait();
+                            }
+                            gated.submit(player, base + i, 7, base + i, () -> new byte[]{3});
+                        }
+                    } finally {
+                        submittersDone.countDown();
+                    }
+                }).start();
+            }
+            assertTrue(submittersDone.await(30, TimeUnit.SECONDS), "submitters finished");
+
+            int expected = submitters * perSubmitter;
+            var q = gated.getPlayerQueue(player);
+            int got = 0;
+            long deadline = System.nanoTime() + 30_000_000_000L;
+            while (got < expected && System.nanoTime() < deadline) {
+                if (q.poll() != null) got++;
+                else Thread.onSpinWait();
+            }
+            assertEquals(expected, got, "exactly one result per submit — no strand, no double");
+            // Let any trailing drain step settle, then assert the gate is at rest.
+            deadline = System.nanoTime() + 5_000_000_000L;
+            while (System.nanoTime() < deadline
+                    && !gated.getDiagnostics().contains("read_gate=0/1, gate_parked=0")) {
+                Thread.onSpinWait();
+            }
+            assertTrue(gated.getDiagnostics().contains("read_gate=0/1, gate_parked=0"),
+                    "gate at rest after the hammer: " + gated.getDiagnostics());
+            assertNull(q.poll(), "no extra results after the count");
+        } finally {
+            gated.shutdown();
+        }
+    }
+
+    /** Release-at-triage: a read that THROWS TimeoutException (the future.get shape)
+     *  releases its permit at error triage — the next read must acquire it, even though
+     *  a real orphaned fetch would still be running downstream OUTSIDE the permit. */
+    @Test
+    void timeoutTriageReleasesThePermitSoTheNextReadProceeds() throws Exception {
+        var gated = new TestDiskReader(1);
+        gated.registerPlayer(player);
+        try {
+            gated.configureReadGate(1);
+            gated.submit(player, 5, 5, 1L, () -> {
+                throw new java.util.concurrent.TimeoutException("simulated 10s expiry");
+            });
+            var q = gated.getPlayerQueue(player);
+            ChunkReadResult timedOut = null;
+            long deadline = System.nanoTime() + 5_000_000_000L;
+            while (timedOut == null && System.nanoTime() < deadline) { timedOut = q.poll(); }
+            assertNotNull(timedOut);
+            assertTrue(timedOut.notFound(), "timeout triages down the not-found ladder");
+
+            gated.submit(player, 6, 6, 2L, () -> new byte[]{1, 2});
+            ChunkReadResult next = null;
+            deadline = System.nanoTime() + 5_000_000_000L;
+            while (next == null && System.nanoTime() < deadline) { next = q.poll(); }
+            assertNotNull(next, "the permit was released at triage — the next read runs");
+            assertFalse(next.notFound());
+            assertEquals(0, gated.getDiag().getGatedCount(),
+                    "no bounce occurred — both reads acquired the single permit in turn");
+        } finally {
+            gated.shutdown();
+        }
+    }
+
+    /** The read_gate diag token is ALWAYS rendered (the live-deploy log's config-era
+     *  receipt): in-use/K plus the monotonic gated counter. */
+    @Test
+    void getDiagnosticsRendersTheReadGateToken() {
+        reader.configureReadGate(3);
+        String line = reader.getDiagnostics();
+        assertTrue(line.contains(", read_gate=0/3, gate_parked=0, gated=0"),
+                "the gate token must render even while the gate is a no-op: " + line);
     }
 
     @Test

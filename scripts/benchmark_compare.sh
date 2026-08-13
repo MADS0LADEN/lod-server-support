@@ -75,6 +75,7 @@ stage_server_config() { # <path> <use_bg_read>
   "lodDistanceChunks": $LOD_R,
   "bytesPerSecondLimitPerPlayer": 20971520,
   "diskReaderThreads": 5,
+  "maxConcurrentDiskReads": 5,
   "sendQueueLimitPerPlayer": 4000,
   "bytesPerSecondLimitGlobal": 104857600,
   "enableChunkGeneration": false,

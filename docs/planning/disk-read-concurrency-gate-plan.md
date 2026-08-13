@@ -74,6 +74,33 @@ plan fixes. The drop-churn cost is bounded: a re-declared position re-runs a ~44
 store lookup once per scan, and the adaptive scan cadence already holds 1 Hz when
 drops exceed 5% of a declaration.
 
+> **AMENDED at implementation (2026-08-13, v0.11.0 stage B — deviation pair, see the
+> progress doc's decisions log):** the PURE fail-fast bounce failed its own live
+> scenario — a permit-LESS pool worker empties the shared queue at bounce speed
+> (µs/task), so the permit HOLDER got one read per queue refill and starved
+> (measured: 1.6% permit utilization, ~8 reads/s at 2 ms reads decaying to ~1.5/s;
+> the disk-read-gate soak could not converge in 340 s). The shipped mechanism adds a
+> **bounded PARK list at the post-store-miss seam** (capacity = the pool queue's,
+> threads×32): a permit-less store MISS parks instead of bouncing, and every permit
+> release drains parked work first — permit holders run expensive reads
+> back-to-back while the other workers keep serving store hits, which is this
+> plan's own stated reservation intent and what the sizing model ("K=1 serializes
+> the annulus") already assumed. Park OVERFLOW bounces exactly as specified below
+> (saturated flavor, counted `gated`, drop-heal unchanged), so `disk.gated` becomes
+> the overflow counter. This is a lightweight subset of rejected option D (the
+> bounded queue WITHOUT the pool split or in-flight accounting refactor); the
+> pre-submit-retention rejection above stands untouched — parking happens after the
+> store lookup, so store hits are never held back.
+>
+> One documented interplay narrowing (stage-B review B-5): on the C2ME-latched
+> fallback (AdaptiveReadThrottle engaged) WITH a store armed, parking tasks return
+> their pool slot in µs, so `tasksInFlight` — the throttle's `canSubmit` input —
+> undercounts buffered expensive demand, and drains never consult the throttle: the
+> effective read-concurrency floor becomes K (half pool) rather than the AIMD floor
+> of 1. Store-off C2ME (the common case) is bit-identical (K = pool → no parking);
+> K still bounds pressure. Accepted — revisit only if a live C2ME+store server
+> shows IO distress the throttle used to absorb.
+
 ## Ground truth (exploration 2026-08-12, verified file:line)
 
 - The enforcement seam is single and clean: `readAndDeliver` — store rung first

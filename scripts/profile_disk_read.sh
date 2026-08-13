@@ -55,6 +55,7 @@ stage_server_config() { # <path>
   "lodDistanceChunks": $LOD_R,
   "bytesPerSecondLimitPerPlayer": ${PROFILE_BW_PER_PLAYER:-20971520},
   "diskReaderThreads": 5,
+  "maxConcurrentDiskReads": 5,
   "sendQueueLimitPerPlayer": ${PROFILE_SEND_QUEUE:-1024},
   "bytesPerSecondLimitGlobal": 104857600,
   "enableChunkGeneration": false,
@@ -230,9 +231,17 @@ cmd_run() {
     [[ "$echo_line" == *"diskReaderThreads=5"* ]] || echo_ok=false
     # Tolerant when the ref predates the key (pre-B4 base arms echo no such key —
     # only an EXPLICIT mismatch invalidates the arm).
+    # Same ref-predates-the-key tolerance for the disk-read gate's K (v0.11.0 stage B —
+    # the staged no-op pin is 5 = the pool, so an explicit different value is a staging
+    # bug, while an absent key is just an older ref). Reset per arm — not a local.
+    __gate_echo_bad=false
+    if [[ "$echo_line" == *"maxConcurrentDiskReads="* ]]; then
+        [[ "$echo_line" == *"maxConcurrentDiskReads=5"* ]] || __gate_echo_bad=true
+    fi
     if [[ "$echo_line" == *"useSelectiveNbtParse="* ]]; then
         [[ "$echo_line" == *"useSelectiveNbtParse=${PROFILE_SELECTIVE_PARSE:-true}"* ]] || echo_ok=false
     fi
+    [[ "${__gate_echo_bad:-false}" != "true" ]] || echo_ok=false
 
     local arm_valid=true
     { [[ "$warn_ok" == "true" ]] && [[ "$echo_ok" == "true" ]] \

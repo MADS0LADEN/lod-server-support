@@ -85,6 +85,8 @@ class JsonConfigLoadTest {
         assertEquals(300, c.lodDistanceChunks);
         assertEquals(25.0, c.mbPerSecondLimitPerPlayer);
         assertEquals(26_214_400, c.bytesPerSecondPerPlayer());
+        assertEquals(0, c.maxConcurrentDiskReads,
+                "the disk-read gate ships at 0 = AUTO (store-conditional)");
         assertTrue(Files.isRegularFile(configDir.resolve(FILE)));
 
         JsonObject saved = savedJson(configDir);

@@ -45,6 +45,36 @@ public abstract class AbstractChunkDiskReader {
     private final LogThrottle saturationWarn = new LogThrottle(SATURATION_WARN_INTERVAL_MS);
     // Read timeouts are documented transients (miss-memo A/B finding) — same aggregation.
     private final LogThrottle timeoutWarn = new LogThrottle(SATURATION_WARN_INTERVAL_MS);
+    // Gate refusals are the same self-healing drop class — same aggregation; the message
+    // names the remedy (the operator signal the gate plan requires).
+    private final LogThrottle gateWarn = new LogThrottle(SATURATION_WARN_INTERVAL_MS);
+
+    // Disk-read concurrency gate (disk-read-concurrency-gate-plan.md): bounds the
+    // EXPENSIVE phase only — store hits are served before it. Constructed at pool size
+    // (a structural no-op) and configured once at service init via configureReadGate,
+    // AFTER store attachment (the store-conditional AUTO needs the post-degrade store
+    // state). Capacity is a volatile read per acquire, so stage C's runtime mutation
+    // needs no further plumbing here.
+    private final DiskReadGate readGate;
+    // The gate's PARK LIST (v0.11.0 stage B deviation, progress-doc decisions log
+    // 2026-08-13 — measured, not speculative): the plan's pure fail-fast bounce let a
+    // permit-LESS worker empty the shared pool queue at bounce speed (µs/task), so the
+    // permit HOLDER ran one read per queue refill and starved — the first live scenario
+    // run measured 1.6% permit utilization (~8 reads/s at 2 ms reads, decaying to
+    // ~1.5/s) and could not converge. A store MISS that fails tryAcquire now PARKS here
+    // (bounded) instead of bouncing; every permit release drains parked work first, so
+    // permit holders run back-to-back expensive reads while the other workers keep
+    // serving store hits — which is the plan's own stated intent ("reserve the other
+    // half for store lookups") and what its sizing model already assumed. Park overflow
+    // still bounces via the unchanged saturated-flavor drop (counted gated), keeping
+    // the drop-heal pressure valve. Entries here are exactly as long-lived as pool-queue
+    // entries (same staleness/dedup/shutdown story: pendings hold, late delivery is
+    // idempotent, isShutdown() short-circuits).
+    private record ParkedRead(UUID playerUuid, int chunkX, int chunkZ, String dimension,
+                              long submissionOrder, ReadOperation operation) {}
+    private final ConcurrentLinkedQueue<ParkedRead> gateParked = new ConcurrentLinkedQueue<>();
+    private final AtomicInteger gateParkedCount = new AtomicInteger();
+    private final int gateParkCapacity;
 
     private final ExecutorService executor;
     private final ArrayBlockingQueue<Runnable> workQueue;
@@ -76,6 +106,10 @@ public abstract class AbstractChunkDiskReader {
 
     protected AbstractChunkDiskReader(int threadCount) {
         this.threadCount = threadCount;
+        this.readGate = new DiskReadGate(threadCount);
+        // Mirror the pool queue's bound: parked work is the same kind of buffered
+        // demand, so the two buffers stay the same order of magnitude.
+        this.gateParkCapacity = threadCount * QUEUE_CAPACITY_PER_THREAD;
         int queueCapacity = threadCount * QUEUE_CAPACITY_PER_THREAD;
         var workQueue = new ArrayBlockingQueue<Runnable>(queueCapacity);
         this.workQueue = workQueue;
@@ -216,6 +250,11 @@ public abstract class AbstractChunkDiskReader {
                     // are deliberately untouched (state unknown — identity drift only on
                     // OOM-class events); a duplicate result for the Error path resolves
                     // as the documented ghost (pending already gone, silent drop).
+                    // Since the gate's park drain, an OOM-class throw ESCAPING a DRAINED
+                    // parked entry lands here with the ORIGINAL task's coords: the
+                    // original gets the duplicate-ghost above while the drained entry's
+                    // pending wedges uncontained — the same accepted OOM-class residual,
+                    // now two positions wide (review B-4).
                     LSSLogger.error("Unexpected failure delivering disk read at "
                             + chunkX + ", " + chunkZ, t);
                     addResult(playerUuid, ChunkReadResult.notFoundFromError(
@@ -429,6 +468,91 @@ public abstract class AbstractChunkDiskReader {
         if (isShutdown()) return;
         if (storeServedHit(playerUuid, chunkX, chunkZ, dimension, submissionOrder)) return;
 
+        // The disk-read concurrency gate (disk-read-concurrency-gate-plan.md): the
+        // expensive NBT phase starts here, so the permit check sits AFTER the store rung
+        // (a hit never consumes a permit) and BEFORE recordSubmitted (a gated read never
+        // enters the disk.submitted/completed pair — the store-hit exclusion precedent;
+        // law A5's partition would otherwise break). A refused acquire PARKS the read
+        // (see the gateParked field comment — the pure bounce starved permit holders);
+        // only park OVERFLOW bounces, reusing the saturated flavor: deliverDiskResult
+        // routes it to the silent superseded drop with dedup fan-out, no memo seed, no
+        // generation escalation, no wire answer — healed by re-declaration ≤1 s.
+        if (!this.readGate.tryAcquire()) {
+            // Claim-then-back-out makes the park bound EXACT (review B-2: a get()-then-add
+            // check let N workers pass at cap-1 concurrently, admitting up to N-1 extras).
+            if (this.gateParkedCount.incrementAndGet() > this.gateParkCapacity) {
+                this.gateParkedCount.decrementAndGet();
+                this.diag.recordGated();
+                long refused = this.gateWarn.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+                if (refused > 0) {
+                    LSSLogger.warn("Disk reads are being concurrency-gated (read_gate="
+                            + this.readGate.capacity() + "/" + this.readGate.capacity()
+                            + ", park full): " + refused + " read(s) dropped since the last"
+                            + " warning — clients re-request automatically; raise"
+                            + " maxConcurrentDiskReads in lss-server-config.json if server"
+                            + " CPU headroom allows");
+                }
+                addResult(playerUuid, ChunkReadResult.saturated(playerUuid, chunkX, chunkZ, dimension, submissionOrder));
+                return;
+            }
+            this.gateParked.add(new ParkedRead(playerUuid, chunkX, chunkZ, dimension,
+                    submissionOrder, operation));
+            // Missed-wakeup guard: a release between our failed acquire and the add
+            // found an empty park list and drained nothing — re-check ourselves.
+            drainGateParked();
+            return;
+        }
+        try {
+            gatedReadAndDeliver(playerUuid, chunkX, chunkZ, dimension, submissionOrder, operation);
+        } finally {
+            // Release on EVERY outcome — including the timeout triage, where future.get
+            // throws at DISK_READ_TIMEOUT_SECONDS and the orphaned downstream fetch keeps
+            // running OUTSIDE the permit (bounded: the vanilla IOWorker executor is
+            // single-threaded; Moonrise self-prioritizes at LOW). Documented, accepted.
+            this.readGate.release();
+            // Feed the freed permit from the park list (the starvation fix's other
+            // half): the releasing worker runs parked expensive reads back-to-back, so
+            // permits stay utilized while OTHER workers keep draining the pool queue
+            // (store hits, parks, bounces).
+            drainGateParked();
+        }
+    }
+
+    /**
+     * Drain parked reads while a permit is free — the loop that keeps permit holders
+     * fed. Never blocks: a failed acquire means the current holders will drain on
+     * their own release. The parked entry deliberately does NOT re-run the store rung
+     * (exactly one store lookup per submission keeps the store hit/miss counters
+     * one-to-one with lookups; the forgone deposit-during-park serve is a micro-win
+     * not worth the accounting split).
+     */
+    private void drainGateParked() {
+        while (!this.gateParked.isEmpty() && !isShutdown()) {
+            if (!this.readGate.tryAcquire()) return;
+            var parked = this.gateParked.poll();
+            if (parked == null) {
+                // Another drainer stole the last entry between our isEmpty and poll.
+                // Release and RE-CHECK (review B-MAJOR-1): returning here was the one
+                // exit that dropped the permit without re-observing the list — a parker
+                // whose own self-drain raced into our sub-µs hold would strand its entry
+                // with zero holders left to drain it (a session-length IN_FLIGHT wedge,
+                // not a drop-heal). The loop's isEmpty re-check closes the window.
+                this.readGate.release();
+                continue;
+            }
+            this.gateParkedCount.decrementAndGet();
+            try {
+                gatedReadAndDeliver(parked.playerUuid(), parked.chunkX(), parked.chunkZ(),
+                        parked.dimension(), parked.submissionOrder(), parked.operation());
+            } finally {
+                this.readGate.release();
+            }
+        }
+    }
+
+    /** The expensive phase — every path through here holds a gate permit. */
+    private void gatedReadAndDeliver(UUID playerUuid, int chunkX, int chunkZ, String dimension,
+                                     long submissionOrder, ReadOperation operation) {
         long startNs = System.nanoTime();
         // Freshness stamp at READ START (R1-M2): the bytes the read produces reflect
         // region state no earlier than this second, so any save landing during the read
@@ -523,8 +647,34 @@ public abstract class AbstractChunkDiskReader {
         this.playerResults.remove(playerUuid);
     }
 
+    /**
+     * Configure the disk-read gate's capacity K (resolved via
+     * {@code ServerConfigBase.effectiveMaxConcurrentDiskReads} — the caller owns both
+     * runtime facts the store-conditional AUTO needs: the resolved pool size and the
+     * POST-DEGRADE store attachment). Called once at service init, after store
+     * attachment; stage C's {@code /lsslod set} reuses it for runtime mutation (the
+     * capacity is a volatile read per acquire).
+     */
+    public void configureReadGate(int capacity) {
+        this.readGate.updateCapacity(capacity);
+    }
+
+    /** The gate's configured capacity K — echo/diag reads. */
+    public int readGateCapacity() {
+        return this.readGate.capacity();
+    }
+
     public String getDiagnostics() {
-        String base = this.diag.formatDiagnostics(getPendingResultCount());
+        String base = this.diag.formatDiagnostics(getPendingResultCount())
+                // Always rendered (a no-op gate shows read_gate=0/<pool>, gated=0): the
+                // live-deploy log records this token as the config-era receipt, and an
+                // absent-when-inert token would make "gate not binding" and "build
+                // without the gate" indistinguishable over RCON. gate_parked is a gauge
+                // (diag-only, NEVER exported — the store.queue trap); gated counts park
+                // OVERFLOW bounces only.
+                + ", read_gate=" + this.readGate.inUse() + "/" + this.readGate.capacity()
+                + ", gate_parked=" + this.gateParkedCount.get()
+                + ", gated=" + this.diag.getGatedCount();
         // The throttle is engaged only on the Fabric A-incompatible fallback path (a chunk-IO mod
         // replaced vanilla IO). On the normal working-A path it is null and the line is unchanged,
         // so existing diagnostics goldens do not move; when engaged it makes the fallback observable

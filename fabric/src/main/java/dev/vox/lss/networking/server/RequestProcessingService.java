@@ -183,11 +183,6 @@ public class RequestProcessingService {
             }
         }
         this.wireCompressionLive = wireCompressionLive;
-        // Script-consumed contract: the measurement harnesses assert their staged knobs
-        // against this line (ServerConfigBase.effectiveConfigEcho). Deliberately AFTER
-        // the zstd probe so the compression value echoed is the LIVE state, not the
-        // request (B0 review M1).
-        LSSLogger.info(config.effectiveConfigEcho(readerThreads, wireCompressionLive));
 
         // LOD store (docs/planning/lod-store-implementation-plan.md): memory tier for
         // "memory", memory + SQLite for "full". Attached to BOTH consumers before any
@@ -318,6 +313,22 @@ public class RequestProcessingService {
             this.lodStore = null;
             this.storeBackfill = null;
         }
+
+        // Disk-read concurrency gate K (disk-read-concurrency-gate-plan.md): resolved
+        // against the POST-DEGRADE store state — `this.lodStore != null`, never the
+        // config string, or half-pool K would re-arm on exactly the store-less servers
+        // the store-conditional AUTO carves out (failed codec probe, enabled=false).
+        int gateCapacity = config.effectiveMaxConcurrentDiskReads(readerThreads,
+                this.lodStore != null);
+        this.diskReader.configureReadGate(gateCapacity);
+        // Script-consumed contract: the measurement harnesses assert their staged knobs
+        // against this line (ServerConfigBase.effectiveConfigEcho). Deliberately AFTER
+        // the zstd probe (the compression value echoed is the LIVE state, not the
+        // request — B0 review M1) and AFTER store attachment (the echoed K is the
+        // store-conditional resolution, which does not exist until the store's own
+        // degrade ladder has run — v1.3 review MAJOR).
+        LSSLogger.info(config.effectiveConfigEcho(readerThreads, wireCompressionLive,
+                gateCapacity));
 
         this.offThreadProcessor.start();
 

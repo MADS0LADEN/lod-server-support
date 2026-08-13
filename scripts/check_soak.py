@@ -93,6 +93,9 @@ ANOMALY_OPT_INS = {
     "store-save-storm": frozenset({"saturated"}),
     "store-save-storm-off": frozenset({"saturated"}),
     "dimension-rejoin-warm": frozenset({"saturated"}),
+    # The gate's own scenario: gated>0 is its PREMISE (K=1 under a threads:2 flood), so
+    # the anomaly is opted in; saturated stays UN-opted — its named check requires 0.
+    "disk-read-gate": frozenset({"gated"}),
     # Paper/Folia (SOAK_PLATFORM=paper|folia): cold-cache disc resync from the base world, like
     # warm-rejoin run 1, so the same load-shaped opt-ins apply.
     "paper-dirty-falling-block": frozenset({"saturated"}),
@@ -114,6 +117,10 @@ MIN_CLIENT_WINDOWS = {
     "dirty-broadcast": {(1, 0): 5},
     "rate-limit-storm": {(1, 0): 3},
     "disk-saturation": {(1, 0): 3},
+    # K=1 on degraded WSL2 IO can spend ~4-5 min converging the annulus (healthy IO:
+    # seconds, since the park list keeps the permit fed); the floor only needs the
+    # >=25 s converged tail (>=4 quiescent 5 s pairs) the 400 s timeline budgets.
+    "disk-read-gate": {(1, 0): 4},
     "generation-disabled": {(1, 0): 3},
     "generation-capacity-stress": {(1, 0): 3},
     "bandwidth-throttle": {(1, 0): 3},
@@ -185,6 +192,15 @@ SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBac
                                      "enableViaMismatchGuard"})
 SERVER_CONFIG_INT_KEYS = frozenset({
     "lodDistanceChunks", "bytesPerSecondLimitPerPlayer", "diskReaderThreads",
+    # Disk-read concurrency gate K (disk-read-concurrency-gate-plan.md; 0 = AUTO,
+    # store-conditional). Registered WITH the knob (the R4 lesson): every pre-existing
+    # scenario pins it to a no-op (its diskReaderThreads value / the resolved default
+    # pool) so their law baselines stay gate-free; disk-read-gate arms it. Precision
+    # note (stage-B review ACC-5): store-offline-mutate's pin of 3 equals the FABRIC
+    # vanilla AUTO pool; a >=8-core Paper standalone run of that phase resolves a
+    # larger prioritized pool, where 3 would nominally bind — inert there
+    # (enabled=false, no read traffic) and the A7 gated arm flags any leak.
+    "maxConcurrentDiskReads",
     "sendQueueLimitPerPlayer", "bytesPerSecondLimitGlobal",
     # Transport deference (0 = off, the shipped default). Listed so an A/B scenario can
     # arm it — the R4 lesson below is exactly this omission.
@@ -285,6 +301,11 @@ SERVER_MONOTONIC = (
     "service.miss_dropped",
     "disk.submitted", "disk.completed", "disk.not_found", "disk.all_air",
     "disk.errors", "disk.saturated", "disk.successful",
+    # DiskReadGate refusals (disk-read-concurrency-gate-plan.md): a read bounced at the
+    # expensive-path permit check. NEVER part of the submitted/completed partition (the
+    # store-hit exclusion precedent), so A5's derived-successful identity is untouched;
+    # A7 flags any increase unless the scenario opts in ("gated" — only disk-read-gate).
+    "disk.gated",
     # Miss-memo rung hits (v0.7.1 miss memo): a fresh memoized absence skipped the redundant
     # disk re-read and escalated straight to the generation ladder. Law A5 counts these as
     # VIRTUAL not-founds on its left side — each hit is dispositioned exactly like a real
@@ -833,6 +854,10 @@ def law_A7_server(prev, cur, window, opt_ins):
     _anomaly(prev, cur, "disk.errors", window, "disk.errors", opt_ins, None, out)
     _anomaly(prev, cur, "generation.timeouts", window, "generation.timeouts", opt_ins, None, out)
     _anomaly(prev, cur, "disk.saturated", window, "disk.saturated", opt_ins, "saturated", out)
+    # The DiskReadGate's refusals: the no-op pins on every pre-existing scenario mean a
+    # nonzero delta there is a PERMIT LEAK (or a missing pin) — a stronger signal than
+    # the saturated arm, same design. Only disk-read-gate opts in.
+    _anomaly(prev, cur, "disk.gated", window, "disk.gated", opt_ins, "gated", out)
     return out
 
 
@@ -1360,6 +1385,51 @@ def check_disk_saturation(ctx):
         yield Violation("disk-saturation", "final snapshot",
                         "last server snapshot is not verified-quiescent (the retained "
                         "backlog never drained)", {"wallMs": last["wallMs"]})
+
+
+@named_check("disk-read-gate", ["server.disk.gated", "server.disk.saturated",
+                                "server.service.superseded"])
+def check_disk_read_gate(ctx):
+    """The DiskReadGate's own scenario (disk-read-concurrency-gate-plan.md, as amended
+    by the stage-B park deviation): a prebuilt superflat annulus read at
+    diskReaderThreads=2 with maxConcurrentDiskReads=1 — every column is a real region
+    read (lodStore off, base world pre-generated). Permit-less misses PARK (bounded at
+    threads*32=64) and drain on release; the 2112-position flood far exceeds the park
+    list, so OVERFLOW bounces MUST occur (disk.gated > 0, the premise) while the v17
+    headroom gate keeps the POOL itself un-saturated (distinct mechanisms: saturated =
+    pool-queue rejection at submit; gated = park-overflow bounce inside the task). A
+    bounce is the standard silent superseded drop healed by re-declaration, so
+    convergence still completes — the fed permit always drains."""
+    last = ctx.server_snaps[-1]
+    if last["disk"]["gated"] <= 0:
+        yield Violation("disk-read-gate", "final snapshot",
+                        "disk.gated never fired — the premise did not hold (K=1 under a "
+                        "2-thread pool over a full annulus of real reads must refuse at "
+                        "least one acquire), so this run proves nothing about the gate; "
+                        "check the scenario config staged maxConcurrentDiskReads=1",
+                        {"expected": "> 0", "actual": last["disk"]["gated"]})
+    if last["disk"]["saturated"] != 0:
+        yield Violation("disk-read-gate", "final snapshot",
+                        "disk.saturated fired — the pool-queue headroom gate leaked "
+                        "(gate refusals must be the ONLY bounce source in this scenario)",
+                        {"expected": "== 0", "actual": last["disk"]["saturated"]})
+    # Every gated bounce is a superseded drop re-declared by the client, so the drop-heal
+    # loop's floor is the gated count itself (superseded also absorbs backlog-replace
+    # supersession on top — >= is exact for the heal-loop claim).
+    if last["service"]["superseded"] < last["disk"]["gated"]:
+        yield Violation("disk-read-gate", "final snapshot",
+                        "superseded < gated — gated bounces are not being dispositioned "
+                        "as silent superseded drops (the saturated-flavor routing broke)",
+                        {"superseded": last["service"]["superseded"],
+                         "gated": last["disk"]["gated"]})
+    if ctx.final_client(1) is None:
+        yield Violation("disk-read-gate", "run1", "no client snapshots in run 1", {})
+        return
+    if (len(ctx.server_snaps) - 1) not in ctx.quiescent_server:
+        yield Violation("disk-read-gate", "final snapshot",
+                        "last server snapshot is not verified-quiescent (the gated drops "
+                        "never converged — K >= 1 must always drain)",
+                        {"wallMs": last["wallMs"]})
 
 
 @named_check("generation-disabled", ["server.generation.submitted", "server.disk.not_found",
@@ -2669,6 +2739,9 @@ CHECKS = {
     "disk-saturation": [check_disk_saturation,
                         make_handshake_check("disk-saturation"),
                         make_disc_completeness("disk-saturation")],
+    "disk-read-gate": [check_disk_read_gate,
+                       make_handshake_check("disk-read-gate"),
+                       make_disc_completeness("disk-read-gate")],
     "generation-disabled": [check_generation_disabled,
                             make_handshake_check("generation-disabled"),
                             make_disc_completeness("generation-disabled")],
@@ -3087,7 +3160,7 @@ def _srv(wall=1000, seg=0, over=None):
                         "grace_skipped": 0, "miss_dropped": 0},
             "disk": {"submitted": 0, "completed": 0, "not_found": 0, "all_air": 0,
                      "errors": 0, "saturated": 0, "successful": 0, "pending": 0,
-                     "memo_hits": 0},
+                     "memo_hits": 0, "gated": 0},
             "generation": {"submitted": 0, "completed": 0, "timeouts": 0,
                            "removed_in_flight": 0, "active": 0,
                            "order_gated": 0, "inversions": 0},
@@ -3296,6 +3369,14 @@ def selftest():
     clean("A7 saturated with opt-in", law_A7_server(
         _srv(1000), _srv(6000, over={"disk.saturated": 1}), "selftest",
         frozenset({"saturated"})))
+    # The DiskReadGate arm (disk-read-concurrency-gate-plan.md): every no-op-pinned
+    # scenario self-verifies its pin here — gated>0 without the opt-in is a permit leak.
+    hits("A7 gated w/o opt-in", law_A7_server(
+        _srv(1000), _srv(6000, over={"disk.gated": 1}), "selftest",
+        frozenset({"saturated"})), "A7")
+    clean("A7 gated with opt-in", law_A7_server(
+        _srv(1000), _srv(6000, over={"disk.gated": 1}), "selftest",
+        frozenset({"gated"})))
 
     # --- A7 client: dropped is the only client anomaly at v17, and is never optable
     # (the responses.rate_limited arm left with the wire response; law B1 is deleted) ---
@@ -4129,6 +4210,13 @@ def selftest():
     cases[0] += 1
     assert validate_config_overrides({"lodDistanceChunks": True}), \
         "config allowlist: bool-for-int must be rejected"
+    cases[0] += 1
+    assert validate_config_overrides({"maxConcurrentDiskReads": 5}) == [], \
+        "config allowlist: the gate key must validate (the R4 lesson — every no-op pin " \
+        "depends on this registration)"
+    cases[0] += 1
+    assert validate_config_overrides({"maxConcurrentDiskReads": "5"}), \
+        "config allowlist: string-for-int gate key must be rejected"
     cases[0] += 1
     assert validate_config_overrides({"xrayObfuscation": "on",
                                       "xrayHiddenBlocks": ["diamond_ore"],
