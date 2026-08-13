@@ -81,14 +81,25 @@ ship immediately.
   five-line in-loop budget in `flushSendQueue`, a shape we already had
   (the deleted AUTO in-loop budget) and know composes with the yield gate,
   the presence gate, and the limiter.
-- Against (and the fix): a NAIVE always-on version adds ~HORIZON ticks of
-  delivery latency to every sustained flow (equilibrium queue = HORIZON ×
-  arrival rate; each payload waits ~HORIZON ticks), which would slow the
-  4 Hz warm-backfill loop — an artificial throughput reduction at the
-  system level, violating the brief. Fixed by EVIDENCE-ARMING (§3): pacing
-  applies only when the channel has recently shown pressure, so fast links
-  never pay it.
-- Verdict: **CHOSEN**, with evidence-arming.
+- Against (and the v2 fix): a NAIVE always-on version with a small static
+  floor adds ~HORIZON ticks of delivery latency to every sustained flow,
+  which would slow the 4 Hz warm-backfill loop — an artificial throughput
+  reduction at the system level, violating the brief. v1 fixed this with
+  evidence-arming (pace only after channel pressure), which the review round
+  falsified three ways (dead pending term, post-dump evidence, the
+  disarm-dump sawtooth — see §7). v2's fix: FLOOR THE DRAIN AT THE REFILL
+  SHARE (allocation/20) — the budget can never pace below the operator's
+  configured rate, so throughput neutrality is structural and no arming is
+  needed at all.
+- Verdict: **CHOSEN**, refill-floored (§3).
+
+**G. Bank clamp (shrink `PlayerBandwidthTracker`'s burst divisor / cap the
+bank — the review round's n10).** Bounds every dump including the first with
+zero new machinery. Absorbed INTO the chosen design rather than adopted raw:
+the refill-share floor IS the bank bound, expressed inside the pacer where it
+composes with Q/HORIZON (backlogs may still use the bank as a slope), the
+kill switch, and the diag receipt — instead of silently changing the
+limiter's constants for every consumer.
 
 **C. Send-rate smoothing (per-tick budget = k × recent send-rate EWMA).**
 The user's "pace based on send rate" reading. Rejected: self-referential
