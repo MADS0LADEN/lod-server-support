@@ -664,6 +664,19 @@ public abstract class AbstractChunkDiskReader {
         return this.readGate.capacity();
     }
 
+    /**
+     * Runtime K re-resolution (v0.11.0 stage C, R-2: the reader owns BOTH facts the
+     * store-conditional resolver needs — its own pool size and its attached store).
+     * Called from the owning service's tick pass; cheap no-op on an unchanged K.
+     * Lowering below in-use follows the gate's documented drain semantics.
+     */
+    public void reapplyGateCapacity(dev.vox.lss.common.config.ServerConfigBase config) {
+        int k = config.effectiveMaxConcurrentDiskReads(this.threadCount, this.store != null);
+        if (k != this.readGate.capacity()) {
+            this.readGate.updateCapacity(k);
+        }
+    }
+
     public String getDiagnostics() {
         String base = this.diag.formatDiagnostics(getPendingResultCount())
                 // Always rendered (a no-op gate shows read_gate=0/<pool>, gated=0): the

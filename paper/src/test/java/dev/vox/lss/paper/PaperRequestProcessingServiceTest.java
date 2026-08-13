@@ -1281,4 +1281,72 @@ class PaperRequestProcessingServiceTest {
                 sent::add);
         assertTrue(sent.isEmpty());
     }
+
+    // ---- v0.11.0 stage C: runtime settings (/lsslod set) ----
+
+    /**
+     * THE SET-review ordering MAJOR, pinned: a registered-but-flip-pending player must
+     * NOT be pushed a v20 SessionConfig. The re-push runs as a runtime task, and
+     * runtime tasks drain AFTER the lifecycle mailbox — so the register's
+     * beforeRegister dialect flip (the pump-only marking) is applied before the
+     * enumeration. An implementation that drained runtime tasks first (or enumerated
+     * from the command thread) would read the tracker's untracked-defaults-to-CURRENT
+     * and push protocol-20 at a legacy client, killing its session until rejoin.
+     */
+    @Test
+    void repushRuntimeTaskSkipsARegisteredButFlipPendingLegacyPlayer() {
+        var sent = new ArrayList<UUID>();
+        service.setSessionConfigSender((player, cfg) -> sent.add(player.getUUID()));
+
+        var legacyUuid = UUID.randomUUID();
+        var legacy = playerIn(legacyUuid, level(Level.OVERWORLD));
+        // The handshake thread's shape: register enqueued with the dialect flip as
+        // beforeRegister — BOTH still pending in the mailbox when the set arrives.
+        service.enqueueRegister(legacy, LSSConstants.CAPABILITY_VOXEL_COLUMNS,
+                () -> service.getDialectTracker().onHandshake(legacyUuid,
+                        dev.vox.lss.common.HandshakeGate.WireDialect.V18),
+                () -> { });
+        var results = new ArrayList<int[]>();
+        service.enqueueRuntimeTask(() -> results.add(service.repushSessionConfig()));
+
+        service.tick();
+
+        assertEquals(1, results.size(), "the runtime task ran on the pump tick");
+        assertEquals(0, results.get(0)[0], "the flip-pending legacy player must NOT be pushed");
+        assertEquals(1, results.get(0)[1], "…it counts as a legacy skip instead");
+        assertTrue(sent.isEmpty());
+    }
+
+    @Test
+    void repushSendsToCurrentDialectSessionsAndSkipsLegacyOnes() {
+        var sent = new ArrayList<UUID>();
+        service.setSessionConfigSender((player, cfg) -> sent.add(player.getUUID()));
+
+        var v20Uuid = UUID.randomUUID();
+        service.registerPlayer(playerIn(v20Uuid, level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        var v18Uuid = UUID.randomUUID();
+        service.getDialectTracker().onHandshake(v18Uuid,
+                dev.vox.lss.common.HandshakeGate.WireDialect.V18);
+        service.registerPlayer(playerIn(v18Uuid, level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+
+        int[] counts = service.repushSessionConfig();
+        assertEquals(1, counts[0], "exactly the CURRENT-dialect session is pushed");
+        assertEquals(1, counts[1], "the v18 session is skipped (updates on rejoin)");
+        assertEquals(List.of(v20Uuid), sent);
+    }
+
+    /** The tick-poll pass must reach EXISTING sessions (the old capture-at-registration
+     *  split gave new joins the new cap while existing sessions kept the boot value). */
+    @Test
+    void runtimeGenPerPlayerCapReachesExistingSessionsOnTheNextTick() {
+        var state = service.registerPlayer(playerIn(UUID.randomUUID(), level(Level.OVERWORLD)),
+                LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        int boot = state.getGenSlotCap();
+        config.generationConcurrencyLimitPerPlayer = boot + 5;
+        service.tick();
+        assertEquals(boot + 5, state.getGenSlotCap(),
+                "the per-player cap must follow config on the next tick for EXISTING states");
+    }
 }

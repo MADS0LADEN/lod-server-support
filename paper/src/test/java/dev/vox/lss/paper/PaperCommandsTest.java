@@ -28,7 +28,7 @@ import static org.mockito.Mockito.when;
  */
 class PaperCommandsTest {
 
-    private static final String USAGE = "Usage: /lsslod <stats|diag|store>";
+    private static final String USAGE = "Usage: /lsslod <stats|diag|store|set|help>";
     private static final String STORE_USAGE = "Usage: /lsslod store <status|invalidate all>";
 
     private final List<String> messages = new ArrayList<>();
@@ -63,9 +63,22 @@ class PaperCommandsTest {
     }
 
     @Test
-    void noArgsShowsUsage() {
+    void noArgsShowsHelp() {
+        // v0.11.0 stage C: bare /lsslod = help (was a usage line), served BEFORE the
+        // service null-check so a not-yet-active server still explains itself.
         assertTrue(run(commands(null, null)));
-        assertEquals(List.of(USAGE), messages);
+        assertEquals(dev.vox.lss.common.CommandHelp.lines("lsslod", false), messages,
+                "the shared CommandHelp builder is the one source of the help text");
+        assertTrue(messages.stream().anyMatch(m -> m.contains("set <key> <value>")),
+                "help must document the runtime-set verb: " + messages);
+        assertTrue(messages.stream().noneMatch(m -> m.contains("backfill")),
+                "backfill verbs are Fabric-only and must not appear in Paper help");
+    }
+
+    @Test
+    void helpVerbShowsTheSameLines() {
+        assertTrue(run(commands(null, null), "help"));
+        assertEquals(dev.vox.lss.common.CommandHelp.lines("lsslod", false), messages);
     }
 
     @Test
@@ -241,8 +254,9 @@ class PaperCommandsTest {
     @Test
     void tabCompleteFiltersByPrefix() {
         var cmd = commands(null, null);
-        assertEquals(List.of("stats", "diag", "store"), cmd.onTabComplete(sender, null, "lsslod", new String[]{""}));
-        assertEquals(List.of("stats", "store"), cmd.onTabComplete(sender, null, "lsslod", new String[]{"st"}));
+        assertEquals(List.of("stats", "diag", "store", "set", "help"),
+                cmd.onTabComplete(sender, null, "lsslod", new String[]{""}));
+        assertEquals(List.of("stats", "store", "set"), cmd.onTabComplete(sender, null, "lsslod", new String[]{"s"}));
         assertEquals(List.of("diag"), cmd.onTabComplete(sender, null, "lsslod", new String[]{"D"}));
         assertEquals(List.of(), cmd.onTabComplete(sender, null, "lsslod", new String[]{"zz"}));
         assertEquals(List.of(), cmd.onTabComplete(sender, null, "lsslod", new String[]{"stats", "x"}));
@@ -250,5 +264,93 @@ class PaperCommandsTest {
                 cmd.onTabComplete(sender, null, "lsslod", new String[]{"store", ""}));
         assertEquals(List.of("all"),
                 cmd.onTabComplete(sender, null, "lsslod", new String[]{"store", "invalidate", ""}));
+        // v0.11.0 stage C: key completion is registry-derived, so it cannot drift.
+        assertEquals(dev.vox.lss.common.config.RuntimeSettings.keyNames(),
+                cmd.onTabComplete(sender, null, "lsslod", new String[]{"set", ""}));
+        assertEquals(List.of("maxConcurrentDiskReads"),
+                cmd.onTabComplete(sender, null, "lsslod", new String[]{"set", "max"}));
+    }
+
+    // ---- v0.11.0 stage C: /lsslod set ----
+
+    /** A service mock whose runtime-task queue runs INLINE (the pump drain, collapsed)
+     *  and whose re-push reports fixed counts. */
+    private static PaperRequestProcessingService inlineTaskService(int[] repushCounts) {
+        var service = mock(PaperRequestProcessingService.class);
+        org.mockito.Mockito.doAnswer(inv -> {
+            ((Runnable) inv.getArgument(0)).run();
+            return null;
+        }).when(service).enqueueRuntimeTask(org.mockito.ArgumentMatchers.any());
+        when(service.repushSessionConfig()).thenReturn(repushCounts);
+        return service;
+    }
+
+    @Test
+    void setWithNoArgsListsTheRegistryWithCurrentValues() {
+        var config = new PaperConfig();
+        config.validate();
+        assertTrue(run(commands(mock(PaperRequestProcessingService.class), config), "set"));
+        assertTrue(messages.get(0).startsWith("Runtime-settable keys"), String.valueOf(messages));
+        assertTrue(messages.contains("  lodDistanceChunks = 300"),
+                "listing shows current values: " + messages);
+        assertEquals(1 + dev.vox.lss.common.config.RuntimeSettings.keyNames().size(),
+                messages.size());
+    }
+
+    @Test
+    void setHappyPathAppliesRepushesAndRepliesWithTheEffectiveValue() {
+        var config = new PaperConfig();
+        config.validate();
+        var service = inlineTaskService(new int[]{2, 1});
+        assertTrue(run(commands(service, config), "set", "lodDistanceChunks", "128"));
+        assertEquals(128, config.lodDistanceChunks, "the mutation applied through the pump task");
+        assertEquals(1, messages.size());
+        assertTrue(messages.get(0).startsWith("lodDistanceChunks = 128 — "),
+                "reply carries the effective value + the applies note: " + messages);
+        assertTrue(messages.get(0).contains("re-pushed to 2 client(s) (1 legacy update on rejoin)"),
+                "the distance set must report the re-push counts: " + messages);
+    }
+
+    @Test
+    void setZeroSemanticsSurviveTheCommandSurface() {
+        var config = new PaperConfig();
+        config.validate();
+        var service = inlineTaskService(new int[]{0, 0});
+        assertTrue(run(commands(service, config), "set", "dirtyBroadcastIntervalSeconds", "0"));
+        assertEquals(0, config.dirtyBroadcastIntervalSeconds,
+                "0 = dirty pushes off must survive end-to-end (the R-2 registry clamp rule)");
+        assertTrue(messages.get(0).startsWith("dirtyBroadcastIntervalSeconds = 0 — "));
+        messages.clear();
+        assertTrue(run(commands(service, config), "set", "maxConcurrentDiskReads", "0"));
+        assertEquals(0, config.maxConcurrentDiskReads, "0 = AUTO, never K=1");
+    }
+
+    @Test
+    void setParseErrorAndUnknownKeyReplyWithoutMutating() {
+        var config = new PaperConfig();
+        config.validate();
+        int before = config.lodDistanceChunks;
+        var service = inlineTaskService(new int[]{0, 0});
+        assertTrue(run(commands(service, config), "set", "lodDistanceChunks", "many"));
+        assertEquals(before, config.lodDistanceChunks, "a parse failure must assign nothing");
+        assertTrue(messages.get(0).contains("not an integer"), String.valueOf(messages));
+        messages.clear();
+        assertTrue(run(commands(service, config), "set", "noSuchKey", "5"));
+        assertTrue(messages.get(0).startsWith("Unknown key 'noSuchKey'"), String.valueOf(messages));
+        messages.clear();
+        assertTrue(run(commands(service, config), "set", "lodDistanceChunks"));
+        assertTrue(messages.get(0).startsWith("Usage: /lsslod set lodDistanceChunks"),
+                "a missing value shows per-key usage: " + messages);
+    }
+
+    @Test
+    void setNonDistanceKeysDoNotRepush() {
+        var config = new PaperConfig();
+        config.validate();
+        var service = inlineTaskService(new int[]{9, 9});
+        assertTrue(run(commands(service, config), "set", "generationConcurrencyLimitGlobal", "64"));
+        assertFalse(messages.get(0).contains("re-pushed"),
+                "only lodDistanceChunks triggers the SessionConfig re-push: " + messages);
+        org.mockito.Mockito.verify(service, org.mockito.Mockito.never()).repushSessionConfig();
     }
 }

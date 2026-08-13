@@ -94,6 +94,17 @@ public final class StoreBackfill {
     private final AtomicBoolean stopRequested = new AtomicBoolean();
     private volatile Thread worker;
     private volatile String statusLine = "idle";
+    // Remaining-estimate progress (v0.11.0 stage C, SET plan Part 2): written by the
+    // worker, read by /lsslod store backfill status. `walked` is the VISITED count —
+    // deliberately different from the terminal lines' regionsDone (done-MARKED only;
+    // error/shed/undrained regions are excluded); the status line shows visited for
+    // progress and leaves regionsDone semantics to the terminal lines. Estimate bias
+    // caveat: the walk is nearest-spawn-first, so the observed avg over the walked
+    // (denser, near-spawn) prefix OVERestimates columns-left for the sparse frontier —
+    // acceptable for a `~` estimate.
+    private volatile int planRegionsTotal;
+    private volatile int planRegionsWalked;
+    private volatile long presentChunksSeen;
     /** Rate-cap windows completed (worker-written, read after join — the wiring pin's
      *  counter: pacing asserts on this, never wall-clock). */
     private volatile long rateWindows;
@@ -205,6 +216,11 @@ public final class StoreBackfill {
                 return;
             }
             List<RegionRef> plan = enumerate();
+            // Progress reset HERE, at walk start — a second start() must never show the
+            // prior run's counts (SET review).
+            this.planRegionsTotal = plan.size();
+            this.planRegionsWalked = 0;
+            this.presentChunksSeen = 0;
             long capBytes = this.store.sizeCapBytes();
             LSSLogger.info(describePlan(plan, capBytes));
             long windowStartNanos = System.nanoTime();
@@ -253,6 +269,14 @@ public final class StoreBackfill {
                 }
                 int[] present = presentChunks(region.mca());
                 if (present == null) continue; // unreadable header: skip, sweep owns it
+                // Bump AFTER the null-check (SET review): an unreadable region counted
+                // as walked-with-zero would bias the columns/region average low.
+                this.planRegionsWalked++;
+                int presentCount = 0;
+                for (int slot : present) {
+                    if (slot != 0) presentCount++;
+                }
+                this.presentChunksSeen += presentCount;
                 long regionErrors = 0;
                 // B9: fence against a concurrent `invalidate all` — a region judged
                 // before the drop must not be done-marked after it.
@@ -345,9 +369,11 @@ public final class StoreBackfill {
                         windowStartNanos = System.nanoTime();
                         windowCols = 0;
                     }
-                    this.statusLine = "running: " + regionsDone + " regions done, "
+                    this.statusLine = "running: " + this.planRegionsWalked + "/"
+                            + this.planRegionsTotal + " regions, "
                             + deposited + " deposited, " + skipped + " skipped, "
-                            + errors + " errors, " + pauses + " pauses";
+                            + errors + " errors, " + pauses + " pauses, "
+                            + remainingEstimate();
                 }
                 // Done-mark ONLY a cleanly processed region: errors or shed deposits
                 // would otherwise turn transient IO trouble into permanent warm-holes
@@ -432,6 +458,26 @@ public final class StoreBackfill {
         }
         plan.sort(Comparator.comparingInt(RegionRef::chebFromSpawn));
         return plan;
+    }
+
+    /** The `~N regions / ~M columns left` tail of the running: status line — a trivial
+     *  reader of the three volatile progress counters; the arithmetic lives in the
+     *  static below so the test can pin every branch directly. */
+    String remainingEstimate() {
+        return remainingEstimateFor(this.planRegionsTotal, this.planRegionsWalked,
+                this.presentChunksSeen);
+    }
+
+    /** Before the first region completes there is no measured average, so the columns
+     *  term is the `<=` worst case (1024/region); after, remaining x the measured
+     *  present-chunks/region. Package-visible for the test's arithmetic-table pin. */
+    static String remainingEstimateFor(int total, int walked, long seen) {
+        int remaining = Math.max(0, total - walked);
+        long columnsLeft = walked > 0
+                ? remaining * (seen / Math.max(1, walked))
+                : remaining * 1024L;
+        return "~" + remaining + " regions / " + (walked > 0 ? "~" : "<=") + columnsLeft
+                + " columns left";
     }
 
     /** The §3 start-of-walk line: region count + size estimate + cap consequence.

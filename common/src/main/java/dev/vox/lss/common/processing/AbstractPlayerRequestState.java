@@ -153,10 +153,14 @@ public abstract class AbstractPlayerRequestState<T> {
     // on a cycle where no new batch arrived (batches land at 1Hz; the pass runs at 20Hz).
     private IncomingBatch appliedWantSet;
 
-    // Admission slots: caps are immutable; held counts are derived from the pending map
-    // (single-writer: processing thread; volatile for /lsslod command reads).
+    // Admission slots: held counts are derived from the pending map (single-writer:
+    // processing thread; volatile for /lsslod command reads). The sync cap stays
+    // immutable; genSlotCap is VOLATILE since v0.11.0 stage C (/lsslod set): the tick
+    // pass writes it from the main/pump thread while tryAdmit reads it on the
+    // PROCESSING thread — a plain field has no happens-before and a runtime change
+    // could stay invisible forever (SET review MAJOR; matches the held-count volatiles).
     private final int syncSlotCap;
-    private final int genSlotCap;
+    private volatile int genSlotCap;
     private volatile int heldSyncSlots = 0;
     private volatile int heldGenSlots = 0;
 
@@ -1119,6 +1123,13 @@ public abstract class AbstractPlayerRequestState<T> {
     public int getHeldGenSlots() { return this.heldGenSlots; }
     public int getSyncSlotCap() { return this.syncSlotCap; }
     public int getGenSlotCap() { return this.genSlotCap; }
+
+    /** Runtime cap change (v0.11.0 stage C): applied to EVERY registered state in the
+     *  same tick pass, removing the old "new joins only" split (registration captured
+     *  the boot value). Volatile write — see the field comment. */
+    public void updateGenSlotCap(int cap) {
+        this.genSlotCap = cap;
+    }
     public long getTotalSectionsSent() { return this.bandwidth.getTotalSectionsSent(); }
     public long getTotalBytesSent() { return this.bandwidth.getTotalBytesSent(); }
     public long getTotalRequestsReceived() { return this.totalRequestsReceived.get(); }

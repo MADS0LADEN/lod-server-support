@@ -55,8 +55,11 @@ public class ChunkGenerationService {
     // distance-graph fixpoint (see DeferredTicketReleases).
     private final DeferredTicketReleases deferredReleases = new DeferredTicketReleases();
 
-    private final int maxConcurrent;
-    private final int maxPerPlayerActive;
+    // Non-final since v0.11.0 stage C (/lsslod set tick-poll): submit/tick are
+    // main-thread-only, so plain fields suffice (unlike the per-player genSlotCap,
+    // which the PROCESSING thread reads and must be volatile).
+    private int maxConcurrent;
+    private int maxPerPlayerActive;
     private final int timeoutTicks;
     private final ColumnSerializer columnSerializer;
     private DirtyContentFilter dirtyContentFilter;
@@ -83,6 +86,14 @@ public class ChunkGenerationService {
     /** Wired by RequestProcessingService after construction (it owns the filter). */
     public void setDirtyContentFilter(DirtyContentFilter filter) {
         this.dirtyContentFilter = filter;
+    }
+
+    /** Runtime cap change (v0.11.0 stage C — the tick-poll pattern): called from the
+     *  owning tick thread before admission. Lowering never cancels in-flight
+     *  generations — it only gates NEW admissions. */
+    public void updateCaps(int global, int perPlayer) {
+        this.maxConcurrent = global;
+        this.maxPerPlayerActive = perPlayer;
     }
 
     /**

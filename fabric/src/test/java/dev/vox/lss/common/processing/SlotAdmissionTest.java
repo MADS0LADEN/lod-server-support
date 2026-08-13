@@ -136,6 +136,28 @@ class SlotAdmissionTest {
         assertEquals(1, state.getHeldGenSlots());
     }
 
+    /** v0.11.0 stage C (/lsslod set): raising the gen cap mid-session must open new
+     *  admissions on the SAME state instance — the cap is read per-admit off the
+     *  volatile field, never captured. The reflective pin makes a future
+     *  final-field "cleanup" red here instead of racing the tick thread. */
+    @Test
+    void updateGenSlotCapOpensAdmissionPastTheOldCapAndTheFieldStaysVolatile() throws Exception {
+        assertTrue(state.tryAdmit(gen(0, 0)), "fill the boot gen cap (1)");
+        assertFalse(state.tryAdmit(gen(0, 1)), "at the boot cap");
+        state.updateGenSlotCap(2);
+        assertTrue(state.tryAdmit(gen(0, 1)), "the raised cap admits without a new state");
+        assertFalse(state.tryAdmit(gen(0, 2)), "the raised cap still bounds");
+        state.updateGenSlotCap(1);
+        assertFalse(state.tryAdmit(gen(0, 3)),
+                "lowering gates new admissions; in-flight entries are never cancelled");
+        assertEquals(2, state.getHeldGenSlots(), "held slots survive a lowering");
+
+        var field = AbstractPlayerRequestState.class.getDeclaredField("genSlotCap");
+        assertTrue(java.lang.reflect.Modifier.isVolatile(field.getModifiers()),
+                "genSlotCap is written by the tick thread and read by admission — "
+                        + "it must stay volatile (stage C threading review)");
+    }
+
     @Test
     void hasPendingTracksAdmission() {
         assertFalse(state.hasPendingRequest(0, 0));

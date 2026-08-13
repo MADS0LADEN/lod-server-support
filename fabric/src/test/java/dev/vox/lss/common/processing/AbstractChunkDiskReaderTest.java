@@ -542,6 +542,39 @@ class AbstractChunkDiskReaderTest {
                 "the gate token must render even while the gate is a no-op: " + line);
     }
 
+    /** Minimal concrete config for the reapply seam (only maxConcurrentDiskReads and
+     *  the store-conditional AUTO resolver are consulted). */
+    public static class GateReapplyConfig extends dev.vox.lss.common.config.ServerConfigBase {}
+
+    /** v0.11.0 stage C (review F8): the tick-poll hop `/lsslod set maxConcurrentDiskReads`
+     *  rides — reapplyGateCapacity(config) must move the LIVE gate's capacity, resolve
+     *  0=AUTO against the reader's OWN pool + post-degrade store fact (store attached →
+     *  ceil(pool/2), store-less → pool), and no-op on an unchanged K. */
+    @Test
+    void reapplyGateCapacityResolvesConfigAgainstPoolAndStoreState() {
+        var r = new TestDiskReader(4);
+        try {
+            var config = new GateReapplyConfig();
+            config.maxConcurrentDiskReads = 2;
+            r.reapplyGateCapacity(config);
+            assertEquals(2, r.readGateCapacity(), "an explicit K reaches the live gate");
+
+            config.maxConcurrentDiskReads = 0; // AUTO, no store attached -> whole pool
+            r.reapplyGateCapacity(config);
+            assertEquals(4, r.readGateCapacity(), "AUTO without a store = the whole pool");
+
+            r.attachStore(new GateStubStore());
+            r.reapplyGateCapacity(config); // AUTO, store attached -> ceil(4/2)
+            assertEquals(2, r.readGateCapacity(), "AUTO with a store = half the pool");
+
+            config.maxConcurrentDiskReads = 64; // above pool: resolver clamps to pool
+            r.reapplyGateCapacity(config);
+            assertEquals(4, r.readGateCapacity(), "K never exceeds the pool");
+        } finally {
+            r.shutdown();
+        }
+    }
+
     @Test
     void poolSaturationBouncesTheSubmitWithASaturatedResult() throws Exception {
         // 1 reader thread, queue capacity 32 (threadCount * 32): with the worker pinned on

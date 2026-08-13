@@ -66,8 +66,10 @@ public class PaperChunkGenerationService {
     // tick() swaps it out on the same thread)
     private List<TickSnapshot.GenerationReadyData> mainReady = new ArrayList<>();
 
-    private final int maxConcurrent;
-    private final int maxPerPlayerActive;
+    // Non-final since v0.11.0 stage C (/lsslod set tick-poll): submit/tick run on the
+    // pump, so plain fields suffice (the per-player genSlotCap is the volatile one).
+    private int maxConcurrent;
+    private int maxPerPlayerActive;
     private final int timeoutTicks;
 
     /** Test seam: hands the async-load completion back to the pump thread. Production
@@ -110,6 +112,14 @@ public class PaperChunkGenerationService {
         this.timeoutTicks = config.generationTimeoutSeconds * LSSConstants.TICKS_PER_SECOND;
         this.mainThreadScheduler = task ->
                 plugin.getServer().getGlobalRegionScheduler().execute(plugin, task);
+    }
+
+    /** Runtime cap change (v0.11.0 stage C — the tick-poll pattern, twin of the Fabric
+     *  method): called from the pump before admission. Lowering never cancels in-flight
+     *  generations — it only gates NEW admissions. */
+    public void updateCaps(int global, int perPlayer) {
+        this.maxConcurrent = global;
+        this.maxPerPlayerActive = perPlayer;
     }
 
     /**

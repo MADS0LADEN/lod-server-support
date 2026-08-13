@@ -54,8 +54,10 @@ public final class DiskReadGate {
      *  stage C adds the runtime path. The ≥1 floor is stage-C insurance (review B-3): a
      *  zero capacity would park every miss with no holder ever releasing to drain them —
      *  a permanent strand, not a tight gate. Note a capacity RAISE does not proactively
-     *  kick a drain — parked work waits for the next release/park event (acceptable at
-     *  boot configure; worth revisiting if stage C wants instant-raise semantics). */
+     *  kick a drain — parked work waits for the next release/park event. Stage C
+     *  (/lsslod set maxConcurrentDiskReads) ACCEPTS this: under any read traffic the
+     *  next release arrives within milliseconds, and an idle reader has nothing parked
+     *  to drain — instant-raise machinery would guard a state that cannot matter. */
     public void updateCapacity(int newCapacity) {
         this.capacity = Math.max(1, newCapacity);
     }

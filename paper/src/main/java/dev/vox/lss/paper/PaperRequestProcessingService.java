@@ -582,6 +582,108 @@ public class PaperRequestProcessingService {
         this.lifecycleMailbox.add(new LifecycleEvent.Remove(uuid));
     }
 
+    // Runtime /lsslod set marshaling (v0.11.0 stage C): commands may arrive on a REGION
+    // thread on Folia, and the mutation path (config assign + validate + save + the
+    // re-push) touches pump-owned state — so the command surface enqueues here and the
+    // pump drains after the lifecycle mailbox (ordering: see the tick() comment).
+    private final ConcurrentLinkedQueue<Runnable> runtimeTasks = new ConcurrentLinkedQueue<>();
+
+    /** Any thread. Runs on the pump at the top of the next tick(), after the lifecycle
+     *  drain. Replies from inside the task reach the sender cross-thread (Bukkit
+     *  sendMessage is thread-safe for console and Adventure-backed players). A task
+     *  enqueued in the shutdown window (pump cancelled, queue never drained again) is
+     *  silently dropped — acceptable for admin commands: the config file write already
+     *  happened on the command thread, only the live-apply/reply is lost. */
+    public void enqueueRuntimeTask(Runnable task) {
+        this.runtimeTasks.add(task);
+    }
+
+    private void drainRuntimeTasks() {
+        Runnable task;
+        while ((task = this.runtimeTasks.poll()) != null) {
+            try {
+                task.run();
+            } catch (Exception e) {
+                // Exception, not Throwable: an Error (OOM, linkage) must propagate —
+                // swallowing it here would hide a dying JVM behind a log line.
+                LSSLogger.error("Runtime settings task failed", e);
+            }
+        }
+    }
+
+    // The tick-poll appliers (v0.11.0 stage C, twin of the Fabric block): each formerly
+    // capture-at-construction consumer re-applies config at the top of the tick on the
+    // pump. Change-guarded so the steady state costs a few field compares.
+    private int lastAppliedGenGlobal = -1;
+    private int lastAppliedGenPerPlayer = -1;
+
+    private void applyRuntimeConfig() {
+        this.bandwidthLimiter.reconfigure(this.config.bytesPerSecondGlobal());
+        this.diskReader.reapplyGateCapacity(this.config);
+        this.offThreadProcessor.updateSweepRadius(this.config.lodDistanceChunks
+                + LSSConstants.LOD_DISTANCE_BUFFER
+                + dev.vox.lss.common.processing.OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS);
+        int genGlobal = this.config.generationConcurrencyLimitGlobal;
+        int genPerPlayer = this.config.generationConcurrencyLimitPerPlayer;
+        if (genGlobal != this.lastAppliedGenGlobal || genPerPlayer != this.lastAppliedGenPerPlayer) {
+            if (this.generationService != null) {
+                this.generationService.updateCaps(genGlobal, genPerPlayer);
+            }
+            for (var state : this.players.values()) {
+                state.updateGenSlotCap(genPerPlayer);
+            }
+            this.lastAppliedGenGlobal = genGlobal;
+            this.lastAppliedGenPerPlayer = genPerPlayer;
+        }
+    }
+
+    /**
+     * Push a fresh SessionConfig to every CURRENT-dialect (v20) session (twin of the
+     * Fabric method; SET plan §"Pushing the new distance"). PUMP-ONLY, and only via a
+     * runtime task drained AFTER the lifecycle mailbox — the ordering pin: a
+     * registered-but-flip-pending player must never be enumerated as CURRENT (the
+     * tracker defaults untracked to CURRENT, and the flip applies in the drain's
+     * beforeRegister). Legacy sessions (v19/v18/v16) are skipped; they keep the
+     * handshake distance until rejoin.
+     *
+     * @return {pushed, legacySkipped}
+     */
+    /** Test seam: sends one v20 SessionConfig frame. Production default is the raw
+     *  plugin-message send (the broadcaster's setDirtySender pattern). */
+    @FunctionalInterface
+    interface SessionConfigSender {
+        void send(ServerPlayer player, PaperConfig config) throws Exception;
+    }
+
+    private SessionConfigSender sessionConfigSender = (player, cfg) ->
+            PaperPayloadHandler.sendSessionConfig(player.getBukkitEntity(),
+                    LSSConstants.PROTOCOL_VERSION, cfg.enabled,
+                    cfg.lodDistanceChunks, cfg.enableChunkGeneration);
+
+    void setSessionConfigSender(SessionConfigSender sender) {
+        this.sessionConfigSender = sender;
+    }
+
+    public int[] repushSessionConfig() {
+        int pushed = 0;
+        int legacy = 0;
+        for (var state : this.players.values()) {
+            if (this.dialects.dialectOf(state.getPlayerUUID())
+                    != dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT) {
+                legacy++;
+                continue;
+            }
+            try {
+                this.sessionConfigSender.send(state.getPlayer(), this.config);
+                pushed++;
+            } catch (Exception e) {
+                LSSLogger.error("Session-config re-push failed for "
+                        + state.getPlayer().getName().getString(), e);
+            }
+        }
+        return new int[]{pushed, legacy};
+    }
+
     private void drainLifecycleMailbox() {
         LifecycleEvent ev;
         while ((ev = this.lifecycleMailbox.poll()) != null) {
@@ -843,11 +945,19 @@ public class PaperRequestProcessingService {
         // disabled is safe by construction: HandshakeGate never invokes the registrar when
         // disabled, and removePlayer of an unregistered UUID is a no-op.
         drainLifecycleMailbox();
+        // Runtime /lsslod set tasks (v0.11.0 stage C): drained AFTER the lifecycle
+        // mailbox, deliberately — the SessionConfig re-push enumerates dialects, and a
+        // registered-but-flip-pending player must have its dialect flip APPLIED before
+        // enumeration (the SET review's ordering MAJOR: an off-pump enumeration could
+        // read the untracked-defaults-to-CURRENT dialect and push a protocol-20 config
+        // at a legacy client, killing its session until rejoin).
+        drainRuntimeTasks();
         if (!this.config.enabled)
             return;
 
         this.diag.reset(this.offThreadProcessor.getDiagnostics());
 
+        applyRuntimeConfig();
         var generationReady = tickGenerationService();
         // v16 declares BEFORE the lifecycle pass: the sync probe reads the mailbox during
         // processPlayerLifecycle, and on Folia holdAndScheduleRegionProbe reads ONLY the
