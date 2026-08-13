@@ -216,6 +216,15 @@ diag, release) reuses infrastructure LSS already has and SeeU lacks.
   conjuncts in the steady-state formula — the review's caveat: entity-add can
   precede the client having a renderable chunk, which is exactly why SeeU's
   `chunkLoaded` term exists. ±16-block hysteresis band + a 1-frame crossfade guard.
+  **SUPERSEDED AS BUILT (E2 review M3, decisions log 2026-08-13 entry 16 — §6.1
+  pair): the shipped handoff is vanilla's own cull predicate (`real present ∧
+  chunk loaded ∧ real.shouldRenderAtSqrDistance(camDistSq)`) keyed the same both
+  directions, NOT a Euclidean distance band. Review proved the band shape
+  double-renders at the render square's diagonal (Euclidean vs Chebyshev chunk
+  geometry) and leaves an invisibility annulus at high render distance (entity
+  cull ~256 blocks sits far inside a 32-chunk circle); the same-predicate swap
+  frame-synchronizes with vanilla's entity pop, so no band is needed. The
+  ENTITY_LOAD edge trigger survives as the same-frame kill.**
 - Renderer: adopt SeeU's `RemotePlayer`-proxy + `LevelRenderContext` submission
   approach (proven on 26.2), with: entity-ID allocation guarded against collision
   with real entity IDs, poses (sneak/glide/swim) mapped as SeeU does,
