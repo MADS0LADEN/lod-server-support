@@ -15,10 +15,10 @@ import net.minecraft.world.entity.player.Player;
  */
 final class PaperFarPlayerSnapshots {
 
-    // Pose flag bits (the SeeU trio, FarPlayerWire.UpdateEntry.poseFlags).
-    static final byte POSE_SNEAK = 1;
-    static final byte POSE_GLIDE = 2;
-    static final byte POSE_SWIM = 4;
+    // Pose flag bits live in FarPlayerWire (shared with the E2 renderer).
+    static final byte POSE_SNEAK = FarPlayerWire.POSE_SNEAK;
+    static final byte POSE_GLIDE = FarPlayerWire.POSE_GLIDE;
+    static final byte POSE_SWIM = FarPlayerWire.POSE_SWIM;
 
     private static final EquipmentSlot[] WIRE_SLOTS = {
             EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS,

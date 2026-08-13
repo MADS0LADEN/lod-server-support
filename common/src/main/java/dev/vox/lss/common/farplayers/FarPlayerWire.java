@@ -286,6 +286,13 @@ public final class FarPlayerWire {
         return new Updates(epoch, dimension, cadence, entries);
     }
 
+    // ---- pose flag bits (UpdateEntry.poseFlags — shared by the snapshot builders
+    //      and the E2 renderer; the SeeU trio) ----
+
+    public static final byte POSE_SNEAK = 1;
+    public static final byte POSE_GLIDE = 2;
+    public static final byte POSE_SWIM = 4;
+
     // ---- quantization helpers ----
 
     public static int quantizePos(double blocks) {

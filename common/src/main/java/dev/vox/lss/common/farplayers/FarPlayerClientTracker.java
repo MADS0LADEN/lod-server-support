@@ -25,11 +25,13 @@ import java.util.UUID;
  */
 public final class FarPlayerClientTracker {
 
-    /** One tracked far player: identity + the latest update (phase A keeps exactly
-     *  what the E2 renderer will interpolate from). */
+    /** One tracked far player: identity + the latest update + the E2 motion
+     *  interpolator (declared-cadence lerp + velocity extrapolation — see
+     *  {@link FarPlayerMotion}). */
     public record TrackedFarPlayer(UUID uuid, String name,
                                    FarPlayerWire.UpdateEntry latest,
-                                   int cadenceTicks, long receivedAtMillis) {}
+                                   int cadenceTicks, long receivedAtMillis,
+                                   FarPlayerMotion motion) {}
 
     private final Map<Integer, UUID> uuidByIndex = new HashMap<>();
     private final Map<UUID, String> nameByUuid = new HashMap<>();
@@ -94,8 +96,16 @@ public final class FarPlayerClientTracker {
         for (var e : updates.entries()) {
             UUID uuid = uuidByIndex.get(e.rosterIndex());
             if (uuid == null) continue;
+            var prev = tracked.get(uuid);
+            FarPlayerMotion motion;
+            if (prev == null) {
+                motion = new FarPlayerMotion(e, updates.cadenceTicks(), nowMillis);
+            } else {
+                motion = prev.motion();
+                motion.apply(e, updates.cadenceTicks(), nowMillis);
+            }
             tracked.put(uuid, new TrackedFarPlayer(uuid, nameByUuid.get(uuid), e,
-                    updates.cadenceTicks(), nowMillis));
+                    updates.cadenceTicks(), nowMillis, motion));
             entriesApplied++;
         }
         updatesApplied++;
