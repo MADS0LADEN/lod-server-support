@@ -325,7 +325,7 @@ override lever is the NEW client key `farPlayersWithSeeU` (default false), not
 express an explicit preference. The gate suppresses only the EFFECTIVE enabled
 term (renderer + the prefs `enabled` field): the capability bit stays composed
 and prefs still deliver, so the shareSelf opt-out survives SeeU's presence (the
-E2 prefs-carrier rule). The INFO logs once per session, not every session.**
+E2 prefs-carrier rule). The INFO logs once per game launch (a static latch), not every session.**
 
 ## 7. Phasing
 

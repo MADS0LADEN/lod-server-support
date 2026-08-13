@@ -38,8 +38,13 @@ final class FarPlayerMountLadder {
 
     private final Function<String, Optional<EntityType<?>>> typeResolver;
     private final BiFunction<EntityType<?>, ClientLevel, Entity> factory;
-    /** Per-type once-latch: a failed type never retries (permanent for the session)
-     *  and never warns twice. */
+    /** Per-type once-latch: a failed type never retries and never warns twice.
+     *  Cleared at session end via {@link #reset()} (the E2 m5 doctrine — one
+     *  contained failure next session beats a per-JVM dead mount type) and CAPPED
+     *  (E3 review m7): a hostile server feeding unique type strings must not grow
+     *  the set or the log without bound — past the cap, failures still degrade to
+     *  unmounted per-call, just without latching or warning. */
+    static final int MAX_LATCHED_TYPES = 256;
     private final Set<String> latchedTypes = new HashSet<>();
 
     FarPlayerMountLadder(Function<String, Optional<EntityType<?>>> typeResolver,
@@ -97,7 +102,21 @@ final class FarPlayerMountLadder {
         return latchedTypes.contains(typeIdentity);
     }
 
+    /** The rung-2 rendering-throw twin (E3 review m6): a mount whose link/extract/
+     *  submit threw is latched like a creation failure — its riders render unmounted
+     *  from the next frame, and the GLOBAL crash latch never fires for a per-type
+     *  problem. */
+    void latchRenderFailure(String typeIdentity, Exception e) {
+        latchWarn(typeIdentity, "rendering failed (" + e + ")");
+    }
+
+    /** Session end: latches die with the session. */
+    void reset() {
+        latchedTypes.clear();
+    }
+
     private void latchWarn(String typeIdentity, String reason) {
+        if (latchedTypes.size() >= MAX_LATCHED_TYPES) return;
         if (latchedTypes.add(typeIdentity)) {
             LSSLogger.warn("Far-player mount '" + typeIdentity + "' will render as an"
                     + " unmounted player: " + reason + " — once per type per session");

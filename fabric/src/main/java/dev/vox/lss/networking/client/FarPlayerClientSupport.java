@@ -87,9 +87,11 @@ public final class FarPlayerClientSupport {
                 config.farPlayersWithSeeU);
         if (!gate && config.farPlayersEnabled && isSeeuPresent() && !seeuInfoLogged) {
             seeuInfoLogged = true;
-            LSSLogger.info("SeeU detected — LSS far players disabled to avoid double"
-                    + " proxies; set farPlayersWithSeeU=true in lss-client-config.json"
-                    + " (or the Sodium screen note) to prefer LSS");
+            LSSLogger.info("SeeU detected — LSS stops drawing far players to avoid"
+                    + " double proxies (your own Share My Position setting still"
+                    + " applies); set farPlayersWithSeeU=true in lss-client-config.json"
+                    + " (the 'Prefer LSS Far Players' option in the Sodium screen)"
+                    + " to use LSS instead");
         }
         return gate;
     }
@@ -104,8 +106,11 @@ public final class FarPlayerClientSupport {
         Boolean present = seeuPresent;
         if (present == null) {
             try {
-                present = net.fabricmc.loader.api.FabricLoader.getInstance()
-                        .isModLoaded("seeu");
+                var loader = net.fabricmc.loader.api.FabricLoader.getInstance();
+                // "voxyseeu" is the pre-rename mod id (the vendored clone's config
+                // migration shows the rename) — an old SeeU build must trip the
+                // gate too (E3 review NIT-3).
+                present = loader.isModLoaded("seeu") || loader.isModLoaded("voxyseeu");
             } catch (Throwable t) {
                 present = false; // loader-less unit contexts: no SeeU
             }

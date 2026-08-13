@@ -56,11 +56,14 @@ public final class FarPlayerMotion {
         this.windowMillis = declaredWindowMillis(cadenceTicks);
     }
 
-    /** Vehicle-motion seed (R-10 v1.3): the mount's own wire position/angles, with the
-     *  RIDER's velocity hint applied later via {@link #applyRaw} — rider and mount
-     *  share a velocity by definition, and separate hints would visibly shear at
-     *  horse/boat speeds. Vehicles have yaw+pitch only; headYaw mirrors yaw. */
+    /** Vehicle-motion seed (R-10 v1.3): the mount's own wire position/angles with the
+     *  RIDER's velocity hint FROM CREATION (E3 review m3 — a zero-velocity seed held
+     *  the mount still for one full window while the rider dead-reckoned ahead:
+     *  exactly the shear the rider-velocity design exists to prevent; rider and
+     *  mount share a velocity by definition). Vehicles have yaw+pitch only; headYaw
+     *  mirrors yaw. */
     public FarPlayerMotion(double x, double y, double z, float yaw, float pitch,
+                           double riderVelX, double riderVelY, double riderVelZ,
                            int cadenceTicks, long nowMillis) {
         this.toX = x;
         this.toY = y;
@@ -74,6 +77,9 @@ public final class FarPlayerMotion {
         this.fromYaw = yaw;
         this.fromHeadYaw = yaw;
         this.fromPitch = pitch;
+        this.velX = riderVelX;
+        this.velY = riderVelY;
+        this.velZ = riderVelZ;
         this.snapshotMillis = nowMillis;
         this.windowMillis = declaredWindowMillis(cadenceTicks);
     }

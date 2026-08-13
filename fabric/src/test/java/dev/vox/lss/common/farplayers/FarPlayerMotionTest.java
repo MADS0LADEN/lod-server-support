@@ -123,12 +123,17 @@ class FarPlayerMotionTest {
     void vehicleMotionSeedsFromMountPositionAndRidesTheRiderVelocity() {
         // R-10 v1.3: the mount lerps its OWN wire positions but extrapolates with the
         // RIDER's velocity hint — separate hints shear visibly at horse/boat speeds.
-        var m = new FarPlayerMotion(100.0, 64.0, 0.0, 90f, 10f, 10, 1_000);
+        var m = new FarPlayerMotion(100.0, 64.0, 0.0, 90f, 10f, 20, 0, 0, 10, 1_000);
         var seed = m.sample(1_100);
-        assertEquals(100, seed.x(), 1e-9, "the seed holds still");
+        assertEquals(100, seed.x(), 1e-9, "inside the window the seed lerps in place");
         assertEquals(90f, seed.yaw(), 1e-4, "vehicle yaw mirrors into headYaw"
                 + " (vehicles have no separate head)");
         assertEquals(90f, seed.headYaw(), 1e-4);
+        // The seed carries the RIDER's velocity from creation (E3 review m3): past
+        // the window it dead-reckons instead of parking a full window behind the
+        // rider (window 600; +100 ms past it at 20 b/s = 2 blocks).
+        assertEquals(102, m.sample(1_000 + 600 + 100).x(), 1e-4,
+                "a mid-motion mount creation extrapolates immediately");
 
         // Rider velocity 20 b/s applied through applyRaw at the mount's new position.
         m.applyRaw(110, 64, 0, 90f, 90f, 10f, 20, 0, 0, 10, 1_500);
