@@ -11,4 +11,5 @@ Credit: SeeU (MIT) as prior art. Folia remains experimental.
 `/lsslod set` runtime settings + `/lsslod help`, backfill remaining estimate,
 `maxConcurrentDiskReads` (bounds disk CPU independently of bandwidth, auto),
 `dirtyBroadcastIntervalSeconds: 0` = broadcasts off, `lodDistanceChunks` default
-now 300, client cache in `.lss/` for fresh installs.
+now 300, LOD yields to vanilla transport by default
+(`lodYieldsToVanillaTransport: true`), client cache in `.lss/` for fresh installs.

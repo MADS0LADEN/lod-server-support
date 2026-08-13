@@ -620,12 +620,13 @@ class ConfigValidationTest {
                         <= LSSConstants.MAX_DISK_READER_THREADS);
     }
 
-    /** The yield plan's recorded evidence discipline (§4): the mechanism ships UNARMED;
-     *  the default flips only in a later release citing the live E3 A/B. */
+    /** Default TRUE since v0.11.0 (user decision 2026-08-13, superseding the yield
+     *  plan's ships-unarmed stance; the CI-inertness pin keeps soaks provably
+     *  unaffected — loopback channels never go unwritable). */
     @Test
-    void transportYieldDefaultsOff() {
-        assertFalse(serverConfig().lodYieldsToVanillaTransport,
-                "lodYieldsToVanillaTransport must default FALSE");
+    void transportYieldDefaultsOn() {
+        assertTrue(serverConfig().lodYieldsToVanillaTransport,
+                "lodYieldsToVanillaTransport defaults TRUE since v0.11.0");
     }
 
     /** Disk serves transcode NBT straight to wire bytes out of the box; false is the
