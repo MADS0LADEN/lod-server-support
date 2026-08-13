@@ -439,7 +439,12 @@ class ClientSessionGateTest {
         assertEquals(64, gate.getServerLodDistance());
         assertNotNull(gate.getRequestManager(), "a v16 session still builds a manager (load-only)");
         assertEquals(List.of("rebuild"), events, "the legacy session builds exactly one manager");
-        assertEquals(List.of(V), handshakeVersions, "a SessionConfig reply sends no further handshake");
+        assertEquals(List.of(V, V16), handshakeVersions,
+                "accepting a v16 session when the last announce was 20 re-announces 16 — the "
+                        + "establish heal aligns the server's dialect mark with the accepted "
+                        + "session before any column flows (unreachable against a real v16 "
+                        + "server, which never replies cross-version; harmless there — a "
+                        + "re-register plus config re-send)");
     }
 
     @Test
@@ -659,9 +664,11 @@ class ClientSessionGateTest {
     void slowTwentyEchoAfterTheLadderAdvancedStillEstablishesAndTheRacedNineteenReasserts() {
         // The load-bearing race (C3 plan): a healthy v20 server whose echo was slow enough
         // that the ladder already announced 19. The late 20 echo must be ACCEPTED (rejecting
-        // would disable LOD against a healthy server); the server's 19 echo to our raced
-        // announce then hits the downgrade guard, which re-announces the ESTABLISHED 20 —
-        // healing the server-side dialect flip the 19 announce caused.
+        // would disable LOD against a healthy server). Establishment itself now heals the
+        // server-side dialect flip FIRST (the establish re-announce — see
+        // establishAfterTheLadderAdvancedReAnnouncesBeforeTheManagerIsBuilt); the server's
+        // 19 echo to our raced announce then hits the downgrade guard, whose re-announce of
+        // the ESTABLISHED 20 stays as the idempotent second assert.
         gate.onJoin(true, false, true, true);
         tickDiscovery(ClientSessionGate.V16_DISCOVERY_DELAY_TICKS); // → announce 19
         assertEquals(List.of(V, V19), handshakeVersions);
@@ -672,20 +679,131 @@ class ClientSessionGateTest {
         V16ClientWire.observeSessionConfigVersion(V);
         gate.onSessionConfig(config(V, true), true, true); // the slow 20 echo lands
         assertTrue(gate.isServerEnabled(), "the late current-version echo must establish");
+        assertEquals(List.of(V, V19, V), handshakeVersions,
+                "the establish heal re-announces the accepted 20 immediately — the manager's "
+                        + "first batch must never race the server's dialect flip");
         handshakeVersions.clear();
 
         V16ClientWire.observeSessionConfigVersion(V19); // the raced 19 echo, netty half
-        assertTrue(V16ClientWire.isNativeBodySession(),
-                "premise: the raced echo transiently arms (announced-19 is sticky)");
+        assertFalse(V16ClientWire.isNativeBodySession(),
+                "the establish heal already retired the 19 announce, so the raced echo can "
+                        + "no longer arm native-body decode — the pre-heal transient window "
+                        + "(a raced 19 frame mis-arming against the live v20 stream) is CLOSED");
         gate.onSessionConfig(config(V19, true), true, true); // …then the main half
         assertEquals(List.of(V), handshakeVersions,
-                "the guard re-announces the ESTABLISHED version, healing the server-side flip");
+                "the guard re-announces the ESTABLISHED version — the idempotent second assert");
         assertFalse(V16ClientWire.isNativeBodySession(),
-                "the guard's re-assert disarms the transient window immediately");
+                "still disarmed after the guard's re-assert");
         V16ClientWire.observeSessionConfigVersion(V19);
         assertFalse(V16ClientWire.isNativeBodySession(),
                 "after the re-assert, a later unsolicited 19 frame must not arm "
                         + "native-body decode against the live v20 stream");
+    }
+
+    // ---- The establish-path dialect-flip heal (found live 2026-08-13: a 1 Mbps throttled
+    // link walked the full ladder against a healthy v20 server; the late 20 echo
+    // established, the manager's first want-set raced ahead of any heal on the C2S stream,
+    // and the still-v16-marked server answered it with legacy-layout columns — a netty
+    // DecoderException hard kick at the client's v20 codec, "found 26871 bytes extra").
+
+    @Test
+    void establishAfterTheLadderAdvancedReAnnouncesBeforeTheManagerIsBuilt() {
+        // THE ordering pin: the re-announce must be SENT before the manager exists. TCP
+        // ordering is the entire correctness argument — the server's dialect flip must
+        // precede the first want-set batch, and the batch cannot exist before the manager.
+        var ordered = new ArrayList<String>();
+        var orderedGate = new ClientSessionGate(processor,
+                v -> ordered.add("hs:" + v),
+                cfg -> { ordered.add("manager"); return new RecordingManager(new ArrayList<>()); });
+
+        orderedGate.onJoin(true, false, true, true);
+        for (int i = 0; i < 2 * ClientSessionGate.V16_DISCOVERY_DELAY_TICKS; i++) {
+            orderedGate.tickDiscoveryLadder(); // walks 19 then 16
+        }
+        assertEquals(List.of("hs:" + V, "hs:" + V19, "hs:" + V16), ordered,
+                "premise: the full ladder walked before any echo arrived");
+
+        orderedGate.onSessionConfig(config(V, true), true, true); // the slow 20 echo lands
+
+        assertEquals(List.of("hs:" + V, "hs:" + V19, "hs:" + V16, "hs:" + V, "manager"), ordered,
+                "the establish re-announce goes out BEFORE the manager is built — TCP "
+                        + "ordering then guarantees the server sheds its legacy dialect mark "
+                        + "before the first batch can arrive");
+
+        V16ClientWire.observeSessionConfigVersion(V16);
+        assertFalse(V16ClientWire.isColumnSourceless(),
+                "the establish re-announce also retires the ladder's v16 announce — a late "
+                        + "legacy frame must not arm sourceless decode against the v20 stream");
+    }
+
+    @Test
+    void establishReAnnounceEchoTakesThePlainReconfigPathWithoutAnotherHandshake() {
+        // Boundedness: the server replies to the establish re-announce with a fresh v20
+        // config. currentAnnounce was committed at the re-announce, so the echo is the
+        // normal re-config path — never a handshake ping-pong.
+        gate.onJoin(true, false, true, true);
+        tickDiscovery(2 * ClientSessionGate.V16_DISCOVERY_DELAY_TICKS); // → announced 19, 16
+        gate.onSessionConfig(config(V, true), true, true); // slow echo → establish + heal
+        assertEquals(List.of(V, V19, V16, V), handshakeVersions,
+                "premise: the establish heal re-announced exactly once");
+
+        gate.onSessionConfig(config(V, true), true, true); // the heal's own echo
+
+        assertEquals(List.of(V, V19, V16, V), handshakeVersions,
+                "the heal echo re-configures without any further handshake");
+        assertTrue(gate.isServerEnabled());
+    }
+
+    @Test
+    void thrownEstablishReAnnounceStillEstablishesAndTheNextConfigRetriesTheHeal() {
+        // A thrown heal send must not block establishment (the session is still viable —
+        // the connection may just be mid-teardown), and the uncommitted announce means a
+        // re-sent config RETRIES the heal instead of silently accepting the stale mark.
+        var sends = new ArrayList<Integer>();
+        boolean[] failNext = {false};
+        var throwingGate = new ClientSessionGate(processor,
+                v -> {
+                    if (failNext[0]) { failNext[0] = false; throw new IllegalStateException("send failed"); }
+                    sends.add(v);
+                },
+                cfg -> { events.add("rebuild"); return new RecordingManager(events); });
+
+        throwingGate.onJoin(true, false, true, true);
+        for (int i = 0; i < 2 * ClientSessionGate.V16_DISCOVERY_DELAY_TICKS; i++) {
+            throwingGate.tickDiscoveryLadder();
+        }
+        assertEquals(List.of(V, V19, V16), sends, "premise: the full ladder walked");
+
+        failNext[0] = true;
+        throwingGate.onSessionConfig(config(V, true), true, true); // heal send THROWS
+        assertEquals(List.of(V, V19, V16), sends, "the thrown heal sent nothing");
+        assertTrue(throwingGate.isServerEnabled(), "a thrown heal must not block establishment");
+        assertNotNull(throwingGate.getRequestManager());
+
+        throwingGate.onSessionConfig(config(V, true), true, true); // a re-sent config
+        assertEquals(List.of(V, V19, V16, V), sends,
+                "the stale announce is retried on the next accepted config");
+
+        throwingGate.onSessionConfig(config(V, true), true, true);
+        assertEquals(List.of(V, V19, V16, V), sends, "committed — no further handshake");
+    }
+
+    @Test
+    void slowNineteenEchoAfterTheLadderReachedSixteenReAnnouncesNineteen() {
+        // The heal generalizes per rung: a v19 server whose echo lands after the ladder
+        // announced 16 establishes the 19 session AND re-announces 19 — a v19-native
+        // client fed source-less v16-layout columns is the same decoder kick one rung down.
+        gate.onJoin(true, false, true, true);
+        tickDiscovery(2 * ClientSessionGate.V16_DISCOVERY_DELAY_TICKS); // 19 then 16
+        assertEquals(List.of(V, V19, V16), handshakeVersions);
+
+        V16ClientWire.observeSessionConfigVersion(V19);
+        gate.onSessionConfig(config(V19, true), true, true);
+
+        assertTrue(gate.isServerEnabled(), "the late 19 echo must establish");
+        assertNotNull(gate.getRequestManager());
+        assertEquals(List.of(V, V19, V16, V19), handshakeVersions,
+                "establishing 19 after the 16 announce re-announces 19 before any column flows");
     }
 
     @Test
@@ -764,6 +882,9 @@ class ClientSessionGateTest {
         assertTrue(gate.isV16Server(), "a first-and-only v16 config builds the legacy session");
         assertNotNull(gate.getRequestManager());
         assertEquals(List.of("rebuild"), events);
-        assertEquals(List.of(V), handshakeVersions, "no v18 re-assert — this was not a downgrade");
+        assertEquals(List.of(V, V16), handshakeVersions,
+                "no DOWNGRADE-guard re-assert (this was not a downgrade of a live session) — "
+                        + "the second handshake is the establish heal re-announcing the "
+                        + "accepted 16, because the last announce was 20");
     }
 }

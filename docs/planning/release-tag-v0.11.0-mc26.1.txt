@@ -1,3 +1,7 @@
+### Bug Fixes
+
+- **Fixes a disconnect on slow connections** — joining through a slow or saturated link could kill the connection right after login with "Packet ... was larger than I expected": the client's legacy-server discovery could leave the server briefly speaking an older wire dialect just as the session started, and the first terrain packets then broke the connection. The client now re-confirms its protocol before requesting any terrain, and waits longer (10 seconds per step) before trying legacy protocols, so slow joins no longer trigger false legacy fallbacks. Fabric client.
+
 ### New Features
 
 - **Far players** — see other players far beyond normal render distance as simple player models standing in your LOD terrain: positions, poses (sneak/glide/swim), equipment, name tags, and smooth motion including elytra dead-reckoning. On by default — including for servers upgrading from earlier versions (`farPlayers` mode `on`; `opt-in` and `off` available, and the exclude list/permission below give per-player control). Bandwidth cost is tiny — quantized positions, change-only equipment, names sent once. Players riding horses, boats, minecarts or any other vanilla entity render seated WITH their mount; mounts your client doesn't know (modded, other MC versions) show an unmounted player instead — never a crash. Prior art: the SeeU mod (MIT) — reimplemented natively in LSS with server-authoritative privacy. On Folia this is the largest new surface and Folia support remains **experimental**.
