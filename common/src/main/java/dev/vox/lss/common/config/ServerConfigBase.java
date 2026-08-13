@@ -137,6 +137,16 @@ public abstract class ServerConfigBase extends JsonConfig {
      * {@code /lsslod set enablePingBackstop} (the live A/B lever).
      */
     public boolean enablePingBackstop = true;
+    /**
+     * Send pacing (send-pacing-plan.md v2 — the refill-floored proportional drain):
+     * spreads the bandwidth bank's one-tick burst into a ~5-tick slope so vanilla
+     * packets interleave during LOD resolution waves (join/rejoin/teleport). The
+     * budget floors at the allocation's own per-tick refill share, so sustained
+     * throughput is never paced below the configured cap — this is a burst SHAPER,
+     * never a rate governor (rate ownership is the client's, via want-set sizing).
+     * Runtime-mutable via {@code /lsslod set enableSendPacing} (the live A/B lever).
+     */
+    public boolean enableSendPacing = true;
 
     /** R-2 shared clamp: 0 (and any negative) = OFF; explicit values clamp to
      *  [MIN=64, MAX=262144] KB. Used by validate() AND the /lsslod set registry so

@@ -123,7 +123,7 @@ class DiagnosticsFormatterTest {
                 "DiskReader: submitted=5, completed=5",
                 "Generation: active=1/32, order_gated=7, inversions=3",
                 "Bandwidth: 512 B/s / 1.0 MB/s global (2.0 MB total, 0 B wire, cols zstd=0 raw=0)",
-                "  Steve: sq=3/4000, psync=2, pgen=1, sent=2000 (4.0 KB), rate=20/s, obuf=64.0 KB/128.0 KB, ceil=off, pingf=1.00, deferred=7, yielded=0"
+                "  Steve: sq=3/4000, psync=2, pgen=1, sent=2000 (4.0 KB), rate=20/s, obuf=64.0 KB/128.0 KB, ceil=off, pingf=1.00, deferred=7, yielded=0, paced=0"
         ), DiagnosticsFormatter.formatDiagnostics(d));
     }
 
@@ -631,5 +631,28 @@ class DiagnosticsFormatterTest {
         assertTrue(DiagnosticsFormatter.formatDiagnostics(d).stream()
                         .anyMatch(l -> l.contains("pingf=0.08")),
                 "a cut factor renders through the %.2f format");
+    }
+
+    /** The paced= VALUE branch (send-pacing-plan.md v2): a live pacer count renders
+     *  (the full-line golden covers only the compat-ctor 0). */
+    @Test
+    void pacedTokenRendersALiveCount() {
+        var d = new DiagnosticsFormatter.DiagData(
+                true, 24,
+                2048, 1_048_576,
+                100, 5000, 10_485_760,
+                11, 33, 44, 55, 66,
+                22,
+                "sent=9, disk=1/2",
+                "submitted=5, completed=5",
+                "active=1/32", true,
+                7, 3,
+                2_097_152,
+                512,
+                List.of(new DiagnosticsFormatter.PlayerDiag("Alex", 1, 4000, 0, 0, 10, 1000,
+                        50_000L, 60_000L, 0L, 3L, -1L, 1.0, 42L)));
+        assertTrue(DiagnosticsFormatter.formatDiagnostics(d).stream()
+                        .anyMatch(l -> l.contains("paced=42")),
+                "a live paced count renders at line end");
     }
 }

@@ -479,4 +479,21 @@ class TransferRateGovernorTest {
         assertTrue(PingBackstop.RECOVER_EXCESS_MS < PingBackstop.CUT_EXCESS_MS,
                 "B recovers below where it cuts");
     }
+
+    @Test
+    void pacerFloorClearsAGovernedQuarterBatchAtDefaults() {
+        // send-pacing-plan.md §4 (the m7 coupling invariant, static over compiled
+        // defaults — the runtime allocation is a variable): the send pacer's refill
+        // floor at the DEFAULT per-player cap must deliver a governed quarter-batch
+        // (≤ ENGAGE_BELOW/4 bytes/s worth) within the client's 5-tick fast-fire
+        // floor, or pacing would slow the governor's own loop. Documented
+        // NON-guarantee under deep pingf cuts / heavy global dilution — the degrade
+        // path there is the offer-backing freeze.
+        long defaultCapBytesPerSec =
+                new dev.vox.lss.config.LSSServerConfig().bytesPerSecondPerPlayer();
+        long perTickShare = defaultCapBytesPerSec / dev.vox.lss.common.LSSConstants.TICKS_PER_SECOND;
+        assertTrue(perTickShare * SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS
+                        >= TransferRateGovernor.ENGAGE_BELOW_BYTES_PER_SEC / 4,
+                "the pace floor must clear a governed quarter-batch inside the fast-fire floor");
+    }
 }

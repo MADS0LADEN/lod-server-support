@@ -74,6 +74,8 @@ class ConfigValidationTest {
     void adaptiveTransferRateMechanismsDefaultOn() {
         assertTrue(serverConfig().enablePingBackstop,
                 "the ping backstop must ship enabled");
+        assertTrue(serverConfig().enableSendPacing,
+                "send pacing must ship enabled (a burst shaper, never a rate governor)");
         assertTrue(clientConfig().enableAdaptiveTransferRate,
                 "the client transfer governor must ship enabled");
     }

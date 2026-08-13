@@ -1188,7 +1188,8 @@ public class PaperRequestProcessingService {
                     this.config.lodYieldsToVanillaTransport
                             ? this.config.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER
                                     + OffThreadProcessor.SWEEP_RADIUS_MARGIN_CHUNKS
-                            : 0);
+                            : 0,
+                    this.config.enableSendPacing);
             if (dropped.length > 0) {
                 // A send failure or the relevance prune discarded resolved-but-undelivered
                 // columns: clear their done-bits so the client's re-requests re-resolve

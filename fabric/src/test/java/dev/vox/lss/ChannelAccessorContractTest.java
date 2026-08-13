@@ -120,6 +120,26 @@ class ChannelAccessorContractTest {
     }
 
     @Test
+    void bothPlatformsWireTheSendPacingConfigIntoTheFlush() throws Exception {
+        // send-pacing-plan.md v2: only the fullest overload arms pacing (S-9a), so a
+        // dropped config pass-through reverts the fleet to unpaced bank dumps with
+        // every unit test green. Plus the paced= diag plumb (the golden constructs
+        // PlayerDiag through the compat ctor, so a literal 0 would stay green).
+        String fabric = Files.readString(Path.of(
+                "src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
+        assertTrue(fabric.contains("config.enableSendPacing"),
+                "Fabric must pass enableSendPacing into the flush");
+        String paper = Files.readString(Path.of(
+                "../paper/src/main/java/dev/vox/lss/paper/PaperRequestProcessingService.java"));
+        assertTrue(paper.contains("this.config.enableSendPacing"),
+                "Paper twin must pass enableSendPacing into the flush");
+        String formatter = Files.readString(Path.of(
+                "../common/src/main/java/dev/vox/lss/common/DiagnosticsFormatter.java"));
+        assertTrue(formatter.contains("state.getPacedTicks()"),
+                "the diag builder must read the LIVE paced counter");
+    }
+
+    @Test
     void bothPlatformsInstallTheChannelPressureProbeAtRegistration() throws Exception {
         String fabric = Files.readString(Path.of(
                 "src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
