@@ -181,6 +181,13 @@ class PaperConfigValidationTest {
             // resolver tests in both twins).
             Map.entry("maxConcurrentDiskReads",
                     new Bounds(0, LSSConstants.MAX_DISK_READER_THREADS)),
+            // Far players (E1): interval 2..100, max ring 128..16384.
+            // farPlayersMinDistanceBlocks is NOT here: its effective ceiling is the
+            // CONFIGURED max (validate() drags it under — an inverted ring hides
+            // everyone), so like generationConcurrencyLimitPerPlayer it has no fixed
+            // both-ends bounds; the named cross-field test lives in the Fabric twin.
+            Map.entry("farPlayersUpdateIntervalTicks", new Bounds(2, 100)),
+            Map.entry("farPlayersMaxDistanceBlocks", new Bounds(128, 16384)),
             // generationConcurrencyLimitPerPlayer and perDimensionTimestampCacheSizeMB left the
             // table-driven sweep 2026-08-02: the first clamps to the CONFIGURED global (§9.1) and
             // the second treats 0 as AUTO, so neither has fixed both-ends bounds. Named tests in
@@ -215,6 +222,10 @@ class PaperConfigValidationTest {
         // tests in the Fabric twin cover all three.
         var derived = java.util.Set.of("diskReaderThreads", "perDimensionTimestampCacheSizeMB",
                 "generationConcurrencyLimitPerPlayer",
+                // Far players (E1): the min ring's effective ceiling is the CONFIGURED
+                // max (validate() drags it under — an inverted ring hides everyone), so
+                // no fixed both-ends bounds; named cross-field test in the Fabric twin.
+                "farPlayersMinDistanceBlocks",
                 // The 2026-08-08 bandwidth rename: the mb doubles have their own exact-bounds
                 // arm below; the legacy byte ints re-sentinel instead of clamping (also below).
                 "mbPerSecondLimitPerPlayer", "mbPerSecondLimitGlobal",

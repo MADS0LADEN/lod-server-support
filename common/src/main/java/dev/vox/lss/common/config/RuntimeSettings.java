@@ -6,7 +6,7 @@ import java.util.function.BiFunction;
 import java.util.function.Function;
 
 /**
- * The {@code /lsslod set} key registry (v0.11.0 stage C,
+ * The {@code /lsslod set} key registry (v0.11.0 stage C + the R-9 far-player rows at E1,
  * runtime-settings-commands-plan.md as amended by the mega plan's R-2/R-5) — shared by
  * both command surfaces so Fabric/Paper cannot drift (the HandshakeGate parity
  * precedent).
@@ -119,7 +119,40 @@ public final class RuntimeSettings {
                     },
                     "applies within a tick; 0 = AUTO (half the reader pool with the store"
                             + " on, the whole pool with it off); lowering lets in-flight"
-                            + " reads finish"));
+                            + " reads finish"),
+            // R-9 (E1): the privacy keys an admin answering a complaint must not need a
+            // restart for. farPlayers is the registry's one STRING-typed row — a strict
+            // parse rejects garbage at the command line, then the value routes through
+            // the EXACT validate() helper (identity for valid forms — the R-2 rule).
+            new SettingKey("farPlayers",
+                    c -> c.farPlayers,
+                    (c, raw) -> {
+                        c.farPlayers = ServerConfigBase.clampFarPlayersMode(
+                                parseFarPlayersMode(raw));
+                        return null;
+                    },
+                    "applies at the next broadcast tick; off disables far players,"
+                            + " opt-in serves only players whose own client opted in,"
+                            + " on serves everyone minus the exclude list"),
+            new SettingKey("farPlayersMaxDistanceBlocks",
+                    c -> String.valueOf(c.farPlayersMaxDistanceBlocks),
+                    (c, raw) -> {
+                        c.farPlayersMaxDistanceBlocks =
+                                ServerConfigBase.clampFarPlayersMaxDistance(parseInt(raw));
+                        return null;
+                    },
+                    "applies at the next broadcast tick; each client's own preference"
+                            + " intersects it"));
+
+    private static String parseFarPlayersMode(String raw) {
+        String v = raw.trim().toLowerCase(java.util.Locale.ROOT);
+        if (!v.equals("off") && !v.equals("opt-in") && !v.equals("optin")
+                && !v.equals("opt_in") && !v.equals("on")) {
+            throw new IllegalArgumentException("not a far-player mode: '" + raw
+                    + "' (off | opt-in | on)");
+        }
+        return v;
+    }
 
     public static List<SettingKey> keys() {
         return KEYS;

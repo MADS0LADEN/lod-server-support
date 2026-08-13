@@ -563,6 +563,32 @@ public abstract class ServerConfigBase extends JsonConfig {
      * means "hide nothing"; a malformed null restores this default.
      */
     public List<String> xrayHiddenBlocks = defaultXrayHiddenBlocks();
+
+    // ---- Far players (v0.11.0 stage E1 — far-player-proxies-plan.md §3.4, INERT until
+    // ---- E2 flips the compiled default to "on"; all serving is additionally gated on
+    // ---- the client's CAPABILITY_FAR_PLAYERS bit, which E1 clients never send).
+
+    /**
+     * Far-player proxies: {@code "off"} / {@code "opt-in"} / {@code "on"}. Server-
+     * authoritative privacy mode (the ESP-oracle fix over SeeU): {@code opt-in} serves
+     * only targets whose own client sent shareSelf=true; {@code on} serves everyone
+     * minus the exclude list / permission node / shareSelf opt-outs. COMPILED DEFAULT
+     * {@code "off"} at E1 (ships inert); E2 flips it to {@code "on"} for fresh AND
+     * upgrading installs (user decision 2026-08-12).
+     */
+    public String farPlayers = "off";
+    /** Broadcast cadence in ticks (default 10 = 2 Hz full-rate tier; far tiers halve). */
+    public int farPlayersUpdateIntervalTicks = 10;
+    /** Server cap on the visibility ring, blocks (client prefs intersect it). Default
+     *  2048 — deliberately NOT SeeU's 8192; admins raise it consciously (privacy). */
+    public int farPlayersMaxDistanceBlocks = 2048;
+    /** Inner ring in blocks (0 = none): players nearer than this are vanilla's job. */
+    public int farPlayersMinDistanceBlocks = 0;
+    /** Serve spectators as far players (default false — SeeU's proven default). */
+    public boolean farPlayersSendSpectators = false;
+    /** Names/UUIDs never served as far players regardless of mode (restart-only for
+     *  v0.11.0 — R-9 registers only the mode + max distance as runtime keys). */
+    public List<String> farPlayersExclude = List.of();
     /**
      * FALLBACK mask cutoff: only blocks below this world Y are masked (Paper's default 64).
      * At/above it the data already ships unobfuscated in vanilla chunk packets, so masking
@@ -692,6 +718,33 @@ public abstract class ServerConfigBase extends JsonConfig {
                 LSSConstants.MIN_MAX_CONCURRENT_DISK_READS, LSSConstants.MAX_DISK_READER_THREADS);
     }
 
+    /** Far-player mode normalization (E1): "off" / "opt-in" / "on"; unknown → the
+     *  compiled default "off" (E1 ships INERT — E2 flips the default to "on"). Static
+     *  per the R-2 registry clamp rule — the /lsslod set row (R-9) uses this exact
+     *  helper. */
+    public static String clampFarPlayersMode(String v) {
+        if (v == null) return "off";
+        return switch (v.trim().toLowerCase(java.util.Locale.ROOT)) {
+            case "on" -> "on";
+            case "opt-in", "optin", "opt_in" -> "opt-in";
+            default -> "off";
+        };
+    }
+
+    public static int clampFarPlayersUpdateInterval(int v) {
+        return Math.clamp(v, 2, 100);
+    }
+
+    public static int clampFarPlayersMaxDistance(int v) {
+        return Math.clamp(v, 128, 16384);
+    }
+
+    /** Min distance: 0 = no inner ring; clamps into [0, 16384] (validate() additionally
+     *  drags it under the max — an inverted ring would hide everyone). */
+    public static int clampFarPlayersMinDistance(int v) {
+        return Math.clamp(v, 0, 16384);
+    }
+
     // R-5 log-on-change (stage C): validate() re-runs on every /lsslod set, so its
     // advisory INFO lines must fire on TRANSITION, not per call — a runtime `set` would
     // otherwise re-print the dirty-0 mode line (and Paper's Folia store warn) on every
@@ -719,6 +772,15 @@ public abstract class ServerConfigBase extends JsonConfig {
                 outboundBufferCeilingKB, LSSConstants.MIN_OUTBOUND_BUFFER_CEILING_KB,
                 LSSConstants.MAX_OUTBOUND_BUFFER_CEILING_KB);
         mbPerSecondLimitGlobal = clampMbGlobal(mbPerSecondLimitGlobal);
+        // Far players (E1): mode normalizes through the shared helper (R-2/R-9); the
+        // ring stays well-formed (min dragged under max — an inverted ring hides
+        // everyone); a malformed null exclude list restores the empty default.
+        farPlayers = clampFarPlayersMode(farPlayers);
+        farPlayersUpdateIntervalTicks = clampFarPlayersUpdateInterval(farPlayersUpdateIntervalTicks);
+        farPlayersMaxDistanceBlocks = clampFarPlayersMaxDistance(farPlayersMaxDistanceBlocks);
+        farPlayersMinDistanceBlocks = Math.min(
+                clampFarPlayersMinDistance(farPlayersMinDistanceBlocks), farPlayersMaxDistanceBlocks);
+        if (farPlayersExclude == null) farPlayersExclude = List.of();
         generationConcurrencyLimitGlobal = clampGenGlobal(generationConcurrencyLimitGlobal);
         generationTimeoutSeconds = Math.clamp(generationTimeoutSeconds, LSSConstants.MIN_GENERATION_TIMEOUT, LSSConstants.MAX_GENERATION_TIMEOUT);
         // 0 (and negative nonsense) = dirty pushes disabled — the lodStoreMaxMB idiom; only a
