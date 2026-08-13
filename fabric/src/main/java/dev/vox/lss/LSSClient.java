@@ -13,6 +13,7 @@ public class LSSClient implements ClientModInitializer {
         Brand.load(LSSClient.class.getClassLoader());
         LSSClientNetworking.init();
         LSSClientCommands.init();
+        dev.vox.lss.networking.client.FarPlayerClientSupport.initRenderer();
         ModCompat.init();
         BenchmarkBridge.initClient();
     }

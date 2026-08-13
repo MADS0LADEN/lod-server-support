@@ -97,10 +97,32 @@ public final class FarPlayerClientSupport {
         lastSentPrefs = null;
     }
 
-    /** Disconnect: the tracker + the prefs-sent latch die with the connection. */
+    /** Disconnect: the tracker + the prefs-sent latch + the renderer's proxy set die
+     *  with the connection. */
     static void onSessionEnd() {
         TRACKER.clear();
         lastSentPrefs = null;
+        FarPlayerRenderer.clearInstance();
+    }
+
+    /**
+     * E2 renderer wiring, called once from {@link dev.vox.lss.LSSClient}: the
+     * COLLECT_SUBMITS pass (contained — a renderer bug degrades to no proxies) plus
+     * the ENTITY_LOAD edge trigger (a real player entity appearing kills its proxy the
+     * same frame — the crossfade guard; UNLOAD needs no hook, the per-frame
+     * real-present conjunct picks it up next pass).
+     */
+    public static void initRenderer() {
+        var renderer = new FarPlayerRenderer();
+        FarPlayerRenderer.install(renderer);
+        net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents
+                .COLLECT_SUBMITS.register(renderer::render);
+        net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientEntityEvents
+                .ENTITY_LOAD.register((entity, world) -> {
+                    if (entity instanceof net.minecraft.world.entity.player.Player p) {
+                        FarPlayerRenderer.onRealPlayerLoad(p.getUUID());
+                    }
+                });
     }
 
     /**

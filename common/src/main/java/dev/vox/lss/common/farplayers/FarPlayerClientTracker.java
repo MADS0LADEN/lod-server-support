@@ -31,7 +31,8 @@ public final class FarPlayerClientTracker {
     public record TrackedFarPlayer(UUID uuid, String name,
                                    FarPlayerWire.UpdateEntry latest,
                                    int cadenceTicks, long receivedAtMillis,
-                                   FarPlayerMotion motion) {}
+                                   FarPlayerMotion motion,
+                                   String[] equipmentIdentities, int[] equipmentCounts) {}
 
     private final Map<Integer, UUID> uuidByIndex = new HashMap<>();
     private final Map<UUID, String> nameByUuid = new HashMap<>();
@@ -104,8 +105,17 @@ public final class FarPlayerClientTracker {
                 motion = prev.motion();
                 motion.apply(e, updates.cadenceTicks(), nowMillis);
             }
+            // Equipment is STICKY (the wire carries it only when changed — a movement
+            // frame must not strip the renderer's armor state); pose/vehicle are
+            // authoritative per entry.
+            String[] equipIds = e.equipmentIdentities() != null
+                    ? e.equipmentIdentities()
+                    : (prev != null ? prev.equipmentIdentities() : null);
+            int[] equipCounts = e.equipmentIdentities() != null
+                    ? e.equipmentCounts()
+                    : (prev != null ? prev.equipmentCounts() : null);
             tracked.put(uuid, new TrackedFarPlayer(uuid, nameByUuid.get(uuid), e,
-                    updates.cadenceTicks(), nowMillis, motion));
+                    updates.cadenceTicks(), nowMillis, motion, equipIds, equipCounts));
             entriesApplied++;
         }
         updatesApplied++;
