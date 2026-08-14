@@ -536,6 +536,15 @@ the gaps as regressions.
 
 ### 5.5 The manual smoke checklist (the tier floor — normative)
 
+> **The client-run lever (rows 3-6; N-3 review MINOR):**
+> `./gradlew :neoforge:runClient -Plss.smoke.join=<host:port> -Plss.smoke.consumer=true`
+> — quick-plays into the named server with the lsstest companion's logging
+> `LSSApi` consumer armed (omit `-Plss.smoke.consumer` for the no-consumer
+> degrade arm; omit `-Plss.smoke.join` for a plain main-menu client). Watch
+> for `[lss-smoke] columns received=` lines. These rows are USER-DRIVEN: the
+> WSLg dev environment freezes the windowed client in render init (N-3
+> decisions-log entry), so they need a real GUI machine.
+
 Run per NeoForge-affecting release when the soak platform is skipped; results
 recorded in the release PR description. All on 26.2 unless noted:
 

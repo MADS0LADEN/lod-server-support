@@ -336,7 +336,12 @@ public final class ClientNetGlue {
                 LSSClientConfig.CONFIG.enableV19ServerCompat);
     }
 
-    /** DISCONNECT ladder body. */
+    /** DISCONNECT ladder body. Known shared residual (N-3 review, pre-existing and
+     *  loader-equivalent): a server-initiated play→config RECONFIGURATION fires
+     *  neither Fabric's DISCONNECT nor NeoForge's LoggingOut, so this body is
+     *  skipped there — {@code ClientSessionGate.onJoin}'s defensive teardown
+     *  covers the manager on the next join; the processor/far-player/trace
+     *  teardowns wait for the real disconnect. */
     public static void onDisconnect() {
         sessionGate.onDisconnect();
         FarPlayerClientSupport.onSessionEnd();
