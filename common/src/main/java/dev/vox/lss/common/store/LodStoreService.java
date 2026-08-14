@@ -3,7 +3,8 @@ package dev.vox.lss.common.store;
 /**
  * The LOD store (docs/planning/lod-store-implementation-plan.md §1): serves previously
  * serialized wire-format section bytes so a warm hit does no chunk NBT parse, no region
- * read, no serialization. Phase 1 ships the bounded in-memory tier; Phase 2 adds SQLite
+ * read, no serialization. (History: Phase 1 shipped a bounded in-memory tier; the tier
+ * was deleted 2026-08-13 — SQLite is the only engine.) Phase 2 added SQLite
  * behind the same interface (and the flat-file fallback engine, if the SQLite spike had
  * failed, would slot here too).
  *
@@ -119,7 +120,7 @@ public interface LodStoreService {
         return "";
     }
 
-    /** The mode this store was built for (memory tier only vs memory+disk). */
+    /** The mode this store was built for (OFF vs FULL — the SQLite engine). */
     LodStoreMode mode();
 
     /** Look up a column; null = miss. Reader-pool threads. Must never throw — internal
@@ -206,6 +207,6 @@ public interface LodStoreService {
         return "ok";
     }
 
-    /** Stop the batcher thread; the memory tier discards content (derived data). */
+    /** Stop the batcher thread (store content is derived data either way). */
     void shutdown();
 }

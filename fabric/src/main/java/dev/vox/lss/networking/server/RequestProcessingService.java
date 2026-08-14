@@ -192,8 +192,8 @@ public class RequestProcessingService {
         }
         this.wireCompressionLive = wireCompressionLive;
 
-        // LOD store (docs/planning/lod-store-implementation-plan.md): memory tier for
-        // "memory", memory + SQLite for "full". Attached to BOTH consumers before any
+        // LOD store (docs/planning/lod-store-implementation-plan.md): the SQLite engine
+        // for "on"/"full" (the memory tier is deleted). Attached to BOTH consumers before any
         // submit/tick: the reader owns the hit rung, the processor owns deposits +
         // invalidation fan-out. Environment resolved eagerly on the main thread (levels
         // are loaded at SERVER_STARTED): per-dimension region dirs via the same API the
@@ -259,9 +259,8 @@ public class RequestProcessingService {
                     storeRegistryFingerprint(server));
             this.lodStore = dev.vox.lss.common.store.LodStores.createOrNull(env);
             if (this.lodStore == null) {
-                LSSLogger.warn("lodStore=" + storeMode.configValue() + " requested but the "
-                        + dev.vox.lss.common.store.StoreCodec.NAME + " codec native cannot "
-                        + "load on this platform — running WITHOUT the LOD store");
+                // LodStores.createOrNull logged the per-cause warn (codec vs SQLite init —
+                // final-review A-M1: one shared message here misattributed SQLite failures).
             } else {
                 this.diskReader.attachStore(this.lodStore);
                 // C4: pre-migration wirefmt=19 store rows translate to the canonical

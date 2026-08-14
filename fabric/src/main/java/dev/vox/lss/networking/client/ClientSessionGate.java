@@ -400,6 +400,13 @@ final class ClientSessionGate {
             // (pinned: the old manager's cache save must land before the new one's
             // load), hence the snapshot rather than a reorder. A legacy-fallback
             // re-push self-corrects: legacy sessions hard-reset the governor on tick.
+            // Known ~1-tick corner (final-review B-N1): a re-push landing between a
+            // dimension swap and the old manager's next tick carries the OLD
+            // dimension's missing-vanilla floor (the rebuilt manager's dim phase takes
+            // the initial-load branch); a stale-LOW floor then over-cuts for ~a dozen
+            // intervals until the per-interval upward drift heals it. Accepted:
+            // self-healing, engaged-sessions-only, needs an admin re-push to coincide
+            // with a dimension trip inside one tick.
             TransferRateGovernor carried = null;
             if (previous != null) {
                 carried = new TransferRateGovernor();

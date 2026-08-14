@@ -86,8 +86,6 @@ public abstract class AbstractPlayerRequestState<T> {
     /** Last sampled outbound-buffer depth, and the session high-water. -1 = no signal. */
     private volatile long outboundPendingBytes = -1;
     private volatile long outboundPendingHighWater = -1;
-    /** Ticks on which the deference gate skipped the column flush. */
-
     // ---- Send pacing (enableSendPacing, send-pacing-plan.md v3) ----
     /** Refill-floored proportional drain: an over-floor backlog spreads over this many
      *  ticks (exponentially — each tick ships Q/HORIZON of what remains, clamped). */
@@ -1193,8 +1191,6 @@ public abstract class AbstractPlayerRequestState<T> {
     public long getOutboundPendingBytes() { return this.outboundPendingBytes; }
     /** Session high-water of {@link #getOutboundPendingBytes()}; -1 = never measured. */
     public long getOutboundPendingHighWater() { return this.outboundPendingHighWater; }
-    /** Ticks whose column flush the deference gate skipped. Nonzero on a healthy link is
-     *  a red flag, not the gate working — see the plan's §11.4 standing warning. */
     public int getHeldSyncSlots() { return this.heldSyncSlots; }
     public int getHeldGenSlots() { return this.heldGenSlots; }
     public int getSyncSlotCap() { return this.syncSlotCap; }

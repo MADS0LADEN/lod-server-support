@@ -105,7 +105,6 @@ SERVER_MECHANISM = {
     # Deposits consumed but not applied (tombstoned by an edit race / lost
     # latest-wins) — ordinary machinery, closes deposits+drops+skips == enqueued.
     "store deposit skips": "store.deposit_skips",
-    "store memory-tier hits": "store.mem_hits",
     "store sweep drops": "store.sweep_drops",
     "store backfill reads": "store.backfill_reads",
     "store backfill deposits": "store.backfill_deposits",
@@ -155,7 +154,6 @@ HIGH_WATER = {
     # across snapshots, which is the honest high water at 5 s resolution.
     "store db bytes": "store.db_bytes",
     "store wal bytes": "store.wal_bytes",
-    "store mem bytes": "store.mem_bytes",
 }
 # Shared with the checker (section_margins already references CS.SERVER_MOVING the same
 # way) — never a hand-copy: the store.queue addition proved hand-sync drifts.

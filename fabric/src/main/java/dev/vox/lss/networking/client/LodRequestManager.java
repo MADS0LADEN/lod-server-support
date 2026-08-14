@@ -374,7 +374,12 @@ public class LodRequestManager {
             // false and invite a fast re-declare storm right out of the halt.
             this.scanner.noteDeclared(0);
         } catch (Exception e) {
-            LSSLogger.error("Failed to send backpressure clear batch", e);
+            long n = BATCH_SEND_FAIL_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+            if (n > 0) {
+                LSSLogger.error("Failed to send backpressure clear batch (" + n
+                        + " send failure(s) since the last report; retried next halted"
+                        + " tick)", e);
+            }
             this.backpressureClearSent = false; // retry on the next halted tick
         }
     }

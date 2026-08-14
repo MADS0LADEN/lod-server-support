@@ -48,7 +48,11 @@ public abstract class AbstractChunkDiskReader {
     // (Gate PARK-OVERFLOW refusals are deliberately LOG-FREE — see the drop site.)
     // Non-timeout read failures aggregate too (log-sweep finding: the bare else beside
     // the throttled timeout branch repeated per failed read, and clients re-declare).
+    // SEPARATE instances (final-review A-M3): the flake catalog's decisive A7 check is
+    // `grep -c "Failed to read chunk" == 0`, and a shared throttle would let a delivery
+    // failure win the release window and silence a real read error's line for 60 s.
     private final LogThrottle readErrorWarn = new LogThrottle(SATURATION_WARN_INTERVAL_MS);
+    private final LogThrottle deliveryFailWarn = new LogThrottle(SATURATION_WARN_INTERVAL_MS);
 
     // Disk-read concurrency gate (disk-read-concurrency-gate-plan.md): bounds the
     // EXPENSIVE phase only — store hits are served before it. Constructed at pool size
@@ -350,7 +354,7 @@ public abstract class AbstractChunkDiskReader {
                     // original gets the duplicate-ghost above while the drained entry's
                     // pending wedges uncontained — the same accepted OOM-class residual,
                     // now two positions wide (review B-4).
-                    long fails = this.readErrorWarn.recordAndTryAcquire(
+                    long fails = this.deliveryFailWarn.recordAndTryAcquire(
                             System.nanoTime() / 1_000_000);
                     if (fails > 0) {
                         LSSLogger.error("Unexpected failure delivering disk read at "

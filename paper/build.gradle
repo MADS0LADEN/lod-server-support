@@ -149,14 +149,17 @@ runPaper.folia.registerTask {
 // ---- Voxy Server Side (VSS) branded variant -------------------------------------------
 //
 // Same plugin, second Modrinth project (voxy-server-side). Byte-copies the built release
-// shadowJar and rewrites only USER-FACING + LOCAL surfaces in plugin.yml (description,
-// website, the command key lsslod->vsslod, the command/permission descriptions, and the
-// permission node lss.admin->vss.admin) plus the lss-brand.properties display resource.
-// Every class and the manifest (incl. paperweight's mappings-namespace stamp) are copied
-// verbatim, and `name: LodServerSupport` / `main:` / `api-version:` are DELIBERATELY kept
-// so the plugin identity / config folder are shared and an LSS server and a VSS client (and
-// vice versa) stay fully wire-compatible (the command name + permission are local, never on
-// the wire). Paper plugins have no embedded icon; the VSS icon lives on the Modrinth page.
+// shadowJar and rewrites only USER-FACING + LOCAL surfaces in plugin.yml (the plugin NAME
+// -> VoxyServerSide since 2026-08-13 — XANTHA's release patch; the data folder therefore
+// FORKS to plugins/VoxyServerSide/ — plus description, author, website, the command key
+// lsslod->vsslod, the command/permission descriptions, and the admin node
+// lss.admin->vss.admin; the farplayers privacy nodes are deliberately NOT renamed — both
+// spellings ship in both jars) plus the lss-brand.properties display resource. Every
+// class and the manifest (incl. paperweight's mappings-namespace stamp) are copied
+// verbatim, and `main:` / `api-version:` stay verbatim — the package/class + platform
+// contract; wire compatibility is untouched by any of this (the command name +
+// permission are local, never on the wire). Paper plugins have no embedded icon; the
+// VSS icon lives on the Modrinth page.
 // See docs/planning/ci-dual-publish.md. release_check.py pins the identity lines verbatim
 // and the command/permission/brand rewrites present.
 import java.util.zip.ZipFile
