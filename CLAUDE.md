@@ -6,9 +6,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 LOD Server Support (LSS) — distributes LOD chunk data from servers to clients over a custom networking protocol. Supports Fabric (client + server) and Paper (server only). The Folia code paths (regionized probing, lifecycle mailbox) exist in the one plugin jar. **`folia-supported` is declared on every line again as of 2026-08-01**: Folia published its first MC 26.2 build (`26.2-1`, channel **BETA**, 2026-07-28), removing the reason it was dropped at v0.7.0 (the flag would have auto-loaded release jars onto a platform that did not exist). `PluginYmlContractTest` + `release_check.py` now pin the flag's PRESENCE — the guarded failure is a jar that silently stops loading on Folia. Folia stays **experimental on every line** (26.2 included): single-player soak validated, concurrent multi-region ingress untested. `SOAK_PLATFORM=folia` finally has something to download on 26.2, and **all four Folia scenarios passed on 2026-08-01** against real Folia 26.2-1 — fresh-backfill (41 windows), warm-rejoin (55), dimension-trip (55), paper-dirty-falling-block (27), 0 violations and 0 warnings throughout. The regionized probe (`in_memory` serves), Moonrise generation (2121 submitted/completed, 0 timeouts) and the protocol-19 zstd column path all ran. **This does NOT retire the experimental label**: every one of those scenarios is single-player, and the stated exit criterion is concurrent MULTI-REGION ingress, which no scenario in the harness produces. Clients request distant chunks individually; the server reads them from disk or memory and streams serialized sections back, enabling LOD rendering mods to display terrain beyond vanilla render distance.
 
+## Support tiers (PLANNED expansion — v0.11.0 stage N, docs/planning/neoforge-support-plan.md)
+
+Fabric + Paper on main (26.2) and the 26.1/1.21.11 support lines are **FULL tier**:
+complete test gauntlets, soaks, live-rig burn-in. **NeoForge (all lines, client +
+server) and the MC 1.21.1 line are BEST-EFFORT tier** (user decision 2026-08-14):
+they track the mainline feature set, but feature cuts are acceptable where the
+platform/version fights (documented per release), automated coverage is reduced
+(neoforge = contract tests + a ~8-12-test gametest smoke subset + an abbreviated
+`SOAK_PLATFORM=neoforge` smoke soak that may be SKIPPED entirely; no Tier 3 on
+either; 1.21.1 additionally ships the spike's feature-drop list), and
+variant-specific issues triage at lower priority. The NeoForge client assumes a
+community Voxy variant with the normal Voxy API surface — `VoxyCompat`'s
+graceful-degrade ladder (no-sink, warn-once, no capability bit) is the contract
+when it doesn't match. **Wire compatibility is NEVER tiered** — every jar speaks
+the same protocol at full fidelity.
+
 ## Project Structure
 
-Multi-project Gradle build with three subprojects:
+Multi-project Gradle build with three subprojects (stage N adds `xplat/` shared
+source + `neoforge/`):
 
 ```
 lod-server-support/
