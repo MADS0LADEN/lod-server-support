@@ -127,6 +127,15 @@ Mirror the `lod_distance` pattern in `LSSConfigMenu` exactly:
 - `Range(0, 3200, 50)`; `setDefaultValue(0)`; value formatter renders 0 as
   `lss.config.column_rate_limit.unlimited` ("Unlimited") — the `lod_distance`
   "Server Default" pattern.
+- **AMENDED 2026-08-14 (granularity request — a user wanted ~20 col/s, unreachable
+  with step 50):** the slider is now CURVED — the option int is an index into
+  `RateSliderStops.STOPS` (0=off; 10..100 by 10, ..500 by 25, ..1000 by 50, ..3200
+  by 100, ~59 stops), value formatter + binding map index↔rate, hand-edited
+  off-curve values display snapped to the nearest stop and are rewritten only if
+  the user moves this slider. `RateSliderStops` is Sodium-import-free so the
+  Tier 1 curve pin (`ConfigValidationTest.rateSliderCurveRoundTripsTheClamp…`)
+  can classload it; the round-trip invariant (every nonzero stop survives
+  validate() unchanged) is pinned there.
 - `OptionImpact.LOW` (client-side pacing, not render cost), binding to
   `cfg.lodColumnsPerSecondLimit`, `setStorageHandler(save)`, and the same
   `setEnabledProvider` gate on `lss:receive_server_lods`.
@@ -165,6 +174,11 @@ Mirror the `lod_distance` pattern in `LSSConfigMenu` exactly:
 - `validate()`: 0 stays 0; nonzero clamps to `[50, 100_000]`. Floor 50 keeps the scanner
   functional (a sub-50 cap starves the frontier to near-wedge cadence for no plausible
   use); the high ceiling is inert but harmless.
+  **AMENDED 2026-08-14: floor lowered to 10** — "no plausible use below 50" was
+  falsified by a real request (a deliberate ~20 col/s trickle on a constrained
+  link), and the machinery is proven far lower (the transfer governor drives the
+  same actuators to 1 col/s). Single-digit rates stay clamped up to 10: that is
+  the genuinely near-wedge zone.
 - **Below R = 776** (`SYNC_ON_LOAD_SLOT_CAP + MAX_CONCURRENT_GENERATIONS +
   WANT_SET_FRONTIER_RESERVE`) the declared want-set no longer dominates the server's
   worst-case in-flight set — the invariant the constant 800 was sized for. Consequence is
