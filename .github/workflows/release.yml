@@ -94,6 +94,11 @@ jobs:
       - name: Build Paper + Tier 1 tests
         run: ./gradlew :paper:test :paper:shadowJar -Pmod_version=${GITHUB_REF_NAME#v}
 
+      # Stage N (best-effort tier): :neoforge:build = xplat compile under MDG (the
+      # twin-contract enforcement) + the contract suite + shadowJar + the VSS repackage.
+      - name: Build NeoForge + contract tests
+        run: ./gradlew :neoforge:build -Pmod_version=${GITHUB_REF_NAME#v}
+
       # Gate the tag-versioned artifacts that actually ship (build.yml gates only the default-version
       # CI build). GitHub Actions exports CI=true, so the build steps above produced CI-named jars
       # that release_check's RELEASE_GLOBS match. Runs after the builds, before the irreversible publish.
@@ -112,6 +117,7 @@ jobs:
           files: |
             fabric/build/libs/lod-server-support-fabric-*.jar
             paper/build/libs/lod-server-support-paper-*.jar
+            neoforge/build/libs/lod-server-support-neoforge-*.jar
 
       - name: Upload Fabric to Modrinth
         uses: Kir-Antipov/mc-publish@v3.3
@@ -123,6 +129,24 @@ jobs:
           version: ${{ github.ref_name }}+fabric+mc26.2
           version-type: release
           loaders: fabric
+          game-versions: |
+            26.2
+          changelog: ${{ steps.release_notes.outputs.notes }}
+
+      # Stage N (neoforge-support-plan.md §4.2): the version NAME carries the
+      # server-side caveat — Modrinth search results and version lists never render
+      # release notes, and on 26.2 no community Voxy build exists yet, so the client
+      # half ships compiled-and-inert (plan §0.1). Best-effort tier (CLAUDE.md).
+      - name: Upload NeoForge to Modrinth
+        uses: Kir-Antipov/mc-publish@v3.3
+        with:
+          modrinth-id: lKiXKLvv
+          modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
+          files: neoforge/build/libs/lod-server-support-neoforge-*.jar
+          name: ${{ github.ref_name }} - NeoForge (MC 26.2, server-side; client needs a community Voxy build)
+          version: ${{ github.ref_name }}+neoforge+mc26.2
+          version-type: release
+          loaders: neoforge
           game-versions: |
             26.2
           changelog: ${{ steps.release_notes.outputs.notes }}
