@@ -29,12 +29,17 @@ class TransferRateGovernorTest {
         g.tick(now, bytes, cols, cols * 100, awaiting, halted, ping, true);
     }
 
-    /** Seeds a 50 ms ping baseline, then one congested slow interval → engaged. */
+    /** Seeds a 50 ms ping baseline, then TWO consecutive congested slow intervals →
+     *  engaged (the round-5 debounce: one interval is a transient, never an
+     *  engagement). Cumulative bytes double so measured stays bytesPerInterval/2 s
+     *  per interval; callers continuing the timeline resume from 2×bytesPerInterval. */
     private long engageAt(TransferRateGovernor g, long t, long bytesPerInterval) {
         tick(g, t, 0, 0, 1, false, NORMAL_PING);
         tick(g, t + INTERVAL, bytesPerInterval, 10, 1, false, CONGESTED_PING);
-        assertTrue(g.isEngaged(), "congested shortfall interval must engage");
-        return t + INTERVAL;
+        assertFalse(g.isEngaged(), "one congested interval is a transient, not congestion");
+        tick(g, t + 2 * INTERVAL, 2 * bytesPerInterval, 20, 1, false, CONGESTED_PING);
+        assertTrue(g.isEngaged(), "the second consecutive congested interval engages");
+        return t + 2 * INTERVAL;
     }
 
     // ---- Engagement gate ----
@@ -60,11 +65,29 @@ class TransferRateGovernorTest {
     void congestedShortfallEngagesAtMeasuredMinusHalfStep() {
         var g = new TransferRateGovernor();
         tick(g, 0, 0, 0, 1, false, NORMAL_PING);
-        // 800 KB over 2 s = 400 KB/s measured, ping excess ~1950 ms.
+        // 800 KB over 2 s = 400 KB/s measured, ping excess ~1950 ms — twice (debounce).
         tick(g, INTERVAL, 800 * KB, 100, 1, false, CONGESTED_PING);
+        tick(g, 2 * INTERVAL, 1600 * KB, 200, 1, false, CONGESTED_PING);
         assertTrue(g.isEngaged());
         assertEquals(400 * KB - STEP / 2, g.getDesiredBytesPerSec(),
                 "bootstrap-by-shortfall: desired = measured − STEP/2");
+    }
+
+    @Test
+    void engageRequiresTwoConsecutiveCongestedIntervals() {
+        // Round-5 review M1: the ping input is a raw 1 Hz probe sample now — a single
+        // GC pause / WiFi burst crossing 250 ms must not buy a sticky engagement
+        // (there is no ping-normal escape anymore). A normal interval between two
+        // congested ones resets the pending streak.
+        var g = new TransferRateGovernor();
+        tick(g, 0, 0, 0, 1, false, NORMAL_PING);
+        tick(g, INTERVAL, 200 * KB, 20, 1, false, CONGESTED_PING);
+        assertFalse(g.isEngaged(), "one congested interval never engages");
+        tick(g, 2 * INTERVAL, 400 * KB, 40, 1, false, NORMAL_PING); // transient over
+        tick(g, 3 * INTERVAL, 600 * KB, 60, 1, false, CONGESTED_PING);
+        assertFalse(g.isEngaged(), "a broken streak restarts the debounce");
+        tick(g, 4 * INTERVAL, 800 * KB, 80, 1, false, CONGESTED_PING);
+        assertTrue(g.isEngaged(), "two consecutive congested intervals engage");
     }
 
     @Test
@@ -87,8 +110,10 @@ class TransferRateGovernorTest {
         tick(g, INTERVAL / 2, 0, 0, 1, true, CONGESTED_PING); // halt mid-interval
         tick(g, INTERVAL, 100 * KB, 10, 1, false, CONGESTED_PING);
         assertFalse(g.isEngaged(), "a halt-overlapped interval must not engage");
-        // The same shape WITHOUT the halt engages — proves the halt was the gate.
+        // The same shape WITHOUT the halt engages (two clean congested intervals —
+        // the debounce) — proves the halt was the gate.
         tick(g, 2 * INTERVAL, 200 * KB, 20, 1, false, CONGESTED_PING);
+        tick(g, 3 * INTERVAL, 300 * KB, 30, 1, false, CONGESTED_PING);
         assertTrue(g.isEngaged());
     }
 
@@ -99,17 +124,20 @@ class TransferRateGovernorTest {
         tick(g, 0, 500 * KB, 50, 1, false, NORMAL_PING);
         tick(g, INTERVAL, 100 * KB, 10, 1, false, CONGESTED_PING); // ran backwards
         assertFalse(g.isEngaged(), "a reset-spanning interval must not engage");
-        // Next interval measures cleanly from the reseeded start.
+        // The next TWO intervals measure cleanly from the reseeded start (debounce).
         tick(g, 2 * INTERVAL, 300 * KB, 30, 1, false, CONGESTED_PING);
-        assertTrue(g.isEngaged(), "the clean interval after the reseed engages");
+        tick(g, 3 * INTERVAL, 500 * KB, 50, 1, false, CONGESTED_PING);
+        assertTrue(g.isEngaged(), "the clean intervals after the reseed engage");
     }
 
     @Test
     void fastMeasuredRateNeverEngages() {
         var g = new TransferRateGovernor();
         tick(g, 0, 0, 0, 1, false, NORMAL_PING);
-        // 16 MB over 2 s = 8 MB/s — above ENGAGE_BELOW even with congested ping.
+        // 8 MB/s per interval — above ENGAGE_BELOW even with congested ping, twice
+        // (so the debounce is provably not what held it back).
         tick(g, INTERVAL, 16_384 * KB, 500, 1, false, CONGESTED_PING);
+        tick(g, 2 * INTERVAL, 32_768 * KB, 1000, 1, false, CONGESTED_PING);
         assertFalse(g.isEngaged(), "sessions measuring above the threshold never engage");
     }
 
@@ -121,11 +149,12 @@ class TransferRateGovernorTest {
         long t = 0;
         tick(g, t, 0, 0, 1, false, NORMAL_PING);
         tick(g, t += INTERVAL, 800 * KB, 100, 1, false, CONGESTED_PING);
+        tick(g, t += INTERVAL, 1600 * KB, 200, 1, false, CONGESTED_PING); // debounce
         long desired = 400 * KB - STEP / 2; // 272 KB/s
         assertEquals(desired, g.getDesiredBytesPerSec());
         // Kept-up: measured within STEP/4 below desired → +STEP (the ABSOLUTE band,
         // review M3 — a multiplicative 0.9 band ratchets standing queue).
-        long bytes = 800 * KB;
+        long bytes = 1600 * KB;
         long measuredBps = desired - STEP / 4 + KB; // just inside the band
         bytes += measuredBps * 2;
         tick(g, t += INTERVAL, bytes, 200, 1, false, CONGESTED_PING);
@@ -153,18 +182,20 @@ class TransferRateGovernorTest {
         g.tick(t, 0, 0, declared, 1, false, NORMAL_PING, true);
         g.tick(t += INTERVAL, 800 * KB, 100, declared += 200, 1, false,
                 CONGESTED_PING, true);
+        g.tick(t += INTERVAL, 1600 * KB, 200, declared += 200, 1, false,
+                CONGESTED_PING, true); // debounce
         long desired = g.getDesiredBytesPerSec(); // 272 KB/s; EWMA 8 KB → R = 34
         assertEquals(34, g.sustainedColumnsPerSecond());
         // A quarter-rate interval (68 KB/s) with almost nothing OFFERED (10 declared
         // vs the ~51 the ¾ term requires): frozen.
-        long bytes = 800 * KB + 68 * KB * 2;
-        g.tick(t += INTERVAL, bytes, 117, declared += 10, 1, false,
+        long bytes = 1600 * KB + 68 * KB * 2;
+        g.tick(t += INTERVAL, bytes, 217, declared += 10, 1, false,
                 CONGESTED_PING, true);
         assertEquals(desired, g.getDesiredBytesPerSec(),
                 "an under-offered shortfall must freeze desired");
         // The SAME measured rate with a full offer is genuine link evidence: cut.
         bytes += 68 * KB * 2;
-        g.tick(t += INTERVAL, bytes, 134, declared += 200, 1, false,
+        g.tick(t += INTERVAL, bytes, 334, declared += 200, 1, false,
                 CONGESTED_PING, true);
         assertEquals(TransferRateGovernor.MIN_RATE_BYTES_PER_SEC,
                 g.getDesiredBytesPerSec(),
@@ -180,13 +211,14 @@ class TransferRateGovernorTest {
         long t = 0;
         tick(g, t, 0, 0, 1, false, NORMAL_PING);
         tick(g, t += INTERVAL, 800 * KB, 100, 1, false, CONGESTED_PING);
-        long bytes = 800 * KB;
+        tick(g, t += INTERVAL, 1600 * KB, 200, 1, false, CONGESTED_PING); // debounce
+        long bytes = 1600 * KB;
         // Feed exactly-kept-up intervals (measured = desired): 3 step up, the 4th drains.
         for (int keptUp = 1; keptUp <= TransferRateGovernor.DRAIN_EVERY_KEPT_UP; keptUp++) {
             long desiredBefore = g.getDesiredBytesPerSec();
             long measuredBps = desiredBefore;
             bytes += measuredBps * 2;
-            tick(g, t += INTERVAL, bytes, 100 + keptUp * 10L, 1, false, CONGESTED_PING);
+            tick(g, t += INTERVAL, bytes, 200 + keptUp * 10L, 1, false, CONGESTED_PING);
             if (keptUp < TransferRateGovernor.DRAIN_EVERY_KEPT_UP) {
                 assertEquals(desiredBefore + STEP, g.getDesiredBytesPerSec(),
                         "kept-up " + keptUp + " probes up");
@@ -207,8 +239,9 @@ class TransferRateGovernorTest {
         long t = 0;
         tick(g, t, 0, 0, 1, false, NORMAL_PING);
         tick(g, t += INTERVAL, 800 * KB, 100, 1, false, CONGESTED_PING);
+        tick(g, t += INTERVAL, 1600 * KB, 200, 1, false, CONGESTED_PING); // debounce
         long desired = g.getDesiredBytesPerSec();
-        long bytes = 800 * KB;
+        long bytes = 1600 * KB;
         // Kept-up interval WITH movement: held.
         bytes += desired * 2;
         g.noteMovement();
@@ -239,16 +272,17 @@ class TransferRateGovernorTest {
         long t = 0;
         tick(g, t, 0, 0, 1, false, NORMAL_PING);
         tick(g, t += INTERVAL, 800 * KB, 100, 1, false, CONGESTED_PING);
-        long bytes = 800 * KB;
+        tick(g, t += INTERVAL, 1600 * KB, 200, 1, false, CONGESTED_PING); // debounce
+        long bytes = 1600 * KB;
         for (int keptUp = 1; keptUp < TransferRateGovernor.DRAIN_EVERY_KEPT_UP; keptUp++) {
             bytes += g.getDesiredBytesPerSec() * 2;
-            tick(g, t += INTERVAL, bytes, 100 + keptUp * 10L, 1, false, CONGESTED_PING);
+            tick(g, t += INTERVAL, bytes, 200 + keptUp * 10L, 1, false, CONGESTED_PING);
         }
         long desiredBefore = g.getDesiredBytesPerSec();
         // The drain-cadence kept-up measures DOUBLE desired (EWMA-lag shape): must
         // bleed down from desired, never jump up toward measured.
         bytes += desiredBefore * 4;
-        tick(g, t += INTERVAL, bytes, 200, 1, false, CONGESTED_PING);
+        tick(g, t += INTERVAL, bytes, 300, 1, false, CONGESTED_PING);
         assertEquals(desiredBefore - STEP / 2, g.getDesiredBytesPerSec(),
                 "the drain anchors at min(desired, measured)");
     }
@@ -258,8 +292,9 @@ class TransferRateGovernorTest {
         var g = new TransferRateGovernor();
         long t = 0;
         tick(g, t, 0, 0, 1, false, NORMAL_PING);
-        // Engage at a crawl: 20 KB over 2 s = 10 KB/s.
+        // Engage at a crawl: 20 KB over 2 s = 10 KB/s (twice — the debounce).
         tick(g, t += INTERVAL, 20 * KB, 4, 1, false, CONGESTED_PING);
+        tick(g, t += INTERVAL, 40 * KB, 8, 1, false, CONGESTED_PING);
         assertEquals(TransferRateGovernor.MIN_RATE_BYTES_PER_SEC, g.getDesiredBytesPerSec(),
                 "desired floors at MIN_RATE, never below");
     }
@@ -273,13 +308,14 @@ class TransferRateGovernorTest {
         var g = new TransferRateGovernor();
         long t = 0;
         tick(g, t, 0, 0, 1, false, NORMAL_PING);
-        // Engage at 3.5 MB/s (just under the 4 MB threshold).
+        // Engage at 3.5 MB/s (just under the 4 MB threshold), twice — the debounce.
         tick(g, t += INTERVAL, 7_168 * KB, 700, 1, false, CONGESTED_PING);
+        tick(g, t += INTERVAL, 14_336 * KB, 1400, 1, false, CONGESTED_PING);
         assertTrue(g.isEngaged());
-        long bytes = 7_168 * KB;
-        long cols = 700;
-        // Feed measured = desired: the loop climbs +STEP per kept-up (every 8th
-        // drains −STEP/4), crossing 4 MB in a few intervals, then needs 10 more
+        long bytes = 14_336 * KB;
+        long cols = 1400;
+        // Feed measured = desired: the loop climbs +STEP per kept-up (every 4th
+        // drains −STEP/2), crossing 4 MB in a few intervals, then needs 10 more
         // qualifying intervals above it. 20 is comfortably enough.
         int intervals = 0;
         while (g.isEngaged() && intervals++ < 20) {
@@ -292,35 +328,174 @@ class TransferRateGovernorTest {
     }
 
     @Test
-    void pingNormalStreakDisengagesEvenWhileConverged() {
-        // Review m10 (frozen-engaged): a converged session yields no qualifying
-        // intervals, so the rate path can never disengage it — the ping-normal path
-        // must, or a later teleport on a healed link resumes under a stale low cap.
+    void pingNormalNeverDisengagesWhileTheCapBinds() {
+        // Live round 5 INVERTED review m10's ping-normal disengage: normal ping under
+        // a binding cap is the governor's own success, not link health. The traced
+        // sawtooth — ~1 min of governed calm, path (b) fires, the un-capped link runs
+        // away to 4.7 s ping for 25 s (the tab-ping blind spot) — is what this pin
+        // prevents. 100 converged normal-ping intervals (~3 min): still engaged.
         var g = new TransferRateGovernor();
         long t = engageAt(g, 0, 300 * KB);
-        long bytes = 300 * KB;
-        // Converged: no demand (awaiting 0), normal ping, no bytes.
-        for (int i = 0; i < TransferRateGovernor.DISENGAGE_PING_NORMAL_INTERVALS; i++) {
-            assertTrue(g.isEngaged(), "still engaged at converged interval " + i);
+        long bytes = 600 * KB; // engageAt's cumulative endpoint
+        for (int i = 0; i < 100; i++) {
             tick(g, t += INTERVAL, bytes, 30, 0, false, NORMAL_PING);
+            assertTrue(g.isEngaged(), "normal ping alone must NEVER disengage (i=" + i + ")");
         }
-        assertFalse(g.isEngaged(), "sustained normal ping must disengage");
-        assertEquals(0, g.sustainedColumnsPerSecond(), "the cap drops entirely");
+        assertTrue(g.sustainedColumnsPerSecond() > 0, "the cap stays armed");
     }
 
     @Test
-    void elevatedPingResetsThePingNormalStreak() {
+    void bindingCapWithNormalPingNeverDisengagesWhileServerLimited() {
+        // The qualifying-interval variant of the deletion pin (round-5 review m3):
+        // bytes flowing at a server-limited 300 KB/s, awaiting > 0, normal ping
+        // throughout. The AIMD oscillates desired around the achieved rate (kept-up
+        // climb → offer-backed shortfall cut) and never crosses the 4 MB/s rate
+        // disengage — ping-normal must not be an exit for this population either.
         var g = new TransferRateGovernor();
-        long t = engageAt(g, 0, 300 * KB);
-        long bytes = 300 * KB;
-        for (int i = 0; i < TransferRateGovernor.DISENGAGE_PING_NORMAL_INTERVALS - 1; i++) {
-            tick(g, t += INTERVAL, bytes, 30, 0, false, NORMAL_PING);
+        long t = engageAt(g, 0, 600 * KB);
+        long bytes = 1200 * KB;
+        long cols = 20;
+        for (int i = 0; i < 40; i++) {
+            bytes += 300 * KB * 2; // measured 300 KB/s every interval
+            cols += 30;
+            tick(g, t += INTERVAL, bytes, cols, 1, false, NORMAL_PING);
+            assertTrue(g.isEngaged(),
+                    "a server-limited binding cap must stay engaged (i=" + i + ")");
         }
-        tick(g, t += INTERVAL, bytes, 30, 0, false, CONGESTED_PING); // resets streak
-        for (int i = 0; i < TransferRateGovernor.DISENGAGE_PING_NORMAL_INTERVALS - 1; i++) {
-            tick(g, t += INTERVAL, bytes, 30, 0, false, NORMAL_PING);
+        assertTrue(g.getDesiredBytesPerSec() < TransferRateGovernor.ENGAGE_BELOW_BYTES_PER_SEC,
+                "the oscillation stays below the rate-disengage threshold");
+    }
+
+    // ---- Vanilla-first (live round 5: the fly-then-stop desync) ----
+
+    /** Engaged at ~300 KB/s with the missing floor learned at 20 (the view-edge ring). */
+    private long engageWithMissingFloor(TransferRateGovernor g) {
+        g.noteMissingVanilla(20);
+        long t = engageAt(g, 0, 600 * KB);
+        return t;
+    }
+
+    @Test
+    void missingVanillaExcessCutsEvenWhenKeptUp() {
+        // The precondition measured live: governed 590 KB/s of a 750 KB/s link, vanilla
+        // 20+ chunks behind (miss 41-43 over the 20 floor), silent movement rejections.
+        // A kept-up interval (measured = desired, which would otherwise STEP UP) must
+        // CUT once the excess crosses the margin.
+        var g = new TransferRateGovernor();
+        long t = engageWithMissingFloor(g);
+        long desired = g.getDesiredBytesPerSec();
+        g.noteMissingVanilla(20 + TransferRateGovernor.MISSING_VANILLA_CUT_EXCESS);
+        long bytes = 1200 * KB + desired * 2; // measured = desired: kept up
+        tick(g, t + INTERVAL, bytes, 60, 1, false, CONGESTED_PING);
+        assertTrue(g.getDesiredBytesPerSec() < desired,
+                "vanilla-behind must cut, never climb");
+        assertEquals(Math.max(desired - STEP / 2, TransferRateGovernor.MIN_RATE_BYTES_PER_SEC),
+                g.getDesiredBytesPerSec(), "the cut lands at measured − STEP/2");
+    }
+
+    @Test
+    void missingVanillaBelowTheMarginStepsNormally() {
+        var g = new TransferRateGovernor();
+        long t = engageWithMissingFloor(g);
+        long desired = g.getDesiredBytesPerSec();
+        g.noteMissingVanilla(20 + TransferRateGovernor.MISSING_VANILLA_CUT_EXCESS - 1);
+        long bytes = 1200 * KB + desired * 2;
+        tick(g, t + INTERVAL, bytes, 60, 1, false, CONGESTED_PING);
+        assertEquals(desired + STEP, g.getDesiredBytesPerSec(),
+                "below the margin the kept-up climb proceeds");
+    }
+
+    @Test
+    void permanentEdgeRingFloorNeverReadsAsExcess() {
+        // The session MIN learns the server-view-distance edge ring (~20 on the rig):
+        // a steady 20 is the floor itself, excess 0 — cutting on it would punish every
+        // session with a permanent missing ring.
+        var g = new TransferRateGovernor();
+        long t = engageWithMissingFloor(g);
+        long desired = g.getDesiredBytesPerSec();
+        g.noteMissingVanilla(20);
+        long bytes = 1200 * KB + desired * 2;
+        tick(g, t + INTERVAL, bytes, 60, 1, false, CONGESTED_PING);
+        assertEquals(desired + STEP, g.getDesiredBytesPerSec(),
+                "the learned floor is not excess");
+    }
+
+    @Test
+    void spuriouslyLowMissingFloorHealsByDrift() {
+        // Round-5 review M2: the floor is a MIN over a SETTINGS-dependent baseline —
+        // a render-distance change can leave a stale-low floor reading the new
+        // permanent edge ring as perpetual excess. The per-interval drift raises the
+        // floor toward the sample, so the spurious cut disarms and the climb resumes
+        // within ~a dozen intervals instead of pinning MIN forever.
+        var g = new TransferRateGovernor();
+        g.noteMissingVanilla(0); // old settings: floor 0
+        long t = engageAt(g, 0, 600 * KB);
+        g.noteMissingVanilla(20); // new settings: the permanent ring reads "excess 20"
+        long bytes = 1200 * KB;
+        long cols = 20;
+        boolean climbed = false;
+        long prev = g.getDesiredBytesPerSec();
+        for (int i = 0; i < 20; i++) {
+            bytes += g.getDesiredBytesPerSec() * 2; // measured = desired: kept up
+            cols += 30;
+            tick(g, t += INTERVAL, bytes, cols, 1, false, CONGESTED_PING);
+            if (g.getDesiredBytesPerSec() > prev) { climbed = true; break; }
+            prev = g.getDesiredBytesPerSec();
         }
-        assertTrue(g.isEngaged(), "the streak must restart after an elevated reading");
+        assertTrue(climbed, "the drifted floor must disarm the spurious cut");
+    }
+
+    @Test
+    void vanillaFirstCutNeverRaisesDesired() {
+        // Round-5 review m2: the cut anchors min(desired, measured) — the interval
+        // right after a deep cut measures the pre-cut in-flight tail (measured well
+        // above the new desired), and a bare measured anchor would RAISE the cap
+        // mid-shed.
+        var g = new TransferRateGovernor();
+        g.noteMissingVanilla(20);
+        long t = engageAt(g, 0, 1600 * KB); // measured 800 KB/s → desired 672 KB/s
+        g.noteMissingVanilla(40); // deep excess (drift erodes slowly at gap/8)
+        long bytes = 3200 * KB;
+        bytes += 672 * KB * 2; // measured = desired → first cut lands 544 KB/s
+        tick(g, t += INTERVAL, bytes, 60, 1, false, CONGESTED_PING);
+        assertEquals(544 * KB, g.getDesiredBytesPerSec(), "first cut: anchor − STEP/2");
+        bytes += 672 * KB * 2; // the pre-cut tail still delivers ABOVE desired
+        tick(g, t += INTERVAL, bytes, 90, 1, false, CONGESTED_PING);
+        assertEquals(416 * KB, g.getDesiredBytesPerSec(),
+                "a tail above desired keeps the shed moving DOWN (a bare measured"
+                        + " anchor would hold at 544)");
+    }
+
+    @Test
+    void missingVanillaNeverEngagesAnUnengagedSession() {
+        // Engaged-only by design: fast links (which never engage) must be untouched —
+        // vanilla briefly behind during flight on a LAN is normal, not congestion.
+        var g = new TransferRateGovernor();
+        tick(g, 0, 0, 0, 1, false, NORMAL_PING);
+        g.noteMissingVanilla(0);
+        g.noteMissingVanilla(200);
+        tick(g, INTERVAL, 300 * KB, 30, 1, false, NORMAL_PING);
+        assertFalse(g.isEngaged(), "missing-vanilla excess is never an engage trigger");
+    }
+
+    @Test
+    void missingFloorRelearnsAfterDimensionChange() {
+        // A new dimension is a new view: a stale low floor would read the whole fresh
+        // view as vanilla-behind and cut for nothing. onDimensionChange clears both
+        // samples; a post-change interval at the new dimension's floor steps normally.
+        var g = new TransferRateGovernor();
+        g.noteMissingVanilla(0); // old dimension's floor: 0
+        long t = engageAt(g, 0, 600 * KB);
+        g.onDimensionChange(); // disengages (control state dies; measurements survive)
+        // Re-engage in the new dimension off the surviving ping baseline (the unseeded
+        // interval re-bases the cumulative counters, so absolute values restart fine).
+        t = engageAt(g, t + INTERVAL, 600 * KB);
+        long desired = g.getDesiredBytesPerSec();
+        g.noteMissingVanilla(40); // the new view: first sample seeds the new floor
+        long bytes = 1200 * KB + desired * 2;
+        tick(g, t + INTERVAL, bytes, 60, 1, false, CONGESTED_PING);
+        assertEquals(desired + STEP, g.getDesiredBytesPerSec(),
+                "the first post-change sample is the new floor, not excess");
     }
 
     // ---- Size estimator + conversion ----
@@ -334,6 +509,7 @@ class TransferRateGovernorTest {
         // 2 columns of 100 KB each: EWMA seeds at ~100 KB; measured 100 KB/s → engage
         // at MIN_RATE. MIN_RATE/100KB < 1 → floors at 1.
         tick(g, INTERVAL, 200 * KB, 2, 1, false, CONGESTED_PING);
+        tick(g, 2 * INTERVAL, 400 * KB, 4, 1, false, CONGESTED_PING); // debounce
         assertTrue(g.isEngaged());
         assertEquals(1, g.sustainedColumnsPerSecond(), "conversion floors at 1 col/s");
         assertEquals(1, g.burstColumnsPerSecond(), "burst floors at 1 too");
@@ -347,6 +523,7 @@ class TransferRateGovernorTest {
         var g = new TransferRateGovernor();
         tick(g, 0, 0, 0, 1, false, NORMAL_PING);
         tick(g, INTERVAL, 200 * KB, 0, 1, false, CONGESTED_PING);
+        tick(g, 2 * INTERVAL, 400 * KB, 0, 1, false, CONGESTED_PING); // debounce
         assertTrue(g.isEngaged(), "byte flow with congested ping engages");
         assertEquals(-1.0, g.getSizeEstimateForTest(), 1e-9, "no sample yet");
         assertEquals(0, g.sustainedColumnsPerSecond(), "no estimate = no cap");
@@ -361,6 +538,7 @@ class TransferRateGovernorTest {
         tick(g, 0, 0, 0, 1, false, NORMAL_PING);
         // 100 columns × 8 KB = 800 KB over 2 s: EWMA ~8 KB, desired 272 KB/s → R = 34.
         tick(g, INTERVAL, 800 * KB, 100, 1, false, CONGESTED_PING);
+        tick(g, 2 * INTERVAL, 1600 * KB, 200, 1, false, CONGESTED_PING); // debounce
         assertEquals(34, g.sustainedColumnsPerSecond());
         assertEquals(9, g.burstColumnsPerSecond(), "ceil(34/4) = 9");
     }
@@ -462,11 +640,13 @@ class TransferRateGovernorTest {
         assertEquals(0, g.sustainedColumnsPerSecond());
         assertEquals(estimate, g.getSizeEstimateForTest(), 1e-9,
                 "the size estimate survives");
-        // Re-engagement uses the KEPT 50 ms baseline: one congested slow interval
-        // suffices (a reseeded baseline would read excess ~0 here and never engage).
-        tick(g, t += INTERVAL, 400 * KB, 40, 1, false, CONGESTED_PING);
+        // Re-engagement uses the KEPT 50 ms baseline: two congested slow intervals
+        // (the debounce) suffice — a reseeded baseline would read excess ~0 here and
+        // never engage at all.
+        tick(g, t += INTERVAL, 400 * KB, 40, 1, false, CONGESTED_PING); // reseed tick
         tick(g, t += INTERVAL, 700 * KB, 70, 1, false, CONGESTED_PING);
-        assertTrue(g.isEngaged(), "the kept baseline re-engages in one interval");
+        tick(g, t += INTERVAL, 1000 * KB, 100, 1, false, CONGESTED_PING);
+        assertTrue(g.isEngaged(), "the kept baseline re-engages via the debounce");
     }
 
     @Test
