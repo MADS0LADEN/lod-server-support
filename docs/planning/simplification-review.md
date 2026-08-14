@@ -1,5 +1,9 @@
 # LSS Simplification & Maintainability Review
 
+**WARNING (2026-08-13 staleness sweep): pre-v17 branch state — the mechanisms
+critiqued below (rate-limit knobs, cancel packet, timeout sweep) were deleted by
+other routes; do not action any finding without re-verification against main.**
+
 **Date:** 2026-06-09 · **Branch:** `paper-release-26.1.2` (working tree incl. uncommitted round-3 hygiene changes — all `file:line` anchors refer to that state) · **Status: decision document — nothing here is implemented.**
 
 A multi-agent critical design review of how LSS works and is implemented, hunting three things the maintainer asked for: places to **simplify** the implementation, **unneeded code or functionality to remove**, and **refactors that improve readability/maintainability**. Method: 3 mapping agents traced the server flow, client flow, and full class/config/payload inventory; 8 design critics with distinct lenses produced 42 raw findings; overlapping proposals were merged into 28; each was then independently, adversarially verified against the code (premise re-checked, hidden users grepped, threading/wire/mapping constraints attacked, value judged). **All 28 survived** — verifier corrections are preserved per finding under *Caveats & corrections*.

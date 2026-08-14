@@ -18,6 +18,11 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.IntSupplier;
 
 public class LodRequestManager {
+
+    // Log-sweep hygiene (2026-08-13): per-column/per-frame failure sites aggregate to
+    // one line/min — a persistent condition must not flood the client log.
+    private static final dev.vox.lss.common.LogThrottle BATCH_SEND_FAIL_WARN =
+            new dev.vox.lss.common.LogThrottle(60_000);
     /** Backpressure threshold: halt sending when column processing queue exceeds this fraction. */
     private static final int BACKPRESSURE_NUMERATOR = 3;
     private static final int BACKPRESSURE_DENOMINATOR = 4;
@@ -565,7 +570,11 @@ public class LodRequestManager {
                 this.metrics.recordRequestSent(positions[i], nowMs); // RTT: last-declare stamp
             }
         } catch (Exception e) {
-            LSSLogger.error("Failed to send want-set batch", e);
+            long n = BATCH_SEND_FAIL_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+            if (n > 0) {
+                LSSLogger.error("Failed to send want-set batch (" + n
+                        + " send failure(s) since the last report; retried at 1 Hz)", e);
+            }
             // Nothing is consumed at send any more (marks are answer-consumed), and the next
             // scan re-declares the identical set, so no mark restoration is needed. Just drop
             // the awaiting entries so late-status gating doesn't credit a batch that never

@@ -274,7 +274,7 @@ class ConfigValidationTest {
         // Plain per-field bound: the #28 cross-clamp is gone (no client budget derives
         // from this cap anymore; the successor invariant lives in WantSetBudgetInvariantTest).
         // Config review §9.1: the per-player ceiling is now the CONFIGURED global, not the
-        // unrelated MAX_CONCURRENCY_LIMIT (1000) — a per-player value above the fleet-wide one
+        // deleted MAX_CONCURRENCY_LIMIT — a per-player value above the fleet-wide one
         // is unreachable by construction, so it used to validate to silent nonsense.
         c.generationConcurrencyLimitGlobal = 64;
         c.generationConcurrencyLimitPerPlayer = 9999;

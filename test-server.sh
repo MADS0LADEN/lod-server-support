@@ -110,10 +110,11 @@ stage_move_trace_marker() {
 # `run-fabric-store` / `run-paper-store` below force "full". The store DB lives at
 # <world>/lss-lod/store.db and persists across restarts (derived data — deleting the
 # lss-lod/ dir is always safe); eyeball it with '/lsslod store status' in-game.
-# Default follows the SHIPPED default, which is OFF again as of 2026-08-03 (the store is
-# opt-in so an upgrade never silently doubles a world folder). So a plain ./test-server.sh
-# exercises what players actually get, and run-fabric-store / run-paper-store are once more
-# the meaningful store arm rather than aliases of the plain entrypoints.
+# Default "on", matching a FRESH INSTALL since the 2026-08-08 config rework (the compiled
+# default stays "off" so an UPGRADING server never silently arms the store, but a brand-new
+# install's generated config says "on" — and a fresh test-server rig is the fresh-install
+# case). run-fabric-store / run-paper-store therefore only differ from the plain
+# entrypoints by FORCING the store on (immune to LSS_LODSTORE=off) + enabling backfill.
 LSS_LODSTORE="${LSS_LODSTORE:-on}"
 case "$LSS_LODSTORE" in
     off|on|full) ;; # "on" == "full" since the 2026-08-08 config rework

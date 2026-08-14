@@ -99,7 +99,8 @@ public final class LSSConstants {
     public static final int MIN_BYTES_PER_SECOND = 1024;
     /** Per-player bandwidth ceiling. Raised 100 MB -> 1 GiB 2026-08-02 (config review
      *  section 5): the live server hit the old ceiling exactly, and this bounds only what an
-     *  admin deliberately types. The DEFAULT is 15 MiB (25 -> 15 on 2026-08-05, v0.9.1) —
+     *  admin deliberately types. The DEFAULT is 25 MiB (25 -> 15 on 2026-08-05, re-raised
+     *  to 25 on 2026-08-08 — ServerConfigBase.DEFAULT_MB_PER_PLAYER is the authority) —
      *  the cap charges RAW bytes because it bounds client decode work (the confirmed
      *  receiver-limited bottleneck), so wire compression did not loosen the constraint it
      *  exists to enforce. */
@@ -172,7 +173,10 @@ public final class LSSConstants {
      *  field's default so "off" costs the same server-side as the default cadence. */
     public static final int DIRTY_DRAIN_ONLY_INTERVAL_SECONDS = 10;
     public static final int MIN_CONCURRENCY_LIMIT = 1;
-    public static final int MAX_CONCURRENCY_LIMIT = 1000;
+    // MAX_CONCURRENCY_LIMIT (1000) DELETED 2026-08-13 (deletion review D-6): the 9.1
+    // config-review fix replaced its clamp role with clampGenPerPlayer(v, configuredGlobal)
+    // — the constant enforced nothing and its two remaining test assertions pinned a
+    // number no mechanism used.
     /** Per-DIMENSION timestamp-cache bounds (multiply by dimension count for the real heap
      *  budget). Ceiling raised 256 -> 512 2026-08-02: reachable on a large-distance server.
      *  0 means AUTO — derived from lodDistanceChunks, see
@@ -364,6 +368,8 @@ public final class LSSConstants {
     public static final int COLUMN_COMPRESS_MIN_BYTES = 512;
 
     // Dimension resource location strings (common/ has no MC deps, so plain strings)
+    // Test-convenience literals only (deletion review D-13) — nothing on the wire or in
+    // production reads these; they live here for the shared test corpus, not the protocol.
     public static final String DIM_STR_OVERWORLD = "minecraft:overworld";
     public static final String DIM_STR_THE_NETHER = "minecraft:the_nether";
     public static final String DIM_STR_THE_END = "minecraft:the_end";

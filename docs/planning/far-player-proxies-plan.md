@@ -1,6 +1,6 @@
 # Far-player proxies in LSS ("SeeU-native") — plan
 
-**Status: PLANNED, unimplemented** (2026-08-12). Design for rendering distant players
+**Status: IMPLEMENTED — shipped in v0.11.0** (E1-E3, 2026-08-13; kept as the design record — the mega plan's R-3/R-5/R-7/R-9/R-10 amendments apply on top). Design for rendering distant players
 beyond vanilla entity-tracking range as a native LSS feature — the player-entity
 complement to LOD terrain. Informed by a full source read of SeeU 0.7.3 (vendored at
 `research/seeu/`, commit `8d79f9a` = the 0.7.3 version bump, upstream

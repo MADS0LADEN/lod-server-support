@@ -409,6 +409,35 @@ final class TransferRateGovernor {
      *  re-engages in 1-2 intervals off the kept baseline; only control state drops
      *  (a full reset would reseed the baseline from the CONGESTED current ping and
      *  the engagement conjunct could never fire again). */
+    /** Carry the governor across a same-connection manager REBUILD (a mid-session
+     *  SessionConfig re-push: {@code /lsslod set}, a Paper /reload re-attach, the
+     *  establish heal). Same link, same session — the review-wave C-M1 finding:
+     *  discarding state here un-capped a governed slow link for the seconds a fresh
+     *  governor needs to re-learn congestion (the round-5 runaway shape, briefly),
+     *  and reseeded the ping baseline from the CONGESTED current reading (the
+     *  MINOR-2 hazard onDimensionChange was built to avoid). Copies measurements
+     *  AND control; the interval accumulator deliberately reseeds so the first
+     *  new-manager tick re-bases the cumulative counters instead of inheriting a
+     *  torn window. */
+    void adoptFrom(TransferRateGovernor other) {
+        this.pingBaselineMs = other.pingBaselineMs;
+        this.baselineDriftAnchorMillis = other.baselineDriftAnchorMillis;
+        this.lastPingMs = other.lastPingMs;
+        this.sizeEwmaBytes = other.sizeEwmaBytes;
+        this.lastMissingVanilla = other.lastMissingVanilla;
+        this.minMissingVanilla = other.minMissingVanilla;
+        this.engaged = other.engaged;
+        this.desiredBytesPerSec = other.desiredBytesPerSec;
+        this.keptUpStreak = other.keptUpStreak;
+        this.rateDisengageStreak = other.rateDisengageStreak;
+        this.engagePendingStreak = other.engagePendingStreak;
+        this.engageNoted = other.engageNoted;
+        this.disengageNoted = other.disengageNoted;
+        this.intervalSeeded = false;
+        this.haltSeenThisInterval = false;
+        this.movementSeenThisInterval = false;
+    }
+
     void onDimensionChange() {
         hardReset();
         // A new dimension is a new view — the missing floor re-learns (the edge ring

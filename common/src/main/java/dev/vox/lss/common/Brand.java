@@ -58,8 +58,9 @@ public final class Brand {
     /** Short acronym for chat/console/thread text: {@code "LSS"} or {@code "VSS"}. */
     public static String shortName() { return shortName; }
 
-    /** Lowercased acronym for LOCAL filesystem names ({@code "lss"} / {@code "vss"}):
-     *  the store directory and cache dot-dir. Never a wire or identity token. */
+    /** Lowercased acronym for LOCAL names ({@code "lss"} / {@code "vss"}): operator
+     *  messages naming the brand-preferred config file, and (as literals kept in sync
+     *  with this) the store directory / cache dot-dir. Never a wire or identity token. */
     public static String lowerShortName() {
         return shortName.toLowerCase(java.util.Locale.ROOT);
     }

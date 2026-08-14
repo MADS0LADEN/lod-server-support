@@ -1,5 +1,11 @@
 # Code Review Follow-ups
 
+**Status: HISTORICAL — pre-v17 branch state (protocol 15 era); do NOT action without
+re-verification.** Every `file:line` below is dead and the mechanisms cited
+(waitingQueue, RateLimiterSet, the cancel packet, the timeout sweep) were deleted by
+the v17 want-set redesign. Kept as the review record only. (Banner added by the
+2026-08-13 staleness sweep.)
+
 Deferred items from the multi-agent codebase review (branch `paper-release-26.1.2`, commit
 `ec040de`). The review surfaced 40 findings → 18 confirmed; 14 were fixed in `ec040de`. The
 items below were **deliberately not fixed** in that pass because they are either large/risky

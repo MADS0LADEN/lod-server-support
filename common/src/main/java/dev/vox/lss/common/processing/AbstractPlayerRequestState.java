@@ -107,6 +107,9 @@ public abstract class AbstractPlayerRequestState<T> {
      *  mechanism counter beside deferred=/yielded=, never a loss signal). */
     private volatile long pacedTicks = 0;
 
+    private static final dev.vox.lss.common.LogThrottle SEND_FAIL_WARN =
+            new dev.vox.lss.common.LogThrottle(60_000);
+
     // ---- Transport yield (lodYieldsToVanillaTransport, yield plan v2.1) ----
     /** 100 ticks = 5 s: the §1.4 starvation floor — bounds worst-case LOD at ~1 column/5 s
      *  and distinguishes "yielding hard" from "dead". Yield starvation only; the ceiling
@@ -657,10 +660,11 @@ public abstract class AbstractPlayerRequestState<T> {
     }
 
     /**
-     * Fullest overload adding send pacing (send-pacing-plan.md v2:
-     * {@code enableSendPacing}, default true — the refill-floored proportional drain).
-     * While enabled, a tick's column flush writes at most
-     * {@code max(allocation/20, queuedRawBytes/PACE_HORIZON_TICKS)} RAW bytes (one
+     * Fullest overload adding send pacing (send-pacing-plan.md v3:
+     * {@code enableSendPacing}, default true — the refill-floored, BURST-CLAMPED
+     * proportional drain). While enabled, a tick's column flush writes at most
+     * {@code clamp(queuedRawBytes/PACE_HORIZON_TICKS, share, PACE_MAX_BURST_SHARES*share)}
+     * RAW bytes where share = allocation/20 (one
      * payload minimum — the presence gate), so the bandwidth bank's burst ships as a
      * ~5-tick slope instead of a one-tick cliff, and vanilla packets interleave every
      * tick. The floor is the allocation's own refill share, so NOTHING is ever paced
@@ -868,8 +872,14 @@ public abstract class AbstractPlayerRequestState<T> {
                     break;
                 }
             } catch (Exception e) {
-                LSSLogger.error("Failed to send queued payload to " + getPlayerName()
-                        + ", dropping remaining queue (" + this.sendQueue.size() + " entries)", e);
+                // Throttled (log sweep): a closing/broken connection can throw here every
+                // tick until the disconnect lands — its sibling yield WARN is latched.
+                long n = SEND_FAIL_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+                if (n > 0) {
+                    LSSLogger.error("Failed to send queued payload to " + getPlayerName()
+                            + ", dropping remaining queue (" + this.sendQueue.size()
+                            + " entries; " + n + " send failure(s) since the last report)", e);
+                }
                 // Seeded with any prune-cleared positions from this tick: both classes
                 // need the caller's clearDiskReadDone routing, and overwriting would
                 // leak the pruned ones' stale done-bits.

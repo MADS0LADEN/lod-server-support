@@ -22,6 +22,9 @@ import java.util.LinkedHashMap;
  */
 final class DeferredTicketReleases {
 
+    private final dev.vox.lss.common.LogThrottle releaseFailWarn =
+            new dev.vox.lss.common.LogThrottle(60_000);
+
     /** Releases executed per drain call (one server tick). 4/tick clears a full 40-ticket
      *  sweep in half a second; a force-load ticket lingering that long is harmless. */
     static final int MAX_RELEASES_PER_TICK = 4;
@@ -53,8 +56,14 @@ final class DeferredTicketReleases {
             try {
                 entry.getValue().run();
             } catch (Exception e) {
-                LSSLogger.error("Deferred ticket release failed for " + entry.getKey()
-                        + " — ticket may remain held", e);
+                // Throttled (log sweep): a C2ME/Moonrise distance-graph incompatibility
+                // throws per ticket per tick here.
+                long n = this.releaseFailWarn.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+                if (n > 0) {
+                    LSSLogger.error("Deferred ticket release failed for " + entry.getKey()
+                            + " — ticket may remain held (" + n
+                            + " failure(s) since the last report)", e);
+                }
             }
             ran++;
         }

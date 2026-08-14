@@ -149,7 +149,7 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public boolean enablePingBackstop = true;
     /**
-     * Send pacing (send-pacing-plan.md v2 — the refill-floored proportional drain):
+     * Send pacing (send-pacing-plan.md v3 — the refill-floored, burst-clamped drain):
      * spreads the bandwidth bank's one-tick burst into a ~5-tick slope so vanilla
      * packets interleave during LOD resolution waves (join/rejoin/teleport). The
      * budget floors at the allocation's own per-tick refill share, so sustained

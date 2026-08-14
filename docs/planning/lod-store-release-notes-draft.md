@@ -1,5 +1,9 @@
 # LOD store — release notes DRAFT (for the eventual tag; user-facing format)
 
+**Status: SUPERSEDED — v0.9.0 shipped its own notes** (v0.9.0-release-notes.md is the
+authority; `lodStoreMemoryMB` advertised below was RETIRED 2026-08-03 and `lodStore`
+defaults changed again 2026-08-08). Kept as a draft artifact only.
+
 ### New Features
 
 - **Persistent LOD store (opt-in)** — New `lodStore` server option (`"off"` by

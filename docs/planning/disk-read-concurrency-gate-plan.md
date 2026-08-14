@@ -610,3 +610,15 @@ generic) so K rides between auto-K and the pool size when the tick is healthy, a
 below auto-K under tick pressure. Needs its own design round (recovery clocking —
 the throttle only re-opens on samples — and a Paper story if Bukkit's
 `getAverageTickTime` is ever adopted).
+
+
+## Amendment 3 (2026-08-13) — the park-overflow WARN is DELETED
+
+The Amendment 2 text above kept the armor-drop WARN "with its throttle, without the
+remedy sentence". Live operation falsified even that: the throttled WARN repeated once
+per interval on a real server for a self-healing race (`read_gate=2/2, park full`),
+and the operator-log-hygiene bar set by this project (see also the store-eviction
+one-line latch) is that self-healing paths carry counters, not recurring log lines.
+The overflow path is now LOG-FREE: `disk.gated` + the always-rendered `gated=` diag
+token are the evidence, and the LATCHED gate-stop WARN (router retention) remains the
+actionable capacity signal. Do not restore the overflow WARN.

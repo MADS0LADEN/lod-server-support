@@ -88,6 +88,13 @@ public final class FarPlayerRenderer {
     private final Set<UUID> submittedVehicles = new HashSet<>();
     private final FarPlayerMountLadder mountLadder = FarPlayerMountLadder.production();
     /** Small identity→Item cache (equipment strings repeat every frame). */
+    /** Identity-string → Item memo. CAPPED (review-wave C-M2): every sibling
+     *  structure carries explicit hostile-input armor (the tracker's 4096-identity
+     *  cap, the mount ladder's 256-type cap) and this map was the one unbounded
+     *  one — a hostile server feeding unique equipment identities grew client heap
+     *  for the JVM's life. Past the cap, identities resolve uncached (correct,
+     *  just unmemoized); the cache also empties with the proxies in clear(). */
+    private static final int ITEM_CACHE_CAP = 1024;
     private final Map<String, Item> itemCache = new ConcurrentHashMap<>();
     private int nextProxyId = PROXY_ID_BASE;
     private boolean crashLatched;
@@ -153,6 +160,7 @@ public final class FarPlayerRenderer {
         vehicles.clear();
         activeVehicles.clear();
         submittedVehicles.clear();
+        itemCache.clear(); // C-M2: the memo empties with the session's proxies
     }
 
     /** The COLLECT_SUBMITS pass. */
@@ -522,18 +530,22 @@ public final class FarPlayerRenderer {
         private static ItemStack stackFor(String identity, int count,
                                           Map<String, Item> itemCache) {
             if (identity == null) return ItemStack.EMPTY;
-            Item item = itemCache.computeIfAbsent(identity, id -> {
-                try {
-                    // Cross-version sessions (Via) can carry identities this client's
-                    // registry lacks — an unknown identity renders as an EMPTY slot,
-                    // the far-player analogue of the column fallback ladder.
-                    return BuiltInRegistries.ITEM.getValue(Identifier.parse(id));
-                } catch (Exception e) {
-                    return Items.AIR;
-                }
-            });
+            Item item = itemCache.size() >= ITEM_CACHE_CAP && !itemCache.containsKey(identity)
+                    ? resolveItem(identity) // cap reached: resolve uncached (C-M2 armor)
+                    : itemCache.computeIfAbsent(identity, Proxy::resolveItem);
             return item == null || item == Items.AIR ? ItemStack.EMPTY
                     : new ItemStack(item, count);
+        }
+
+        private static Item resolveItem(String id) {
+            try {
+                // Cross-version sessions (Via) can carry identities this client's
+                // registry lacks — an unknown identity renders as an EMPTY slot,
+                // the far-player analogue of the column fallback ladder.
+                return BuiltInRegistries.ITEM.getValue(Identifier.parse(id));
+            } catch (Exception e) {
+                return Items.AIR;
+            }
         }
 
         private void updateWalkAnimation(Vec3 position, boolean allowWalk,

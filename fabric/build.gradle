@@ -392,7 +392,9 @@ tasks.register('vssJar') {
                         def rebranded = lang.collectEntries { k, v ->
                             [k, v.toString()
                                     .replace('LOD Server Support', 'Voxy Server Side')
-                                    .replace('LSS', 'VSS')]
+                                    // Word-boundary: never corrupt 'LSS' inside a longer
+                                    // token (review-wave V-M2).
+                                    .replaceAll(/\bLSS\b/, 'VSS')]
                         }
                         byte[] lb = groovy.json.JsonOutput.prettyPrint(
                                 groovy.json.JsonOutput.toJson(rebranded)).getBytes('UTF-8')

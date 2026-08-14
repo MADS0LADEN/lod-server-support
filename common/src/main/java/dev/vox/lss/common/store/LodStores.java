@@ -96,7 +96,8 @@ public final class LodStores {
     public static String offRecommendationOrNull(boolean lssEnabled, boolean isFolia) {
         if (!lssEnabled || isFolia) return null;
         return "LOD store is off. Recommended: set \"lodStore\": \"on\" in"
-                + " lss-server-config.json for much faster LOD serving; the tradeoff is it"
+                + " " + Brand.lowerShortName() + "-server-config.json for much faster LOD"
+                + " serving; the tradeoff is it"
                 + " roughly doubles the size of your world directory.";
     }
 }

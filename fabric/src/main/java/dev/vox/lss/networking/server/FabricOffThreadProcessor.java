@@ -23,6 +23,11 @@ import java.util.concurrent.ConcurrentHashMap;
  * that will be sent via Fabric networking on the main thread.
  */
 public class FabricOffThreadProcessor extends OffThreadProcessor<PlayerRequestState> {
+
+    // Log-sweep hygiene (2026-08-13): per-column/per-event conditions aggregate to one
+    // line/min — self-healing paths must not flood operator consoles.
+    private static final dev.vox.lss.common.LogThrottle OVERSIZED_WARN =
+            new dev.vox.lss.common.LogThrottle(60_000);
     private final ChunkDiskReader diskReader;
 
     // Stored references for disk read submission. Grows but never prunes — acceptable because
@@ -102,17 +107,26 @@ public class FabricOffThreadProcessor extends OffThreadProcessor<PlayerRequestSt
         // pre-built store frames, whose non-shrinking degenerates ship raw) — load-bearing
         // for store-frame hits too, whose rows can legally exceed the send cap (plan §3).
         if (bytes.rawSize() > LSSConstants.MAX_SEND_SECTIONS_SIZE) {
-            LSSLogger.warn("Dropping oversized column [" + cx + ", " + cz + "] in " + dimension
+            {
+            long n = OVERSIZED_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+            if (n > 0) LSSLogger.warn("Dropping oversized column [" + cx + ", " + cz + "] in " + dimension
                     + ": " + bytes.rawSize() + " bytes exceeds send limit "
-                    + LSSConstants.MAX_SEND_SECTIONS_SIZE + " (netty frame cap would kill the connection)");
+                    + LSSConstants.MAX_SEND_SECTIONS_SIZE + " (netty frame cap would kill the connection)"
+                    + " (" + n + " oversized drop(s) since the last report — the client"
+                    + " re-asks and is answered up-to-date)");
             return false;
+        }
         }
         if (dimension.length() > LSSConstants.MAX_DIMENSION_STRING_LENGTH) {
             // Drop just this column (like an oversized one) rather than letting writeUtf throw
             // at send time and nuke the whole send queue. No real dimension id is this long;
             // the !sent path answers the client up-to-date so it stops asking.
-            LSSLogger.warn("Dropping column [" + cx + ", " + cz + "] with oversized dimension id ("
-                    + dimension.length() + " chars > " + LSSConstants.MAX_DIMENSION_STRING_LENGTH + ")");
+            long dn = OVERSIZED_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+            if (dn > 0) {
+                LSSLogger.warn("Dropping column [" + cx + ", " + cz + "] with oversized dimension id ("
+                        + dimension.length() + " chars > " + LSSConstants.MAX_DIMENSION_STRING_LENGTH
+                        + ") (" + dn + " oversized drop(s) since the last report)");
+            }
             return false;
         }
         var dimensionKey = this.dimensionKeyCache.computeIfAbsent(dimension,

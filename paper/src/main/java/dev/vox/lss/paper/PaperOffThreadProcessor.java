@@ -18,6 +18,11 @@ import java.util.concurrent.ConcurrentHashMap;
  * that will be sent via Plugin Messaging on the main thread.
  */
 public class PaperOffThreadProcessor extends OffThreadProcessor<PaperPlayerRequestState> {
+
+    // Log-sweep hygiene (2026-08-13): per-column/per-event conditions aggregate to one
+    // line/min — self-healing paths must not flood operator consoles.
+    private static final dev.vox.lss.common.LogThrottle OVERSIZED_WARN =
+            new dev.vox.lss.common.LogThrottle(60_000);
     private final PaperChunkDiskReader diskReader;
 
     // Maps a dimension id to its live ServerLevel for disk-read submission. Refreshed every
@@ -94,18 +99,27 @@ public class PaperOffThreadProcessor extends OffThreadProcessor<PaperPlayerReque
         // RAW-size guard (twin of the Fabric build; load-bearing for store-frame hits
         // whose rows can legally exceed the send cap — plan §3).
         if (bytes.rawSize() > LSSConstants.MAX_SEND_SECTIONS_SIZE) {
-            LSSLogger.warn("Dropping oversized column [" + cx + ", " + cz + "] in " + dimension
+            {
+            long n = OVERSIZED_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+            if (n > 0) LSSLogger.warn("Dropping oversized column [" + cx + ", " + cz + "] in " + dimension
                     + ": " + bytes.rawSize() + " bytes exceeds send limit "
-                    + LSSConstants.MAX_SEND_SECTIONS_SIZE + " (netty frame cap would kill the connection)");
+                    + LSSConstants.MAX_SEND_SECTIONS_SIZE + " (netty frame cap would kill the connection)"
+                    + " (" + n + " oversized drop(s) since the last report — the client"
+                    + " re-asks and is answered up-to-date)");
             return false;
+        }
         }
         if (dimension.length() > LSSConstants.MAX_DIMENSION_STRING_LENGTH) {
             // Drop just this column (like an oversized one): without the guard
             // encodeVoxelColumnPreEncoded's writeUtf throws out of this method and aborts the
             // WHOLE processing cycle. No real dimension id is this long; the !sent path answers
             // the client up-to-date so it stops asking.
-            LSSLogger.warn("Dropping column [" + cx + ", " + cz + "] with oversized dimension id ("
-                    + dimension.length() + " chars > " + LSSConstants.MAX_DIMENSION_STRING_LENGTH + ")");
+            long dn = OVERSIZED_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+            if (dn > 0) {
+                LSSLogger.warn("Dropping column [" + cx + ", " + cz + "] with oversized dimension id ("
+                        + dimension.length() + " chars > " + LSSConstants.MAX_DIMENSION_STRING_LENGTH
+                        + ") (" + dn + " oversized drop(s) since the last report)");
+            }
             return false;
         }
         // C2 legacy egress translation (XVER §4.2), at THIS per-recipient choke point —

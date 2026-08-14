@@ -1,6 +1,10 @@
 # Resource-Management Reference — How LOD Streaming Yields to Vanilla
 
-**Status:** reference snapshot as of 2026-07-16 (protocol v17, A+B read protection). Line
+**Status: SUPERSEDED snapshot (2026-07-16, protocol v17)** — the "1 Hz re-declaration"
+layer it describes is now the ADAPTIVE scan cadence (up to 4 Hz, 2026-08-03), the
+protocol is 20, and the transport lane gained the yield gate + send pacing + the
+transfer-rate pair (adaptive-transfer-rate-plan.md). Read CLAUDE.md for the current
+model; this file remains as the v17-era map. Line
 numbers cited inline were exact at authoring; re-grep the symbol if they've drifted. This
 documents *what exists* — the mechanisms by which LSS keeps LOD streaming from degrading
 vanilla chunk distribution across CPU, memory, disk, and network.

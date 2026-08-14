@@ -16,6 +16,11 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * to receive pre-voxelized column data from the server.
  */
 public final class LSSApi {
+
+    // Log-sweep hygiene (2026-08-13): per-column/per-frame failure sites aggregate to
+    // one line/min — a persistent condition must not flood the client log.
+    private static final dev.vox.lss.common.LogThrottle CONSUMER_THROW_WARN =
+            new dev.vox.lss.common.LogThrottle(60_000);
     private static final List<VoxelColumnConsumer> columnConsumers = new CopyOnWriteArrayList<>();
 
     /**
@@ -158,7 +163,12 @@ public final class LSSApi {
             } catch (Throwable e) {
                 // Isolate per consumer: one consumer's failure (incl. Errors such as a
                 // LinkageError from an incompatible LOD mod) must not skip the others.
-                LSSLogger.error("Voxel column consumer threw exception", e);
+                long n = CONSUMER_THROW_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+                if (n > 0) {
+                    LSSLogger.error("Voxel column consumer threw exception (" + n
+                            + " consumer throw(s) since the last report; each column is"
+                            + " re-served)", e);
+                }
                 // A throw means the column was not ingested — treat it like an explicit
                 // reportIngestFailure so the position is re-served instead of becoming a
                 // permanent hole: exactly one report per failing consumer per delivery.

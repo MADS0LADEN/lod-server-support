@@ -21,45 +21,6 @@ public final class DiagnosticsFormatter {
             long outboundPending, long outboundHighWater, long sendDeferrals,
             long yielded, long ceilBytes, double pingFactor, long paced
     ) {
-        /** Pre-send-pacing shape — keeps existing constructions/tests intact
-         *  (paced renders 0). */
-        public PlayerDiag(String name, int sendQueue, int maxSendQueue, int pendingSync,
-                          int pendingGen, long sent, long bytes, long outboundPending,
-                          long outboundHighWater, long sendDeferrals, long yielded,
-                          long ceilBytes, double pingFactor) {
-            this(name, sendQueue, maxSendQueue, pendingSync, pendingGen, sent, bytes,
-                    outboundPending, outboundHighWater, sendDeferrals, yielded, ceilBytes,
-                    pingFactor, 0L);
-        }
-
-        /** Pre-ping-backstop shape — keeps existing constructions/tests intact
-         *  (pingf renders 1.00). */
-        public PlayerDiag(String name, int sendQueue, int maxSendQueue, int pendingSync,
-                          int pendingGen, long sent, long bytes, long outboundPending,
-                          long outboundHighWater, long sendDeferrals, long yielded,
-                          long ceilBytes) {
-            this(name, sendQueue, maxSendQueue, pendingSync, pendingGen, sent, bytes,
-                    outboundPending, outboundHighWater, sendDeferrals, yielded, ceilBytes,
-                    1.0, 0L);
-        }
-
-        /** No-ceiling shape — keeps existing constructions/tests intact
-         *  (ceil renders "off"). */
-        public PlayerDiag(String name, int sendQueue, int maxSendQueue, int pendingSync,
-                          int pendingGen, long sent, long bytes, long outboundPending,
-                          long outboundHighWater, long sendDeferrals, long yielded) {
-            this(name, sendQueue, maxSendQueue, pendingSync, pendingGen, sent, bytes,
-                    outboundPending, outboundHighWater, sendDeferrals, yielded, -1L, 1.0,
-                    0L);
-        }
-
-        /** Pre-transport-yield shape — keeps existing constructions/tests intact. */
-        public PlayerDiag(String name, int sendQueue, int maxSendQueue, int pendingSync,
-                          int pendingGen, long sent, long bytes, long outboundPending,
-                          long outboundHighWater, long sendDeferrals) {
-            this(name, sendQueue, maxSendQueue, pendingSync, pendingGen, sent, bytes,
-                    outboundPending, outboundHighWater, sendDeferrals, 0L, -1L);
-        }
     }
 
     public record DiagData(
