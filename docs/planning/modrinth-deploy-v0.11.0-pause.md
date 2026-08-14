@@ -79,6 +79,27 @@ byte-denominated bandwidth keys are gone in favor of the new defaults.
   beyond render distance, name tags, Share-My-Position opt-out works, `/lsslod
   diag` grows the `FarPlayers:` line.
 
+## 4b. Stage-N re-arm deploy (2026-08-14 — supersedes any earlier staged jar)
+
+Stage N (NeoForge, PRs #167-#171) merged AFTER the original pause package, so
+the rig should re-deploy from post-N main before the re-validation window:
+
+- Jar: `fabric/build/libs/lod-server-support-fabric-0.11.0+26.2.jar` from the
+  F-gate re-arm pre-flight (main @ cd905979, `CI=true`, `-Pmod_version=0.11.0`)
+  — sha256 `8dfe11e9848646afa3181e0e58820429d9dbf0edf9086af1f7e8651b7306dc80`,
+  7,910,986 B. Upload over `mods/lod-server-support-fabric.jar`, verify the
+  byte size, restart (archon token EXPIRED — panel Start is the user's; RCON
+  `stop` may not auto-restart, see CLAUDE.local.md).
+- The N changes are wire-inert on Fabric by construction (xplat srcDir moves +
+  delegating statics; N-1a's jar-diff proved class-byte identity vs main), so
+  the §4 checklist above is unchanged — the re-arm run is a regression sweep,
+  not a new-feature gate. Server-side expectations identical: boot clean,
+  `read_path=moonrise-low`, store warm, `lsslod set` lists both boolean rows,
+  `pingf=`/`paced=` in diag.
+- Six-family `release_check.py --version 0.11.0` was green on this tree
+  (2026-08-14) — the release pre-flight now REQUIRES `:neoforge:build` (the
+  gate hard-fails without the neoforge LSS+VSS pair).
+
 ## 5. Found-bug loop (from the plan — verbatim rules)
 
 A fix re-opens the owning stage's gates (its tier set + its soaks), redeploys,
