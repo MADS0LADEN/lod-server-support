@@ -12,14 +12,15 @@ import java.util.List;
 public final class DiagnosticsFormatter {
 
     /** {@code outboundPending}/{@code outboundHighWater} are netty outbound-buffer depths
-     *  in bytes, -1 = no signal (never "empty"); {@code sendDeferrals} counts ticks the
-     *  transport-deference gate skipped. See the elytra-wall investigation §8.3. */
+     *  in bytes, -1 = no signal (never "empty"). See the elytra-wall investigation §8.3.
+     *  (The {@code sendDeferrals}/{@code ceilBytes} components died with the fixed
+     *  outbound ceiling, 2026-08-13 — deletion review #2.) */
     public record PlayerDiag(
             String name, int sendQueue, int maxSendQueue,
             int pendingSync, int pendingGen,
             long sent, long bytes,
-            long outboundPending, long outboundHighWater, long sendDeferrals,
-            long yielded, long ceilBytes, double pingFactor, long paced
+            long outboundPending, long outboundHighWater,
+            long yielded, double pingFactor, long paced
     ) {
     }
 
@@ -256,20 +257,17 @@ public final class DiagnosticsFormatter {
         for (var p : d.players) {
             double pRate = d.uptimeSec > 0 ? (double) p.sent / d.uptimeSec : 0;
             lines.add(String.format(
-                    "  %s: sq=%d/%d, psync=%d, pgen=%d, sent=%d (%s), rate=%s/s, obuf=%s/%s, ceil=%s, pingf=%.2f, deferred=%d, yielded=%d, paced=%d",
+                    "  %s: sq=%d/%d, psync=%d, pgen=%d, sent=%d (%s), rate=%s/s, obuf=%s/%s, pingf=%.2f, yielded=%d, paced=%d",
                     p.name, p.sendQueue, p.maxSendQueue,
                     p.pendingSync, p.pendingGen,
                     p.sent, formatBytes(p.bytes),
                     formatRate(pRate),
                     formatOutbound(p.outboundPending), formatOutbound(p.outboundHighWater),
-                    // ceil= : the operator-FIXED outbound ceiling, or "off" (the AUTO
-                    // mode was deleted — adaptive-transfer-rate-plan.md).
-                    p.ceilBytes >= 0 ? formatBytes(p.ceilBytes) : "off",
                     // pingf= : Mechanism B's receipt — 1.00 = no cut.
                     p.pingFactor,
-                    // paced= : the send pacer's receipt (budget-stopped partial
-                    // flush ticks — a mechanism counter, never a loss signal).
-                    p.sendDeferrals, p.yielded, p.paced
+                    // yielded/paced: transport-yield + send-pacer receipts (mechanism
+                    // counters, never loss signals).
+                    p.yielded, p.paced
             ));
         }
 
@@ -308,24 +306,6 @@ public final class DiagnosticsFormatter {
                                            dev.vox.lss.common.store.LodStoreMode storeMode,
                                            dev.vox.lss.common.store.LodStoreDiagnostics storeDiag,
                                            Collection<? extends AbstractPlayerRequestState<?>> states) {
-        return collectDiagData(enabled, lodDistanceChunks, bwPerPlayer, bwGlobal,
-                sendQueueLimitPerPlayer, uptimeSec, tickDiagnostics, windowBandwidthRate,
-                serviceTotalSent, serviceTotalBytes, serviceWireBytes, diag, diskReader,
-                bwLimiter, generationDiagnosticsOrNull, storeMode, storeDiag, states, 0L);
-    }
-
-    public static DiagData collectDiagData(boolean enabled, int lodDistanceChunks,
-                                           long bwPerPlayer, long bwGlobal, int sendQueueLimitPerPlayer,
-                                           long uptimeSec, String tickDiagnostics, long windowBandwidthRate,
-                                           long serviceTotalSent, long serviceTotalBytes,
-                                           long serviceWireBytes,
-                                           ProcessingDiagnostics diag, AbstractChunkDiskReader diskReader,
-                                           SharedBandwidthLimiter bwLimiter,
-                                           String generationDiagnosticsOrNull,
-                                           dev.vox.lss.common.store.LodStoreMode storeMode,
-                                           dev.vox.lss.common.store.LodStoreDiagnostics storeDiag,
-                                           Collection<? extends AbstractPlayerRequestState<?>> states,
-                                           long fixedCeilingBytes) {
         // The Throughput totals are SERVICE-scoped (TickDiagnostics — they exist to survive
         // per-player state teardown): summing the live states' counters here (the pre-R2-9
         // shape) collapsed after every dimension change/rejoin while uptime kept the service
@@ -340,10 +320,7 @@ public final class DiagnosticsFormatter {
                     state.getHeldSyncSlots(), state.getHeldGenSlots(),
                     state.getTotalSectionsSent(), state.getTotalBytesSent(),
                     state.getOutboundPendingBytes(), state.getOutboundPendingHighWater(),
-                    state.getSendDeferrals(), state.getYieldedTicks(),
-                    // Operator-FIXED ceiling from config, or -1 = off (the AUTO ceiling
-                    // was deleted — adaptive-transfer-rate-plan.md).
-                    fixedCeilingBytes > 0 ? fixedCeilingBytes : -1L,
+                    state.getYieldedTicks(),
                     state.getPingBackstop().factor(),
                     state.getPacedTicks()
             ));

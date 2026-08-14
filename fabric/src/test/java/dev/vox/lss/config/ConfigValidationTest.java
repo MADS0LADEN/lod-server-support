@@ -554,14 +554,13 @@ class ConfigValidationTest {
             c.validate();
             // missMemoTtlSeconds and lodStoreResweepSeconds have a legal floor of 0
             // (each 0 is that feature's kill switch), as does lodStoreMaxMB (0 =
-            // uncapped, the default), outboundBufferCeilingKB (0 = no ceiling, the
-            // default), and dirtyBroadcastIntervalSeconds (0 = dirty
+            // uncapped, the default), and dirtyBroadcastIntervalSeconds (0 = dirty
             // pushes off since v0.11.0; the drain keeps its fallback cadence);
             // xrayMaxBlockHeight's floor is a world Y and
             // deliberately negative — every other numeric floor is >= 1.
             int floor = switch (f.getName()) {
                 case "missMemoTtlSeconds", "lodStoreResweepSeconds", "lodStoreMaxMB",
-                        "outboundBufferCeilingKB", "dirtyBroadcastIntervalSeconds",
+                        "dirtyBroadcastIntervalSeconds",
                         // 0 = AUTO (derived), the default for both since 2026-08-02;
                         // maxConcurrentDiskReads is the same shape (store-conditional
                         // AUTO — disk-read-concurrency-gate-plan.md).

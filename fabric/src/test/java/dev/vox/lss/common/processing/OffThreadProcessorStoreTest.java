@@ -41,7 +41,7 @@ class OffThreadProcessorStoreTest {
         final ConcurrentLinkedQueue<Long> deletes = new ConcurrentLinkedQueue<>();
         final ConcurrentLinkedQueue<long[]> invalidations = new ConcurrentLinkedQueue<>();
 
-        @Override public LodStoreMode mode() { return LodStoreMode.MEMORY; }
+        @Override public LodStoreMode mode() { return LodStoreMode.FULL; }
         @Override public StoreHit get(String dimension, long packed) { return null; }
         @Override public boolean deposit(String d, long p, byte[] b, long ts, long acq) {
             this.deposits.add(new Dep(d, p, b, ts, acq));

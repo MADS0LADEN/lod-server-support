@@ -7,16 +7,14 @@ import java.util.Locale;
  * {@code off} (no store — the kill switch every phase gate A/Bs against) and
  * {@code full} (the SQLite disk store).
  *
- * <p><b>{@link #MEMORY} is NOT a config value</b> — it is the internal state of the
- * boot-time degrade only (retired as a user-facing mode 2026-08-02; {@code "memory"} in
- * a config file now normalizes to {@code off} like any other unrecognized word). It
- * survives as an enum constant because {@link LodStores} falls back to
- * {@link MemoryLodStore} when SQLite cannot initialize, and the diag token must report
- * what is actually RUNNING ({@code store=memory}) rather than the configured
- * aspiration. Rationale for the retirement: at its 64 MB budget the tier held ~6% of one
- * player's disc under random eviction while zstd-compressing every deposit, and the
- * Phase 2 A/B had already deleted it from {@code full} mode for costing +14.6% CPU/col
- * to save 5 µs against a 2.4 ms NBT path.
+ * <p><b>There is no MEMORY constant anymore</b> — {@code "memory"} was retired as a
+ * user-facing mode 2026-08-02 (normalizes to {@code off} like any unrecognized word),
+ * and the in-memory degrade TIER itself was deleted 2026-08-13 (user decision): a
+ * failed SQLite init now runs store-less, and the diag token reports {@code store=off}
+ * — what is actually running. Rationale for the retirement: at its 64 MB budget the
+ * tier held ~6% of one player's disc under random eviction while zstd-compressing
+ * every deposit, and the Phase 2 A/B had already deleted it from {@code full} mode for
+ * costing +14.6% CPU/col to save 5 µs against a 2.4 ms NBT path.
  *
  * <p>Since the 2026-08-08 config rework (user decision) the store is ON BY DEFAULT and
  * {@code "on"} is the canonical spelling of {@link #FULL} ({@code "full"} stays accepted
@@ -26,7 +24,7 @@ import java.util.Locale;
  * config echo names the effective mode. Pinned by {@code LodStoreModeTest}.
  */
 public enum LodStoreMode {
-    OFF, MEMORY, FULL;
+    OFF, FULL;
 
     public static LodStoreMode normalize(String value) {
         if (value == null) return OFF;

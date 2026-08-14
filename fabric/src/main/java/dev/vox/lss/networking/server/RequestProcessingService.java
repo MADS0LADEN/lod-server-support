@@ -749,7 +749,6 @@ public class RequestProcessingService {
         }
         flushSendQueues(this.players.values(), perPlayerCap, this.bandwidthLimiter, this.diag,
                 this::sendColumnPayload, this.offThreadProcessor,
-                (long) config.outboundBufferCeilingKB * 1024L,
                 config.lodYieldsToVanillaTransport,
                 // The prune is the YIELD's companion (§2.1 — long queue residency is a
                 // yield phenomenon) and must not ship armed under the default-FALSE
@@ -861,26 +860,24 @@ public class RequestProcessingService {
                                  ColumnPayloadSender sender,
                                  FabricOffThreadProcessor offThreadProcessor) {
         flushSendQueues(states, perPlayerCap, bandwidthLimiter, diag, sender, offThreadProcessor,
-                0L, false, 0);
+                false, 0);
     }
 
     static void flushSendQueues(Iterable<PlayerRequestState> states, long perPlayerCap,
                                  SharedBandwidthLimiter bandwidthLimiter, TickDiagnostics diag,
                                  ColumnPayloadSender sender,
                                  FabricOffThreadProcessor offThreadProcessor,
-                                 long outboundCeilingBytes, boolean yieldToTransport,
-                                 int pruneRadiusChunks) {
+                                 boolean yieldToTransport, int pruneRadiusChunks) {
         flushSendQueues(states, perPlayerCap, bandwidthLimiter, diag, sender,
-                offThreadProcessor, outboundCeilingBytes, yieldToTransport,
-                pruneRadiusChunks, false);
+                offThreadProcessor, yieldToTransport, pruneRadiusChunks, false);
     }
 
     static void flushSendQueues(Iterable<PlayerRequestState> states, long perPlayerCap,
                                  SharedBandwidthLimiter bandwidthLimiter, TickDiagnostics diag,
                                  ColumnPayloadSender sender,
                                  FabricOffThreadProcessor offThreadProcessor,
-                                 long outboundCeilingBytes, boolean yieldToTransport,
-                                 int pruneRadiusChunks, boolean sendPacing) {
+                                 boolean yieldToTransport, int pruneRadiusChunks,
+                                 boolean sendPacing) {
         for (var state : states) {
             if (!state.hasCompletedHandshake()) continue;
             // pingFactor rides the ALLOCATION argument (m12): the per-player bucket
@@ -891,8 +888,7 @@ public class RequestProcessingService {
                     payload -> {
                         if (consumeSendDropFault()) return;
                         sender.send(state, payload);
-                    }, outboundCeilingBytes, yieldToTransport,
-                    pruneRadiusChunks, sendPacing);
+                    }, yieldToTransport, pruneRadiusChunks, sendPacing);
             if (dropped.length > 0) {
                 // A send failure or the relevance prune discarded resolved-but-undelivered
                 // columns: clear their done-bits so the client's re-requests re-resolve

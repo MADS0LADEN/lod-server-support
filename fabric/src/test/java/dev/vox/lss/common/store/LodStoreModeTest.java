@@ -37,17 +37,14 @@ class LodStoreModeTest {
     }
 
     /**
-     * Only the two CONFIG-legal modes round-trip. MEMORY is deliberately excluded: it
-     * survives as an enum constant purely so the SQLite-init degrade can report
-     * {@code store=memory} honestly in diagnostics, so its configValue() is a display
-     * token with no parse side.
+     * Both remaining modes round-trip (the MEMORY constant died with the in-memory
+     * degrade tier, 2026-08-13 — a failed SQLite init now runs store-less and the
+     * diag token reads store=off).
      */
     @Test
     void configValueRoundTripsForTheConfigLegalModesOnly() {
         assertEquals(LodStoreMode.OFF, LodStoreMode.normalize(LodStoreMode.OFF.configValue()));
         assertEquals(LodStoreMode.FULL, LodStoreMode.normalize(LodStoreMode.FULL.configValue()));
-        assertEquals("memory", LodStoreMode.MEMORY.configValue(),
-                "the degrade's diag token must still render as store=memory");
     }
 
     @Test

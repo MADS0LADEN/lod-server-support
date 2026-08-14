@@ -125,19 +125,14 @@ public abstract class ServerConfigBase extends JsonConfig {
      * infrastructure, not dead weight.
      */
     public int sendQueueLimitPerPlayer = LSSConstants.MAX_BATCH_CHUNK_REQUESTS;
-    /**
-     * Outbound ceiling (flight-cadence plan §11.4; the AUTO mode that briefly
-     * occupied 0 was deleted — adaptive-transfer-rate-plan.md records the
-     * falsification): bounds the standing LOD queue ahead of vanilla's packets on
-     * the shared channel.
-     *
-     * <p><b>Default 0 = OFF</b> (no ceiling — slow-link pacing is owned by the
-     * client transfer governor and the server ping backstop). An EXPLICIT value
-     * (64..262144 KB) is an operator-FIXED entry-gate ceiling with no-floor
-     * semantics — a manual lever for special transports. Runtime-mutable via
-     * {@code /lsslod set outboundBufferCeilingKB} (0 = off).
-     */
-    public int outboundBufferCeilingKB = 0;
+    // outboundBufferCeilingKB DELETED 2026-08-13 (deletion review #2, user decision):
+    // the AUTO mode was live-falsified three times (adaptive-transfer-rate-plan.md), and
+    // the surviving operator-FIXED ceiling was structurally shadowed — the netty gauge
+    // caps at the high-water mark while writable and the ceiling floored at 64 KB, so it
+    // could only fire while NOT_WRITABLE, exactly when the default-ON transport yield
+    // already skips the flush with better semantics (starvation floor + relevance
+    // prune). Slow-link pacing is owned by the client transfer governor + the server
+    // ping backstop; an old config file's key is ignored and dropped on the next save.
     /**
      * The vanilla-ping backstop (adaptive-transfer-rate-plan.md, Mechanism B): when a
      * player's keepalive ping rises >750 ms over its session baseline while LSS was
@@ -159,13 +154,6 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public boolean enableSendPacing = true;
 
-    /** R-2 shared clamp: 0 (and any negative) = OFF; explicit values clamp to
-     *  [MIN=64, MAX=262144] KB. Used by validate() AND the /lsslod set registry so
-     *  a registry row can never clamp differently from boot validation. */
-    public static int clampOutboundBufferCeilingKB(int v) {
-        return v <= 0 ? 0 : Math.clamp(v, LSSConstants.MIN_OUTBOUND_BUFFER_CEILING_KB,
-                LSSConstants.MAX_OUTBOUND_BUFFER_CEILING_KB);
-    }
     /**
      * Transport yield (vanilla-first-lod-yield-plan.md v2.1, v0.10.0 stage A2): while the
      * player's netty channel reports NOT WRITABLE, the per-tick column flush is skipped
@@ -807,7 +795,6 @@ public abstract class ServerConfigBase extends JsonConfig {
                 LSSConstants.MIN_SEND_QUEUE_SIZE, LSSConstants.MAX_SEND_QUEUE_SIZE);
         // 0 = disabled is a first-class value (the default); any nonzero opt-in clamps into
         // the supported band — same shape as lodStoreMaxMB.
-        outboundBufferCeilingKB = clampOutboundBufferCeilingKB(outboundBufferCeilingKB);
         mbPerSecondLimitGlobal = clampMbGlobal(mbPerSecondLimitGlobal);
         // Far players (E1): mode normalizes through the shared helper (R-2/R-9); the
         // ring stays well-formed (min dragged under max — an inverted ring hides

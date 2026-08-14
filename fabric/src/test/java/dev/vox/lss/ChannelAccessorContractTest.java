@@ -73,23 +73,6 @@ class ChannelAccessorContractTest {
     }
 
     @Test
-    void bothPlatformsWireTheConfiguredCeilingIntoTheFlush() throws Exception {
-        // Source-regex wiring pin (the StoreEnvironmentContractTest pattern). The only test
-        // that touches the flush glue goes through the overload that hard-codes 0L, so a
-        // revert of either production call site to 0L — or a dropped *1024 — would ship
-        // green and turn outboundBufferCeilingKB into a silent no-op an operator could only
-        // diagnose by noticing deferred= never moves.
-        String fabric = Files.readString(Path.of(
-                "src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
-        assertTrue(fabric.contains("config.outboundBufferCeilingKB * 1024L"),
-                "Fabric must pass the CONFIGURED ceiling, in bytes, into flushSendQueues");
-        String paper = Files.readString(Path.of(
-                "../paper/src/main/java/dev/vox/lss/paper/PaperRequestProcessingService.java"));
-        assertTrue(paper.contains("this.config.outboundBufferCeilingKB * 1024L"),
-                "Paper twin must pass the same configured ceiling in bytes");
-    }
-
-    @Test
     void bothPlatformsPlumbThePingFactorThroughTheFlushAllocation() throws Exception {
         // The m12 plumbing pin (adaptive-transfer-rate-plan.md): the ping backstop's
         // factor must ride the ALLOCATION argument into flushSendQueue — the

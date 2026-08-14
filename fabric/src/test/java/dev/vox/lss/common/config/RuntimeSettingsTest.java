@@ -167,7 +167,7 @@ class RuntimeSettingsTest {
                 "generationConcurrencyLimitPerPlayer", "mbPerSecondLimitPerPlayer",
                 "mbPerSecondLimitGlobal", "dirtyBroadcastIntervalSeconds",
                 "maxConcurrentDiskReads", "farPlayers", "farPlayersMaxDistanceBlocks",
-                "outboundBufferCeilingKB", "enablePingBackstop", "enableSendPacing")));
+                "enablePingBackstop", "enableSendPacing")));
         var c = new TestServerConfig();
         assertEquals(names.size(), RuntimeSettings.listLines(c).size());
     }
@@ -202,22 +202,4 @@ class RuntimeSettingsTest {
         assertEquals(true, c.enableSendPacing, "true applies");
     }
 
-    /** The fixed outbound ceiling row (the AUTO mode was deleted —
-     *  adaptive-transfer-rate-plan.md): 0 = OFF, and the row clamps exactly like boot
-     *  validation (the R-2 rule: sub-floor values clamp UP to the 64 KB fixed floor,
-     *  never down to off). */
-    @Test
-    void outboundCeilingRowClampsLikeValidateWithZeroMeaningOff() {
-        var c = new TestServerConfig();
-        apply(c, "outboundBufferCeilingKB", "262144");
-        assertEquals(262144, c.outboundBufferCeilingKB, "a large fixed ceiling is legal");
-        apply(c, "outboundBufferCeilingKB", "0");
-        assertEquals(0, c.outboundBufferCeilingKB, "0 = off (the default)");
-        apply(c, "outboundBufferCeilingKB", "1");
-        assertEquals(dev.vox.lss.common.LSSConstants.MIN_OUTBOUND_BUFFER_CEILING_KB,
-                c.outboundBufferCeilingKB,
-                "a sub-floor fixed value clamps up exactly like validate() (R-2)");
-        apply(c, "outboundBufferCeilingKB", "-3");
-        assertEquals(0, c.outboundBufferCeilingKB, "negatives normalize to off");
-    }
 }

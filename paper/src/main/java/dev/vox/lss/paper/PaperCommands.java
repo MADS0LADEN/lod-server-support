@@ -146,13 +146,7 @@ public class PaperCommands implements CommandExecutor, TabCompleter {
                     // steady-state must stay diagnosable without any log line.
                     + " evicted=" + store.diagnostics().getSqlEvictions()
                     // C4: background-migration progress (empty once every row is v20).
-                    + store.migrationStatusToken()
-                    // Memory-tier visibility (review B1): db/wal/evicted are SQL-only
-                    // and rendered a thrashing memory store as all-zero.
-                    + (store.diagnostics().getMemBytes() > 0
-                            ? " mem=" + (store.diagnostics().getMemBytes() >> 20) + "MB"
-                                    + " mem_evicted=" + store.diagnostics().getMemEvictions()
-                            : ""));
+                    + store.migrationStatusToken());
         } else if (args.length >= 3 && args[1].equalsIgnoreCase("invalidate")
                 && args[2].equalsIgnoreCase("all")) {
             if (store == null) {
@@ -207,11 +201,7 @@ public class PaperCommands implements CommandExecutor, TabCompleter {
                         ? dev.vox.lss.common.store.LodStoreMode.OFF
                         : (service.getLodStore() != null ? service.getLodStore().mode() : null),
                 service.getOffThreadProcessor().getStoreDiagnostics(),
-                service.getPlayers().values(),
-                // ceil= : an operator-FIXED ceiling renders its configured value;
-                // 0 = off (the AUTO mode was deleted — adaptive-transfer-rate-plan.md).
-                config.outboundBufferCeilingKB > 0
-                        ? (long) config.outboundBufferCeilingKB * 1024L : 0L
+                service.getPlayers().values()
         ).withV16Line(service.getV16CompatManager().diagLineOrNull())
                 .withV18Line(service.getDialectTracker().diagLine())
                 .withFarPlayersLine(farPlayersDiagLineOrNull(service))
