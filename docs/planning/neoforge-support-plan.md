@@ -1,42 +1,137 @@
-# NeoForge support plan — client + server, best-effort tier (2026-08-14, v1.0)
+# NeoForge support plan — client + server, best-effort tier (2026-08-14, v1.1)
 
 **Status: PLANNED — folded into the v0.11.0 mega plan as stage N (post-pause,
-pre-G), with MC 1.21.1 added as a stage-G backport target.** Research basis:
+pre-G), with MC 1.21.1 added as a stage-G backport target. The N-before-G
+sequencing carries an explicit user decision point — §0.6.** Research basis:
 docs/planning/neoforge-1.21.1-port-spike.md (+ its all-four-lines addendum) —
 availability, API-drift, renderer, and precedent facts live there and are not
 re-argued here.
 
+**v1.1 (2026-08-14): revised after the 3-Opus review round** (architecture
+lens; CI/release lens; scoping/tier-honesty lens — verdicts and fold record in
+§9). Headline changes from v1.0: the client half's 26.2 reality stated honestly
+with an executable gate (§0.1); the best-effort tier made operational — cut
+protocol, defined floor, promotion criterion, corrected tier table (§6); the
+sequencing decision presented instead of resolved (§0.6); N-1 split into
+N-1a/N-1b with the source-path contract-test retarget costed (§2); the
+send-guard inversion + upstream #1913 as work items (§1.2); the tag-scheme
+collision fix (§4.2); the jarJar-walker and contract-test-relocation fixes
+(§4.2); re-costed effort (§8).
+
 ## 0. Scope decisions (user directives, 2026-08-14)
 
-1. **Client AND server ship on NeoForge.** The client half assumes the player
-   runs *some* Voxy variant exposing the normal Voxy API surface (the
-   j-shelfwood-class community ports — probed: `commonImpl.VoxyCommon`,
-   `WorldIdentifier.of`, `rawIngest(...)`, `getTaskCount`,
-   `getStorageBasePath` all match our bridge's shapes). **Graceful degradation
-   is the contract, not renderer availability**: `VoxyCompat` already treats
-   every unresolvable handle as no-sink (warn-once, no capability bit, inert
-   client) — that existing ladder IS the acceptance bar. No new degrade
-   machinery is needed; the gate is a test that the ladder works under the
-   NeoForge classloader.
-2. **Best-effort support tier** for BOTH the NeoForge variant and the MC 1.21.1
-   line (CLAUDE.md + README get a support-tier table): feature cuts to make
-   1.21.1 work are acceptable; imperfect automated coverage for NeoForge is
-   acceptable. Concretely pre-authorized: no Tier 3 on NeoForge (the framework
-   does not exist), gametest smoke subset instead of the full 71, the
-   abbreviated soak (§5.3) instead of `soak.sh all`, and the 1.21.1 line drops
-   Tier 3 + ships `useBackgroundReadSplit`/`useSelectiveNbtParse` flag-off +
-   the Voxy reset ladder degraded (per the spike's feature-drop list).
-3. **Sequencing**: stage N lands on MAIN after the F-pause sign-off and before
-   G, so the backport process carries the module (the user's main-first
-   directive). Schedule consequence stated honestly: G (and all v0.11.0 tags)
-   moves out by N's duration (~2-3 weeks). 1.21.1 joins G as a NEW branch
-   (Fabric + NeoForge only — no Paper module on that line, spike decision).
-4. **Soaks**: NeoForge gets `SOAK_PLATFORM=neoforge` running an ABBREVIATED
-   smoke set (§5.3), not the full scenario suite. Skippable entirely if the
-   plumbing fights back (best-effort), with the manual smoke as the floor.
-5. **VSS**: the branded pair gains a `vssJarNeoforge` (same zip-repackage
-   pattern, TOML rewrite instead of fabric.mod.json). XANTHA's manual publish
-   flow (`vssJars`) extends; release.yml still never publishes VSS.
+### 0.1 Client AND server ship on NeoForge — with the 26.2 reality stated
+
+The client half assumes the player runs *some* Voxy variant exposing the
+normal Voxy API surface (the j-shelfwood-class community ports — probed
+against the 1.21.1 fork: `commonImpl.VoxyCommon`, `WorldIdentifier.of`,
+`rawIngest(...)`, `getTaskCount`, `getStorageBasePath` all match our bridge's
+shapes). **Graceful degradation is the contract, not renderer availability**:
+`VoxyCompat` already treats every unresolvable handle as no-sink (warn-once,
+no capability bit, inert client) — that existing ladder IS the acceptance bar.
+
+**Honesty clause (review MAJOR):** the probe was against a *1.21.1* fork. Per
+the spike's availability matrix there is **no Voxy build of any kind on 26.2
+NeoForge today** — so on the line stage N actually ships, the client half goes
+out **compiled and inert by construction** (no consumer → no capability bit →
+the server never serves it). That is a deliberate ship-the-socket decision:
+the moment a community port appears, the jar works without an LSS release.
+Consequences:
+
+- The N-3 client gate CANNOT be "manual smoke with a community Voxy build" on
+  26.2 (no such build exists to smoke with). The executable gate is a
+  **throwaway dev-only test mod registering an `LSSApi` consumer** that logs
+  decoded column receipts — a real end-to-end client-half proof (handshake,
+  capability bit, want-set, decode, dispatch) needing no renderer.
+- A renderer-level gate runs where a renderer exists: the 26.1.2 line (Foxy
+  shim) or the 1.21.1 line (j-shelfwood fork) at stage G — recorded as the
+  place the "LODs actually render on NeoForge" box gets ticked.
+- The Modrinth **version name/description must carry the caveat** (search
+  results and version lists don't show release notes): "NeoForge (MC 26.2) —
+  server-side; client requires a community Voxy build" (§4.2).
+- README/CLAUDE.md say the same (§6).
+
+### 0.2 Best-effort support tier — operational, not vibes
+
+BOTH the NeoForge variant and the MC 1.21.1 line are **best-effort tier**.
+The tier is DEFINED in §6 (tier table, cut protocol, floor, promotion
+criterion, release-notes rule) — CLAUDE.md carries the durable copy.
+Concretely pre-authorized by this plan: no Tier 3 on NeoForge (the framework
+does not exist), gametest smoke subset instead of the full 71, the abbreviated
+soak (§5.3) with skip pre-authorized, and the 1.21.1 line ships the spike's
+feature-drop list (`useBackgroundReadSplit`/`useSelectiveNbtParse` flag-off,
+Voxy reset ladder degraded). Anything NOT pre-authorized here goes through the
+§6 cut protocol.
+
+### 0.3 Sequencing — default per directive, decision presented
+
+Default: stage N lands on MAIN after the F-pause sign-off and before G, so the
+backport process carries the module (the user's make-it-part-of-the-backport-
+process directive), and 1.21.1 joins G as a new branch. The schedule and
+program-risk consequences of that default, and the alternative orderings, are
+laid out in **§0.6 — the user picks at the pause gate** (the same gate that
+already blocks G). Two structural repairs apply if the default stands:
+
+- **F-gate re-arm (review MAJOR):** stage F's pre-flight and pause validated a
+  tree that N then rewrites (~16k lines moved + a new subproject). N-4
+  therefore RE-ARMS the release gates: full `CI=true` pre-flight per line,
+  `release_check.py` green, a fresh dev deploy to the Modrinth rig, and a
+  short re-validation window before G tags anything. Sign-off on the pause
+  authorizes N to start — it does NOT carry forward as sign-off on the
+  post-N tree.
+- **1.21.1 line scope:** Fabric + NeoForge, **no Paper module** — this is a
+  scoping cut made by THIS plan under the §6 cut protocol (v1.0 mis-cited it
+  as a "spike decision"; the spike made no such call). Grounds: the line is
+  best-effort, the Paper 1.21.1 port is real additional work (its own
+  MC-retarget of the NMS/Moonrise surfaces), and no user ask names it. It is
+  *revisitable*: the `support/mc1.20.1` line ships a Paper module, so
+  portability to old-API Paper is proven precedent — demand can re-open it.
+
+### 0.4 Soaks — abbreviated, with the skip expected and the floor defined
+
+NeoForge gets `SOAK_PLATFORM=neoforge` running an ABBREVIATED scenario set
+(§5.3). **Honest cost note (review MAJOR):** unlike Folia (which reuses
+Paper's driver wholesale), NeoForge shares an event API with neither Fabric
+nor Bukkit — the platform needs a third `SoakScenarioDriver` twin (~200 lines)
+plus a third metrics exporter (~400-700 lines) satisfying the exporter-schema
+parity contract tests. That is well past the ~2-day budget, so **the skip
+clause is EXPECTED to fire**, and the tier's floor is the §5.5 manual smoke
+checklist — which this plan defines rather than gestures at.
+
+### 0.5 VSS
+
+The branded pair gains a `vssJarNeoforge` (same zip-repackage pattern; the
+descriptor rewrite is a `neoforge.mods.toml` TOML rewrite — closer to
+plugin.yml's line-based approach than fabric.mod.json's JSON one). XANTHA's
+manual publish flow (`vssJars`) extends; release.yml still never publishes
+VSS. Two coordination notes (review): adding a loader to the `84zcagOb`
+listing is XANTHA's listing — **needs their buy-in before N-4 wires the
+task**; and per §4.2, `release_check.py`'s discover step hard-fails on a
+missing jar family, so the VSS-neoforge jar becomes a release blocker the
+same commit the check lands — the task and the check land together.
+(`brandedConfigCandidates` needs no NeoForge analogue of the Paper
+data-folder fork: NeoForge configs live in the shared `config/` dir.)
+
+### 0.6 The sequencing decision (presented, not resolved)
+
+Both options satisfy "make NeoForge part of the backport process" — NeoForge
+rides the normal machinery either way. They differ in what gets risked. The
+program is at the pause gate anyway; this is the decision to take alongside
+sign-off.
+
+| | **Option A — N before G (this plan's default, per the include-it-in-v0.11.0 directive)** | **Option B — v0.11.0 ships first; N + the 1.21.1 line become v0.12.0** |
+|---|---|---|
+| v0.11.0 publish | slips by N + the 1.21.1 line (~6-9 calendar weeks total added before tags — §8) | ships on the current schedule, from the exact tree the pause validated |
+| Pause integrity | repaired by the N-4 F-gate re-arm (fresh pre-flight + re-deploy + re-validation window) — but the re-arm is itself calendar time | unbroken by construction |
+| G delta-port | carries the whole-tree xplat move onto the `-v0.10` bases on top of the documented ~90-file 1.21.11 adaptation set — the shape most likely to trigger the mega plan's fresh-re-port escape hatch | `-v0.11` bases cut from a tagged tree; the move lands on the NEXT round where a conflict blocks nothing urgent |
+| 1.21.1 line cut from | main-at-G (untagged, mid-program) | a tagged, reviewed v0.11.0 — the spike's own recommendation |
+| NeoForge wall-clock | in v0.11.0, ~6-9 weeks out | in v0.12.0 — roughly the same wall-clock (identical total work), while v0.11.0's five features reach users ~6-9 weeks sooner |
+| Total work | identical | identical |
+
+**Defensible hybrid:** authorize **N-1a/N-1b only** (the xplat extraction —
+behavior-neutral) immediately after the v0.11.0 tags, in the quiet
+post-release window, with N-2..N-4 + the 1.21.1 line as v0.12.0. De-risks the
+delta-port question entirely and starts the port without blocking the release.
 
 ## 1. Architecture
 
@@ -59,33 +154,100 @@ lod-server-support/
   ColumnCacheStore, ResetCoordinator, far-player client tracker/support logic),
   the server stack (ChunkDiskReader core, SectionSerializer,
   NbtSectionSerializer, generation service core, dirty pipeline core), payload
-  codecs, VoxyCompat/MoonriseReadCompat/AntiXrayCompat, LSSApi.
+  codecs, VoxyCompat/MoonriseReadCompat/AntiXrayCompat, LSSApi, and the
+  dev-only `benchmark/` package incl. `SoakScenarioDriver` (review: it was
+  homeless in v1.0 — it imports `net.fabricmc` and is exactly what a future
+  `SOAK_PLATFORM=neoforge` driver would twin, so it moves with a LoaderServices
+  route for its loader touches; release exclusion rules unchanged).
 - **What stays per-loader**: entrypoints, event/payload registration, mixin
   classes + configs (near-verbatim copies, different wiring), the far-player
   RENDERER (26.2 Fabric = COLLECT_SUBMITS; 26.2 NeoForge = the state-based
   RenderLevelStageEvent/ExtractLevelRenderStateEvent pair), config-screen glue
   (Fabric-only — Sodium's config API; NeoForge v1 is config-file + `/lsslod
-  set` only), LAN hook (Fabric-only), move-tracer bootstrap (mixin-loading
-  differs; hook bodies live in xplat).
-- **`LoaderServices` seam** (xplat interface, per-loader impl): isModLoaded,
-  configDir, gameDir, modVersion, payload send. The ~14 `FabricLoader` call
-  sites route through it; NeoForge maps to `ModList`/`FMLPaths`/
-  `PacketDistributor`(+`ClientPacketDistributor`).
+  set` only), LAN hook (Fabric-only — consequence stated: a NeoForge
+  integrated server published to LAN does NOT start the service in v1;
+  recorded in §5.4), move-tracer bootstrap (mixin-loading differs; hook
+  bodies live in xplat).
+- **The seam inventory** (review MAJOR — v1.0 undercounted at "~14
+  FabricLoader sites"). Per-loader seams routed through `LoaderServices`
+  (xplat interface, per-loader impl) or equivalent:
+  1. `FabricLoader` sites: isModLoaded, configDir, gameDir, modVersion.
+  2. **Payload send** — incl. the static networking holders
+     (`LSSClientNetworking`/`LSSServerNetworking` publish send functions the
+     stacks call through; the holders' WIRING is per-loader even where the
+     logic is xplat).
+  3. **`RequestProcessingService` construction/lifecycle** — event wiring is
+     per-loader (SERVER_STARTED vs ServerStarted etc.); the service body is
+     xplat.
+  4. **`ChannelPressureProbe` factories** (`FabricChannelPressure` /
+     `PaperChannelPressure` precedent) — a NeoForge impl, else the transport
+     yield gate + ping backstop silently read UNKNOWN-never-yields on
+     NeoForge = silent feature loss. A contract test pins that the NeoForge
+     probe resolves a real channel (review MAJOR).
+  5. **Client command source type** — Fabric's client command API vs
+     `RegisterClientCommandsEvent`'s source; `/lss` command bodies take a thin
+     source adapter.
+  6. **`ChunkSaveDataHook`** — the dirty hook is a REAL mixin on NeoForge too
+     (same `SerializableChunkData.copyOf` target; vanilla class, loader-neutral
+     target verified in the spike); the @Inject lives per-loader, the body
+     (`onChunkSaveData`) in xplat.
+  7. **Mixin ACCESSORS used by xplat code** (review MAJOR — the coupling v1.0
+     missed): `ChunkDiskReader` calls `AccessorSimpleRegionStorage`/
+     `AccessorIOWorker`/`AccessorRegionFileStorage`/`AccessorRegionFile` etc.
+     Accessor *interfaces* are loader-generated classes. Resolution: the
+     accessor interfaces themselves move to xplat as plain interfaces and each
+     loader's mixin config targets them (mixin annotations are data — both
+     loaders run the same Mixin library and can implement a shared interface),
+     OR the reader's accessor touches route through a small per-loader
+     `RegionIoAccess` seam. Decide at N-1b; the contract is "xplat compiles
+     with zero loader imports", pinned by a source-regex test.
+  8. **`FabricFarPlayerSnapshots`** (server-side extraction) — NeoForge twin
+     over the same vanilla types.
+- **Java discipline (review):** xplat is compiled by each consumer, so nothing
+  builds it standalone and a Java-25-only API leak (the tree has exactly one:
+  `ScopedValue` in `AntiXrayCompat`) surfaces months later on a 1.21.x
+  backport. Tripwire: a CI step compiles xplat at `--release 21` with the
+  known-25-only files excluded via an explicit list (currently 1 entry), so
+  any NEW leak reds main immediately.
 
 ### 1.2 Non-negotiable invariants (carried from the existing architecture)
+
+Rule generalized per review: **every "never tiered" claim names the test that
+reds when it's violated.**
 
 - **Wire bytes identical across loaders by construction**: payload classes are
   vanilla `StreamCodec` + `CustomPacketPayload`, shared via xplat verbatim —
   the same guarantee the Fabric/Paper pair already pins (`WireParityTest`).
   A NeoForge server serves Fabric clients and vice versa with zero shims.
+  *Test:* the NeoForge contract suite reuses the WireParityTest byte corpus;
+  §4.2's cross-loader class-digest check pins the shipped jars.
 - **Every `lss:*` payload registers `.optional()`** on NeoForge (a mandatory
   payload refuses vanilla/Fabric clients at login — the fork's mistake).
-- **NeoForge throws on sends to unannounced channels** (Fabric no-ops): all
-  send paths are already handshake-gated by design; the flush/broadcast paths
-  additionally get containment so a race lands as a contained send failure
-  (the existing send-failure ladder), never a tick crash.
+  *Test:* `.optional()` census (source-regex) in the neoforge contract suite.
+- **Send-guard inversion (review MAJOR — v1.0 had this backwards).** NeoForge
+  THROWS on sends to unannounced channels where Fabric silently no-ops, and
+  the codebase contains **zero `canSend` gates** because Fabric never needed
+  them. The exposed sites are not just flush/broadcast races: **the C2S
+  handshake is an unprompted FIRST send** — a NeoForge client joining a
+  server without LSS (vanilla, or Fabric-without-LSS) would THROW on the
+  handshake send, exactly the kind of with-other-mods crash issue #160 is
+  about. Work item: a `sendIfListening` wrapper at the LoaderServices seam
+  (NeoForge impl checks channel availability / catches `UnsupportedOperation`
+  shape; Fabric impl passes through), applied to EVERY send site — handshake,
+  client_info, want-set, empty-clear, far-player prefs, and all S2C paths.
+  *Test:* an interop matrix in the contract suite enumerating (client-loader ×
+  server-has-LSS) with the wrapper's behavior pinned per cell; plus the
+  degrade smoke (§5.5) joining a vanilla server.
+- **Upstream NeoForge#1913 stated as a load-bearing assumption (review
+  MAJOR):** the NeoForge-client→Fabric-server channel-announcement bug means
+  a NeoForge client may not see Fabric-server channels as announced. Our
+  mitigation assumption — LSS's own C2S handshake (wrapped per above) arms the
+  session, and the server only sends S2C after registration — makes the
+  mixed-loader pair work even if announcement is one-way-broken. This is an
+  ASSUMPTION until N-3 verifies it live (a NeoForge client against the
+  Modrinth Fabric rig is the cheapest real test); recorded as risk §7.6.
 - **C2S ≤ 32 KiB on NeoForge**: the want-set batch maxes ~16.5 KiB
-  (1024 × 16 B + envelope). A build-time pin
+  (1024 × 16 B + envelope). *Test:* a build-time pin
   (`WantSetBudgetInvariantTest` sibling) asserts
   `MAX_BATCH_CHUNK_REQUESTS * 16 + ENVELOPE_MARGIN < 32768` so a future budget
   raise cannot silently cross the loader bound.
@@ -94,15 +256,30 @@ lod-server-support/
 
 ## 2. Stage N — NeoForge on main (26.2), phased
 
-### N-1: xplat extraction (no behavior change)
+### N-1a: xplat extraction — moves + retargets (no behavior change)
 
-Pure file moves + the LoaderServices seam. The fabric module gains
-`sourceSets.main.java.srcDir("../xplat/src/main/java")` (and resources); the
-jar layout, mixin configs, and every test are unchanged. **Gate: the full
-existing suite green (T1 both platforms, T2, T3, release_check, one
-fresh-backfill soak) + a jar-diff sanity check** — the Fabric jar before/after
-N-1 differs only in metadata (class bytes identical modulo compile order).
-This is the blast-radius stage: land it alone, first, in a quiet window.
+File moves + `sourceSets.main.java.srcDir("../xplat/src/main/java")` (and
+resources) on the fabric module; jar layout and mixin configs unchanged.
+**NOT "every test unchanged" (review MAJOR):** the source-path contract-test
+family reads production sources AS TEXT by path — at least 9 files retarget
+(`ChannelAccessorContractTest`, `StoreEnvironmentContractTest`,
+`SaveHookContractTest`, `LanHookContractTest`, `MoveTraceHookContractTest`,
+`ViaGuardWiringContractTest`, `SelectiveChunkNbtLoaderTest`,
+`ClientColumnProcessorTest`, `ExporterContractTest`), ideally via one shared
+`SourcePaths` helper that resolves fabric-then-xplat so the NEXT move is a
+one-line change; and `FoliaWiringContractTest`'s production-class scan set
+grows to xplat. **Gate: the full existing suite green (T1 both platforms, T2,
+T3, release_check, one fresh-backfill soak) + a jar-diff sanity check** — the
+Fabric jar before/after N-1a differs only in metadata (class bytes identical
+modulo compile order). This is the blast-radius stage: land it alone, first,
+in a quiet window.
+
+### N-1b: the seams (behavior-neutral refactor)
+
+The §1.1 seam inventory: `LoaderServices` + the send wrapper + the accessor
+resolution + the static-holder wiring split. Fabric impl = current behavior
+verbatim. Gate: the normal suite (no jar-diff claim — call sites change) +
+the xplat zero-loader-imports source pin + the `--release 21` tripwire step.
 
 ### N-2: neoforge module, server half
 
@@ -111,33 +288,49 @@ MDG 2 (`net.neoforged.moddev` 2.0.14x), NeoForge 26.2.0.x, Java 25.
 (all 10 channels, `.optional()`, `executesOn` matching each receiver's current
 thread contract), event wiring (ServerStarted/Stopping, ServerTickEvent.Post,
 PlayerLoggedOut), commands via `RegisterCommandsEvent`, the dirty hook +
-disk-read accessor mixins (same targets as Fabric — vanilla classes; AT file
-for the 2-line accessWidener), natives packaging (jarJar with module metadata;
+disk-read accessor mixins (same vanilla targets as Fabric; AT file for the
+2-line accessWidener). **Packaging decision lands HERE, not at N-4** (review
+MAJOR): natives via jarJar (`META-INF/jarjar/` — note: a different nesting
+path than Loom's `META-INF/jars/`, which is why §4.2's release_check walker
+must be generalized BEFORE the neoforge checks can mean anything) with
 **fallback pre-authorized: Paper-style shading** — known-good in-repo,
-no-relocate-org.sqlite rule applies). Server parity gates: the shared
-`WireParityTest` pattern extended to a neoforge contract suite (payload
-census, registrar census via source-regex, mods.toml pins), the gametest
-smoke subset (§5.2), the abbreviated soak (§5.3).
+no-relocate-org.sqlite rule applies. Server parity gates: the neoforge
+contract suite (§5.1), the gametest smoke subset (§5.2), the §5.3/§5.5
+soak-or-floor.
 
 ### N-3: neoforge module, client half
 
 Client events (LoggingIn/Out, ClientTickEvent.Post), client commands
-(`RegisterClientCommandsEvent`), `VoxyCompat` under the NeoForge classloader
-(no runtime remapping — the direct-class-literal rule relaxes, but keep the
-code identical; the graceful-degrade ladder is the contract), `/lss reset`
-(Voxy half degrades per its existing ladder when the fork's holder interfaces
-are absent), the far-player renderer on the state-based
-RenderLevelStageEvent/Extract pair (**best-effort: if the 26.2 NeoForge
-render-submit surface fights the proxy-entity idiom, CUT far-player rendering
-on NeoForge v1** — the tracker/wire stay, the renderer no-ops with an INFO;
-the capability bit still composes from consumers only). Client gate: manual
-smoke with a community Voxy build (LODs render, reset works, far players
-render-or-degrade) + the no-Voxy degrade smoke (clean logs, no capability).
+(`RegisterClientCommandsEvent` + the source adapter), `VoxyCompat` under the
+NeoForge classloader (no runtime remapping — the direct-class-literal rule
+relaxes, but keep the code identical; the graceful-degrade ladder is the
+contract), `/lss reset` (Voxy half degrades per its existing ladder when the
+fork's holder interfaces are absent — the no-holder branch ABORTS the Voxy
+half by design (the `isWorldUsed` freeze guard); verify the abort surfaces a
+user-visible chat line, since on NeoForge it's a shipped configuration, not an
+edge case), the far-player renderer on the state-based
+RenderLevelStageEvent/Extract pair. **Best-effort renderer cut, stated
+precisely (review):** if the 26.2 NeoForge render-submit surface fights the
+proxy-entity idiom, CUT the far-player **render path only** — it no-ops with
+a once-per-session INFO. The tracker, wire channels, and **the capability-bit
+arm term stay exactly as on Fabric**: the bit is the PREFS CARRIER — dropping
+the subscription would stop the `shareSelf` opt-out from ever reaching the
+server, a privacy regression wearing a feature cut's clothes. *Test:* the
+existing prefs-carrier pins run in the neoforge contract suite.
+**Client gates (executable — review MAJOR):** (1) the throwaway `LSSApi`
+consumer test mod proves the end-to-end client half on 26.2 (§0.1); (2) the
+no-Voxy degrade smoke (clean logs, no capability bit); (3) the vanilla-server
+join smoke (the send-wrapper proof); (4) NeoForge-client→Fabric-server
+against the Modrinth rig (the #1913 assumption check). Renderer-level
+verification is deferred to a line where a renderer exists (§0.1).
 
-### N-4: CI + release + VSS + docs
+### N-4: CI + release + VSS + docs + F-gate re-arm
 
-Details §4/§6. CLAUDE.md support-tier table, README version table row,
-release-notes draft line.
+Details §4/§6. CLAUDE.md support-tier section finalized, README rows, the
+release-notes draft line **naming issue #160 as answered** (our far players
+degrade instead of crashing; the NeoForge variant is ours now). Then the
+F-gate re-arm (§0.3): fresh per-line pre-flights, release_check green, dev
+deploy to the Modrinth rig, short re-validation window. G starts after.
 
 ## 3. Stage G additions — 1.21.1 as a backport target
 
@@ -151,34 +344,77 @@ serializer old-API translation, far-player renderer → 1.21.1 immediate-mode
 idiom (old `RenderLevelStageEvent` semantics on the NeoForge side), golden
 regen (keep `xver-live-corpus` un-regenerated — the XVER proof), Java 21
 (`ScopedValue` → the 1.21.11 line's AntiXray pass-through). Line scope:
-**Fabric + NeoForge, no Paper, no Tier 3, best-effort tier** — feature cuts
-per the spike's drop list are pre-authorized. The other two support lines
-receive the neoforge module through the normal delta-port (their NeoForge
-majors: 26.1.2.x and 21.11.x; expected drift is the documented rename set,
-each line pins its own MDG/NeoForge pair).
+**Fabric + NeoForge, no Paper (a §6-protocol cut recorded at §0.3 — not a
+spike decision), no Tier 3, best-effort tier** — feature cuts per the spike's
+drop list are pre-authorized. **Line-mechanics consequences (review MAJORs):**
+
+- **`ReleaseWorkflowContractTest` lives in `paper/src/test` — a module this
+  line does not have.** On `support/mc1.21.1` the twin relocates to
+  `fabric/src/test` (package-private copy; the test is pure file-reading, no
+  Paper types). Pinned in the line's port checklist.
+- **Tag scheme: `+mc1.21.1` is a PREFIX of `+mc1.21.11`** — every glob or
+  `contains()` guard collides. §4.2 carries the fix; the line's release.yml
+  flavor and contract-test twin use exact-suffix/boundary forms from day one.
+- The renderer-level client gate for NeoForge runs HERE (the j-shelfwood fork
+  exists on this line — §0.1).
+
+The other two support lines receive the neoforge module through the normal
+delta-port (their NeoForge majors: 26.1.2.x and 21.11.x; expected drift is the
+documented rename set, each line pins its own MDG/NeoForge pair). Note the
+delta-port now carries the whole-tree xplat move (§0.6's Option-A cost; the
+fresh-re-port escape hatch's trigger condition is "conflict resolution exceeds
+the documented ~90-file adaptation-set effort").
 
 ## 4. CI + release workflow modifications
 
 ### 4.1 build.yml (main + support flavors)
 
 - The main build job gains: `./gradlew :neoforge:build` (compiles xplat under
-  MDG + runs the neoforge contract tests) and the gametest smoke step
-  (`:neoforge:runGameTestServer`, failure-exit-code gated) with the same
-  retry-once + evidence-artifact pattern as the existing tiers.
+  MDG + runs the neoforge contract tests), the xplat `--release 21` tripwire
+  step (§1.1), and the gametest smoke step (`:neoforge:runGameTestServer`)
+  with the same retry-once + `::warning::` + evidence-artifact pattern as the
+  existing tiers (new artifact names `gametest-*-evidence-neoforge`; the
+  job's 45-min timeout re-checked against the added steps). `vssJars` CI
+  presence: `vssJarNeoforge` builds in the same job so the pair check has
+  inputs (review m: the VSS jars must exist before release_check runs).
 - Tier 1/2/3 stay on the fabric module unchanged. Docs-only skip rules
-  unchanged. The support-branch build.yml flavors gain the same step with
+  unchanged. The support-branch build.yml flavors gain the same steps with
   their pinned NeoForge versions.
 
 ### 4.2 release.yml (main flavor; support flavors mirror per line)
 
 - Build step: add `:neoforge:build -Pmod_version=…` beside the existing two.
-- `release_check.py`: new `check_neoforge_jar` family — dev-package exclusion
-  (benchmark/soak classes absent), `neoforge.mods.toml` pins (mod id `lss`,
-  display name, version expansion), nested-natives presence, the
-  wire-identity check extended (the xplat/common class bytes shared with the
-  Fabric jar — SHA where packaging allows, else a class-digest comparison),
-  the VSS-neoforge pair checks. RELEASE_GLOBS gain the neoforge jar; selftest
-  fixtures extended same-commit (the R4/S-8 rule).
+  Version expansion under MDG uses its own property idiom — verify the
+  `-Pmod_version` flow reaches `neoforge.mods.toml` (open question flagged;
+  resolve at N-2 with a `release_check` pin either way).
+- **`release_check.py` (review MAJORs folded):**
+  - `_nested_jars()` currently walks ONLY `META-INF/jars/*.jar` (Loom's
+    layout). NeoForge jarJar nests under **`META-INF/jarjar/`** — without
+    generalizing the walker first, the natives/forbidden-package checks on the
+    neoforge jar would pass VACUOUSLY. The walker gains the second prefix (or
+    the shading fallback makes it moot — the N-2 packaging decision gates
+    this check's design; whichever ships, the selftest carries a
+    counter-fixture proving the walker sees nested content).
+  - New `check_neoforge_jar` family — dev-package exclusion (benchmark/soak
+    classes absent), `neoforge.mods.toml` pins (mod id `lss`, display name,
+    version expansion), natives presence (per packaging), the VSS-neoforge
+    pair checks, `check_third_party_notices` grown to a 3-way (fabric/paper/
+    neoforge).
+  - **Wire-identity, corrected (review MAJOR):** v1.0 misdescribed the
+    existing `check_wire_identity_fabric` — it pins the **LSS↔VSS brand
+    pair** (nested common-jar SHA equality), NOT cross-platform bytes. Two
+    separate checks land: `check_wire_identity_neoforge` = the same
+    brand-pair SHA rule for the neoforge pair; and a NEW cross-loader check =
+    a **class-digest comparison** of the xplat+common class SET between the
+    Fabric and NeoForge jars (same class names present; byte-equality only
+    where compilation is deterministic — else presence+size, with the honest
+    limitation noted in the check's docstring).
+  - `discover` hardcodes jar families and **hard-fails when one is missing**
+    — the neoforge + VSS-neoforge families, the build steps producing them,
+    and the check land in the SAME commit or CI reds (the existing R4/S-8
+    same-commit rule; a `_write_tree_neoforge` selftest fixture, ~150-250
+    lines, lands with them). `RELEASE_GLOBS`, the stale-jar ambiguity guard,
+    and the glob-hygiene list all gain the neoforge entries.
 - GitHub release `files:` gains `neoforge/build/libs/lod-server-support-neoforge-*.jar`.
 - **New Modrinth step** (mirroring the existing two):
   ```yaml
@@ -188,7 +424,7 @@ each line pins its own MDG/NeoForge pair).
       modrinth-id: lKiXKLvv
       modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
       files: neoforge/build/libs/lod-server-support-neoforge-*.jar
-      name: ${{ github.ref_name }} - NeoForge (MC 26.2)
+      name: ${{ github.ref_name }} - NeoForge (MC 26.2, server-side; client needs a community Voxy build)
       version: ${{ github.ref_name }}+neoforge+mc26.2
       version-type: release
       loaders: neoforge
@@ -196,29 +432,58 @@ each line pins its own MDG/NeoForge pair).
         26.2
       changelog: ${{ steps.release_notes.outputs.notes }}
   ```
-  Support-line flavors: game-versions/name per line; the 1.21.1 flavor
-  publishes fabric+neoforge (no Paper step).
-- `ReleaseWorkflowContractTest` (+ per-line twins): pins gain the neoforge
-  build step, the release-files glob, the Modrinth step census (three uploads
-  on main; two on 1.21.1), and VSS-publish absence unchanged.
+  The `name:` carries the §0.1 caveat because search results and version
+  lists don't render release notes. mc-publish's dependency metadata for
+  NeoForge reads the TOML `[[dependencies]]` block — the mods.toml must
+  declare neoforge/minecraft ranges correctly or the listing's environment
+  tags mislead (review note). Support-line flavors follow the existing
+  support-line convention (a MOD_VERSION derive step, NOT `github.ref_name`,
+  which embeds the `+mc…` suffix there); the 1.21.1 flavor publishes
+  fabric+neoforge (no Paper step).
+- **Tag scheme collision (review MAJOR — empirically verified):**
+  `+mc1.21.1` is a prefix of `+mc1.21.11`, so `v*+mc1.21.1*`-style globs
+  match BOTH lines — PREV_TAG resolution, the wrong-line tag guard, and
+  changelog scoping all cross-contaminate. Fixes, pinned on BOTH affected
+  lines: the 1.21.1 flavor's tag trigger/guards use the **exact-suffix form**
+  (`v*+mc1.21.1` with NO trailing wildcard, plus an end-anchored regex
+  `\+mc1\.21\.1$` in shell guards); the 1.21.11 flavor's guards are audited
+  for the converse (they must not match the new line — its existing guards
+  use the longer string so prefix-matching is safe in that direction, but the
+  audit is explicit); and both lines' `ReleaseWorkflowContractTest` twins pin
+  the anchored forms — the current `contains()` idiom structurally cannot
+  express "1.21.11 but not 1.21.1", so those pins assert the REGEX/anchored
+  literals appear verbatim. Same landmine inside the tests themselves:
+  `FORBIDDEN_LINE_TOKENS`-style substring checks must use full version-ids or
+  word boundaries.
+- `ReleaseWorkflowContractTest` (+ per-line twins): the census constants are
+  EXACT counts — `assertEquals(2, count("modrinth-id: lKiXKLvv"))` reds the
+  moment the third upload step exists, `MODRINTH_VERSION_IDS` gains the
+  neoforge id, and the VSS-absence pin must not be tripped by the new step
+  names. All updated same-commit with the workflow edit. Partial-publish
+  exposure grows to four steps per line — the §4.3 recovery rule now names
+  four channels.
 
 ### 4.3 The irreversibility discipline (unchanged, restated)
 
 Tags publish irreversibly; the neoforge jar joins the same pre-flight
 (`CI=true ./gradlew :fabric:build … :neoforge:build … && release_check.py
---version`) BEFORE tagging; never re-run a partially published release —
-recovery is hand-uploading the GitHub-attached jar to the channel that missed.
+--version`) BEFORE tagging (CLAUDE.md's Releasing section gains
+`:neoforge:build`; the 1.21.1 line's variant drops `:paper:*`); never re-run
+a partially published release — recovery is hand-uploading the
+GitHub-attached jars to whichever of the (now four) channels missed.
 
 ## 5. Testing strategy (best-effort tier, made concrete)
 
 ### 5.1 Tier 1
 
 Stays on the fabric module (fabric-loader-junit compiles xplat + common —
-~1250 tests unchanged). The neoforge module gets CONTRACT tests only
-(JUnit, no MC boot): mods.toml pins, registrar/payload census (source-regex),
-AT-file presence + content, `.optional()` census, the C2S-bound pin,
-LoaderServices completeness (reflective: every interface method has a
-neoforge impl).
+~1250 tests unchanged, minus the N-1a path retargets). The neoforge module
+gets CONTRACT tests only (JUnit, no MC boot): mods.toml pins,
+registrar/payload census (source-regex), AT-file presence + content,
+`.optional()` census, the C2S-bound pin, the send-wrapper interop matrix
+(§1.2), the ChannelPressureProbe resolution pin, the prefs-carrier arm-term
+pin, LoaderServices completeness (reflective: every interface method has a
+neoforge impl — the same pattern as the governor's adoptFrom completeness pin).
 
 ### 5.2 Tier 2 smoke subset (NeoForge gametests)
 
@@ -226,73 +491,190 @@ neoforge impl).
 serve round-trip (crafted frames), disk-read byte parity vs the live
 serializer (THE cross-loader correctness pin), generation serve, dirty
 broadcast, idempotent shutdown. Registered via `RegisterGameTestsEvent`
-(the 26.x data-driven idiom); run as `runGameTestServer` in CI. Full-suite
-parity is explicitly NOT a goal (best-effort tier).
+(the 26.x data-driven idiom); run as `runGameTestServer` in CI, wired into
+the build like the existing tiers (explicit step — NOT assumed to hang off
+`check`). Full-suite parity is explicitly NOT a goal (best-effort tier).
 
-### 5.3 Abbreviated soak ("smoke soak")
+### 5.3 Abbreviated soak — shape corrected, skip expected
 
-`SOAK_PLATFORM=neoforge ./scripts/soak.sh smoke` = TWO scenarios only:
+**No `soak.sh smoke` subcommand exists and none is added** (review: the
+dispatcher takes `<scenario>|all`; unknown args error). The correct shape is
+the Paper/Folia precedent: a `NEOFORGE_SCENARIOS=(fresh-backfill
+dirty-broadcast)` array selected by `SOAK_PLATFORM=neoforge`, so
+`SOAK_PLATFORM=neoforge ./scripts/soak.sh all` runs exactly the two:
 `fresh-backfill` (generation + serve + all conservation laws once) and
 `dirty-broadcast` (the NeoForge dirty hook end-to-end). Unchanged Fabric soak
 client + checker — the run itself is the Fabric-client↔NeoForge-server interop
-proof (the Paper/Folia precedent). Pre-authorized fallback: if driver plumbing
-under NeoForge exceeds ~2 days, SKIP the soak platform entirely and gate on
-the manual smoke checklist (best-effort).
+proof. **Cost honesty (§0.4):** this requires a third scenario driver +
+exporter twin satisfying the schema-parity contracts (~600-900 lines total —
+Folia's zero-cost reuse does not apply). **The skip clause is expected to
+fire**: if the plumbing exceeds ~2 days, SKIP the soak platform — recorded as
+a §6-protocol decision entry (not silently), with §5.5 as the floor.
 
 ### 5.4 What NeoForge explicitly does NOT get
 
-Tier 3 (no framework), the full soak suite, benchmark harness arms, Folia-class
-platform validation, per-release live-rig burn-in (the Modrinth rig stays
-Fabric). Recorded in CLAUDE.md so nobody chases the gap as a regression.
+Tier 3 (no framework), the full soak suite, benchmark harness arms,
+Folia-class platform validation, per-release live-rig burn-in (the Modrinth
+rig stays Fabric), the Sodium config screen (config file + `/lsslod set`
+instead), the LAN integrated-server hook (a LAN-published NeoForge integrated
+server does not start the service). Recorded in CLAUDE.md so nobody chases
+the gaps as regressions.
 
-## 6. Support-tier documentation (CLAUDE.md + README)
+### 5.5 The manual smoke checklist (the tier floor — normative)
 
-New CLAUDE.md section (and README version-table column):
+Run per NeoForge-affecting release when the soak platform is skipped; results
+recorded in the release PR description. All on 26.2 unless noted:
 
-> **Support tiers.** Fabric 26.2 + Paper 26.2 (main) and the 26.1/1.21.11
-> support lines are FULL tier: complete test gauntlets, soaks, live-rig
-> burn-in. **NeoForge (all lines) and the MC 1.21.1 line are BEST-EFFORT
-> tier**: they ship client+server and track the mainline feature set, but
-> feature cuts are acceptable where the platform/version fights (each cut
-> documented in the line's release notes), automated coverage is reduced
-> (contract tests + gametest smoke + abbreviated/skipped soak on NeoForge; no
-> Tier 3 on either), and issues specific to these variants are triaged at
-> lower priority. Wire compatibility is NEVER tiered — every jar speaks the
-> same protocol at full fidelity.
+1. **Server serve**: NeoForge server + Fabric client w/ Voxy — join, LODs
+   stream, `/lsslod diag` shows serves from all three sources (probe/disk/
+   generation), no WARN/ERROR in the server log.
+2. **Dirty**: `setblock` near a served column → the client re-receives it.
+3. **Client degrade**: NeoForge client, NO Voxy — clean logs, no capability
+   bit sent, zero LSS traffic after handshake reply.
+4. **Client half live**: NeoForge client + the throwaway `LSSApi` consumer
+   test mod — columns decode and dispatch (§0.1's executable gate); where a
+   community Voxy build exists for the line (1.21.1, 26.1.2), swap it in and
+   eyeball actual rendering.
+5. **Vanilla-server join**: NeoForge client joins a vanilla server — no
+   throw, no log spam (the send-wrapper proof).
+6. **Mixed-loader**: NeoForge client → Fabric server (the rig) — session
+   arms, columns flow (the #1913 assumption check).
+7. **Store + restart**: store-armed server restart — `store status` state=ok,
+   warm serves on rejoin.
+
+### 5.6 Test-tier summary
+
+| Surface | Fabric (main) | NeoForge (main) |
+|---|---|---|
+| Tier 1 JUnit | ~1250 (compiles xplat) | contract suite only |
+| Tier 2 gametests | 71 | ~8-12 smoke |
+| Tier 3 client | yes | none (no framework) |
+| Soak | 20 scenarios | 2-scenario set, skip expected → §5.5 floor |
+| Live rig | yes | no |
+
+## 6. The best-effort tier (normative — CLAUDE.md carries the durable copy)
+
+### 6.1 Tier table (corrected per review — v1.0's FULL-tier claim was false)
+
+| Tier | Lines | Commitment |
+|---|---|---|
+| **Full** | Fabric + Paper on main (26.2) | complete gauntlets (T1/T2/T3), 20-scenario soaks ×3 platforms, live-rig burn-in, first-priority triage |
+| **Correct, not perfect** | the 26.1 + 1.21.11 support lines (Fabric + Paper) | full builds + T1/T2, representative smoke soaks, NO live rig (the rig is 26.2 Fabric only), no exhaustive gauntlets — the recorded support-line effort budget |
+| **Best-effort** | NeoForge (all lines) + the whole MC 1.21.1 line | tracks the mainline feature set; cuts allowed via §6.2; coverage per §5; lowest triage priority |
+
+### 6.2 Cut protocol
+
+A feature cut on a best-effort line is legal when: (1) it is pre-authorized
+by this plan (§0.2's list), OR (2) it is recorded as a **dated decisions-log
+entry in the owning program/progress doc** (the mega plan §6.1 pairing rule)
+naming what is cut, why, and the revival condition — release notes alone are
+not the record. Out of bounds regardless of tier (**wire safety — explicit
+sign-off required**): dropping any of the 10 `lss:*` channel registrations
+(WireParityTest census; on NeoForge an unregistered channel makes sends
+throw); changing capability-bit composition (the far-player bit is the PREFS
+CARRIER — dropping the subscription is a privacy regression: a mode-`on`
+server would share targets whose `shareSelf` opt-out never arrived); dropping
+a compat rung (v16/v18/v19); altering the v20 identity dictionary or codec
+negotiation; raising `WANT_SET_BUDGET`/`MAX_BATCH_CHUNK_REQUESTS` past the
+NeoForge C2S bound (already pinned). Wire-safe and unilateral under the tier:
+test-tier scope, server-internal read/parse flags (byte-identical by their
+own pinned invariants), client-local UX (config screen, LAN hook, tracer
+bootstrap, reset-ladder degrade), the far-player **render path** no-op
+(§N-3's precise form), per-loader packaging.
+
+### 6.3 Floor, promotion, release notes
+
+- **Floor**: when the soak platform is skipped, §5.5 is the per-release floor.
+- **Promotion criterion** (the tier's exit, mirroring Folia's experimental
+  exit discipline — the two labels are DIFFERENT axes: *experimental* =
+  platform-correctness confidence, *best-effort* = support/coverage
+  commitment, and neither implies the other): NeoForge promotes to
+  correct-not-perfect when (a) a real Voxy-API renderer exists on the line,
+  (b) the soak platform runs the 2-scenario set green in CI-adjacent use, and
+  (c) a release cycle passes with no variant-specific regression. Until then
+  the label stays.
+- **Release-notes rule** (mirrors the Folia-experimental rule): NeoForge- or
+  1.21.1-affecting items must name the best-effort tier, and any cut taken
+  under §6.2 must appear in that line's notes.
+- **The recurring tax, stated**: this strategy makes a full release up to
+  4 lines × 3 loaders ≈ 12 artifacts; every future backport carries the
+  fourth line and third loader permanently. That is the accepted price of
+  main-first NeoForge (spike addendum's finding, now recorded where it is
+  read).
 
 ## 7. Risks
 
-1. **The xplat extraction (N-1) is the program's blast radius** — every open
-   branch crosses it. Mitigation: land alone, first, gated by the full suite +
-   jar-diff; support branches take it via the normal G delta-port.
-2. **Natives under NeoForge's module layer** (sqlite/zstd via jarJar) — least
-   charted; shading fallback pre-authorized.
+1. **The xplat extraction (N-1) — true exposure restated (review):** zero
+   open PRs cross it today; the real exposure is (a) the two active `-v0.10`
+   support bases, whose G delta-port must carry a whole-tree source move on
+   top of the documented ~90-file adaptation set — the shape most likely to
+   trigger the fresh-re-port escape hatch (cost: re-deriving that set), and
+   (b) the fresh 1.21.1 cut, which inherits the move for free (fresh cut).
+   Mitigation: N-1a lands alone in a quiet window; §0.6's Option B/hybrid
+   removes (a) entirely.
+2. **Natives under NeoForge's module layer** (sqlite/zstd via jarJar,
+   `META-INF/jarjar/`) — least charted; shading fallback pre-authorized;
+   decision at N-2 gates the release_check design (§4.2).
 3. **Renderer reality on NeoForge clients**: community Voxy forks only
-   (1.21.1 fork; Foxy shim at 26.1.2; nothing on 26.2/1.21.11 today). The
-   client half ships anyway per the user directive — VoxyCompat's degrade is
-   the contract; the release notes state plainly which renderer builds exist
-   per line at publish time.
+   (1.21.1 fork; Foxy shim at 26.1.2; **nothing on 26.2/1.21.11 today**). The
+   client half ships anyway per the user directive — compiled-and-inert on
+   26.2 (§0.1), VoxyCompat's degrade the contract, the Modrinth version name
+   carrying the caveat, renderer verification deferred to lines where a
+   renderer exists.
 4. **NeoForge API drift on support lines** (21.1 old render/gametest idioms vs
    26.x) — bounded by the spike's drift map; the glue is thin by design.
-5. **Schedule**: N delays every v0.11.0 tag by ~2-3 weeks; G grows by the
-   1.21.1 line (~12-18 d). The alternative (release v0.11.0 first, NeoForge as
-   v0.12.0) was considered and rejected by the user's make-it-part-of-the-
-   backport-process directive — revisit only if the pause uncovers urgent
-   fixes needing a fast tag.
-6. **Send-throw semantics** (NeoForge throws where Fabric no-ops) — contained
-   at the flush/broadcast sites; the smoke soak + a contract test pin it.
+5. **Schedule**: the sequencing decision (§0.6) is the schedule risk in full;
+   under Option A every v0.11.0 tag waits on N plus the F-gate re-arm.
+6. **Send-throw semantics + upstream #1913** — the two mixed-loader hazards
+   (§1.2): the send wrapper covers the throw class; the handshake-arms-the-
+   session assumption covers #1913 and is verified live at N-3 against the
+   Fabric rig. A false assumption here downgrades the NeoForge client to
+   LSS-inert on Fabric servers (degrade, not crash) — visible in the §5.5
+   mixed-loader check.
+7. **VSS/XANTHA coordination** — the `84zcagOb` listing gaining a loader
+   needs XANTHA's buy-in; the VSS-neoforge jar is a release blocker once the
+   release_check family lands (§0.5, §4.2).
 
-## 8. Effort
+## 8. Effort (re-costed per review — v1.0 costed the client half ~zero)
 
 | Phase | Estimate |
 |---|---|
-| N-1 xplat extraction | 3-4 d |
-| N-2 server half | 4-6 d |
-| N-3 client half | 3-5 d |
-| N-4 CI/release/VSS/docs | 2-3 d |
-| **Stage N total (main)** | **~12-18 d** |
+| N-1a xplat moves + test retargets | 3-5 d |
+| N-1b seams (LoaderServices, send wrapper, accessors, holders) | 3-4 d |
+| N-2 server half (incl. packaging decision + natives) | 4-6 d |
+| N-3 client half (incl. renderer attempt + degrade gates + rig check) | 4-6 d |
+| N-4 CI/release/VSS/docs + F-gate re-arm | 3-4 d |
+| **Stage N total (main)** | **~17-25 d** |
 | G increment: 26.1 + 1.21.11 neoforge carry | ~5-9 d |
-| G increment: the 1.21.1 line (fabric+neoforge) | ~12-18 d |
-| **Program total added** | **~29-45 d** |
+| G increment: the 1.21.1 line (fabric+neoforge, contract-test relocation, tag-scheme twins) | ~13-19 d |
+| **Program total added** | **~35-53 d (~7-10.5 wk)** |
 
-(Consistent with the spike's 27-42 matrix estimate + N-4's release machinery.)
+Exceeds the spike's 27-42 d matrix estimate honestly: the spike's main-line
+number was server-first scoped (client dormant, renderer deferred); this plan
+restores the full client half per directive and adds the review round's
+hardening (seams, send wrapper, CI collision fixes, soak driver OR floor).
+
+## 9. Review record (3-Opus round, 2026-08-14)
+
+- **Architecture lens** — verdict: sound shape, 6 MAJORs: accessor/xplat
+  coupling unaddressed; LoaderServices seam undercount (static holders,
+  service lifecycle, pressure probes, command source, save hook,
+  FarPlayerSnapshots); N-1 not pure-moves (9 source-path contract tests +
+  FoliaWiringContractTest scan set); send-guard inversion (handshake =
+  unprompted first send, zero canSend sites) + interop matrix; soak
+  driver/exporter twin unscoped; missing surfaces (transport-yield silent
+  loss, LAN consequence). All folded: §1.1 seam inventory, §1.2, §2 N-1a/b
+  split, §0.4/§5.3, §5.4.
+- **CI/release lens** — verdict: would not have published correctly on the
+  first tag, 5 MAJORs: tag-scheme prefix collision (empirically verified);
+  ReleaseWorkflowContractTest homeless on the Paper-less line; wire-identity
+  clause misidentified the existing check; `_nested_jars` blind to
+  `META-INF/jarjar/`; stage N discharges F's gates without re-arming. All
+  folded: §4.2, §3, §0.3/N-4. Minors folded across §4.
+- **Scoping/tier-honesty lens** — verdict: not ready as written, 7 MAJORs:
+  client half had no executable 26.2 gate; sequencing over-read as resolved;
+  risk-1 exposure misstated; tier not operational (no cut protocol/floor/
+  promotion, false FULL-tier claim about existing lines); scope grew while
+  the estimate didn't; missing risks (#1913, recurring tax); the no-Paper cut
+  cited phantom spike provenance. All folded: §0.1, §0.6, §7.1, §6, §8,
+  §1.2/§6.3, §0.3. The wire-safe/not-wire-safe cut table is theirs (§6.2).

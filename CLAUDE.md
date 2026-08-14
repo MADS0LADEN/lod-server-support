@@ -6,21 +6,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 LOD Server Support (LSS) — distributes LOD chunk data from servers to clients over a custom networking protocol. Supports Fabric (client + server) and Paper (server only). The Folia code paths (regionized probing, lifecycle mailbox) exist in the one plugin jar. **`folia-supported` is declared on every line again as of 2026-08-01**: Folia published its first MC 26.2 build (`26.2-1`, channel **BETA**, 2026-07-28), removing the reason it was dropped at v0.7.0 (the flag would have auto-loaded release jars onto a platform that did not exist). `PluginYmlContractTest` + `release_check.py` now pin the flag's PRESENCE — the guarded failure is a jar that silently stops loading on Folia. Folia stays **experimental on every line** (26.2 included): single-player soak validated, concurrent multi-region ingress untested. `SOAK_PLATFORM=folia` finally has something to download on 26.2, and **all four Folia scenarios passed on 2026-08-01** against real Folia 26.2-1 — fresh-backfill (41 windows), warm-rejoin (55), dimension-trip (55), paper-dirty-falling-block (27), 0 violations and 0 warnings throughout. The regionized probe (`in_memory` serves), Moonrise generation (2121 submitted/completed, 0 timeouts) and the protocol-19 zstd column path all ran. **This does NOT retire the experimental label**: every one of those scenarios is single-player, and the stated exit criterion is concurrent MULTI-REGION ingress, which no scenario in the harness produces. Clients request distant chunks individually; the server reads them from disk or memory and streams serialized sections back, enabling LOD rendering mods to display terrain beyond vanilla render distance.
 
-## Support tiers (PLANNED expansion — v0.11.0 stage N, docs/planning/neoforge-support-plan.md)
+## Support tiers (PLANNED expansion — v0.11.0 stage N, docs/planning/neoforge-support-plan.md v1.1 is normative)
 
-Fabric + Paper on main (26.2) and the 26.1/1.21.11 support lines are **FULL tier**:
-complete test gauntlets, soaks, live-rig burn-in. **NeoForge (all lines, client +
-server) and the MC 1.21.1 line are BEST-EFFORT tier** (user decision 2026-08-14):
-they track the mainline feature set, but feature cuts are acceptable where the
-platform/version fights (documented per release), automated coverage is reduced
-(neoforge = contract tests + a ~8-12-test gametest smoke subset + an abbreviated
-`SOAK_PLATFORM=neoforge` smoke soak that may be SKIPPED entirely; no Tier 3 on
-either; 1.21.1 additionally ships the spike's feature-drop list), and
-variant-specific issues triage at lower priority. The NeoForge client assumes a
-community Voxy variant with the normal Voxy API surface — `VoxyCompat`'s
-graceful-degrade ladder (no-sink, warn-once, no capability bit) is the contract
-when it doesn't match. **Wire compatibility is NEVER tiered** — every jar speaks
-the same protocol at full fidelity.
+Three tiers, not two: **Full** — Fabric + Paper on main (26.2): complete gauntlets
+(T1/T2/T3), 20-scenario soaks ×3 platforms, live-rig burn-in, first-priority
+triage. **Correct, not perfect** — the 26.1/1.21.11 support lines: full builds +
+T1/T2 and representative smoke soaks, NO live rig (the Modrinth rig is 26.2 Fabric
+only) and no exhaustive gauntlets (the recorded support-line effort budget).
+**Best-effort** — NeoForge (all lines, client + server) and the whole MC 1.21.1
+line (user decision 2026-08-14): they track the mainline feature set, but feature
+cuts are acceptable where the platform/version fights, automated coverage is
+reduced (neoforge = contract tests + a ~8-12-test gametest smoke subset + a
+2-scenario `SOAK_PLATFORM=neoforge` set whose SKIP is expected — the plan's §5.5
+manual smoke checklist is then the per-release floor; no Tier 3 on either; 1.21.1
+additionally ships the spike's feature-drop list and has NO Paper module), and
+variant-specific issues triage at lower priority. Cuts beyond the plan's
+pre-authorized list need a dated decisions-log entry (the §6.2 cut protocol);
+release notes for NeoForge/1.21.1-affecting items must name the tier and any cut
+(mirroring the Folia-experimental rule). Best-effort is a SUPPORT commitment axis,
+distinct from Folia's *experimental* (a correctness-confidence axis); promotion
+criteria live in the plan §6.3. The NeoForge client assumes a community Voxy
+variant with the normal Voxy API surface — `VoxyCompat`'s graceful-degrade ladder
+(no-sink, warn-once, no capability bit) is the contract when it doesn't match; on
+26.2 no such build exists yet, so the client half ships compiled-and-inert by
+construction. Accepted recurring cost: a full release becomes up to 4 lines × 3
+loaders ≈ 12 artifacts, permanently. **Wire compatibility is NEVER tiered** —
+every jar speaks the same protocol at full fidelity, and every never-tiered claim
+names a test that reds when violated (plan §1.2).
 
 ## Project Structure
 
