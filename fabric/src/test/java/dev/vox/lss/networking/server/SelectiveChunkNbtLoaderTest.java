@@ -310,21 +310,8 @@ class SelectiveChunkNbtLoaderTest {
      */
     @Test
     void whitelistCoversEverySerializerRootAccessor() throws Exception {
-        Path dir = Path.of("").toAbsolutePath();
-        Path src = null;
-        for (int depth = 0; depth < 5 && dir != null; depth++, dir = dir.getParent()) {
-            Path cand = dir.resolve("src/main/java/dev/vox/lss/networking/server/NbtSectionSerializer.java");
-            if (Files.exists(cand)) {
-                src = cand;
-                break;
-            }
-            Path nested = dir.resolve("fabric/src/main/java/dev/vox/lss/networking/server/NbtSectionSerializer.java");
-            if (Files.exists(nested)) {
-                src = nested;
-                break;
-            }
-        }
-        assertTrue(src != null, "cannot locate NbtSectionSerializer source");
+        Path src = dev.vox.lss.testutil.SourcePaths.mainSource(
+                "dev/vox/lss/networking/server/NbtSectionSerializer.java");
         String serializer = Files.readString(src);
         var accessor = Pattern.compile("chunkNbt\\.(?:get|contains)\\w*\\(\"([^\"]+)\"");
         var found = new java.util.HashSet<String>();

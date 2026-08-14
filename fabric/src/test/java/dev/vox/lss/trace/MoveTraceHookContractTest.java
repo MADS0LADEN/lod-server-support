@@ -239,9 +239,7 @@ class MoveTraceHookContractTest {
     }
 
     private static Path hooksSource() {
-        var moduleRelative = Path.of("src/main/java/dev/vox/lss/trace/MoveDesyncHooks.java");
-        if (Files.exists(moduleRelative)) return moduleRelative;
-        return Path.of("fabric").resolve(moduleRelative);
+        return dev.vox.lss.testutil.SourcePaths.mainSource("dev/vox/lss/trace/MoveDesyncHooks.java");
     }
 
     /** Survives both the Gradle CWD (module dir) and an IDE repo-root CWD. */
