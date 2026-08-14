@@ -252,7 +252,10 @@ public class LodRequestManager {
             ClientNetTrace.maybeEmit(mc, player, level, viewDistance,
                     LSSClientNetworking.getQueuedColumnCount(),
                     LSSClientNetworking.getQueuedColumnBytes(),
-                    this.lastIngestBacklog, this.tracker.size());
+                    this.lastIngestBacklog, this.tracker.size(),
+                    this.governor.getDesiredBytesPerSec(),
+                    this.governor.sustainedColumnsPerSecond(),
+                    this.metrics.getRttP50Ms(), this.metrics.getRttP95Ms());
         }
     }
 
