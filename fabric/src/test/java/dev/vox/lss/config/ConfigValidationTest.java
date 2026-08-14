@@ -760,20 +760,67 @@ class ConfigValidationTest {
         // cap the user meant to disable.
         c.lodColumnsPerSecondLimit = -5;
         c.validate();
-        assertEquals(0, c.lodColumnsPerSecondLimit, "negatives normalize to off, never to 50");
+        assertEquals(0, c.lodColumnsPerSecondLimit, "negatives normalize to off, never to the floor");
 
-        c.lodColumnsPerSecondLimit = 10;
+        c.lodColumnsPerSecondLimit = 5;
         c.validate();
-        assertEquals(50, c.lodColumnsPerSecondLimit, "positive values clamp to the 50 floor");
+        assertEquals(10, c.lodColumnsPerSecondLimit, "positive values clamp to the 10 floor");
+
+        // The 2026-08-14 granularity request: a low-but-plausible manual rate like 20
+        // must survive validate() unchanged (the old floor of 50 silently rewrote it).
+        c.lodColumnsPerSecondLimit = 20;
+        c.validate();
+        assertEquals(20, c.lodColumnsPerSecondLimit, "20 col/s is a legal manual cap");
 
         c.lodColumnsPerSecondLimit = 1_000_000;
         c.validate();
         assertEquals(100_000, c.lodColumnsPerSecondLimit, "...and to the 100k ceiling");
 
-        // Every nonzero Sodium slider stop (step 50, range 50..3200) round-trips unchanged.
+        // Every nonzero Sodium slider stop must round-trip unchanged — the slider is
+        // curved (RateSliderStops: 10s, then 25s/50s/100s up to 3200), and its
+        // lowest nonzero stop equals the validate() floor by construction.
         c.lodColumnsPerSecondLimit = 3200;
         c.validate();
         assertEquals(3200, c.lodColumnsPerSecondLimit);
+    }
+
+    @Test
+    void rateSliderCurveRoundTripsTheClampAndCoversTheLowEnd() {
+        // The curved "Max LOD Download Rate" slider (2026-08-14 granularity request).
+        // Invariant 1: the UI must never lie — every nonzero stop survives validate()
+        // unchanged, so what the slider shows is what the config keeps.
+        var stops = RateSliderStops.STOPS;
+        var c = clientConfig();
+        for (int i = 1; i < stops.length; i++) {
+            c.lodColumnsPerSecondLimit = stops[i];
+            c.validate();
+            assertEquals(stops[i], c.lodColumnsPerSecondLimit,
+                    "slider stop " + stops[i] + " must round-trip the clamp unchanged");
+            assertTrue(stops[i] > stops[i - 1], "stops must be strictly ascending");
+        }
+        // Invariant 2: the shape the request asked for — stop 0 is off, the lowest
+        // nonzero stop IS the clamp floor (10), 20 is selectable, top stays 3200.
+        assertEquals(0, stops[0], "stop 0 must be off");
+        c.lodColumnsPerSecondLimit = stops[1] - 1;
+        c.validate();
+        assertEquals(stops[1], c.lodColumnsPerSecondLimit,
+                "the lowest nonzero stop must equal the validate() floor");
+        assertTrue(java.util.Arrays.stream(stops).anyMatch(s -> s == 20),
+                "20 col/s must be a selectable stop (the granularity request)");
+        assertEquals(3200, stops[stops.length - 1], "the top stop is the no-op bound");
+
+        // Invariant 3: nearestIndex — off maps only to stop 0 and stop 0 only to off
+        // (a tiny nonzero rate must never display as Unlimited, nor off as a throttle);
+        // exact stops map to themselves; legal-but-inert hand-edits snap to the top.
+        assertEquals(0, RateSliderStops.nearestIndex(0));
+        assertEquals(0, RateSliderStops.nearestIndex(-7));
+        assertEquals(1, RateSliderStops.nearestIndex(1), "1 col/s must not read as Unlimited");
+        for (int i = 1; i < stops.length; i++) {
+            assertEquals(i, RateSliderStops.nearestIndex(stops[i]),
+                    "exact stop " + stops[i] + " must map to its own index");
+        }
+        assertEquals(stops.length - 1, RateSliderStops.nearestIndex(100_000),
+                "above-top values display snapped to the top stop");
     }
 
     @Test

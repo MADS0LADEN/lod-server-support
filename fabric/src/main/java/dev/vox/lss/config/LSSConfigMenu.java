@@ -67,21 +67,28 @@ public class LSSConfigMenu implements ConfigEntryPoint {
         page.addOptionGroup(distanceGroup);
 
         // Max LOD download rate — the manual column-rate cap
-        // (docs/planning/client-column-rate-cap-design.md). Slider top = 3200 because that is
-        // where the mechanism provably no-ops (800-budget batches space to exactly the 5-tick
-        // fast floor); larger hand-edited values are legal and inert. Step 50 = the validate()
-        // floor, so every nonzero slider stop round-trips the clamp unchanged.
+        // (docs/planning/client-column-rate-cap-design.md). The slider is CURVED (2026-08-14
+        // granularity request): the option's int is an INDEX into RATE_STOPS, not the rate,
+        // so the low end steps by 10 (a user can pick 20) while the top stays reachable in
+        // one drag — the curve + rationale live in RateSliderStops (Sodium-free, test-pinned).
+        // Slider top = 3200 because that is where the mechanism provably no-ops (800-budget
+        // batches space to exactly the 5-tick fast floor); larger hand-edited values are
+        // legal and inert (they display snapped to the top stop but are only rewritten if
+        // the user actually moves THIS slider — Sodium writes only modified options).
+        // Every nonzero stop round-trips the validate() clamp unchanged: the lowest stop
+        // equals the [10, 100000] floor by construction.
         var rateGroup = builder.createOptionGroup();
         var rateOption = builder.createIntegerOption(Identifier.parse("lss:column_rate_limit"));
         rateOption.setName(Component.translatable("lss.config.column_rate_limit"));
         rateOption.setTooltip(Component.translatable("lss.config.column_rate_limit.tooltip"));
         rateOption.setImpact(OptionImpact.LOW);
         rateOption.setDefaultValue(0);
-        rateOption.setRange(new Range(0, 3200, 50));
-        rateOption.setValueFormatter(v -> v == 0
+        rateOption.setRange(new Range(0, RateSliderStops.STOPS.length - 1, 1));
+        rateOption.setValueFormatter(idx -> idx == 0
                 ? Component.translatable("lss.config.column_rate_limit.unlimited")
-                : Component.literal(Integer.toString(v)));
-        rateOption.setBinding(v -> cfg.lodColumnsPerSecondLimit = v, () -> cfg.lodColumnsPerSecondLimit);
+                : Component.literal(Integer.toString(RateSliderStops.STOPS[idx])));
+        rateOption.setBinding(idx -> cfg.lodColumnsPerSecondLimit = RateSliderStops.STOPS[idx],
+                () -> RateSliderStops.nearestIndex(cfg.lodColumnsPerSecondLimit));
         rateOption.setStorageHandler(save);
         rateOption.setEnabledProvider(s -> s.readBooleanOption(enabledDep[0]), enabledDep);
         rateGroup.addOption(rateOption);

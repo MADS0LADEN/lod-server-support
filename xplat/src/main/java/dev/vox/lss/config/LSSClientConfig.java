@@ -151,9 +151,12 @@ public class LSSClientConfig extends JsonConfig {
         }
         // <= 0 normalizes to 0 (off) — a negative hand-edit means "off", and clamping it to the
         // floor would silently ARM a cap the user meant to disable. Positive values clamp to
-        // [50, 100000]: below 50 the scanner still functions but starves the frontier to a
-        // near-wedge cadence for no plausible use; the ceiling is inert (the mechanism no-ops
-        // above ~3200) but bounds what a typo can store.
+        // [10, 100000] (floor lowered from 50, 2026-08-14 — a user asked for ~20 col/s, so
+        // "no plausible use below 50" was falsified; the machinery is proven far lower — the
+        // transfer governor drives the same actuators down to 1 col/s). Below 10 the scanner
+        // still functions but starves the frontier to a near-wedge cadence, so single-digit
+        // rates stay clamped up; the ceiling is inert (the mechanism no-ops above ~3200) but
+        // bounds what a typo can store.
         farPlayersMaxDistanceBlocks = Math.clamp(farPlayersMaxDistanceBlocks, 0, 16384);
         farPlayersMinDistanceBlocks = Math.clamp(farPlayersMinDistanceBlocks, 0,
                 farPlayersMaxDistanceBlocks > 0 ? farPlayersMaxDistanceBlocks : 16384);
@@ -163,7 +166,7 @@ public class LSSClientConfig extends JsonConfig {
         if (lodColumnsPerSecondLimit <= 0) {
             lodColumnsPerSecondLimit = 0;
         } else {
-            lodColumnsPerSecondLimit = Math.clamp(lodColumnsPerSecondLimit, 50, 100_000);
+            lodColumnsPerSecondLimit = Math.clamp(lodColumnsPerSecondLimit, 10, 100_000);
         }
     }
 }
