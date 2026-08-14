@@ -92,7 +92,11 @@ final class FarPlayerMountLadder {
                 return null;
             }
             return entity;
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            // Throwable, not Exception (issue-#160 review MINOR-3): EntityType.create
+            // first-loads the modded class here, and a client-side NoClassDefFoundError
+            // (server-oriented mod internals absent on the client) must latch the TYPE,
+            // not escape to the whole-pass latch.
             latchWarn(typeIdentity, "creation failed (" + e + ")");
             return null;
         }
@@ -106,7 +110,7 @@ final class FarPlayerMountLadder {
      *  submit threw is latched like a creation failure — its riders render unmounted
      *  from the next frame, and the GLOBAL crash latch never fires for a per-type
      *  problem. */
-    void latchRenderFailure(String typeIdentity, Exception e) {
+    void latchRenderFailure(String typeIdentity, Throwable e) {
         latchWarn(typeIdentity, "rendering failed (" + e + ")");
     }
 
