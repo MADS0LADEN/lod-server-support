@@ -30,11 +30,21 @@ public final class SourcePaths {
     public static Path mainSource(String javaPath) {
         Path dir = Path.of("").toAbsolutePath();
         for (int depth = 0; depth < 5 && dir != null; depth++, dir = dir.getParent()) {
+            java.util.List<Path> hits = new java.util.ArrayList<>();
             for (String tree : SOURCE_TREES) {
                 Path candidate = dir.resolve(tree + javaPath);
                 if (Files.exists(candidate)) {
-                    return candidate;
+                    hits.add(candidate);
                 }
+            }
+            // A file present in BOTH trees is a botched half-move (copy instead of
+            // git mv) — fail loudly rather than silently preferring fabric's copy.
+            if (hits.size() > 1) {
+                throw new AssertionError("production source " + javaPath
+                        + " exists in more than one tree: " + hits);
+            }
+            if (hits.size() == 1) {
+                return hits.get(0);
             }
         }
         throw new AssertionError("cannot locate production source " + javaPath
