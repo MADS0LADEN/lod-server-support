@@ -4,16 +4,19 @@ import dev.vox.lss.common.Brand;
 import dev.vox.lss.common.DiagnosticsFormatter;
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.config.LSSServerConfig;
-import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.permissions.Permissions;
 
 
-class LSSServerCommands {
-    public static void init() {
-        CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
+/** The shared /lsslod tree + handlers (xplat since N-2): each loader registers it
+ *  through its own command event — Fabric via CommandRegistrationCallback in
+ *  LSSServerNetworking.init(), NeoForge via RegisterCommandsEvent. Handlers read the
+ *  per-loader {@code LSSServerNetworking.getRequestService()} holder (same-FQN twin
+ *  contract, plan §1.1). */
+public class LSSServerCommands {
+    public static void register(com.mojang.brigadier.CommandDispatcher<CommandSourceStack> dispatcher) {
             dispatcher.register(
                     Commands.literal(Brand.serverCommand())
                             .requires(source -> source.permissions().hasPermission(Permissions.COMMANDS_GAMEMASTER))
@@ -65,7 +68,6 @@ class LSSServerCommands {
                                     )
                             )
             );
-        });
     }
 
     private static int showHelp(CommandSourceStack source) {

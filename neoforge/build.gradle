@@ -1,0 +1,115 @@
+plugins {
+    id 'java'
+    id 'net.neoforged.moddev' version '2.0.144'
+    id 'com.gradleup.shadow' version '9.4.2'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = 'lod-server-support-neoforge'
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(25)
+
+// CI naming parity with the fabric module (release.yml feeds mod_version from the tag).
+def ciArchiveVersion = providers.environmentVariable('CI').map { it == 'true' }.getOrElse(false)
+        ? "${project.mod_version}+${project.minecraft_version}" : ''
+tasks.withType(AbstractArchiveTask).configureEach {
+    archiveVersion = ciArchiveVersion
+}
+
+repositories {
+    mavenCentral()
+}
+
+neoForge {
+    version = project.neoforge_version
+
+    // The fabric accesswidener's 2-line PalettedContainer widening, AT dialect.
+    accessTransformers = project.files('src/main/resources/META-INF/accesstransformer.cfg')
+
+    mods {
+        lss {
+            sourceSet sourceSets.main
+        }
+    }
+
+    runs {
+        server {
+            server()
+            programArgument '--nogui'
+            systemProperty 'neoforge.enabledGameTestNamespaces', 'lss'
+        }
+    }
+}
+
+// Stage N (neoforge-support-plan.md §1.1): the xplat shared source set — the same
+// loader-neutral sources the fabric module compiles. THIS compile is the enforcement
+// of xplat's loader purity and of the same-FQN twin contract.
+sourceSets {
+    main {
+        java {
+            srcDir '../xplat/src/main/java'
+        }
+    }
+}
+
+// N-2 packaging decision (plan §2, pre-authorized fallback taken): Paper-style
+// SHADING, not jarJar — known-good in-repo, and the no-relocate rule applies
+// (relocating org.sqlite / com.github.luben breaks their native loaders). The
+// dedicated `shade` configuration keeps MDG's MC/NeoForge classpath out of the jar.
+configurations {
+    shade
+}
+
+configurations.all {
+    resolutionStrategy {
+        // common declares slf4j 2.0.18; MC 26.2's dependency graph STRICTLY pins
+        // 2.0.17. Force MC's version (API-compatible) — the runtime provider is the
+        // game's own slf4j anyway (same posture as the fabric/paper modules).
+        force 'org.slf4j:slf4j-api:2.0.17'
+    }
+}
+
+dependencies {
+    implementation project(':common')
+    shade project(':common')
+    implementation 'org.xerial:sqlite-jdbc:3.49.1.0'
+    shade 'org.xerial:sqlite-jdbc:3.49.1.0'
+    implementation 'com.github.luben:zstd-jni:1.5.7-3'
+    shade 'com.github.luben:zstd-jni:1.5.7-3'
+
+    testImplementation platform('org.junit:junit-bom:5.11.3')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+processResources {
+    def props = [mod_version    : project.mod_version,
+                 minecraft_version: project.minecraft_version,
+                 neoforge_version : project.neoforge_version]
+    inputs.properties props
+    filesMatching('META-INF/neoforge.mods.toml') {
+        expand props
+    }
+}
+
+shadowJar {
+    configurations = [project.configurations.shade]
+    archiveClassifier = ''
+    mergeServiceFiles()
+    // Dev-only packages never ship (release_check pins this on every jar family).
+    exclude 'dev/vox/lss/benchmark/**'
+}
+
+jar {
+    archiveClassifier = 'slim'
+}
+
+build.dependsOn shadowJar
+
+test {
+    useJUnitPlatform()
+}

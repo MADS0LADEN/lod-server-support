@@ -13,4 +13,4 @@ pluginManagement {
     }
 }
 
-include ':common', ':fabric', ':paper'
+include ':common', ':fabric', ':paper', ':neoforge'

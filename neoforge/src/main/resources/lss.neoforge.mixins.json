@@ -1,0 +1,21 @@
+{
+  "required": true,
+  "package": "dev.vox.lss.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "mixins": [
+    "AccessorServerChunkCache",
+    "AccessorSimpleRegionStorage",
+    "AccessorIOWorker",
+    "AccessorRegionFileStorage",
+    "AccessorRegionFile",
+    "AccessorConnection",
+    "AccessorServerCommonPacketListener",
+    "ChunkSaveDataHook"
+  ],
+  "client": [
+    "AccessorClientPacketListener"
+  ]
+}
