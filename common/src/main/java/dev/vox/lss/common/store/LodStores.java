@@ -27,8 +27,10 @@ import java.nio.file.Path;
  * user decision): the same arithmetic that killed the front tier condemns the mode —
  * at 64 MB and ~5.3 KB/col it resides ~12.5k columns, ~6% of one player's disc at
  * lodDistanceChunks=256, under random eviction, while paying a zstd compression on
- * every single deposit. {@link MemoryLodStore} survives ONLY as the degrade below, at
- * a fixed budget with no knob.
+ * every single deposit. The class itself was DELETED 2026-08-13 (user decision, the
+ * deletion review's #1): its last reachable role was the SQLite-init degrade, and on a
+ * box whose disk store just failed to open, degrading one rung further to store-off
+ * loses only warm-join serving — disk reads still serve everything.
  */
 public final class LodStores {
 
@@ -49,27 +51,21 @@ public final class LodStores {
 
     private LodStores() {}
 
-    /**
-     * Resident budget for the SQLite-init degrade. Fixed, not configurable: this is a
-     * consolation cache on a server whose disk store just failed to open, not an
-     * operating mode anyone should be tuning. 64 MB was the old {@code lodStoreMemoryMB}
-     * default.
-     */
-    static final long DEGRADE_MAX_BYTES = 64L * 1024 * 1024;
-
-    /** Null = run without a store (the codec-probe degrade; caller logs its own warn). */
+    /** Null = run without a store (the codec-probe AND SQLite-init degrades; caller
+     *  logs its own warn for the codec case). */
     public static LodStoreService createOrNull(SqliteLodStore.Environment env) {
         StoreCodec codec = StoreCodec.zstdOrNull();
         if (codec == null) return null;
         var diag = new LodStoreDiagnostics();
         SqliteLodStore sqlite = SqliteLodStore.createOrNull(LodStoreMode.FULL, env, diag);
         if (sqlite == null) {
+            // The in-memory degrade tier was DELETED 2026-08-13: running store-less on a
+            // box whose SQLite just failed is the honest state (the diag token reads
+            // store=off — what is actually running), and disk reads serve everything.
             LSSLogger.warn("lodStore=on requested but the SQLite store is unavailable —"
-                    + " degrading to the in-memory store (warm joins survive kicks, not"
-                    + " restarts)");
-            // MEMORY, not FULL: mode() feeds the diag token, which must report what is
-            // actually RUNNING (store=memory), never the configured aspiration.
-            return new MemoryLodStore(LodStoreMode.MEMORY, codec, DEGRADE_MAX_BYTES, diag);
+                    + " running WITHOUT a store (disk reads serve everything; warm-join"
+                    + " acceleration is off until the store can open)");
+            return null;
         }
         // The store defaults ON (2026-08-08 rework), so its disk cost now lands on servers
         // that never asked for it. Say so once, at the point it becomes true, rather than

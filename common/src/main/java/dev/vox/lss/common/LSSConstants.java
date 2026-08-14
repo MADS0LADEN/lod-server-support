@@ -142,8 +142,6 @@ public final class LSSConstants {
      *  still ships whole once {@code pending <= ceiling}, so a small fixed ceiling
      *  cannot wedge on one legal payload. The transport YIELD needs no floor at all
      *  (writability-gated; yield plan §1.2). */
-    public static final int MIN_OUTBOUND_BUFFER_CEILING_KB = 64;
-    public static final int MAX_OUTBOUND_BUFFER_CEILING_KB = 262_144;
     public static final long MAX_BYTES_PER_SECOND_GLOBAL_LIMIT = 1_073_741_824;
     public static final int MIN_CONCURRENT_GENERATIONS = 1;
     /** Global generation ceiling. Raised 256 -> 512 2026-08-02: WantSetBudgetInvariantTest

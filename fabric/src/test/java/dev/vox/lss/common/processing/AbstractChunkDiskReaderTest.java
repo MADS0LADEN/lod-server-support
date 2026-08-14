@@ -292,7 +292,7 @@ class AbstractChunkDiskReaderTest {
         volatile dev.vox.lss.common.store.LodStoreService.StoreHit answer;
 
         @Override public dev.vox.lss.common.store.LodStoreMode mode() {
-            return dev.vox.lss.common.store.LodStoreMode.MEMORY;
+            return dev.vox.lss.common.store.LodStoreMode.FULL;
         }
         @Override public StoreHit get(String dimension, long packed) { return this.answer; }
         @Override public boolean deposit(String d, long p, byte[] b, long ts, long acq) { return true; }

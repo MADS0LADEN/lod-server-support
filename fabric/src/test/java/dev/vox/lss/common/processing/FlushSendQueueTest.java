@@ -48,75 +48,13 @@ class FlushSendQueueTest {
     // ---- Transport deference (elytra-wall plan §11.4) ----
 
     @Test
-    void deferralRetainsTheQueueAndStillPublishesTheSnapshot() throws Exception {
-        // Placement is the whole finding of the plan review: the gate must sit AFTER the
-        // readyPayloads drain and the snapshot publish. The snapshot is the router's ONLY
-        // retain-and-stop input, so deferring above it would leave sendQueueFull() forever
-        // false and the router dispatching disk reads for the entire deferral — inverting
-        // the backpressure this gate exists to create.
-        state.setChannelPressureProbe(() -> 8_000_000L); // 8 MB pending
-        state.addReadyPayload(new QueuedPayload<>("a", 0, 0, POS_1));
-        state.addReadyPayload(new QueuedPayload<>("b", 0, 1, POS_2));
-        Thread.sleep(50);
-
-        long[] dropped = state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 2_097_152L);
-
-        assertTrue(sent.isEmpty(), "over the ceiling nothing is sent");
-        assertEquals(0, dropped.length, "deferral RETAINS — it must never report drops");
-        assertEquals(2, state.getSendQueueSize(),
-                "the readyPayloads drain and snapshot publish must still have happened");
-        assertEquals(1, state.getSendDeferrals(), "the deferral is counted for diag");
-
-        // Next tick with a drained buffer: the retained queue goes out, in order.
-        state.setChannelPressureProbe(() -> 0L);
-        Thread.sleep(50);
-        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 2_097_152L);
-        assertEquals(List.of("a", "b"), sent, "the retained queue drains intact next tick");
-    }
-
-    @Test
-    void deferralStillSweepsDepartedStampsAndRespectsTheExactBoundary() throws Exception {
-        // §11.4 named THREE things the mis-placed early return would have skipped: the
-        // readyPayloads drain, the snapshot publish, and this sweep. The first two are
-        // pinned above; without this one a sustained deferral leaks one departedColumns
-        // entry per column ever sent.
-        var clock = new AtomicLong(0);
-        state.setDepartureGraceForTest(500_000_000L, clock::get);
-        state.addReadyPayload(new QueuedPayload<>("a", 0, 0, POS_1));
-        Thread.sleep(50);
-        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 0L);
-        assertEquals(1, state.departedColumnCountForTest(), "premise: one departure stamped");
-
-        // Past the grace, with the gate DEFERRING: the sweep must still run.
-        clock.addAndGet(2_000_000_000L); // well past the 500 ms grace
-        state.setChannelPressureProbe(() -> 8_000_000L);
-        state.addReadyPayload(new QueuedPayload<>("b", 0, 1, POS_2));
-        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 2_097_152L);
-        assertEquals(1, state.getSendDeferrals(), "premise: this tick deferred");
-        assertEquals(0, state.departedColumnCountForTest(),
-                "the expired stamp must be swept on the deferral path too");
-    }
-
-    @Test
-    void theCeilingIsAnExclusiveBoundary() throws Exception {
-        // pending == ceiling must SEND (the gate is `pending > ceiling`); a `>=` flip would
-        // be invisible to the coarse 8MB-vs-2MB tests above.
-        state.setChannelPressureProbe(() -> 2_097_152L);
-        state.addReadyPayload(new QueuedPayload<>("a", 0, 0, POS_1));
-        Thread.sleep(50);
-        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 2_097_152L);
-        assertEquals(List.of("a"), sent, "exactly at the ceiling still sends");
-        assertEquals(0, state.getSendDeferrals());
-    }
-
-    @Test
     void aThrowingProbeCannotTakeTheFlushDown() throws Exception {
         // The probe runs inside the per-player flush loop, so an escaping exception would
         // take every LATER player's flush with it.
         state.setChannelPressureProbe(() -> { throw new IllegalStateException("probe blew up"); });
         state.addReadyPayload(new QueuedPayload<>("a", 0, 0, POS_1));
         Thread.sleep(50);
-        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 2_097_152L);
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add);
         assertEquals(List.of("a"), sent, "a broken probe must degrade to no-signal, not throw");
         assertEquals(-1, state.getOutboundPendingBytes());
     }
@@ -129,24 +67,10 @@ class FlushSendQueueTest {
         state.addReadyPayload(new QueuedPayload<>("a", 0, 0, POS_1));
         Thread.sleep(50);
 
-        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 1L);
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add);
 
         assertEquals(List.of("a"), sent, "no signal must send exactly as before");
-        assertEquals(0, state.getSendDeferrals());
         assertEquals(-1, state.getOutboundPendingBytes(), "and the gauge reports no signal");
-    }
-
-    @Test
-    void ceilingZeroDisablesTheGateEntirely() throws Exception {
-        // The shipped default. Even an absurd pending depth sends normally.
-        state.setChannelPressureProbe(() -> Long.MAX_VALUE / 2);
-        state.addReadyPayload(new QueuedPayload<>("a", 0, 0, POS_1));
-        Thread.sleep(50);
-
-        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 0L);
-
-        assertEquals(List.of("a"), sent, "ceiling 0 = off");
-        assertEquals(0, state.getSendDeferrals());
     }
 
     @Test
@@ -155,16 +79,16 @@ class FlushSendQueueTest {
         state.setChannelPressureProbe(pending::get);
         Thread.sleep(50);
 
-        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 0L);
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add);
         assertEquals(5_000L, state.getOutboundPendingBytes());
         assertEquals(5_000L, state.getOutboundPendingHighWater());
 
         pending.set(50_000L);
-        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 0L);
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add);
         assertEquals(50_000L, state.getOutboundPendingHighWater(), "high-water rises");
 
         pending.set(1_000L);
-        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 0L);
+        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add);
         assertEquals(1_000L, state.getOutboundPendingBytes(), "current follows down");
         assertEquals(50_000L, state.getOutboundPendingHighWater(), "...high-water does not");
     }

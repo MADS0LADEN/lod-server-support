@@ -87,7 +87,6 @@ public abstract class AbstractPlayerRequestState<T> {
     private volatile long outboundPendingBytes = -1;
     private volatile long outboundPendingHighWater = -1;
     /** Ticks on which the deference gate skipped the column flush. */
-    private volatile long sendDeferrals = 0;
 
     // ---- Send pacing (enableSendPacing, send-pacing-plan.md v3) ----
     /** Refill-floored proportional drain: an over-floor backlog spreads over this many
@@ -622,23 +621,14 @@ public abstract class AbstractPlayerRequestState<T> {
      */
     public long[] flushSendQueue(long allocationBytes, SharedBandwidthLimiter globalLimiter,
                                   TickDiagnostics diag, PayloadSender<T> sender) {
-        return flushSendQueue(allocationBytes, globalLimiter, diag, sender, 0L);
-    }
-
-    /**
-     * Flush overload carrying the transport-deference ceiling (0 = disabled, the default —
-     * see {@code outboundBufferCeilingKB}). Above the ceiling this tick's column flush is
-     * skipped and the queue RETAINED, matching the router's "a full slot cap retains the
-     * entry" convention: nothing is dropped, and the next tick drains normally.
-     *
-     * <p>Short overloads pin the yield OFF (the S-9a defaults pin): only the full overload
-     * can arm it, and only the platform services call that with live config.
-     */
-    public long[] flushSendQueue(long allocationBytes, SharedBandwidthLimiter globalLimiter,
-                                  TickDiagnostics diag, PayloadSender<T> sender,
-                                  long outboundCeilingBytes) {
-        return flushSendQueue(allocationBytes, globalLimiter, diag, sender,
-                outboundCeilingBytes, false, 0);
+        // Short overloads pin the yield/prune/pacing OFF (the S-9a defaults pin): only
+        // the full overload can arm them, and only the platform services call that with
+        // live config. (The operator-fixed outbound ceiling that used to ride this chain
+        // was DELETED 2026-08-13 — deletion review #2: with the netty gauge capped at
+        // the high-water mark while writable and the ceiling floored at 64 KB, it could
+        // only ever fire while NOT_WRITABLE — exactly when the default-ON yield gate
+        // already skips the flush, with better semantics.)
+        return flushSendQueue(allocationBytes, globalLimiter, diag, sender, false, 0);
     }
 
     /**
@@ -653,10 +643,9 @@ public abstract class AbstractPlayerRequestState<T> {
      */
     public long[] flushSendQueue(long allocationBytes, SharedBandwidthLimiter globalLimiter,
                                   TickDiagnostics diag, PayloadSender<T> sender,
-                                  long outboundCeilingBytes, boolean yieldToTransport,
-                                  int pruneRadiusChunks) {
+                                  boolean yieldToTransport, int pruneRadiusChunks) {
         return flushSendQueue(allocationBytes, globalLimiter, diag, sender,
-                outboundCeilingBytes, yieldToTransport, pruneRadiusChunks, false);
+                yieldToTransport, pruneRadiusChunks, false);
     }
 
     /**
@@ -675,8 +664,8 @@ public abstract class AbstractPlayerRequestState<T> {
      */
     public long[] flushSendQueue(long allocationBytes, SharedBandwidthLimiter globalLimiter,
                                   TickDiagnostics diag, PayloadSender<T> sender,
-                                  long outboundCeilingBytes, boolean yieldToTransport,
-                                  int pruneRadiusChunks, boolean sendPacing) {
+                                  boolean yieldToTransport, int pruneRadiusChunks,
+                                  boolean sendPacing) {
         QueuedPayload<T> ready;
         while ((ready = this.readyPayloads.poll()) != null) {
             this.sendQueue.add(ready);
@@ -715,27 +704,6 @@ public abstract class AbstractPlayerRequestState<T> {
         if (pending > this.outboundPendingHighWater) this.outboundPendingHighWater = pending;
 
         long[] dropped = prunedPositions;
-
-        // Transport deference. A deep outbound buffer means LSS payloads are already
-        // queued AHEAD of vanilla's chunk packets on the shared channel; writing more
-        // deepens that head-of-line delay. -1 (no signal) never throttles.
-        //
-        // Placement is load-bearing: this sits AFTER the readyPayloads drain and the
-        // sendQueueSizeSnapshot publish because that snapshot is the ONLY input to the
-        // router's retain-and-stop gate. Deferring above it would leave sendQueueFull()
-        // permanently false and the router happily dispatching disk reads for the whole
-        // deferral — inverting the backpressure this gate exists to create. The departed
-        // sweep below is for the same reason: it is the only GC of departedColumns, and
-        // skipping it leaks one entry per column ever sent.
-        if (outboundCeilingBytes > 0 && pending > outboundCeilingBytes) {
-            // Count only ticks that actually withheld work: `deferred=` is the operator's
-            // tripwire, and an idle-queue tick skipped nothing. Ceiling first, yield
-            // second (S-6) — and the ceiling path deliberately has NO floor (F2-7): an
-            // operator-armed ceiling keeps today's exact semantics.
-            if (!this.sendQueue.isEmpty()) this.sendDeferrals++;
-            sweepDepartedColumns();
-            return dropped;
-        }
 
         // The yield gate (§1.2): while the channel is NOT writable, skip this tick's
         // column flush and retain the queue — with the §1.4 starvation floor: after
@@ -1227,7 +1195,6 @@ public abstract class AbstractPlayerRequestState<T> {
     public long getOutboundPendingHighWater() { return this.outboundPendingHighWater; }
     /** Ticks whose column flush the deference gate skipped. Nonzero on a healthy link is
      *  a red flag, not the gate working — see the plan's §11.4 standing warning. */
-    public long getSendDeferrals() { return this.sendDeferrals; }
     public int getHeldSyncSlots() { return this.heldSyncSlots; }
     public int getHeldGenSlots() { return this.heldGenSlots; }
     public int getSyncSlotCap() { return this.syncSlotCap; }

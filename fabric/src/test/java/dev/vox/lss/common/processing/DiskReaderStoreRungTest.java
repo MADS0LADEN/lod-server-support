@@ -35,7 +35,7 @@ class DiskReaderStoreRungTest {
         RuntimeException throwOnGet;
         long lastGetPacked = Long.MIN_VALUE;
 
-        @Override public LodStoreMode mode() { return LodStoreMode.MEMORY; }
+        @Override public LodStoreMode mode() { return LodStoreMode.FULL; }
 
         @Override public StoreHit get(String dimension, long packed) {
             this.lastGetPacked = packed;

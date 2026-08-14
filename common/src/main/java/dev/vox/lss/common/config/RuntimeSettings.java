@@ -130,18 +130,6 @@ public final class RuntimeSettings {
                     "applies within a tick; 0 = AUTO (half the reader pool with the store"
                             + " on, the whole pool with it off); lowering lets in-flight"
                             + " reads finish"),
-            // Fixed outbound ceiling (the AUTO mode was deleted —
-            // adaptive-transfer-rate-plan.md): 0 = off, explicit KB = fixed ceiling.
-            new SettingKey("outboundBufferCeilingKB",
-                    c -> String.valueOf(c.outboundBufferCeilingKB),
-                    (c, raw) -> {
-                        c.outboundBufferCeilingKB =
-                                ServerConfigBase.clampOutboundBufferCeilingKB(parseInt(raw));
-                        return null;
-                    },
-                    "applies within a tick; 0 = off (no ceiling — slow-link pacing is"
-                            + " the client governor + ping backstop); explicit KB ="
-                            + " fixed entry-gate ceiling"),
             // The ping backstop's live A/B lever (adaptive-transfer-rate-plan.md —
             // the registry's first BOOLEAN row; decision recorded in the plan's
             // review log). Strict parse: only "true"/"false".

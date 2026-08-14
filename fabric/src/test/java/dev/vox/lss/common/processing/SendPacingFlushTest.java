@@ -64,7 +64,7 @@ class SendPacingFlushTest {
 
     /** Full-overload flush with pacing armed and the yield gate off. */
     private long[] flushPaced(long allocation) {
-        return state.flushSendQueue(allocation, limiter, diag, sent::add, 0L, false, 0,
+        return state.flushSendQueue(allocation, limiter, diag, sent::add, false, 0,
                 true);
     }
 
@@ -183,7 +183,7 @@ class SendPacingFlushTest {
         state.setChannelPressureProbe(writableProbe());
         queue(10, 100_000, 100_000);
         fillBank();
-        state.flushSendQueue(2_000_000, limiter, diag, sent::add, 0L, false, 0);
+        state.flushSendQueue(2_000_000, limiter, diag, sent::add, false, 0);
         assertEquals(5, sent.size(), "unpaced: the bank dumps five shares in one tick");
         assertEquals(0, state.getPacedTicks(), "pacing off books nothing");
     }
@@ -204,8 +204,8 @@ class SendPacingFlushTest {
             second.addReadyPayload(new QueuedPayload<>("q" + i, 100_000, 100_000, i, 200L + i));
         }
         fillBank();
-        second.flushSendQueue(2_000_000, limiter, diag, sent::add, 0L);
-        assertEquals(5, sent.size(), "the 5-arg overload never paces either");
+        second.flushSendQueue(2_000_000, limiter, diag, sent::add, false, 0);
+        assertEquals(5, sent.size(), "the yield/prune overload never paces either");
         assertEquals(0, state.getPacedTicks() + second.getPacedTicks());
     }
 
@@ -233,10 +233,10 @@ class SendPacingFlushTest {
         queue(3, 100_000, 100_000);
         fillBank();
         for (int i = 0; i < AbstractPlayerRequestState.YIELD_FLOOR_TICKS - 1; i++) {
-            state.flushSendQueue(2_000_000, limiter, diag, sent::add, 0L, true, 0, true);
+            state.flushSendQueue(2_000_000, limiter, diag, sent::add, true, 0, true);
         }
         assertTrue(sent.isEmpty(), "yielding until the floor");
-        state.flushSendQueue(2_000_000, limiter, diag, sent::add, 0L, true, 0, true);
+        state.flushSendQueue(2_000_000, limiter, diag, sent::add, true, 0, true);
         assertEquals(1, sent.size(), "the floor tick ships its one payload");
         assertEquals(0, state.getPacedTicks(), "the floor tick never books paced=");
     }

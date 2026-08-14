@@ -30,8 +30,6 @@ public final class LodStoreDiagnostics {
     // enqueued == deposits + deposit_drops + deposit_skips.
     private final AtomicLong depositSkips = new AtomicLong();
     private final AtomicLong errors = new AtomicLong();
-    private final AtomicLong memHits = new AtomicLong();
-    private final AtomicLong memEvictions = new AtomicLong();
     private final AtomicLong sqlEvictions = new AtomicLong();
     // Rows the freshness sweep dropped (stale header / vanished region / absent chunk /
     // mask drift / unresolvable dim). The ONLY live observable that a sweep actually
@@ -56,7 +54,6 @@ public final class LodStoreDiagnostics {
 
     // Gauges (set, not summed)
     private volatile long queueDepth;      // write-batcher queue depth (drains to 0 at rest)
-    private volatile long memBytes;        // memory-tier resident compressed bytes
     private volatile long dbBytes;         // SQLite main file size
     private volatile long walBytes;        // SQLite -wal size
     private volatile long checkpointMsMax; // slowest TRUNCATE checkpoint observed
@@ -83,8 +80,6 @@ public final class LodStoreDiagnostics {
 
     public long getMigratedRows() { return this.migratedRows.get(); }
     public long getMigrateAnomalies() { return this.migrateAnomalies.get(); }
-    public void recordMemHit() { this.memHits.incrementAndGet(); }
-    public void recordMemEviction() { this.memEvictions.incrementAndGet(); }
     /** Size-cap SQL rows evicted (total; the one-shot cap log points here — the
      *  ongoing capped steady-state stays observable via '/lsslod store status'). */
     public void recordSqlEvictions(int rows) { this.sqlEvictions.addAndGet(rows); }
@@ -94,7 +89,6 @@ public final class LodStoreDiagnostics {
     public void recordBackfillSkip() { this.backfillSkips.incrementAndGet(); }
 
     public void setQueueDepth(long depth) { this.queueDepth = depth; }
-    public void setMemBytes(long bytes) { this.memBytes = bytes; }
     public void setDbBytes(long bytes) { this.dbBytes = bytes; }
     public void setWalBytes(long bytes) { this.walBytes = bytes; }
     public void recordCheckpointMs(long ms) {
@@ -107,15 +101,12 @@ public final class LodStoreDiagnostics {
     public long getDepositDrops() { return this.depositDrops.get(); }
     public long getDepositSkips() { return this.depositSkips.get(); }
     public long getErrors() { return this.errors.get(); }
-    public long getMemHits() { return this.memHits.get(); }
-    public long getMemEvictions() { return this.memEvictions.get(); }
     public long getSqlEvictions() { return this.sqlEvictions.get(); }
     public long getSweepDrops() { return this.sweepDrops.get(); }
     public long getBackfillReads() { return this.backfillReads.get(); }
     public long getBackfillDeposits() { return this.backfillDeposits.get(); }
     public long getBackfillSkips() { return this.backfillSkips.get(); }
     public long getQueueDepth() { return this.queueDepth; }
-    public long getMemBytes() { return this.memBytes; }
     public long getDbBytes() { return this.dbBytes; }
     public long getWalBytes() { return this.walBytes; }
     public long getCheckpointMsMax() { return this.checkpointMsMax; }

@@ -1182,7 +1182,6 @@ public class PaperRequestProcessingService {
             long[] dropped = state.flushSendQueue(
                     state.getPingBackstop().apply(perPlayerCap), this.bandwidthLimiter, this.diag,
                     data -> this.columnPayloadSender.send(state, data),
-                    (long) this.config.outboundBufferCeilingKB * 1024L,
                     this.config.lodYieldsToVanillaTransport,
                     // Prune gated on the yield (review B-2) — the Fabric twin's comment.
                     this.config.lodYieldsToVanillaTransport

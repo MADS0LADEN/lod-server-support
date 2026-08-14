@@ -46,7 +46,7 @@ class StoreFrameDeliveryTest {
         final ConcurrentLinkedQueue<Dep> rawDeposits = new ConcurrentLinkedQueue<>();
         final ConcurrentLinkedQueue<FrameDep> frameDeposits = new ConcurrentLinkedQueue<>();
 
-        @Override public LodStoreMode mode() { return LodStoreMode.MEMORY; }
+        @Override public LodStoreMode mode() { return LodStoreMode.FULL; }
         @Override public StoreHit get(String dimension, long packed) { return null; }
         @Override public boolean deposit(String d, long p, byte[] b, long ts, long acq) {
             this.rawDeposits.add(new Dep(p, b, ts));

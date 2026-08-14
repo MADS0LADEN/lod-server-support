@@ -106,8 +106,6 @@ public class ServiceLifecycleGameTests {
                             + " accessors did not apply and the instrument is dead, got " + pending);
             helper.assertTrue(state.getOutboundPendingHighWater() >= pending,
                     "high-water must track the sampled value");
-            helper.assertTrue(state.getSendDeferrals() == 0,
-                    "transport deference ships OFF (ceiling 0) — nothing may defer");
         } finally {
             service.shutdown();
         }

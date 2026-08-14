@@ -96,31 +96,6 @@ class PaperConfigValidationTest {
         assertEquals(1, c.dirtyBroadcastIntervalSeconds, "1 is the nonzero floor, kept exactly");
     }
 
-    /** The outbound ceiling ships OFF (0) — the AUTO mode that briefly occupied 0 was
-     *  deleted (adaptive-transfer-rate-plan.md: three live falsifications; slow-link
-     *  pacing is the client governor + ping backstop now). Explicit values stay the
-     *  operator-FIXED entry-gate ceiling with the 64 KB floor. */
-    @Test
-    void outboundBufferCeilingShipsOffWithASmallFixedFloor() {
-        assertEquals(0, new PaperConfig().outboundBufferCeilingKB,
-                "the outbound ceiling must ship OFF (0)");
-        PaperConfig c = new PaperConfig();
-        c.outboundBufferCeilingKB = 1;
-        c.validate();
-        assertEquals(LSSConstants.MIN_OUTBOUND_BUFFER_CEILING_KB, c.outboundBufferCeilingKB,
-                "a fixed opt-in must clamp up to the floor through the Paper subclass");
-        c.outboundBufferCeilingKB = 0;
-        c.validate();
-        assertEquals(0, c.outboundBufferCeilingKB, "0 stays 0 — off, the R-2 rule");
-        c.outboundBufferCeilingKB = -5;
-        c.validate();
-        assertEquals(0, c.outboundBufferCeilingKB, "negatives normalize to off");
-        c.outboundBufferCeilingKB = 999_999;
-        c.validate();
-        assertEquals(LSSConstants.MAX_OUTBOUND_BUFFER_CEILING_KB, c.outboundBufferCeilingKB,
-                "explicit values clamp to the fixed-ceiling range");
-    }
-
     /** The lodStore SPLIT default (user decision, 2026-08-08 second round), through the
      *  Paper subclass: compiled default "off" — a key absent from an existing file must
      *  never arm the store on upgrade — while fresh installs generate "on" via
@@ -202,10 +177,6 @@ class PaperConfigValidationTest {
             // applies only to nonzero opt-in caps, pinned by the named test below.
             Map.entry("lodStoreMaxMB",
                     new Bounds(0, LSSConstants.MAX_LOD_STORE_MAX_MB)),
-            // outboundBufferCeilingKB's legal floor is 0 (= transport deference off, the
-            // default); the 4096 floor applies only to nonzero opt-ins, pinned below.
-            Map.entry("outboundBufferCeilingKB",
-                    new Bounds(0, LSSConstants.MAX_OUTBOUND_BUFFER_CEILING_KB)),
             Map.entry("lodStoreResweepSeconds",
                     new Bounds(LSSConstants.MIN_LOD_STORE_RESWEEP_SECONDS,
                             LSSConstants.MAX_LOD_STORE_RESWEEP_SECONDS)),

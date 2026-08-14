@@ -225,10 +225,6 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     # via the int allowlist — a fractional override belongs in a new float set if ever
     # needed).
     "mbPerSecondLimitPerPlayer", "mbPerSecondLimitGlobal",
-    # Outbound ceiling (0 = off, the default; explicit = operator-fixed entry
-    # gate — the AUTO mode was deleted, adaptive-transfer-rate-plan.md). Listed so
-    # an A/B scenario can pin it — the R4 lesson below is exactly this omission.
-    "outboundBufferCeilingKB",
     "generationConcurrencyLimitGlobal", "generationTimeoutSeconds",
     "dirtyBroadcastIntervalSeconds",
     "generationConcurrencyLimitPerPlayer", "perDimensionTimestampCacheSizeMB",
@@ -378,11 +374,11 @@ SERVER_MONOTONIC = (
     "service.grace_skipped",
     # LOD store (docs/planning/lod-store-implementation-plan.md): monotonic counter half
     # of the store family (all-zero while lodStore=off — the kill-switch A/B arm shape).
-    # The gauges (store.queue is a SERVER_DRAIN; mem_bytes/db_bytes/wal_bytes/
+    # The gauges (store.queue is a SERVER_DRAIN; db_bytes/wal_bytes/
     # checkpoint_ms_max/read_avg_us) are deliberately absent from this whitelist.
     "store.hits", "store.misses", "store.deposits", "store.deposit_drops",
     "store.deposit_skips",
-    "store.errors", "store.mem_hits", "store.mem_evictions", "store.sweep_drops",
+    "store.errors", "store.sweep_drops",
     "store.backfill_reads", "store.backfill_deposits", "store.backfill_skips",
 )
 CLIENT_MONOTONIC = (
@@ -3257,10 +3253,10 @@ def _srv(wall=1000, seg=0, over=None):
                             "entries": 0, "suppressed": 0, "bytes": 0},
             "store": {"hits": 0, "misses": 0, "deposits": 0, "deposit_drops": 0,
                       "deposit_skips": 0,
-                      "errors": 0, "mem_hits": 0, "mem_evictions": 0, "sweep_drops": 0,
+                      "errors": 0, "sweep_drops": 0,
                       "backfill_reads": 0, "backfill_deposits": 0, "backfill_skips": 0,
                       "queue": 0,
-                      "mem_bytes": 0, "db_bytes": 0, "wal_bytes": 0,
+                      "db_bytes": 0, "wal_bytes": 0,
                       "checkpoint_ms_max": 0, "read_avg_us": 0, "read_p95_us": 0},
             "bandwidth": {"total_bytes": 0}, "players": []}
     for k, v in (over or {}).items():

@@ -49,7 +49,7 @@ class TransportYieldFlushTest {
     private final TestState state = new TestState();
 
     private long[] flush(boolean yield, int pruneRadius) {
-        return state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 0L, yield, pruneRadius);
+        return state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, yield, pruneRadius);
     }
 
     // ---- the gate ----
@@ -106,8 +106,6 @@ class TransportYieldFlushTest {
                         + " review C-9): the position was never sent");
         assertEquals(120_000, state.getOutboundPendingBytes(),
                 "the ONE probe read still feeds the diag gauge");
-        assertEquals(0, state.getSendDeferrals(),
-                "yielded ticks are yielded=, never deferred= — distinct attributions");
 
         // Channel drains: the retained queue goes out untouched.
         state.setChannelPressureProbe(probe(0, ChannelPressureProbe.Writability.WRITABLE));
@@ -198,7 +196,7 @@ class TransportYieldFlushTest {
         // A WRITABLE tick whose allocation is 0: the limiter refuses, nothing sends,
         // the queue stays — and the counter must survive it.
         state.setChannelPressureProbe(probe(0, ChannelPressureProbe.Writability.WRITABLE));
-        state.flushSendQueue(0L, limiter, diag, sent::add, 0L, true, 0);
+        state.flushSendQueue(0L, limiter, diag, sent::add, true, 0);
         assertTrue(sent.isEmpty(), "the refused tick sent nothing");
         state.setChannelPressureProbe(probe(500_000, ChannelPressureProbe.Writability.NOT_WRITABLE));
         for (int i = 0; i < AbstractPlayerRequestState.YIELD_FLOOR_TICKS - half - 1; i++) {
@@ -209,24 +207,6 @@ class TransportYieldFlushTest {
         assertEquals(List.of("a"), sent,
                 "the floor fires at " + AbstractPlayerRequestState.YIELD_FLOOR_TICKS
                         + " WITHHELD ticks total — the refused tick reset nothing");
-    }
-
-    // ---- ordering: ceiling first, yield second (S-6/F2-7) ----
-
-    @Test
-    void ceilingFiresBeforeYieldAndHasNoFloor() throws Exception {
-        // Over the ceiling AND unwritable: the tick is a DEFERRAL (deferred=), never a
-        // yielded tick — and the ceiling path has no floor, pinned so the asymmetry is
-        // deliberate (an operator-armed ceiling keeps today's exact semantics).
-        state.setChannelPressureProbe(probe(8_000_000, ChannelPressureProbe.Writability.NOT_WRITABLE));
-        state.addReadyPayload(new QueuedPayload<>("a", 10, 0, POS_1));
-        Thread.sleep(50);
-        for (int i = 0; i < AbstractPlayerRequestState.YIELD_FLOOR_TICKS + 20; i++) {
-            state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 2_097_152L, true, 0);
-        }
-        assertTrue(sent.isEmpty(), "the ceiling path never floor-sends (F2-7)");
-        assertEquals(AbstractPlayerRequestState.YIELD_FLOOR_TICKS + 20, state.getSendDeferrals());
-        assertEquals(0, state.getYieldedTicks(), "a deferred tick is not a yielded tick");
     }
 
     // ---- degrade pins: UNKNOWN never yields ----
@@ -279,13 +259,6 @@ class TransportYieldFlushTest {
         state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add);
         assertEquals(List.of("a"), sent, "the short overload never yields");
 
-        // The 5-arg ceiling overload — the pre-yield production shape — is equally
-        // yield-off (review B-7).
-        sent.clear();
-        state.addReadyPayload(new QueuedPayload<>("b", 10, 1, POS_2));
-        Thread.sleep(50);
-        state.flushSendQueue(BIG_ALLOCATION, limiter, diag, sent::add, 0L);
-        assertEquals(List.of("b"), sent, "the ceiling overload never yields either");
     }
 
     @Test
@@ -383,7 +356,7 @@ class TransportYieldFlushTest {
         Thread.sleep(50);
         state.setFlushTickCounterForTest(AbstractPlayerRequestState.PRUNE_INTERVAL_TICKS - 1);
         long[] dropped = state.flushSendQueue(BIG_ALLOCATION, limiter, diag,
-                p -> { throw new IllegalStateException("send blew up"); }, 0L, true, 300);
+                p -> { throw new IllegalStateException("send blew up"); }, true, 300);
         assertEquals(2, dropped.length, "pruned + failure-dropped both reported: "
                 + java.util.Arrays.toString(dropped));
     }
