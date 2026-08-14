@@ -133,24 +133,6 @@ jobs:
             26.2
           changelog: ${{ steps.release_notes.outputs.notes }}
 
-      # Stage N (neoforge-support-plan.md §4.2): the version NAME carries the
-      # server-side caveat — Modrinth search results and version lists never render
-      # release notes, and on 26.2 no community Voxy build exists yet, so the client
-      # half ships compiled-and-inert (plan §0.1). Best-effort tier (CLAUDE.md).
-      - name: Upload NeoForge to Modrinth
-        uses: Kir-Antipov/mc-publish@v3.3
-        with:
-          modrinth-id: lKiXKLvv
-          modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
-          files: neoforge/build/libs/lod-server-support-neoforge-*.jar
-          name: ${{ github.ref_name }} - NeoForge (MC 26.2, server-side; client needs a community Voxy build)
-          version: ${{ github.ref_name }}+neoforge+mc26.2
-          version-type: release
-          loaders: neoforge
-          game-versions: |
-            26.2
-          changelog: ${{ steps.release_notes.outputs.notes }}
-
       - name: Upload Paper to Modrinth
         uses: Kir-Antipov/mc-publish@v3.3
         with:
@@ -173,6 +155,28 @@ jobs:
             paper
             purpur
             folia
+          game-versions: |
+            26.2
+          changelog: ${{ steps.release_notes.outputs.notes }}
+
+      # Stage N (neoforge-support-plan.md §4.2): the version NAME carries the
+      # server-side caveat — Modrinth search results and version lists never render
+      # release notes (the fuller "client needs a community Voxy build" sentence lives
+      # in the changelog: labrinth caps version names at 64 chars and rejects longer
+      # ones with a 400, which would strand a partial publish). On 26.2 no community
+      # Voxy build exists yet, so the client half ships compiled-and-inert (plan §0.1).
+      # Best-effort tier (CLAUDE.md) — which is also why this step runs LAST: a failure
+      # here strands only the best-effort artifact, never Fabric/Paper (the full tier).
+      - name: Upload NeoForge to Modrinth
+        uses: Kir-Antipov/mc-publish@v3.3
+        with:
+          modrinth-id: lKiXKLvv
+          modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
+          files: neoforge/build/libs/lod-server-support-neoforge-*.jar
+          name: ${{ github.ref_name }} - NeoForge (MC 26.2, server-side)
+          version: ${{ github.ref_name }}+neoforge+mc26.2
+          version-type: release
+          loaders: neoforge
           game-versions: |
             26.2
           changelog: ${{ steps.release_notes.outputs.notes }}

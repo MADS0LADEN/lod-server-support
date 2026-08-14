@@ -80,7 +80,8 @@ class NeoForgeLoaderSeamContractTest {
 
     /** The sendIfListening containment (plan §1.2): both send paths must carry the
      *  hasChannel pre-check / throw containment — without it a NeoForge client
-     *  joining a vanilla server crashes on the handshake send (#160's failure class). */
+     *  joining a vanilla server crashes on the handshake send (the unannounced-channel
+     *  throw — plan §1.2's loader-difference list). */
     @Test
     void sendPathsContainTheUnannouncedChannelThrow() throws IOException {
         String impl = read("neoforge/src/main/java/dev/vox/lss/platform/NeoForgeLoaderServices.java");
@@ -93,7 +94,7 @@ class NeoForgeLoaderSeamContractTest {
         String client = read(
                 "neoforge/src/main/java/dev/vox/lss/platform/NeoForgeClientLoaderServices.java");
         assertTrue(client.contains("connection == null || !connection.hasChannel(payload.type())"),
-                "sendToServer must pre-check the connection + channel (the #160 crash class)");
+                "sendToServer must pre-check the connection + channel (the unannounced-channel crash class)");
         assertTrue(client.contains("catch (UnsupportedOperationException"),
                 "the client send's race window needs the throw contained too");
     }

@@ -10,7 +10,7 @@ import net.neoforged.neoforge.client.network.ClientPacketDistributor;
  * this class references client-only types and must never load on a dedicated
  * server).
  *
- * <p>Client-side sendIfListening (plan §1.2 — the #160 crash class): the C2S
+ * <p>Client-side sendIfListening (plan §1.2 — the unannounced-channel crash class): the C2S
  * handshake is an unprompted FIRST send, and NeoForge THROWS on a channel the
  * server has not announced (a vanilla server, an LSS-less Fabric server, or
  * the upstream #1913 one-way-announcement case). No connection or an

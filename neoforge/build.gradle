@@ -189,7 +189,8 @@ test {
 // rewrites ONLY display surfaces — neoforge.mods.toml branding fields + the
 // lss-brand.properties display values. Mod id `lss`, packages, channels and every class
 // byte are untouched, so the VSS jar stays wire-identical to the LSS jar
-// (release_check's check_wire_identity_neoforge pins the class-set SHA equality).
+// (release_check's check_wire_identity_neoforge pins a sha256 digest over every class
+// entry's bytes, and check_vss_pair_neoforge pins the TOML rewrite line-for-line).
 // XANTHA publishes manually via the root `vssJars` aggregate; release.yml never touches VSS.
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
@@ -222,6 +223,8 @@ tasks.register('vssJar') {
                                 .replaceFirst(/(?m)^displayName=.*$/,
                                         'displayName="Voxy Server Side"')
                                 .replaceFirst(/(?m)^authors=.*$/, 'authors="Xantha, VoX"')
+                                .replaceFirst(/(?m)^issueTrackerURL=.*$/,
+                                        'issueTrackerURL="https://modrinth.com/plugin/voxy-server-side"')
                                 .replaceFirst(/(?m)^description=.*$/,
                                         "description='''Render distant Voxy LODs on servers. Server-side works with any LSS/VSS client; the client half needs a community Voxy build for NeoForge.'''")
                         zos.putNextEntry(new ZipEntry(e.name))

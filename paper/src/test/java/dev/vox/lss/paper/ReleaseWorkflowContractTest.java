@@ -158,13 +158,32 @@ class ReleaseWorkflowContractTest {
     void neoforgeStepCarriesTheServerSideCaveatInItsName() {
         // Plan §0.1: no community Voxy build exists on 26.2 NeoForge, so the client half
         // ships compiled-and-inert. Search results and version lists never render release
-        // notes — the version NAME is the only surface every browser sees.
-        assertTrue(releaseYml.contains(
-                        "name: ${{ github.ref_name }} - NeoForge (MC 26.2, server-side; "
-                                + "client needs a community Voxy build)"),
+        // notes — the version NAME is the only surface every browser sees. The name is
+        // deliberately SHORT (N-4 review MAJOR-1): labrinth caps version names at 64
+        // chars and 400s longer ones MID-PUBLISH — the fuller sentence lives in the
+        // changelog. Do not grow this string past the cap.
+        String name = "name: ${{ github.ref_name }} - NeoForge (MC 26.2, server-side)";
+        assertTrue(releaseYml.contains(name),
                 "the NeoForge Modrinth step's version name must carry the server-side caveat");
+        assertTrue(name.length() - "name: ${{ github.ref_name }}".length() + "v0.99.99".length() <= 64,
+                "the NeoForge version name must stay under labrinth's 64-char cap");
         assertTrue(releaseYml.contains("loaders: neoforge"),
                 "the NeoForge step must declare its loader");
+        // The step's files glob must name the NEOFORGE jar (N-4 review NIT: a copy-paste
+        // fabric glob would publish the wrong jar as the NeoForge version, suite green).
+        int stepStart = releaseYml.indexOf("- name: Upload NeoForge to Modrinth");
+        assertTrue(stepStart >= 0, "the NeoForge Modrinth step must exist");
+        int nextStep = releaseYml.indexOf("- name:", stepStart + 1);
+        String stepBlock = nextStep >= 0
+                ? releaseYml.substring(stepStart, nextStep) : releaseYml.substring(stepStart);
+        assertTrue(stepBlock.contains(
+                        "files: neoforge/build/libs/lod-server-support-neoforge-*.jar"),
+                "the NeoForge step must ship the neoforge LSS jar, not another loader's");
+        // Publish ORDER (N-4 review MINOR): the best-effort-tier step runs LAST, so any
+        // failure in it strands only the best-effort artifact — never Paper (full tier),
+        // which would otherwise be left unpublished after GitHub + Fabric already shipped.
+        assertTrue(stepStart > releaseYml.indexOf("- name: Upload Paper to Modrinth"),
+                "the NeoForge Modrinth step must come AFTER the Paper step");
     }
 
     @Test

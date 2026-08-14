@@ -364,10 +364,25 @@ def check_cross_loader_classes(fabric_jar, neoforge_jar, problems):
     for n in fab_names:
         if not (n.startswith("dev/vox/lss/") and n.endswith(".class")):
             continue
-        if any(n.startswith(pref) for pref in FABRIC_ONLY_CLASS_PREFIXES):
+        # Boundary-exact matching (N-4 review): a bare prefix must match only the class
+        # itself or its nested members — never a name EXTENSION (e.g. a future shared
+        # MoveTraceBootstrapCommon must not ride the MoveTraceBootstrap allowlist row).
+        if any(n.startswith(pref) if pref.endswith("$")
+               else (n == pref + ".class" or n.startswith(pref + "$"))
+               for pref in FABRIC_ONLY_CLASS_PREFIXES):
             continue
         if n not in neo_names:
             missing.append(n)
+    # common/ rides NESTED in the fabric jar (META-INF/jars/common-*.jar) but FLAT in
+    # the neoforge shade (N-4 review): without this walk a shadowJar exclude slimming a
+    # common subpackage would ship a NoClassDefFoundError jar with every check green.
+    for label, nested_names in _nested_jars(fabric_jar):
+        if "common-" not in label:
+            continue
+        for n in nested_names:
+            if (n.startswith("dev/vox/lss/common/") and n.endswith(".class")
+                    and n not in neo_names):
+                missing.append(f"{label}!{n}")
     if missing:
         problems.append(f"{base}: shared classes present in the fabric jar but missing here "
                         f"({len(missing)}): {sorted(missing)[:5]} — a shadowJar exclude or "
@@ -390,20 +405,42 @@ def check_vss_neoforge_identity(jar, problems):
 
 
 def check_wire_identity_neoforge(lss_jar, vss_jar, problems):
-    """The VSS repackage must byte-copy every CLASS entry (flat shaded jar, so the
-    class set IS the wire surface — the fabric nested-common-SHA check's sibling)."""
+    """The VSS repackage must byte-copy every dev/vox/lss CLASS entry (flat shaded jar,
+    so the class set IS the wire surface — the Paper sha256-digest check's sibling;
+    was CRC32 until the N-4 review, which is weaker than the byte proof it claimed)."""
     base = os.path.basename(vss_jar)
+    if _class_digest(lss_jar) != _class_digest(vss_jar):
+        problems.append(f"{base}: dev/vox/lss/**.class bytes differ from the LSS neoforge "
+                        "jar — the repackage must be a byte-copy rebrand (wire identity)")
 
-    def class_crcs(j):
-        with zipfile.ZipFile(j) as z:
-            return {i.filename: i.CRC for i in z.infolist() if i.filename.endswith(".class")}
 
-    a, b = class_crcs(lss_jar), class_crcs(vss_jar)
-    if a != b:
-        drift = sorted(set(a) ^ set(b)) + sorted(k for k in a if k in b and a[k] != b[k])
-        problems.append(f"{base}: class entries differ from the LSS neoforge jar "
-                        f"({len(drift)}): {drift[:5]} — the repackage must be a "
-                        "byte-copy rebrand (wire identity)")
+VSS_NEOFORGE_REBRAND_KEYS = ("displayName=", "authors=", "description=", "issueTrackerURL=")
+
+
+def check_vss_pair_neoforge(lss_jar, vss_jar, problems):
+    """The TOML pair diff (N-4 review): the VSS rebrand's line-anchored replaceFirst
+    rewrites can silently corrupt a reflowed multi-line TOML construct (orphaned
+    continuation text + a dangling triple-quote = an unloadable jar) while every
+    substring-presence check stays green. Pin the exact rewrite shape: identical line
+    COUNT, and every line byte-equal except the four branding keys."""
+    vbase = os.path.basename(vss_jar)
+    try:
+        lss = _read(lss_jar, "META-INF/neoforge.mods.toml").splitlines()
+        vss = _read(vss_jar, "META-INF/neoforge.mods.toml").splitlines()
+    except KeyError:
+        return  # the per-jar checks already flagged the missing descriptor
+    if len(lss) != len(vss):
+        problems.append(f"{vbase}: neoforge.mods.toml line count differs from the LSS jar "
+                        f"({len(vss)} vs {len(lss)}) — the rebrand must be line-for-line "
+                        "(a replaceFirst against a reflowed construct corrupts the TOML)")
+        return
+    for i, (a, b) in enumerate(zip(lss, vss), 1):
+        if a == b:
+            continue
+        if not any(a.lstrip().startswith(k) and b.lstrip().startswith(k)
+                   for k in VSS_NEOFORGE_REBRAND_KEYS):
+            problems.append(f"{vbase}: neoforge.mods.toml line {i} differs outside the "
+                            f"branding keys {VSS_NEOFORGE_REBRAND_KEYS}: {b!r}")
 
 
 def check_third_party_notices(jar, is_fabric, problems):
@@ -675,17 +712,19 @@ def _vss_counterpart(vss_jar, lss_jars, vss_prefix, lss_prefix):
 
 def check_glob_hygiene(problems, soak_jars):
     """The dev-only soak jar must never be picked up by a release glob; every CI-named release
-    jar (all four brand/platform combinations) must be picked up by exactly one release glob (a
+    jar (all six brand/platform combinations) must be picked up by exactly one release glob (a
     publish that matches nothing fails CI)."""
     for sj in soak_jars:
         base = os.path.basename(sj)
         for glob in RELEASE_GLOBS:
             if fnmatch.fnmatch(base, glob):
                 problems.append(f"{base}: dev soak jar MATCHES release glob {glob} — would be published")
-    # Round-trip every CI artifact name format against the globs (HD-043). Each of the four
+    # Round-trip every CI artifact name format against the globs (HD-043). Each of the six
     # shipped prefixes must match one release glob; the soak jar must match none.
     for prefix in ("lod-server-support-fabric", "lod-server-support-paper",
-                   "voxy-server-side-fabric", "voxy-server-side-paper"):
+                   "lod-server-support-neoforge",
+                   "voxy-server-side-fabric", "voxy-server-side-paper",
+                   "voxy-server-side-neoforge"):
         ci_name = f"{prefix}-{CI_NAME_SUFFIX}"
         if not any(fnmatch.fnmatch(ci_name, g) for g in RELEASE_GLOBS):
             problems.append(f"CI name {ci_name} matches no release glob")
@@ -706,7 +745,7 @@ def discover(problems, expected_version=None, root=ROOT):
     neo = _jars_in(neo_libs, "lod-server-support-neoforge")
     vneo = _jars_in(neo_libs, "voxy-server-side-neoforge")
     soak = _jars_in(pap_libs, SOAK_JAR_PREFIX)
-    # All four families must be present — a release ships all four, and a missing family
+    # All six families must be present — a release ships all six, and a missing family
     # (e.g. the vssJar finalizer silently unwired) must fail the gate, not shrink it.
     for jars, what, hint in ((fab, "lod-server-support-fabric", "run :fabric:build"),
                              (pap, "lod-server-support-paper", "run :paper:shadowJar"),
@@ -781,6 +820,7 @@ def discover(problems, expected_version=None, root=ROOT):
                             "jar to pair-verify against (stale vss jar?)")
         else:
             check_wire_identity_neoforge(src, jar, problems)
+            check_vss_pair_neoforge(src, jar, problems)
     # The vss jars ship to real users → identical safety gate, plus the identity guardrail
     # that pins them as branded byte-copies (mod id `lss`; plugin name VoxyServerSide since
     # the 2026-08-13 rebrand),
@@ -1714,6 +1754,35 @@ def _selftest():
         check(any("twin drift dropped shared surface" in m for m in p),
               f"cross-loader class drop not caught: {p}")
         _write_tree_neoforge("lod-server-support-neoforge.jar", TOML_LSS, BRAND_LSS)
+
+        # cross-loader drift, NESTED flavor (N-4 review): fabric ships common/ inside
+        # META-INF/jars, so a neoforge shade slimming a common class must still red
+        _write_tree_neoforge("lod-server-support-neoforge.jar", TOML_LSS, BRAND_LSS,
+                             drop=("dev/vox/lss/common/PositionUtil.class",))
+        p = []
+        discover(p, root=droot)
+        check(any("twin drift dropped shared surface" in m for m in p),
+              f"nested-common class drop not caught: {p}")
+        _write_tree_neoforge("lod-server-support-neoforge.jar", TOML_LSS, BRAND_LSS)
+
+        # the VSS TOML pair check (N-4 review): a non-branding line drift must red
+        _write_tree_neoforge("voxy-server-side-neoforge.jar",
+                             TOML_VSS.replace('loaderVersion="[4,)"', 'loaderVersion="[9,)"'),
+                             BRAND_VSS)
+        p = []
+        discover(p, root=droot)
+        check(any("differs outside the branding keys" in m for m in p),
+              f"vss neoforge non-branding TOML drift not caught: {p}")
+
+        # ... and a corrupted rewrite that changes the line count (the reflowed-construct
+        # replaceFirst failure mode: orphaned continuation + dangling triple-quote)
+        _write_tree_neoforge("voxy-server-side-neoforge.jar",
+                             TOML_VSS + "orphaned continuation text'''\n", BRAND_VSS)
+        p = []
+        discover(p, root=droot)
+        check(any("line count differs" in m for m in p),
+              f"vss neoforge TOML line-count corruption not caught: {p}")
+        _write_tree_neoforge("voxy-server-side-neoforge.jar", TOML_VSS, BRAND_VSS)
 
     print(f"release_check selftest OK: {n} cases")
     return 0

@@ -57,9 +57,10 @@ jobs:
       - name: NeoForge gametest smoke (retry once on flake)
         run: |
           ./gradlew :neoforge:runGameTestServer || {
-            echo "::warning title=NeoForge gametest flake::runGameTestServer failed once; retrying (first-attempt logs in the gametest-flake-evidence-neoforge artifact)"
+            echo "::warning title=NeoForge gametest flake::runGameTestServer failed once; retrying (first-attempt logs in the gametest-flake-evidence-server artifact under neoforge/)"
             mkdir -p flake-evidence/neoforge
-            cp -r neoforge/run/gametestserver/logs flake-evidence/neoforge/ 2>/dev/null || true
+            cp -r neoforge/run/logs flake-evidence/neoforge/logs 2>/dev/null || true
+            cp -r neoforge/run/crash-reports flake-evidence/neoforge/crash-reports 2>/dev/null || true
             ./gradlew :neoforge:runGameTestServer
           }
 
@@ -97,7 +98,8 @@ jobs:
             paper/build/test-results/
             neoforge/build/reports/
             neoforge/build/test-results/
-            neoforge/run/gametestserver/logs/
+            neoforge/run/logs/
+            neoforge/run/crash-reports/
           if-no-files-found: ignore
           retention-days: 30
 
