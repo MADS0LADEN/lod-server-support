@@ -53,6 +53,8 @@ public class ColumnTimestampCache {
 
     private static final int FORMAT_VERSION = 2;
     private static final String FILE_NAME = "lss-timestamps.bin";
+    private static final dev.vox.lss.common.LogThrottle SAVE_FAIL_WARN =
+            new dev.vox.lss.common.LogThrottle(60_000);
     /** 2025-01-01T00:00:00Z — every legitimate LSS stamp postdates it (design §2).
      *  Offsets are u32 seconds from here; 0 is the absent sentinel, so the epoch
      *  itself stores as 1 (+1 s overstate, the safe direction). Exhausts in ~2161. */
@@ -405,9 +407,17 @@ public class ColumnTimestampCache {
                 LSSLogger.debug("Saved " + size() + " timestamp cache entries to " + file);
             }
         } catch (IOException e) {
-            LSSLogger.warn("Failed to save timestamp cache to " + file, e);
+            // Throttled (log-sweep top finding): the invalidation debounce re-saves ~2 s
+            // after any dirty broadcast, so on a full/read-only disk this warned (with
+            // stack) every few seconds forever — the same cadence that demoted the
+            // SUCCESS line to debug above.
+            long n = SAVE_FAIL_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+            if (n > 0) {
+                LSSLogger.warn("Failed to save timestamp cache to " + file
+                        + " (" + n + " failed save(s) since the last report)", e);
+            }
             try { Files.deleteIfExists(tmpFile); } catch (IOException e2) {
-                LSSLogger.warn("Failed to clean up temporary timestamp cache file " + tmpFile, e2);
+                // covered by the aggregate above; the tmp file is retried next save
             }
         }
     }

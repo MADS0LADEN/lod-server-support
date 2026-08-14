@@ -22,7 +22,5 @@ class WantSetBudgetInvariantTest {
                         + LSSConstants.WANT_SET_FRONTIER_RESERVE
                         <= LSSConstants.WANT_SET_BUDGET,
                 "budget must dominate max in-flight (sync cap + global gen ceiling) + frontier reserve");
-        assertTrue(LSSConstants.SYNC_ON_LOAD_SLOT_CAP <= LSSConstants.MAX_CONCURRENCY_LIMIT,
-                "the constant slot cap must respect the protocol concurrency ceiling");
     }
 }

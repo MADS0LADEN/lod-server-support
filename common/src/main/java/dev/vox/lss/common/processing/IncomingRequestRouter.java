@@ -28,6 +28,11 @@ import java.util.UUID;
  */
 class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
 
+    // Log-sweep hygiene: the Fabric probe path's twin throttle (this routing-path site
+    // was the bare one).
+    private static final dev.vox.lss.common.LogThrottle PROBE_SERVE_FAIL_WARN =
+            new dev.vox.lss.common.LogThrottle(60_000);
+
     private final OffThreadProcessor<PS> processor;
     private final Map<UUID, PS> players;
     private final ColumnTimestampCache timestampCache;
@@ -310,8 +315,12 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
             // and a deterministic throw tripped the cycle backoff for all players. Contain
             // as the standard transient: counted superseded, no done-bit (the client
             // re-declares within <=1 s), the rest of the pass continues.
-            dev.vox.lss.common.LSSLogger.error("Failed to serve probe column "
-                    + req.cx() + ", " + req.cz(), t);
+            long n = PROBE_SERVE_FAIL_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+            if (n > 0) {
+                dev.vox.lss.common.LSSLogger.error("Failed to serve probe column "
+                        + req.cx() + ", " + req.cz() + " (" + n
+                        + " probe-serve failure(s) since the last report)", t);
+            }
             this.ctx.diagnostics().addSuperseded(1);
             this.ctx.diagnostics().incrementInMemory();
             return true;

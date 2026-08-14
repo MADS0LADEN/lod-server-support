@@ -45,8 +45,10 @@ public abstract class AbstractChunkDiskReader {
     private final LogThrottle saturationWarn = new LogThrottle(SATURATION_WARN_INTERVAL_MS);
     // Read timeouts are documented transients (miss-memo A/B finding) — same aggregation.
     private final LogThrottle timeoutWarn = new LogThrottle(SATURATION_WARN_INTERVAL_MS);
-    // Gate refusals are the same self-healing drop class — same aggregation; the message
-    // names the remedy (the operator signal the gate plan requires).
+    // (Gate PARK-OVERFLOW refusals are deliberately LOG-FREE — see the drop site.)
+    // Non-timeout read failures aggregate too (log-sweep finding: the bare else beside
+    // the throttled timeout branch repeated per failed read, and clients re-declare).
+    private final LogThrottle readErrorWarn = new LogThrottle(SATURATION_WARN_INTERVAL_MS);
 
     // Disk-read concurrency gate (disk-read-concurrency-gate-plan.md): bounds the
     // EXPENSIVE phase only — store hits are served before it. Constructed at pool size
@@ -225,7 +227,8 @@ public abstract class AbstractChunkDiskReader {
                     + ", park full): the request router is deferring cold-region reads to the"
                     + " next client declaration (running total: gate_stops= in /"
                     + Brand.serverCommand() + " diag). This is the gate working; raise"
-                    + " maxConcurrentDiskReads in lss-server-config.json if server CPU"
+                    + " maxConcurrentDiskReads in " + dev.vox.lss.common.Brand.lowerShortName()
+                    + "-server-config.json if server CPU"
                     + " headroom allows and you want faster cold backfill. (Logged once per"
                     + " session.)");
         }
@@ -347,8 +350,13 @@ public abstract class AbstractChunkDiskReader {
                     // original gets the duplicate-ghost above while the drained entry's
                     // pending wedges uncontained — the same accepted OOM-class residual,
                     // now two positions wide (review B-4).
-                    LSSLogger.error("Unexpected failure delivering disk read at "
-                            + chunkX + ", " + chunkZ, t);
+                    long fails = this.readErrorWarn.recordAndTryAcquire(
+                            System.nanoTime() / 1_000_000);
+                    if (fails > 0) {
+                        LSSLogger.error("Unexpected failure delivering disk read at "
+                                + chunkX + ", " + chunkZ + (fails > 1 ? " (+" + (fails - 1)
+                                + " more since last report)" : ""), t);
+                    }
                     addResult(playerUuid, ChunkReadResult.notFoundFromError(
                             playerUuid, chunkX, chunkZ, dimension, submissionOrder));
                 } finally {
@@ -363,7 +371,8 @@ public abstract class AbstractChunkDiskReader {
             if (rejected > 0) {
                 LSSLogger.warn("Disk reader saturated: " + rejected + " chunk read(s) dropped"
                         + " since the last warning — clients re-request automatically; raise"
-                        + " diskReaderThreads in lss-server-config.json if this persists");
+                        + " diskReaderThreads in " + dev.vox.lss.common.Brand.lowerShortName()
+                        + "-server-config.json if this persists");
             }
             // The bounce never consulted the store or storage: submitted+saturated+completed
             // recorded together so the at-rest identity (completed == outcomes) holds.
@@ -675,7 +684,12 @@ public abstract class AbstractChunkDiskReader {
                             + (releases > 1 ? " (+" + (releases - 1) + " more since last report)" : ""));
                 }
             } else {
-                LSSLogger.error("Failed to read chunk NBT from disk at " + chunkX + ", " + chunkZ, e);
+                long fails = this.readErrorWarn.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+                if (fails > 0) {
+                    LSSLogger.error("Failed to read chunk NBT from disk at " + chunkX + ", "
+                            + chunkZ + (fails > 1 ? " (+" + (fails - 1)
+                            + " more since last report)" : ""), e);
+                }
             }
             this.diag.recordError();
             recordRealCompletion(System.nanoTime() - startNs);

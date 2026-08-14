@@ -136,7 +136,9 @@ public class LSSGameTests {
         helper.assertTrue(c.generationTimeoutSeconds >= LSSConstants.MIN_GENERATION_TIMEOUT && c.generationTimeoutSeconds <= LSSConstants.MAX_GENERATION_TIMEOUT, "generationTimeoutSeconds");
         // 0 = dirty pushes disabled (v0.11.0) — a first-class value beside the sending band.
         helper.assertTrue(c.dirtyBroadcastIntervalSeconds == 0 || (c.dirtyBroadcastIntervalSeconds >= LSSConstants.MIN_DIRTY_BROADCAST_INTERVAL && c.dirtyBroadcastIntervalSeconds <= LSSConstants.MAX_DIRTY_BROADCAST_INTERVAL), "dirtyBroadcastIntervalSeconds");
-        helper.assertTrue(c.generationConcurrencyLimitPerPlayer >= LSSConstants.MIN_CONCURRENCY_LIMIT && c.generationConcurrencyLimitPerPlayer <= LSSConstants.MAX_CONCURRENCY_LIMIT, "generationConcurrencyLimitPerPlayer");
+        // The real clamp semantic (R-2 / config review 9.1): per-player is bounded by the
+        // configured GLOBAL cap, not a protocol constant (MAX_CONCURRENCY_LIMIT is deleted).
+        helper.assertTrue(c.generationConcurrencyLimitPerPlayer >= LSSConstants.MIN_CONCURRENCY_LIMIT && c.generationConcurrencyLimitPerPlayer <= c.generationConcurrencyLimitGlobal, "generationConcurrencyLimitPerPlayer");
         helper.succeed();
     }
 }

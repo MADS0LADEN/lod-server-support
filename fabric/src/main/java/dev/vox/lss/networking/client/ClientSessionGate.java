@@ -392,11 +392,25 @@ final class ClientSessionGate {
             // NEW manager, whose dimension guard drops it until its first tick — same
             // accepted residual as the disconnect race.)
             var previous = this.requestManager;
+            // Same connection, same link: SNAPSHOT the old governor before teardown
+            // resets it, and hand the state to the rebuilt manager (review-wave C-M1 —
+            // a /lsslod set re-push must not un-cap a governed slow link; the far-
+            // player tracker solved this same rebuild event by living OUTSIDE the
+            // manager, R-5). The teardown-then-rebuild ORDER is itself load-bearing
+            // (pinned: the old manager's cache save must land before the new one's
+            // load), hence the snapshot rather than a reorder. A legacy-fallback
+            // re-push self-corrects: legacy sessions hard-reset the governor on tick.
+            TransferRateGovernor carried = null;
             if (previous != null) {
+                carried = new TransferRateGovernor();
+                carried.adoptFrom(previous.governor);
                 teardownManager(previous);
             }
             this.connectionStartMs = System.currentTimeMillis();
             this.requestManager = this.managerFactory.create(config);
+            if (carried != null) {
+                this.requestManager.governor.adoptFrom(carried);
+            }
         }
     }
 

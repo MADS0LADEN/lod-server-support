@@ -94,6 +94,19 @@ class PluginYmlContractTest {
     }
 
     @Test
+    void bothFarPlayerPrivacyNodesAreDeclaredDefaultFalse() {
+        // Review-wave V-M1 (the load-bearing dual declaration): the enforcement
+        // dual-checks lss.* OR vss.*, and Bukkit resolves an UNDECLARED node to the op
+        // default — deleting EITHER declaration (or flipping a default) silently hides
+        // every op from far players on the jars where that spelling is undeclared.
+        // Both spellings ship in BOTH jars; the vssJar rewrite must not rename them.
+        assertEquals("false", yml.getString("permissions/lss.farplayers.hidden/default"),
+                "lss.farplayers.hidden must be declared default false");
+        assertEquals("false", yml.getString("permissions/vss.farplayers.hidden/default"),
+                "vss.farplayers.hidden must be declared default false");
+    }
+
+    @Test
     void apiVersionMatchesTheDevBundleMinecraftVersion() throws Exception {
         String apiVersion = yml.getString("api-version");
         assertNotNull(apiVersion);

@@ -22,6 +22,11 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
  */
 public final class FarPlayerClientSupport {
 
+    // Log-sweep hygiene (2026-08-13): per-column/per-frame failure sites aggregate to
+    // one line/min — a persistent condition must not flood the client log.
+    private static final dev.vox.lss.common.LogThrottle MALFORMED_FRAME_WARN =
+            new dev.vox.lss.common.LogThrottle(60_000);
+
     /** Flipped true at E2 (the defaults decision — E1 shipped false/inert).
      *  Package-visible for the pin test. */
     static final boolean CLIENT_ARMED = true;
@@ -147,7 +152,11 @@ public final class FarPlayerClientSupport {
         try {
             TRACKER.onRoster(FarPlayerWire.decodeRoster(body));
         } catch (Exception e) {
-            LSSLogger.warn("Malformed far-player roster frame — ignored (" + e + ")");
+            long n = MALFORMED_FRAME_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+            if (n > 0) {
+                LSSLogger.warn("Malformed far-player roster frame — ignored (" + e + "; " + n
+                        + " malformed frame(s) since the last report)");
+            }
         }
     }
 
@@ -156,7 +165,11 @@ public final class FarPlayerClientSupport {
         try {
             TRACKER.onUpdates(FarPlayerWire.decodeUpdates(body), monotonicMillis());
         } catch (Exception e) {
-            LSSLogger.warn("Malformed far-player updates frame — ignored (" + e + ")");
+            long n = MALFORMED_FRAME_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+            if (n > 0) {
+                LSSLogger.warn("Malformed far-player updates frame — ignored (" + e + "; " + n
+                        + " malformed frame(s) since the last report)");
+            }
         }
     }
 

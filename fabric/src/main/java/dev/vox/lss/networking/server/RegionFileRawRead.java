@@ -77,7 +77,15 @@ final class RegionFileRawRead {
                 // vanilla, and reading it here closes the non-ATOMIC_MOVE replace window
                 // the withdrawn lazy-pool-IO design would have re-opened (review C7).
                 if (streamLength != 0) {
-                    LSSLogger.warn("Chunk " + pos + " has both internal and external streams");
+                    // Throttled like every other corrupt-region line in this file (the
+                    // log sweep found this one bare — an affected chunk is re-read on
+                    // every re-declaration).
+                    long n = CORRUPT_WARN_THROTTLE.recordAndTryAcquire(
+                            System.nanoTime() / 1_000_000);
+                    if (n > 0) {
+                        LSSLogger.warn("Chunk " + pos + " has both internal and external"
+                                + " streams (" + n + " since the last report)");
+                    }
                 }
                 Path external = acc.lss$getExternalChunkPath(pos);
                 if (!Files.isRegularFile(external)) {

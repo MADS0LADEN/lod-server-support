@@ -218,6 +218,13 @@ SERVER_CONFIG_INT_KEYS = frozenset({
     # box whose AUTO pool exceeds it, needs the opt-in or a K=pool pin).
     "maxConcurrentDiskReads",
     "sendQueueLimitPerPlayer", "bytesPerSecondLimitGlobal",
+    # Canonical bandwidth spellings since the 2026-08-08 key rename (staleness-sweep
+    # finding: only the legacy byte spellings were listed, so a scenario written with
+    # the modern keys would be rejected — the R4 lesson again). Values are MiB/s
+    # doubles in the mod; scenarios may still write ints (validated as numeric below
+    # via the int allowlist — a fractional override belongs in a new float set if ever
+    # needed).
+    "mbPerSecondLimitPerPlayer", "mbPerSecondLimitGlobal",
     # Outbound ceiling (0 = off, the default; explicit = operator-fixed entry
     # gate — the AUTO mode was deleted, adaptive-transfer-rate-plan.md). Listed so
     # an A/B scenario can pin it — the R4 lesson below is exactly this omission.
@@ -997,8 +1004,14 @@ def evaluate_laws(ctx):
     for run, csnaps in sorted(ctx.runs.items()):
         violations += law_A6_client(run, csnaps)
 
-    # B2 over raw series, armed by the scenario's bandwidth cap override.
+    # B2 over raw series, armed by the scenario's bandwidth cap override — either
+    # spelling (the mb* keys are the canonical ones since 2026-08-08; bytes* are the
+    # legacy readers the mod honors forever).
     cap = ctx.config.get("bytesPerSecondLimitGlobal")
+    if not (isinstance(cap, int) and not isinstance(cap, bool)):
+        mb = ctx.config.get("mbPerSecondLimitGlobal")
+        if isinstance(mb, (int, float)) and not isinstance(mb, bool):
+            cap = int(mb * 1024 * 1024)
     if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
         violations += law_B2(snaps, cap)
 
@@ -1599,9 +1612,11 @@ def check_bandwidth_throttle(ctx):
     send-queue breaker); only the recovery mechanism changed — a want dropped by a
     queue-full break is re-declared by the client's 1 Hz want-set, not rescued by the
     deleted 10 s in-flight timeout sweep."""
-    if "bytesPerSecondLimitGlobal" not in ctx.config:
+    if ("bytesPerSecondLimitGlobal" not in ctx.config
+            and "mbPerSecondLimitGlobal" not in ctx.config):
         yield Violation("bandwidth-throttle", "config",
-                        "scenario config must set bytesPerSecondLimitGlobal or B2 stays unarmed", {})
+                        "scenario config must set a global bandwidth cap (either spelling)"
+                        " or B2 stays unarmed", {})
     last = ctx.server_snaps[-1]
     if last["service"]["queue_full"] < 1:
         yield Violation("bandwidth-throttle", "final snapshot",

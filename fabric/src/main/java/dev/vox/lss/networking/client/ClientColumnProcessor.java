@@ -26,6 +26,11 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 class ClientColumnProcessor {
+
+    // Log-sweep hygiene (2026-08-13): per-column/per-frame failure sites aggregate to
+    // one line/min — a persistent condition must not flood the client log.
+    private static final dev.vox.lss.common.LogThrottle PROCESS_FAIL_WARN =
+            new dev.vox.lss.common.LogThrottle(60_000);
     static final int MAX_QUEUED_COLUMNS = 8000;
     /** Byte budget for queued (still-compressed-in-memory) section payloads: the count cap
      *  alone admits up to 8000 x 2 MiB = 16 GiB from a hostile or misbehaving server before
@@ -380,8 +385,12 @@ class ClientColumnProcessor {
                 // class the delivery-honesty refactor eliminated; LSSApi.dispatchColumn one
                 // frame downstream already treats Throwable this way). Report FIRST so the
                 // stamp is forgotten, then let true Errors propagate.
-                LSSLogger.error("Failed to process voxel column at "
-                        + payload.chunkX() + "," + payload.chunkZ(), t);
+                long n = PROCESS_FAIL_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+                if (n > 0) {
+                    LSSLogger.error("Failed to process voxel column at "
+                            + payload.chunkX() + "," + payload.chunkZ() + " (" + n
+                            + " failure(s) since the last report)", t);
+                }
                 this.failureReporter.report(payload.dimension(),
                         payload.chunkX(), payload.chunkZ());
                 if (t instanceof Error err && !(t instanceof AssertionError)) throw err;

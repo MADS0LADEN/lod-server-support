@@ -1,6 +1,6 @@
 # Runtime settings commands + backfill remaining-estimate + `/lsslod help` + package descriptions — plan
 
-**Status: PLANNED, unimplemented** (2026-08-12). **Reviewed 2026-08-12** (1 Fable
+**Status: IMPLEMENTED — shipped in v0.11.0** (stage C, 2026-08-13; `/lsslod set` on both platforms, `common/config/RuntimeSettings`; kept as the design record). **Reviewed 2026-08-12** (1 Fable
 subagent, all load-bearing citations re-verified): verdict IMPLEMENT WITH FIXES,
 2 MAJOR / 9 MINOR — all folded into this revision. Headlines: the SessionConfig
 re-push must enumerate + send on the pump/main thread AFTER the mailbox drain (a

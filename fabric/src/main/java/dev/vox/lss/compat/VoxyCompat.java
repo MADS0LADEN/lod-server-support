@@ -24,6 +24,11 @@ import java.util.function.Consumer;
  * intermediate ID translation.
  */
 class VoxyCompat {
+
+    // Log-sweep hygiene (2026-08-13): per-column/per-frame failure sites aggregate to
+    // one line/min — a persistent condition must not flood the client log.
+    private static final dev.vox.lss.common.LogThrottle INGEST_FAIL_WARN =
+            new dev.vox.lss.common.LogThrottle(60_000);
     // WorldIdentifier.of(Level) → Object
     private static MethodHandle worldIdentifierOf;
 
@@ -176,7 +181,11 @@ class VoxyCompat {
             reportSink.report(dimension, chunkX, chunkZ);
         } catch (Throwable e) {
             if (e instanceof Error && !(e instanceof AssertionError)) throw (Error) e;
-            LSSLogger.error("Voxy raw ingest failed", e);
+            long n = INGEST_FAIL_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+            if (n > 0) {
+                LSSLogger.error("Voxy raw ingest failed (" + n
+                        + " failed ingest(s) since the last report; each is re-served)", e);
+            }
             reportSink.report(dimension, chunkX, chunkZ);
         }
     }

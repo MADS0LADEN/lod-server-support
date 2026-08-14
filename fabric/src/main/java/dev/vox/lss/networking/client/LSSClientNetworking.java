@@ -21,6 +21,11 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.storage.LevelResource;
 
 public class LSSClientNetworking {
+
+    // Log-sweep hygiene (2026-08-13): per-column/per-frame failure sites aggregate to
+    // one line/min — a persistent condition must not flood the client log.
+    private static final dev.vox.lss.common.LogThrottle UNKNOWN_TYPE_WARN =
+            new dev.vox.lss.common.LogThrottle(60_000);
     private static final ClientColumnProcessor columnProcessor = new ClientColumnProcessor();
 
     // Session state and the JOIN / SessionConfig / DISCONNECT ladders live in the gate
@@ -310,7 +315,15 @@ public class LSSClientNetworking {
                         // self-heal that approximates v16's ~1 s retry. Debug, not warn: on a
                         // v16 session this is routine, and a v18 server never sends it.
                         LSSLogger.debug("v16 rate-limited position " + packed + " (re-declared next scan)");
-                default -> LSSLogger.warn("Unknown batch response type: " + type);
+                default -> {
+                    // Throttled (log sweep): this sits INSIDE the per-element batch loop —
+                    // protocol drift would emit hundreds of lines per second bare.
+                    long n = UNKNOWN_TYPE_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+                    if (n > 0) {
+                        LSSLogger.warn("Unknown batch response type: " + type + " (" + n
+                                + " unknown element(s) since the last report)");
+                    }
+                }
             }
         }
     }

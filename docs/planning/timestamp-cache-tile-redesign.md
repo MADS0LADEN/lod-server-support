@@ -1,6 +1,6 @@
 # ColumnTimestampCache tile redesign — ~10x+ memory reduction at large lodDistance
 
-Status: PLANNED — reviewed 2026-08-08 by two subagent review rounds (adversarial
+Status: IMPLEMENTED — shipped in v0.10.0 (D0; `ColumnTimestampCache` cites this as the as-built design). Reviewed 2026-08-08 by two subagent review rounds (adversarial
 correctness + integration/completeness); all findings incorporated below, each marked
 "review round 1" (correctness) or "review round 2" (integration). Not implemented.
 Target branch: a fresh `feat/tscache-tiles` off `main` AFTER the protocol-20 C6 work

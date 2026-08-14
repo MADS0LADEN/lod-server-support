@@ -1,6 +1,6 @@
 # Client full-reset command (`/lss reset`) + client cache relocation to `.lss/` — plan
 
-**Status: PLANNED, unimplemented** (2026-08-12). Two client-side features, one plan:
+**Status: IMPLEMENTED — shipped in v0.11.0** (stage D, 2026-08-13; `/lss reset` + the `.lss`/`.vss` cache dot-dirs; kept as the design record). Two client-side features, one plan:
 
 1. A new client command that clears BOTH the Voxy data cache (disk + **in-memory** —
    the player visibly watches all LODs disappear) AND the LSS client cache, then resets

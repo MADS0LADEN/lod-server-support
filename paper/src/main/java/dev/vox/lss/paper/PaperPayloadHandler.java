@@ -242,13 +242,28 @@ public final class PaperPayloadHandler {
         sendRawNmsPayload(player, ID_DIRTY_COLUMNS, data);
     }
 
+    // Malformed-C2S log guard (log-sweep top finding): these warns fire on
+    // CLIENT-SUPPLIED bytes at packet rate and returned null WITHOUT throwing, so they
+    // bypassed the plugin's hostile-frame throttle (which only covers the exception
+    // path) — a cheap remote log-flood vector. One aggregated line per minute, max.
+    private static final dev.vox.lss.common.LogThrottle MALFORMED_C2S_WARN =
+            new dev.vox.lss.common.LogThrottle(60_000);
+
+    private static void warnMalformed(String what) {
+        long n = MALFORMED_C2S_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+        if (n > 0) {
+            LSSLogger.warn(what + " (" + n + " malformed C2S frame(s) since the last"
+                    + " report; contained — malformed frames are dropped)");
+        }
+    }
+
     // ---- C2S Decoding ----
 
     public record DecodedHandshake(int protocolVersion, int capabilities) {}
 
     public static DecodedHandshake decodeHandshake(byte[] data) {
         if (data == null || data.length == 0) {
-            LSSLogger.warn("Received empty handshake payload");
+            warnMalformed("Received empty handshake payload");
             return null;
         }
         return withReadBuffer(data, buf -> {
@@ -262,13 +277,13 @@ public final class PaperPayloadHandler {
 
     public static DecodedBatchChunkRequest decodeBatchChunkRequest(byte[] data) {
         if (data == null || data.length == 0) {
-            LSSLogger.warn("Received empty batch chunk request payload");
+            warnMalformed("Received empty batch chunk request payload");
             return null;
         }
         return withReadBuffer(data, buf -> {
             int count = buf.readVarInt();
             if (count < 0 || count > LSSConstants.MAX_BATCH_CHUNK_REQUESTS) {
-                LSSLogger.warn("Batch chunk request count out of range: " + count);
+                warnMalformed("Batch chunk request count out of range: " + count);
                 return null;
             }
             long[] packedPositions = new long[count];

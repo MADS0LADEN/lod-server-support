@@ -1,5 +1,9 @@
 # Instructions: CPU optimization round 2 (disk-read serving path)
 
+**Status: EXECUTED — historical.** Round 2 shipped (PR #74, `useNbtTranscode` default
+true) and later perf rounds superseded this work order. Do not execute; kept as the
+methodology record. (Banner added by the 2026-08-13 staleness sweep.)
+
 You are continuing a validated CPU-optimization effort on LSS's disk-read LOD serving
 path. Round 1 is DONE and measured; your job is round 2: implement the next tier,
 validate byte-identity through the existing gates, and prove the CPU win with the same

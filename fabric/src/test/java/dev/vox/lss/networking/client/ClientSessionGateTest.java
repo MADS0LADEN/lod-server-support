@@ -74,6 +74,34 @@ class ClientSessionGateTest {
         return new SessionConfigS2CPayload(protocolVersion, enabled, 64, true);
     }
 
+    @org.junit.jupiter.api.Test
+    void sessionConfigRePushCarriesTheGovernorAcrossTheManagerRebuild() {
+        // Review-wave C-M1: a mid-session re-push (/lsslod set, a Paper /reload
+        // re-attach) rebuilds the manager — the fresh governor must ADOPT the old
+        // one's state, or a governed slow link is un-capped for the seconds a fresh
+        // loop needs to re-learn congestion (the round-5 runaway shape) and the ping
+        // baseline reseeds from the congested current reading.
+        gate.onSessionConfig(config(V, true), true, true);
+        var first = gate.getRequestManager();
+        // Engage the first manager's governor with a known shape (the manager-test rig).
+        first.governor.tick(1, 0, 0, 0, 1, false, 50, true);
+        first.governor.tick(1 + TransferRateGovernor.INTERVAL_MILLIS,
+                800 * 1024, 100, 20_000, 1, false, 2_000, true);
+        first.governor.tick(1 + 2 * TransferRateGovernor.INTERVAL_MILLIS,
+                1600 * 1024, 200, 40_000, 1, false, 2_000, true);
+        org.junit.jupiter.api.Assertions.assertTrue(first.governor.isEngaged(), "rig engagement");
+        long desired = first.governor.getDesiredBytesPerSec();
+
+        gate.onSessionConfig(config(V, true), true, true); // the re-push
+        var second = gate.getRequestManager();
+        org.junit.jupiter.api.Assertions.assertNotSame(first, second, "the re-push rebuilds");
+        org.junit.jupiter.api.Assertions.assertTrue(second.governor.isEngaged(),
+                "the rebuilt manager's governor must stay engaged");
+        org.junit.jupiter.api.Assertions.assertEquals(desired,
+                second.governor.getDesiredBytesPerSec(),
+                "the governed rate carries across the rebuild");
+    }
+
     /** The synthetic disabled shape the codec's drain branch produces for a foreign version. */
     private static SessionConfigS2CPayload codecForeignShape(int protocolVersion) {
         return new SessionConfigS2CPayload(protocolVersion, false, 0, false);

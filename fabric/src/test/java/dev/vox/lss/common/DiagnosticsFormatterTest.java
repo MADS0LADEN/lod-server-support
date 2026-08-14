@@ -112,7 +112,7 @@ class DiagnosticsFormatterTest {
                 2_097_152,
                 512,
                 List.of(new DiagnosticsFormatter.PlayerDiag("Steve", 3, 4000, 2, 1, 2000, 4096,
-                        65536L, 131072L, 7L)));
+                        65536L, 131072L, 7L, 0L, -1L, 1.0, 0L)));
 
         assertEquals(List.of(
                 "=== LSS LOD Diagnostics ===",
@@ -478,7 +478,7 @@ class DiagnosticsFormatterTest {
                 2_097_152,
                 512,
                 List.of(new DiagnosticsFormatter.PlayerDiag("Steve", 0, 4000, 0, 0, 0, 0,
-                        -1L, -1L, 0L)));
+                        -1L, -1L, 0L, 0L, -1L, 1.0, 0L)));
         var lines = DiagnosticsFormatter.formatDiagnostics(d);
         assertTrue(lines.stream().anyMatch(l -> l.contains("obuf=n/a/n/a")),
                 "no-signal must render as n/a, got: " + lines);
@@ -604,7 +604,7 @@ class DiagnosticsFormatterTest {
                 2_097_152,
                 512,
                 List.of(new DiagnosticsFormatter.PlayerDiag("Alex", 1, 4000, 0, 0, 10, 1000,
-                        50_000L, 60_000L, 0L, 3L, 125_000L)));
+                        50_000L, 60_000L, 0L, 3L, 125_000L, 1.0, 0L)));
         assertTrue(DiagnosticsFormatter.formatDiagnostics(d).stream()
                         .anyMatch(l -> l.contains("ceil=122.1 KB")),
                 "an armed ceiling renders its byte value");
@@ -627,7 +627,7 @@ class DiagnosticsFormatterTest {
                 2_097_152,
                 512,
                 List.of(new DiagnosticsFormatter.PlayerDiag("Alex", 1, 4000, 0, 0, 10, 1000,
-                        50_000L, 60_000L, 0L, 3L, -1L, 0.0833)));
+                        50_000L, 60_000L, 0L, 3L, -1L, 0.0833, 0L)));
         assertTrue(DiagnosticsFormatter.formatDiagnostics(d).stream()
                         .anyMatch(l -> l.contains("pingf=0.08")),
                 "a cut factor renders through the %.2f format");

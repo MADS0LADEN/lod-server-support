@@ -375,6 +375,22 @@ def check_vss_pair_fabric(lss_jar, vss_jar, problems):
     icon = vmeta.get("icon")
     if icon and icon not in _names(vss_jar):
         problems.append(f"{vbase}: fabric.mod.json icon {icon!r} is not an entry in the jar")
+    # Lang-value rebrand pin (review-wave V-M2): the vssJar rewrites en_us.json VALUES —
+    # a silent no-op ships VSS Sodium pages reading "LOD Server Support"/"LSS" mid-
+    # sentence (the exact defect the rewrite exists to fix). Skipped when the jar has no
+    # lang entry (synthetic selftest fixtures); the byte-copy loop cannot drop entries.
+    LANG = "assets/lss/lang/en_us.json"
+    if LANG in _names(vss_jar):
+        try:
+            vlang = json.loads(_read(vss_jar, LANG))
+        except (KeyError, json.JSONDecodeError):
+            problems.append(f"{vbase}: {LANG} is not valid JSON after the lang rebrand")
+            vlang = {}
+        for k, v in vlang.items():
+            sv = str(v)
+            if "LOD Server Support" in sv or re.search(r"\bLSS\b", sv):
+                problems.append(f"{vbase}: lang value {k!r} still carries LSS branding "
+                                "— the vssJar lang rewrite no-opped or missed it")
 
 
 # plugin.yml lines that are the identity + wire contract: the VSS rebrand must leave every

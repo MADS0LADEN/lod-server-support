@@ -72,8 +72,11 @@ public final class FarPlayerBroadcastService {
         boolean send(UUID viewer, String channel, byte[] body);
     }
 
-    /** Reflective vanish-mod bridge seam (melius-vanish on Fabric, vanish meta on
-     *  Paper); default sees everyone. */
+    /** Vanish bridge seam. Paper feeds the "vanished" metadata read (SuperVanish/
+     *  PremiumVanish/EssentialsX) through the snapshot instead; Fabric passes null —
+     *  there is no cross-mod vanish convention on Fabric (recorded descope,
+     *  v0.11.0-progress decisions log), so a Fabric vanish mod's players rely on the
+     *  exclude list / permission node. */
     @FunctionalInterface
     public interface VanishBridge {
         boolean canSee(UUID viewer, UUID target);

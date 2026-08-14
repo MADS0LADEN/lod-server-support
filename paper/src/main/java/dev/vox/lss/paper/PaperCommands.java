@@ -80,7 +80,8 @@ public class PaperCommands implements CommandExecutor, TabCompleter {
                             PaperRequestProcessingService service, String[] args) {
         var config = this.configSupplier.get();
         if (args.length == 1) {
-            sender.sendMessage("Runtime-settable keys (applied + persisted to lss-server-config.json):");
+            sender.sendMessage("Runtime-settable keys (applied + persisted to "
+                    + dev.vox.lss.common.Brand.lowerShortName() + "-server-config.json):");
             for (var line : dev.vox.lss.common.config.RuntimeSettings.listLines(config)) {
                 sender.sendMessage("  " + line);
             }
