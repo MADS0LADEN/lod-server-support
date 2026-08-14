@@ -1,160 +1,106 @@
 package dev.vox.lss.networking.client;
 
-import dev.vox.lss.networking.payloads.SoakDialectOverride;
-import dev.vox.lss.common.LSSConstants;
-import dev.vox.lss.networking.payloads.ZstdWireSupport;
-import dev.vox.lss.common.LSSLogger;
-import dev.vox.lss.common.PositionUtil;
-import dev.vox.lss.api.LSSApi;
-import dev.vox.lss.config.LSSClientConfig;
 import dev.vox.lss.networking.payloads.BatchResponseS2CPayload;
 import dev.vox.lss.networking.payloads.DirtyColumnsS2CPayload;
-import dev.vox.lss.networking.payloads.HandshakeC2SPayload;
 import dev.vox.lss.networking.payloads.SessionConfigS2CPayload;
 import dev.vox.lss.networking.payloads.VoxelColumnS2CPayload;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
-import net.minecraft.client.Minecraft;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.storage.LevelResource;
 
+/**
+ * Fabric client-side networking glue: event + receiver REGISTRATION. Since N-3
+ * the session state and every receiver/lifecycle body live in the loader-neutral
+ * {@link ClientNetGlue} (xplat — shared verbatim with the NeoForge module); the
+ * delegating statics here keep every pre-extraction caller and test signature
+ * intact.
+ */
 public class LSSClientNetworking {
 
-    // Log-sweep hygiene (2026-08-13): per-column/per-frame failure sites aggregate to
-    // one line/min — a persistent condition must not flood the client log.
-    private static final dev.vox.lss.common.LogThrottle UNKNOWN_TYPE_WARN =
-            new dev.vox.lss.common.LogThrottle(60_000);
-    private static final ClientColumnProcessor columnProcessor = new ClientColumnProcessor();
-
-    // Session state and the JOIN / SessionConfig / DISCONNECT ladders live in the gate
-    // (unit-testable); this class wires the production seams — the real handshake send
-    // and manager construction with live server-address resolution.
-    private static final ClientSessionGate sessionGate = new ClientSessionGate(
-            columnProcessor,
-            version -> {
-                ClientPlayNetworking.send(new HandshakeC2SPayload(
-                        version, LSSConstants.CAPABILITY_VOXEL_COLUMNS
-                                | ZstdWireSupport.capabilityBit()
-                                | FarPlayerClientSupport.capabilityBit()));
-                FarPlayerClientSupport.onHandshakeSent();
-                sendClientInfoSidecar();
-            },
-            LSSClientNetworking::createRequestManager);
-
-    /** The lss:client_info sidecar rides beside every announce (XVER §2.2): the
-     *  handshake shape is frozen, so the client's data version travels on its own
-     *  channel. Best-effort — legacy servers discard the unregistered channel, and a
-     *  send failure must never take the announce down with it. */
-    private static void sendClientInfoSidecar() {
-        // A real protocol-19 client has no lss:client_info channel — the soak harness's
-        // legacy-dialect emulation must not send one either (C2 lever fidelity).
-        if (SoakDialectOverride.isV19()) return;
-        try {
-            ClientPlayNetworking.send(new dev.vox.lss.networking.payloads.ClientInfoC2SPayload(
-                    net.minecraft.SharedConstants.getCurrentVersion().dataVersion().version()));
-        } catch (Exception e) {
-            LSSLogger.debug("client_info sidecar send failed: " + e.getMessage());
-        }
-    }
-
     public static boolean isServerEnabled() {
-        return sessionGate.isServerEnabled();
+        return ClientNetGlue.isServerEnabled();
     }
 
     /** C6 observability: the established session's protocol version (0 pre-config). */
     public static int getSessionVersion() {
-        return sessionGate.getSessionVersion();
+        return ClientNetGlue.getSessionVersion();
     }
 
     public static boolean hasReceivedSessionConfig() {
-        return sessionGate.hasReceivedSessionConfig();
+        return ClientNetGlue.hasReceivedSessionConfig();
     }
 
     public static int getServerLodDistance() {
-        return sessionGate.getServerLodDistance();
+        return ClientNetGlue.getServerLodDistance();
     }
 
     public static long getColumnsReceived() {
-        return sessionGate.getColumnsReceived();
+        return ClientNetGlue.getColumnsReceived();
     }
 
     public static long getBytesReceived() {
-        return sessionGate.getBytesReceived();
+        return ClientNetGlue.getBytesReceived();
     }
 
     public static long getWireBytesReceived() {
-        return sessionGate.getWireBytesReceived();
+        return ClientNetGlue.getWireBytesReceived();
     }
 
     public static long getColumnsDropped() {
-        return columnProcessor.getColumnsDropped();
+        return ClientNetGlue.getColumnsDropped();
     }
 
     public static long getConnectionStartMs() {
-        return sessionGate.getConnectionStartMs();
+        return ClientNetGlue.getConnectionStartMs();
     }
 
     public static LodRequestManager getRequestManager() {
-        return sessionGate.getRequestManager();
+        return ClientNetGlue.getRequestManager();
     }
 
     public static int getQueuedColumnCount() {
-        return columnProcessor.getQueuedCount();
+        return ClientNetGlue.getQueuedColumnCount();
     }
 
     public static long getQueuedColumnBytes() {
-        return columnProcessor.getQueuedBytes();
+        return ClientNetGlue.getQueuedColumnBytes();
     }
 
-    /**
-     * Report a delivered-but-not-ingested column (decode failure or consumer rejection
-     * via {@link LSSApi#reportIngestFailure}). Hops to the main thread, where the manager
-     * forgets the received-stamp and schedules a re-request. Safe from any thread.
-     */
+    /** See {@link ClientNetGlue#reportIngestFailure} — safe from any thread. */
     public static void reportIngestFailure(ResourceKey<Level> dimension, int chunkX, int chunkZ) {
-        var mc = Minecraft.getInstance();
-        if (mc == null) return; // unit tests / very early startup — no session to repair anyway
-        mc.execute(() -> {
-            var manager = sessionGate.getRequestManager();
-            if (manager != null) {
-                manager.onIngestFailure(dimension, PositionUtil.packPosition(chunkX, chunkZ));
-            }
-        });
+        ClientNetGlue.reportIngestFailure(dimension, chunkX, chunkZ);
     }
 
-    /**
-     * Drain the decode queue and unstamp every undispatched column via the manager —
-     * called before any cache persistence (disconnect, dimension change) so stamps for
-     * never-ingested data cannot outlive the session state that recorded them.
-     */
+    /** See {@link ClientNetGlue#reportUndispatchedColumns}. */
     static void reportUndispatchedColumns(LodRequestManager manager) {
-        columnProcessor.reportUndispatched(manager);
+        ClientNetGlue.reportUndispatchedColumns(manager);
     }
 
-    /** Bounded wait for the in-flight decode drain — the /lss reset sequence's step-1
-     *  await (see {@link ClientColumnProcessor#awaitDecodeIdle}). */
+    /** See {@link ClientNetGlue#awaitDecodeIdle}. */
     static boolean awaitDecodeIdle(long timeoutMs) {
-        return columnProcessor.awaitDecodeIdle(timeoutMs);
+        return ClientNetGlue.awaitDecodeIdle(timeoutMs);
     }
 
     public static void triggerHostHandshake() {
-        Minecraft.getInstance().execute(() -> {
-            if (!LSSClientConfig.CONFIG.receiveServerLods) return;
-            if (sessionGate.getRequestManager() != null) return;
-            if (!LSSApi.hasVoxelConsumers()) return; // no LOD consumer -> stay silent
-            try {
-                ClientPlayNetworking.send(new HandshakeC2SPayload(
-                        LSSConstants.PROTOCOL_VERSION, LSSConstants.CAPABILITY_VOXEL_COLUMNS
-                                | ZstdWireSupport.capabilityBit()
-                                | FarPlayerClientSupport.capabilityBit()));
-                FarPlayerClientSupport.onHandshakeSent();
-                sendClientInfoSidecar();
-            } catch (Exception e) {
-                LSSLogger.debug("LAN host handshake send failed: " + e.getMessage());
-            }
-        });
+        ClientNetGlue.triggerHostHandshake();
+    }
+
+    /** Delegate kept for the pinned truth table — see {@link ClientNetGlue#shouldDriveV16Generation}. */
+    static boolean shouldDriveV16Generation(int protocolVersion, boolean generationOptIn) {
+        return ClientNetGlue.shouldDriveV16Generation(protocolVersion, generationOptIn);
+    }
+
+    /** Delegate kept for the receiver-ladder tests — see {@link ClientNetGlue#handleVoxelColumn}. */
+    static void handleVoxelColumn(LodRequestManager manager, ClientColumnProcessor processor,
+                                  VoxelColumnS2CPayload payload) {
+        ClientNetGlue.handleVoxelColumn(manager, processor, payload);
+    }
+
+    /** Delegate kept for the dispatch tests — see {@link ClientNetGlue#dispatchBatchResponses}. */
+    static void dispatchBatchResponses(LodRequestManager manager, BatchResponseS2CPayload payload) {
+        ClientNetGlue.dispatchBatchResponses(manager, payload);
     }
 
     public static void init() {
@@ -163,197 +109,47 @@ public class LSSClientNetworking {
         registerTickHandler();
     }
 
-    /**
-     * Production {@link ClientSessionGate.ManagerFactory}: builds the per-session manager
-     * and resolves the cache-keying server address from the live client (multiplayer ip →
-     * LAN/local world dir → unknown).
-     */
-    private static LodRequestManager createRequestManager(SessionConfigS2CPayload payload) {
-        var manager = new LodRequestManager();
-        var mc = Minecraft.getInstance();
-        String serverAddr;
-        var serverData = mc.getCurrentServer();
-        var spServer = mc.getSingleplayerServer();
-        if (serverData != null && serverData.ip != null) {
-            serverAddr = serverData.ip;
-        } else if (spServer != null) {
-            var worldDir = spServer.getWorldPath(LevelResource.ROOT).getFileName();
-            serverAddr = "local:" + (worldDir != null ? worldDir : "world");
-        } else {
-            serverAddr = "unknown";
-        }
-        manager.onSessionConfig(payload, serverAddr);
-        // Tier B v16 backward-compat: only a v16 session reaches here with protocolVersion() == 16
-        // (the gate rejects a v16 config outright when enableV16ServerCompat is off, before the
-        // factory runs), so this is the single place that combines "v16 session" with the client
-        // opt-in. A v18 session leaves it false and the egress byte-identical.
-        manager.setV16GenerationDrive(shouldDriveV16Generation(
-                payload.protocolVersion(), LSSClientConfig.CONFIG.enableV16Generation));
-        return manager;
-    }
-
-    /**
-     * Tier B decision: drive on-demand generation on the server only for a genuine v16 session
-     * AND when the client has opted in. Pure so the truth table is unit-testable
-     * (v18 → false regardless of the opt-in; v16 → the opt-in).
-     */
-    static boolean shouldDriveV16Generation(int protocolVersion, boolean generationOptIn) {
-        return protocolVersion == LSSConstants.V16_COMPAT_PROTOCOL_VERSION && generationOptIn;
-    }
-
     private static void registerPacketHandlers() {
         ClientPlayNetworking.registerGlobalReceiver(
                 SessionConfigS2CPayload.TYPE,
-                (payload, context) -> context.client().execute(
-                        () -> {
-                            sessionGate.onSessionConfig(payload, LSSApi.hasVoxelConsumers(),
-                                    LSSClientConfig.CONFIG.enableV16ServerCompat);
-                            // Far players (E1): the prefs frame follows the session
-                            // config (send-once-unless-changed, contained; no-op while
-                            // the capability bit is not composed — all of E1).
-                            FarPlayerClientSupport.maybeSendPrefs();
-                        })
+                (payload, context) -> ClientNetGlue.onSessionConfigFrame(payload)
         );
 
         ClientPlayNetworking.registerGlobalReceiver(
                 BatchResponseS2CPayload.TYPE,
-                (payload, context) -> {
-                    context.client().execute(() -> {
-                        var manager = sessionGate.getRequestManager();
-                        if (manager == null) return;
-                        dispatchBatchResponses(manager, payload);
-                    });
-                }
+                (payload, context) -> ClientNetGlue.onBatchResponseFrame(payload)
         );
 
         ClientPlayNetworking.registerGlobalReceiver(
                 DirtyColumnsS2CPayload.TYPE,
-                (payload, context) -> {
-                    context.client().execute(() -> {
-                        var manager = sessionGate.getRequestManager();
-                        if (manager != null) {
-                            manager.onDirtyColumns(payload.dirtyPositions());
-                        }
-                    });
-                }
+                (payload, context) -> ClientNetGlue.onDirtyColumnsFrame(payload)
         );
 
         ClientPlayNetworking.registerGlobalReceiver(
                 dev.vox.lss.networking.payloads.FarPlayerRosterS2CPayload.TYPE,
-                (payload, context) -> context.client().execute(
-                        () -> FarPlayerClientSupport.onRosterFrame(payload.body()))
+                (payload, context) -> ClientNetGlue.onFarPlayerRosterFrame(payload.body())
         );
 
         ClientPlayNetworking.registerGlobalReceiver(
                 dev.vox.lss.networking.payloads.FarPlayerUpdatesS2CPayload.TYPE,
-                (payload, context) -> context.client().execute(
-                        () -> FarPlayerClientSupport.onUpdatesFrame(payload.body()))
+                (payload, context) -> ClientNetGlue.onFarPlayerUpdatesFrame(payload.body())
         );
 
         ClientPlayNetworking.registerGlobalReceiver(
                 VoxelColumnS2CPayload.TYPE,
-                (payload, context) -> {
-                    sessionGate.recordColumnFrame(payload.estimatedBytes(), payload.wireEstimatedBytes());
-
-                    context.client().execute(() ->
-                            handleVoxelColumn(sessionGate.getRequestManager(), columnProcessor, payload));
-                }
+                (payload, context) -> ClientNetGlue.onVoxelColumnFrame(payload)
         );
     }
 
-    /**
-     * VoxelColumn receive glue (main client thread). Ordering is load-bearing: "did the
-     * client already hold data here" must be captured BEFORE {@code onColumnReceived}
-     * stamps the position — a resync must air-fill absent sections to clear ghost terrain.
-     * A 0-section column is an authoritative content→air clear REGARDLESS of the held
-     * check: the server only sends it to data-claiming clients, so heldContentBefore==false
-     * here means the stamp was dropped moments earlier (an ingest-failure report racing the
-     * delivery). Treating that as a plain first serve would dispatch zero sections with no
-     * air-fill yet stamp ts&gt;0 — a validated hole that up_to_date pins for the session.
-     * Package-private so tests can pin the ladder without a network receiver.
-     */
-    static void handleVoxelColumn(LodRequestManager manager, ClientColumnProcessor processor,
-                                  VoxelColumnS2CPayload payload) {
-        long packed = PositionUtil.packPosition(payload.chunkX(), payload.chunkZ());
-        boolean resync = manager != null && manager.heldContentBefore(packed);
-        // Codec-gated (plan §0.8): only raw bytes can be varint-peeked here. A compliant
-        // server always ships clears raw (1-byte body, far below the compress threshold);
-        // a compressed "clear" from a non-compliant server reads as not-a-clear —
-        // fail-safe, it still decodes correctly at the drain.
-        boolean clear = payload.codec() == LSSConstants.COLUMN_CODEC_RAW
-                && ClientColumnProcessor.isClearColumn(payload.shippedSections());
-        if (manager != null && !manager.onColumnReceived(packed, payload.columnTimestamp(),
-                payload.dimension(), clear, payload.source())) {
-            // Out-of-range unsolicited drop: the state map refused the stamp, and the
-            // consumers must not ingest it either — a hostile/buggy server could otherwise
-            // grow the LOD store without bound while /lss diag shows nothing tracked.
-            return;
-        }
-        // A clear air-fills even when the held check missed (see above) — the consumer must
-        // overwrite whatever it renders there with air.
-        processor.offer(payload, resync || clear);
-    }
-
-    /**
-     * Routes each batch entry to its per-type manager callback. An unknown responseType
-     * skips that entry only, never the rest of the batch (forward compat with newer
-     * servers). That same skip covers the RETIRED byte 0 (v16's rate-limited bounce): a
-     * pre-v17 server never gets this far (the handshake gate rejects the version mismatch),
-     * but the inert skip is what makes byte 0 safe to leave reserved forever.
-     * Package-private so tests can exercise it without a network receiver.
-     */
-    static void dispatchBatchResponses(LodRequestManager manager, BatchResponseS2CPayload payload) {
-        for (int i = 0; i < payload.count(); i++) {
-            long packed = payload.packedPositions()[i];
-            byte type = payload.responseTypes()[i];
-            switch (type) {
-                case LSSConstants.RESPONSE_UP_TO_DATE -> manager.onColumnUpToDate(packed);
-                case LSSConstants.RESPONSE_NOT_GENERATED -> manager.onColumnNotGenerated(packed);
-                case LSSConstants.RESPONSE_RATE_LIMITED_V16 ->
-                        // A v16 server's soft back-off bounce (retired byte 0). The position
-                        // stays unsatisfied and is re-declared on the next scan — the v18
-                        // self-heal that approximates v16's ~1 s retry. Debug, not warn: on a
-                        // v16 session this is routine, and a v18 server never sends it.
-                        LSSLogger.debug("v16 rate-limited position " + packed + " (re-declared next scan)");
-                default -> {
-                    // Throttled (log sweep): this sits INSIDE the per-element batch loop —
-                    // protocol drift would emit hundreds of lines per second bare.
-                    long n = UNKNOWN_TYPE_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
-                    if (n > 0) {
-                        LSSLogger.warn("Unknown batch response type: " + type + " (" + n
-                                + " unknown element(s) since the last report)");
-                    }
-                }
-            }
-        }
-    }
-
     private static void registerConnectionLifecycle() {
-        ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
-            // Don't activate on singleplayer/integrated servers (unless testing)
-            boolean localIntegratedServer = Minecraft.getInstance().hasSingleplayerServer()
-                    && !Boolean.getBoolean("lss.test.integratedServer");
-            sessionGate.onJoin(LSSClientConfig.CONFIG.receiveServerLods, localIntegratedServer,
-                    LSSApi.hasVoxelConsumers(), LSSClientConfig.CONFIG.enableV16ServerCompat,
-                    LSSClientConfig.CONFIG.enableV19ServerCompat);
-        });
+        ClientPlayConnectionEvents.JOIN.register(
+                (handler, sender, client) -> ClientNetGlue.onJoin());
 
-        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
-            sessionGate.onDisconnect();
-            FarPlayerClientSupport.onSessionEnd();
-        });
+        ClientPlayConnectionEvents.DISCONNECT.register(
+                (handler, client) -> ClientNetGlue.onDisconnect());
     }
 
     private static void registerTickHandler() {
-        ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            // Runs even before a session: the v16-server discovery fallback (no-op on the v18
-            // happy path, which disarms it before the delay elapses).
-            sessionGate.tickDiscoveryLadder();
-            var manager = sessionGate.getRequestManager();
-            if (manager != null && sessionGate.isServerEnabled()) {
-                manager.tick();
-            }
-            columnProcessor.scheduleProcessing(sessionGate.isServerEnabled());
-        });
+        ClientTickEvents.END_CLIENT_TICK.register(client -> ClientNetGlue.onEndClientTick());
     }
 }

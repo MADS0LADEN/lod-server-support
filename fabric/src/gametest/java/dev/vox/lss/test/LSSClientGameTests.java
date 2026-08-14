@@ -243,7 +243,8 @@ public class LSSClientGameTests implements FabricClientGameTest {
         LSSApi.registerColumnConsumer(fallbackRecorder);
         context.runOnClient(client -> {
             try {
-                var netClass = LSSClientNetworking.class;
+                // The static processor + receive glue live in ClientNetGlue since N-3.
+                var netClass = dev.vox.lss.networking.client.ClientNetGlue.class;
                 var procField = netClass.getDeclaredField("columnProcessor");
                 procField.setAccessible(true);
                 var handle = netClass.getDeclaredMethod("handleVoxelColumn",

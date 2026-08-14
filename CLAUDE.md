@@ -107,6 +107,20 @@ Since 2026-07 `build.yml` contains the flakes automatically: docs-only changes (
   - **Law A5 — latent false positives on PERMANENT generation failures and boundary ticket drops (documented 2026-07-16, direction corrected 2026-07-18, never yet seen live).** A5 balances `disk.not_found` against `generation.submitted + not_generated + service.miss_dropped`. A permanent generation failure (extraction error / Moonrise null chunk) lands on BOTH right-hand terms for one miss — `generation.submitted` at submit AND the client's `responses.not_generated` when the answer arrives — so while the client is connected the RHS OVER-counts by one per failure; a disconnect before the answer rebalances it. Same family, opposite direction: the two generation-ticket drop paths in `drainGenerationTicketRequests` (state gone / dimension mismatch, both platforms) skip `miss_dropped`, so a near-boundary drop on `dimension-trip` UNDER-counts the RHS by one. No current scenario produces permanent gen failures (they require real extraction errors, not config), so an A5 red today is a code regression first; check whether the imbalance equals a small count of server-side generation errors or near-boundary ticket drops before chasing conservation. Also noted in `law_A5`'s comment in `check_soak.py`.
   - **Law A1 — latent false positives on lost sends (documented 2026-07-28, never yet seen live — the A5 latents' A1 siblings).** Three shapes count `requested_total` (or consume a disposition) with no balancing term: a client transport send that THROWS still counts the batch (count-at-send is pinned), a server batch-frame send failure loses up to 4096 dispositions, and a post-/reload declaration landing in the unregistered window before the re-attach prompt heals it (Paper). All are dying-connection/boundary shapes the quiescent-pair windowing excludes. An A1 red whose imbalance equals one batch or frame is one of these — re-run, don't chase conservation. Related observability hole, same family: a dirty NOTICE whose send fails after its clear/invalidation applied is invisible to every counter (`dirty.marked_total`/`dirty.broadcast_positions` book the drain as done) — a still-connected client keeps stale LOD until the next edit or rejoin, and a soak cannot distinguish that from a healthy quiet run. Full list in `law_A1`'s docstring.
 
+## Background-task discipline (assistant workflow)
+
+**Always put a time-based fallback on background tasks** (user rule, 2026-08-14 —
+added after a readiness-poller wedged the session): every background command that
+waits on a condition MUST carry its own deadline — wrap the wait in `timeout <s>`
+or bound the loop (`for i in $(seq 1 N); do ... sleep S; done` + a final
+TIMED-OUT line) so the task always EXITS and fires its completion notification,
+even when the condition can never become true. Never launch an unbounded
+`until`/`while true` poller: if the watched thing wedges (or the predicate is
+subtly wrong — the sighting was a log-freshness conjunct that became permanently
+false once an idle server stopped writing), the task wedges, and the session
+wedges waiting on it. Long-running SERVICES (test servers, proxies) are exempt
+from the deadline but their READINESS checks are not.
+
 ## Local Test Servers (manual play)
 
 ```bash
