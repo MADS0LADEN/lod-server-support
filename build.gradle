@@ -4,10 +4,11 @@
 // Convenience aggregate for the Voxy Server Side branded pair (XANTHA's publish flow):
 //   ./gradlew vssJars   ->  fabric/build/libs/voxy-server-side-fabric*.jar
 //                           paper/build/libs/voxy-server-side-paper*.jar
+//                           neoforge/build/libs/voxy-server-side-neoforge*.jar (stage N-4)
 // Each platform's vssJar is a byte-copy rebrand of the LSS jar (wire-identical; see the
 // vssJar tasks in fabric/ and paper/ build.gradle). Version-stamped names: CI=true.
 tasks.register('vssJars') {
-    description = 'Builds both Voxy Server Side branded jars (Fabric + Paper).'
+    description = 'Builds the Voxy Server Side branded jars (Fabric + Paper + NeoForge).'
     group = 'build'
-    dependsOn ':fabric:vssJar', ':paper:vssJar'
+    dependsOn ':fabric:vssJar', ':paper:vssJar', ':neoforge:vssJar'
 }

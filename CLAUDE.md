@@ -16,9 +16,10 @@ only) and no exhaustive gauntlets (the recorded support-line effort budget).
 **Best-effort** — NeoForge (all lines, client + server) and the whole MC 1.21.1
 line (user decision 2026-08-14): they track the mainline feature set, but feature
 cuts are acceptable where the platform/version fights, automated coverage is
-reduced (neoforge = contract tests + a ~8-12-test gametest smoke subset + a
-2-scenario `SOAK_PLATFORM=neoforge` set whose SKIP is expected — the plan's §5.5
-manual smoke checklist is then the per-release floor; no Tier 3 on either; 1.21.1
+reduced (neoforge = contract tests + an 8-test gametest smoke subset; the plan's
+2-scenario `SOAK_PLATFORM=neoforge` set was SKIPPED at stage N — no soak.sh lever
+exists yet, and the plan's §5.5 manual smoke checklist is the per-release floor;
+no Tier 3 on either; 1.21.1
 additionally ships the spike's feature-drop list), and
 variant-specific issues triage at lower priority. Cuts beyond the plan's
 pre-authorized list need a dated decisions-log entry (the §6.2 cut protocol);
@@ -38,14 +39,21 @@ names a test that reds when violated (plan §1.2).
 
 ## Project Structure
 
-Multi-project Gradle build with three subprojects (stage N adds `xplat/` shared
-source + `neoforge/`):
+Multi-project Gradle build (stage N landed `xplat/` + `neoforge/`, 2026-08-14):
 
 ```
 lod-server-support/
-├── common/   Pure Java utilities (no MC deps) — shared by fabric/ and paper/
-├── fabric/   Fabric mod (client + server), Minecraft 26.2
-└── paper/    Paper/Folia plugin (server only), Minecraft 26.2
+├── common/   Pure Java utilities (no MC deps) — shared by all loaders
+├── xplat/    Shared MC-logic SOURCE SET (not a Gradle project) — compiled by
+│             fabric/ AND neoforge/ via srcDir; loader-pure (XplatLoaderPurityTest
+│             whole-source pin; XplatJava21SurfaceTest constant-pool tripwire);
+│             per-loader seams via dev.vox.lss.platform.LoaderServices + same-FQN
+│             twins (LSSServerNetworking/LSSClientNetworking/FarPlayerRenderer/
+│             LSSNetworking + the ChunkSaveDataHook mixin shim)
+├── fabric/   Fabric mod (client + server), Minecraft 26.2 — hosts ALL test tiers
+├── neoforge/ NeoForge mod (client + server), Minecraft 26.2 — BEST-EFFORT tier;
+│             MDG 2, shaded (no jarJar), contract tests + 8-test gametest smoke
+└── paper/    Paper/Folia plugin (server only), Minecraft 26.2 (unchanged by N)
 ```
 
 ## Build Commands
@@ -53,12 +61,15 @@ lod-server-support/
 ```bash
 ./gradlew :fabric:build -x runClientGameTest  # Build Fabric mod + Tier 1 & 2 tests
 ./gradlew :paper:shadowJar                    # Build Paper plugin JAR
+./gradlew :neoforge:build                     # Build NeoForge mod (shadowJar + contract tests + vssJar)
+./gradlew :neoforge:runGameTestServer         # NeoForge 8-test gametest smoke (exit = failed count)
 ./gradlew clean                               # Clean build artifacts
 ```
 
 Output JARs:
 - `fabric/build/libs/lod-server-support-fabric.jar` — Fabric mod (client + server)
 - `paper/build/libs/lod-server-support-paper.jar` — Paper plugin (server only, shadow JAR; serves Paper and Purpur — `folia-supported` is declared again on the 26.2 line, so Folia loads this jar)
+- `neoforge/build/libs/lod-server-support-neoforge.jar` — NeoForge mod (client + server, shadow JAR — Paper-style shading, no jarJar; the plain jar task is DISABLED so no `-slim` artifact can match release globs). Best-effort tier: on 26.2 the client half ships compiled-and-inert (no community Voxy build exists — the Modrinth version NAME carries the caveat, pinned by `ReleaseWorkflowContractTest`); the far-player RENDER PATH is cut (tracker/wire/prefs-carrier bit live). The `neoforge/build/libs/voxy-server-side-neoforge*.jar` VSS variant (TOML+brand rewrite, class-set byte-identical — `check_wire_identity_neoforge`) joins the `vssJars` aggregate
 - `fabric/build/libs/voxy-server-side-fabric*.jar` / `paper/build/libs/voxy-server-side-paper*.jar` — the **Voxy Server Side** branded pair (`vssJar` tasks; `./gradlew vssJars` is the root convenience aggregate — the XANTHA publish flow, no CI involvement). Near-byte-copies of the LSS jars rewriting **display + LOCAL surfaces**, never wire. **The 2026-08-13 VSS-restore round folded XANTHA's v0.10.0 release patch**: what differs now — fabric.mod.json name/description/authors (`Xantha`, `VoX`)/homepage + the RESTORED dedicated icon (`branding/vss/icon.png` injected as `assets/lss/icon-vss.png`), the lang-file display VALUES (keys stay `lss.*`), plugin.yml **name (`VoxyServerSide` — the Paper data folder therefore FORKS to `plugins/VoxyServerSide/`; a Paper-side jar swap starts a fresh config folder)**/description/author/website + the command key (`lsslod`→`vsslod`) + admin permission node (`lss.admin`→`vss.admin`), the `lss-brand.properties` resource, and the brand-preferred config filenames — CLIENT (`vss-client-config.json`) and, since this round, SERVER (`vss-server-config.json`) — both with cross-brand adoption (`JsonConfig.brandedConfigCandidates`: an existing other-brand file is adopted as the read+write target, so a same-folder jar swap keeps config). Brand-routed LOCAL paths with the same adoption rule: the LOD-store dir (`LodStores.brandedStoreDir` — `<world>/vss-lod`, adopts an existing `lss-lod`) and the client cache dot-dir (`.vss/cache`, adopts `.lss/cache`; legacy `config/lss/cache` still wins). The far-player privacy node is deliberately NOT renamed: BOTH `lss.farplayers.hidden` and `vss.farplayers.hidden` are declared (default false) in both jars and the enforcement dual-checks them — Bukkit resolves an UNDECLARED node to the op default, so the old single-brand rename + `lss.*` enforcement literal silently hid every op on a VSS server. What stays verbatim (the **wire-compatibility** contract — an LSS client ↔ VSS server works, and vice versa): mod id `lss`, package/class names (`main:` in plugin.yml), and the entire `lss:*` channel/protocol/payload wire surface. The nested `common-*.jar` is byte-**identical** between the LSS and VSS Fabric jars — `release_check.py`'s `check_wire_identity_fabric` pins that SHA equality as the wire-compat proof, alongside the brand.properties + plugin.yml pair checks (updated for the name rebrand + authors + icon). Runtime branding flows through `common/Brand` (loaded from `lss-brand.properties` as each platform's FIRST init step; defaults to LSS so tests and un-repackaged jars are unbranded), consulted by `LSSLogger`'s category, chat/console/thread-name text, command literals, and the brand-routed local paths above. Published to Modrinth project `84zcagOb` (voxy-server-side) by releases v0.7.0–v0.7.3; **VSS publishing stays out of release.yml** (disabled since v0.8.0; XANTHA publishes the pair manually from `vssJars`) — `release_check.py` still gates the pair, and release.yml attaches only the LSS pair, pinned by `ReleaseWorkflowContractTest`.
 
 CI builds (env `CI=true`) name the jars `lod-server-support-<platform>-<mod_version>+<minecraft_version>.jar` (e.g. `lod-server-support-fabric-0.6.0+26.2.jar`); the release workflow feeds `mod_version` from the tag. Local dev builds keep the stable unversioned names.
@@ -476,8 +487,8 @@ Releases are triggered by pushing an **annotated tag** (`git tag -a`). The tag a
 
 1. Review commits since the last tag: `git log $(git describe --tags --abbrev=0)..HEAD --oneline`
 2. **Pre-flight the exact release build locally** before tagging — the tag triggers an irreversible GitHub + Modrinth publish, so it must be green first:
-   `CI=true ./gradlew :fabric:build -x runClientGameTest :paper:test :paper:shadowJar -Pmod_version=<version> && python3 scripts/release_check.py --version <version>`
-   (`release_check.py` must print `OK`; `--version` pins the check to the jars just built — stale jars in build/libs otherwise fail the run; `:fabric:build` runs Tier 1 + Tier 2, `:paper:test` gates the Paper jar. CI runs Tier 3 (`:fabric:runClientGameTest`) as a separate build.yml job — check it is green on the release commit before tagging.)
+   `CI=true ./gradlew :fabric:build -x runClientGameTest :paper:test :paper:shadowJar :neoforge:build -Pmod_version=<version> && python3 scripts/release_check.py --version <version>`
+   (`release_check.py` must print `OK`; `--version` pins the check to the jars just built — stale jars in build/libs otherwise fail the run; `:fabric:build` runs Tier 1 + Tier 2, `:paper:test` gates the Paper jar, `:neoforge:build` runs the contract suite + builds the six-family jar set `release_check.py` now hard-requires. CI runs Tier 3 (`:fabric:runClientGameTest`) as a separate build.yml job — check it is green on the release commit before tagging.)
 3. Get the release commit onto `main` via PR (protected branch): push the release branch, `gh pr create --base main`, then `gh pr merge --merge`. Use **`--merge`** (a merge commit) — `--squash`/`--rebase` rewrite SHAs and orphan the tag.
 4. Write release notes to a file (format below) and create the annotated tag with **`--cleanup=verbatim`** so the `###` headers survive:
    `git tag -a v<version> -F <notes-file> --cleanup=verbatim`

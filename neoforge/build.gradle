@@ -171,8 +171,11 @@ shadowJar {
     from(rootProject.file("THIRD-PARTY-NOTICES"))
 }
 
+// Shadow-only module: the plain jar would sit in build/libs where CI's
+// lod-server-support-neoforge-*.jar globs (release assets, release_check) would
+// match it — disable it outright (dev runs use the classes dirs, not the jar).
 jar {
-    archiveClassifier = 'slim'
+    enabled = false
 }
 
 build.dependsOn shadowJar
@@ -180,3 +183,76 @@ build.dependsOn shadowJar
 test {
     useJUnitPlatform()
 }
+
+// ---- Voxy Server Side (VSS) branded variant (N-4; plan §0.5) --------------------------
+// The fabric vssJar's TOML sibling: a byte-preserving repackage of the shadowJar that
+// rewrites ONLY display surfaces — neoforge.mods.toml branding fields + the
+// lss-brand.properties display values. Mod id `lss`, packages, channels and every class
+// byte are untouched, so the VSS jar stays wire-identical to the LSS jar
+// (release_check's check_wire_identity_neoforge pins a sha256 digest over every class
+// entry's bytes, and check_vss_pair_neoforge pins the TOML rewrite line-for-line).
+// XANTHA publishes manually via the root `vssJars` aggregate; release.yml never touches VSS.
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
+
+tasks.register('vssJar') {
+    description = 'Repackages the LSS NeoForge jar under the Voxy Server Side branding.'
+    dependsOn 'shadowJar'
+    def srcJar = tasks.named('shadowJar').flatMap { it.archiveFile }
+    def outName = providers.environmentVariable('CI').map { it == 'true' }.getOrElse(false)
+            ? "voxy-server-side-neoforge-${project.mod_version}+${project.minecraft_version}.jar"
+            : 'voxy-server-side-neoforge.jar'
+    def outFile = layout.buildDirectory.file("libs/${outName}")
+    inputs.file(srcJar)
+    outputs.file(outFile)
+    doLast {
+        def src = srcJar.get().asFile
+        def out = outFile.get().asFile
+        out.parentFile.mkdirs()
+        def zf = new ZipFile(src)
+        try {
+            new ZipOutputStream(new FileOutputStream(out)).withCloseable { zos ->
+                def entries = zf.entries()
+                while (entries.hasMoreElements()) {
+                    def e = entries.nextElement()
+                    if (e.name == 'META-INF/neoforge.mods.toml') {
+                        // Line-based TOML rewrite (the plugin.yml precedent): branding
+                        // fields only; modId + dependency blocks untouched.
+                        def text = zf.getInputStream(e).getText('UTF-8')
+                                .replaceFirst(/(?m)^displayName=.*$/,
+                                        'displayName="Voxy Server Side"')
+                                .replaceFirst(/(?m)^authors=.*$/, 'authors="Xantha, VoX"')
+                                .replaceFirst(/(?m)^issueTrackerURL=.*$/,
+                                        'issueTrackerURL="https://modrinth.com/plugin/voxy-server-side"')
+                                .replaceFirst(/(?m)^description=.*$/,
+                                        "description='''Render distant Voxy LODs on servers. Server-side works with any LSS/VSS client; the client half needs a community Voxy build for NeoForge.'''")
+                        zos.putNextEntry(new ZipEntry(e.name))
+                        zos.write(text.getBytes('UTF-8'))
+                        zos.closeEntry()
+                    } else if (e.name == 'lss-brand.properties') {
+                        def props = 'shortName=VSS\ndisplayName=Voxy Server Side\nclientCommand=vss\nserverCommand=vsslod\n'
+                        zos.putNextEntry(new ZipEntry('lss-brand.properties'))
+                        zos.write(props.getBytes('UTF-8'))
+                        zos.closeEntry()
+                    } else {
+                        def ne = new ZipEntry(e.name)
+                        ne.method = e.method
+                        if (e.method == ZipEntry.STORED) {
+                            ne.size = e.size
+                            ne.compressedSize = e.compressedSize
+                            ne.crc = e.crc
+                        }
+                        zos.putNextEntry(ne)
+                        zf.getInputStream(e).withCloseable { is -> zos << is }
+                        zos.closeEntry()
+                    }
+                }
+            }
+        } finally {
+            zf.close()
+        }
+    }
+}
+
+tasks.named('build') { dependsOn 'vssJar' }

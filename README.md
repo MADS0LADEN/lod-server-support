@@ -2,7 +2,7 @@
 
 Streams LOD (Level of Detail) chunk data from your server to connected clients, so [Voxy](https://modrinth.com/mod/voxy) can render terrain hundreds of chunks out — including terrain the player has never visited.
 
-Supports **Fabric** clients, and **Fabric**, **Paper**, **Purpur** and **Folia** servers.
+Supports **Fabric** clients, and **Fabric**, **NeoForge**, **Paper**, **Purpur** and **Folia** servers. NeoForge support is best-effort tier (server works fully; the client half needs a community Voxy build for NeoForge, which doesn't exist on 26.2 yet).
 
 https://github.com/user-attachments/assets/721fb344-890e-4e03-ab36-539444427f7b
 
@@ -18,6 +18,7 @@ https://github.com/user-attachments/assets/721fb344-890e-4e03-ab36-539444427f7b
 | **Fabric client** | `lod-server-support-fabric.jar` | `mods/` | `config/lss-client-config.json` |
 | **Fabric server** | `lod-server-support-fabric.jar` | `mods/` | `config/lss-server-config.json` |
 | **Paper / Purpur / Folia** | `lod-server-support-paper.jar` | `plugins/` | `plugins/LodServerSupport/lss-server-config.json` |
+| **NeoForge server** | `lod-server-support-neoforge.jar` | `mods/` | `config/lss-server-config.json` |
 
 Restart after installing. Downloads are on [Modrinth](https://modrinth.com/plugin/lod-server-support); GitHub Releases mirror every version.
 
@@ -25,11 +26,11 @@ Restart after installing. Downloads are on [Modrinth](https://modrinth.com/plugi
 
 Each Minecraft version has its own build, versioned `v<x.y.z>+mc<version>`; only the latest of each is listed. Folia uses the same JAR as Paper (experimental).
 
-| Minecraft | LSS Version | Fabric | Paper | Folia | Voxy | Java |
-|---|---|---|---|---|---|---|
-| **26.2** | v0.11.0+mc26.2 | ✅ | ✅ | ✅ | 0.2.17-alpha+ | 25+ |
-| **26.1.x** | v0.11.0+mc26.1 | ✅ | ✅ | ✅ | 0.2.14-alpha+ | 25+ |
-| **1.21.11** | v0.11.0+mc1.21.11 | ✅ | ✅ | ✅ | 0.2.15-beta+ | 21+ |
+| Minecraft | LSS Version | Fabric | NeoForge | Paper | Folia | Voxy | Java |
+|---|---|---|---|---|---|---|---|
+| **26.2** | v0.11.0+mc26.2 | ✅ | ✅ (server) | ✅ | ✅ | 0.2.17-alpha+ | 25+ |
+| **26.1.x** | v0.11.0+mc26.1 | ✅ | — | ✅ | ✅ | 0.2.14-alpha+ | 25+ |
+| **1.21.11** | v0.11.0+mc1.21.11 | ✅ | — | ✅ | ✅ | 0.2.15-beta+ | 21+ |
 
 > [!IMPORTANT]
 > **Mixed versions are fine back to v0.4.x.** LSS translates between protocol versions in both directions, so old clients keep working against new servers and vice versa. Against anything older — or with the compat layers turned off — you simply get vanilla render distance and no error.

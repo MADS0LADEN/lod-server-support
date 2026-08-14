@@ -47,6 +47,23 @@ jobs:
       - name: Paper Tier 1 tests
         run: ./gradlew :paper:test
 
+      # Stage N: the NeoForge module (best-effort tier — CLAUDE.md "Support tiers").
+      # build = compile (xplat under MDG — the twin-contract enforcement) + the contract
+      # suite + shadowJar + the VSS repackage; the gametest smoke runs the 8-test subset
+      # with the same retry-once + evidence pattern as the fabric tiers.
+      - name: Build NeoForge + contract tests
+        run: ./gradlew :neoforge:build
+
+      - name: NeoForge gametest smoke (retry once on flake)
+        run: |
+          ./gradlew :neoforge:runGameTestServer || {
+            echo "::warning title=NeoForge gametest flake::runGameTestServer failed once; retrying (first-attempt logs in the gametest-flake-evidence-server artifact under neoforge/)"
+            mkdir -p flake-evidence/neoforge
+            cp -r neoforge/run/logs flake-evidence/neoforge/logs 2>/dev/null || true
+            cp -r neoforge/run/crash-reports flake-evidence/neoforge/crash-reports 2>/dev/null || true
+            ./gradlew :neoforge:runGameTestServer
+          }
+
       - name: Soak checker + report selftests
         run: |
           python3 scripts/check_soak.py --selftest
@@ -79,6 +96,10 @@ jobs:
             fabric/build/test-results/
             paper/build/reports/
             paper/build/test-results/
+            neoforge/build/reports/
+            neoforge/build/test-results/
+            neoforge/run/logs/
+            neoforge/run/crash-reports/
           if-no-files-found: ignore
           retention-days: 30
 
@@ -104,6 +125,16 @@ jobs:
         with:
           name: voxy-server-side-paper
           path: paper/build/libs/voxy-server-side-paper*.jar
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: lod-server-support-neoforge
+          path: neoforge/build/libs/lod-server-support-neoforge*.jar
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: voxy-server-side-neoforge
+          path: neoforge/build/libs/voxy-server-side-neoforge*.jar
 
   # Tier 3: the only end-to-end pins for the client-server flow, LSSApi consumer
   # dispatch, the ingest-failure recovery loop, and the IntegratedServerLanHook path.
