@@ -379,6 +379,32 @@ server `pingf=0.02, yielded=747, paced=852, sq=308`):
    `sq=308` is resolved-but-unsent RAM, not link latency (obuf stayed
    ~3 KB); the relevance prune + re-declaration own it.
 
+## Live round 3 (2026-08-13, the instrumented flight — VERDICT)
+
+One 328 s traced session (stand/fly/stand) with the governor-state +
+real-ping-probe net rows settled all three hypotheses:
+
+- **Final standing state: 82/87/90 ms (med/p90/max) with LODs streaming at
+  ~134 KB/s and the governor correctly DISENGAGED** — the retuned drain +
+  movement hold deliver the design goal; the user reports block-breaking
+  "feels pretty good".
+- **Movement spikes are H2 — vanilla's own chunk bursts**: while flying, the
+  governor sat cut at ~122 KB/s and LSS DELIVERED a median 44 KB/s (near
+  nothing), yet ping still burst to 3.5-4.4 s in ~10% of seconds — each
+  terrain crossing ships several hundred KB of vanilla chunk packets on a
+  ~500 KB/s link. LSS has nothing left to yield; the lever is vanilla-side
+  (server view distance sizes the bursts).
+- **The early-backfill minute carries brief pre-engagement spikes** (p90
+  335 ms, max 1.9 s while ping's MEDIAN stayed under the engage conjunct) —
+  the documented corner; the server pacer + yield kept it bounded.
+- Instrument note: the trace's `rtt_p50/p95` measure WANT-latency including
+  the server's standing queue (minutes during a big backfill), not network
+  RTT — relabel before anyone reads them as ping.
+
+**Program verdict: the LSS side of slow-link latency is DONE.** Remaining
+movement discomfort at 4 Mbps is vanilla's own traffic (control test:
+receiveServerLods=false on the same route).
+
 ## Test plan
 
 - T1: governor AIMD unit suite (engagement gate incl. demand-backing, the
