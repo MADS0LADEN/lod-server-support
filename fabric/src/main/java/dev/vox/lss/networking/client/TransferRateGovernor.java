@@ -48,14 +48,24 @@ final class TransferRateGovernor {
     /** The congestion conjunct: ping excess over baseline required to ENGAGE, and the
      *  per-interval drain trigger while engaged. Far below Mechanism B's 750 ms cut. */
     static final int ENGAGE_PING_EXCESS_MS = 250;
-    /** Ping excess below this counts toward the ping-normal disengage streak. */
-    static final int DISENGAGE_PING_EXCESS_MS = 100;
-    /** Disengage path (a): consecutive QUALIFYING intervals with desired above the
-     *  engage threshold. */
+    /** Consecutive qualifying congested intervals required to ENGAGE (round-5 review
+     *  M1): the ping input is now a raw 1 Hz probe sample, not the tab value vanilla
+     *  both refreshed at 30 s and smoothed (3l+s)/4 — the 250 ms threshold was
+     *  calibrated against that damped signal, and with the ping-normal escape deleted
+     *  a single GC pause or WiFi retransmit burst must not buy a sticky engagement.
+     *  Real congestion sustains across intervals; transients do not. */
+    static final int ENGAGE_CONSECUTIVE_INTERVALS = 2;
+    /** The ONLY disengage path: consecutive QUALIFYING intervals with desired above
+     *  the engage threshold — rate evidence that the loop probed clear of the slow
+     *  regime. There is deliberately NO ping-normal disengage (live round 5 deleted
+     *  review m10's path (b)): while the cap binds, normal ping is the governor's own
+     *  SUCCESS, not link health — the traced sawtooth was exactly that path firing
+     *  after ~1 min of the calm it was causing, un-capping a 750 KB/s link into a
+     *  25 s line-rate runaway (ping 4.7 s, vanilla 20+ chunks behind, movement
+     *  rejections) until the 30 s tab-ping refresh let it re-engage. A frozen
+     *  (demand-limited) engaged session now stays engaged, which is harmless: the
+     *  cap sits above actual demand, and the kept-up climb resumes with demand. */
     static final int DISENGAGE_RATE_INTERVALS = 10;
-    /** Disengage path (b): consecutive intervals of normal ping (~1 min — closes the
-     *  frozen-engaged state, review m10). */
-    static final int DISENGAGE_PING_NORMAL_INTERVALS = 30;
     /** The deterministic drain bias (review M3; retuned at live round 2): every Nth
      *  consecutive kept-up interval bleeds standing queue instead of probing up — a
      *  rate-matched loop never drains queue it INHERITED, and an AIMD equilibrium
@@ -71,6 +81,17 @@ final class TransferRateGovernor {
     /** Baseline upward drift: +1 ms/s, so a genuinely changed route re-baselines in
      *  minutes (Mechanism B's rule, mirrored client-side). */
     private static final long BASELINE_DRIFT_MS_PER_SEC = 1;
+    /** Live round 5 (the fly-then-stop desync): missing vanilla chunks IN VIEW above
+     *  the session's observed floor mean vanilla delivery is BEHIND the player — the
+     *  moved-wrongly precondition (26.2 clients walk into unreceived terrain and the
+     *  server rejects the move). An engaged interval seeing at least this much excess
+     *  CUTS regardless of kept-up rate: the governor's fair-share equilibrium
+     *  otherwise holds its rate while vanilla's catch-up burst crawls (measured live:
+     *  governed 590 KB/s of a 750 KB/s link with silent movement rejections). The
+     *  floor is learned as a session MIN (the server-view-distance edge ring is a
+     *  permanent nonzero baseline — ~20 on the rig). Unengaged sessions never
+     *  evaluate this: fast links are untouched. */
+    static final int MISSING_VANILLA_CUT_EXCESS = 8;
 
     /** Injectable MONOTONIC clock in millis (impl review m2: interval math on the
      *  wall clock misreads an NTP step or VM resume as a rate collapse — a spurious
@@ -86,6 +107,8 @@ final class TransferRateGovernor {
     private boolean awaitingAtStart;
     private boolean haltSeenThisInterval;
     private boolean movementSeenThisInterval;
+    private int lastMissingVanilla = -1;   // newest sample (<0 = none yet)
+    private int minMissingVanilla = -1;    // session floor (the permanent edge ring)
 
     // ---- Ping baseline ----
     private int pingBaselineMs = -1;       // -1 = unseeded (zero/absent samples ignored)
@@ -97,7 +120,7 @@ final class TransferRateGovernor {
     private long desiredBytesPerSec;
     private int keptUpStreak;
     private int rateDisengageStreak;
-    private int pingNormalStreak;
+    private int engagePendingStreak;
 
     // ---- Size estimator (runs from session start, pre-engagement) ----
     private double sizeEwmaBytes = -1;     // -1 = no sample yet (division guarded)
@@ -106,7 +129,7 @@ final class TransferRateGovernor {
     private boolean engageNoted;
     private boolean disengageNoted;
 
-    private static boolean harnessJvm() {
+    static boolean harnessJvm() { // package-private: the manager's probe gate shares it
         return Boolean.getBoolean("lss.soak") || Boolean.getBoolean("lss.benchmark");
     }
 
@@ -183,26 +206,52 @@ final class TransferRateGovernor {
                         && deltaDeclared * 4L >= expectedDeclared * 3L;
                 stepEngaged(measured, offerBacked);
             }
-            // Disengage (b): sustained normal ping — evaluated on EVERY interval (a
-            // converged session produces no qualifying intervals, which is exactly the
-            // frozen-engaged state this path exists to close). No signal resets the
-            // streak (conservative: never disengage blind).
-            if (pingExcess != Integer.MIN_VALUE && pingExcess < DISENGAGE_PING_EXCESS_MS) {
-                if (++this.pingNormalStreak >= DISENGAGE_PING_NORMAL_INTERVALS) {
-                    disengage("link ping normal for ~1 minute");
-                }
-            } else {
-                this.pingNormalStreak = 0;
-            }
         } else if (qualifying
                 && pingExcess != Integer.MIN_VALUE
                 && pingExcess > ENGAGE_PING_EXCESS_MS
                 && measured < ENGAGE_BELOW_BYTES_PER_SEC) {
-            engage(measured, pingExcess);
+            if (++this.engagePendingStreak >= ENGAGE_CONSECUTIVE_INTERVALS) {
+                engage(measured, pingExcess);
+            }
+        } else {
+            this.engagePendingStreak = 0;
+        }
+        driftMissingFloor();
+    }
+
+    /** Round-5 review M2: the missing floor is a session MIN over a SETTINGS-dependent
+     *  baseline (client render distance vs server view distance — either side can
+     *  change mid-session), so a stale-low floor would read the new permanent edge
+     *  ring as perpetual excess and pin an engaged session at MIN forever. The ping
+     *  baseline's own answer, mirrored: drift the floor UP toward the newest sample
+     *  once per evaluated interval (never past it — a genuine vanilla-behind episode
+     *  keeps its gap while the view keeps falling behind, and a settings shift heals
+     *  in ~a minute). The min-snap in noteMissingVanilla restores a genuinely lower
+     *  floor instantly. */
+    private void driftMissingFloor() {
+        if (this.minMissingVanilla >= 0 && this.lastMissingVanilla > this.minMissingVanilla) {
+            int gap = this.lastMissingVanilla - this.minMissingVanilla;
+            this.minMissingVanilla += Math.max(1, gap / 8);
         }
     }
 
     private void stepEngaged(long measured, boolean offerBacked) {
+        if (vanillaBehind()) {
+            // Vanilla-first (live round 5): the world around the player is missing —
+            // whatever LSS's own rate looks like, its link share is starving vanilla's
+            // catch-up and prolonging the desync window. Cut unconditionally (not
+            // gated on offer-backing: this is a PRIORITY decision, not rate evidence)
+            // and reset the kept-up streak; the loop re-probes once the view heals.
+            // Anchored min(desired, measured) — the MINOR-3 drain rule: the interval
+            // right after a deep cut measures the pre-cut in-flight tail, and a bare
+            // measured anchor would RAISE the cap mid-shed (round-5 review m2).
+            this.desiredBytesPerSec = Math.max(
+                    Math.min(this.desiredBytesPerSec, measured) - STEP_BYTES_PER_SEC / 2,
+                    MIN_RATE_BYTES_PER_SEC);
+            this.keptUpStreak = 0;
+            this.rateDisengageStreak = 0;
+            return;
+        }
         boolean shortfall = measured < this.desiredBytesPerSec - STEP_BYTES_PER_SEC / 4;
         if (shortfall && !offerBacked) {
             // The actuator under-offered (a cadence hold, the walk-cost coverage
@@ -248,11 +297,11 @@ final class TransferRateGovernor {
 
     private void engage(long measured, int pingExcess) {
         this.engaged = true;
+        this.engagePendingStreak = 0;
         this.desiredBytesPerSec =
                 Math.max(measured - STEP_BYTES_PER_SEC / 2, MIN_RATE_BYTES_PER_SEC);
         this.keptUpStreak = 0;
         this.rateDisengageStreak = 0;
-        this.pingNormalStreak = 0;
         if (!this.engageNoted) {
             this.engageNoted = true;
             LSSLogger.info("LOD transfer governor engaged at "
@@ -267,7 +316,6 @@ final class TransferRateGovernor {
         this.desiredBytesPerSec = 0;
         this.keptUpStreak = 0;
         this.rateDisengageStreak = 0;
-        this.pingNormalStreak = 0;
         if (!this.disengageNoted) {
             this.disengageNoted = true;
             LSSLogger.info("LOD transfer governor disengaged (" + reason
@@ -324,7 +372,7 @@ final class TransferRateGovernor {
         this.desiredBytesPerSec = 0;
         this.keptUpStreak = 0;
         this.rateDisengageStreak = 0;
-        this.pingNormalStreak = 0;
+        this.engagePendingStreak = 0;
         this.intervalSeeded = false;
         this.intervalStartMillis = 0;
         this.haltSeenThisInterval = false;
@@ -339,6 +387,23 @@ final class TransferRateGovernor {
         this.movementSeenThisInterval = true;
     }
 
+    /** Missing-vanilla-chunks sample (live round 5) — the scanner's 1 Hz periodic
+     *  count; the session MIN learns the permanent view-edge ring so only EXCESS
+     *  reads as vanilla-behind. Main client thread. */
+    void noteMissingVanilla(int missing) {
+        if (missing < 0) return;
+        this.lastMissingVanilla = missing;
+        if (this.minMissingVanilla < 0 || missing < this.minMissingVanilla) {
+            this.minMissingVanilla = missing;
+        }
+    }
+
+    private boolean vanillaBehind() {
+        return this.lastMissingVanilla >= 0 && this.minMissingVanilla >= 0
+                && this.lastMissingVanilla - this.minMissingVanilla
+                        >= MISSING_VANILLA_CUT_EXCESS;
+    }
+
     /** Dimension change (impl review MINOR-2): same connection, same link — the
      *  MEASUREMENTS (ping baseline, size estimate) survive so a still-congested link
      *  re-engages in 1-2 intervals off the kept baseline; only control state drops
@@ -346,11 +411,18 @@ final class TransferRateGovernor {
      *  the engagement conjunct could never fire again). */
     void onDimensionChange() {
         hardReset();
+        // A new dimension is a new view — the missing floor re-learns (the edge ring
+        // differs per dimension; a stale low floor would read the whole fresh view
+        // as vanilla-behind and cut for nothing).
+        this.lastMissingVanilla = -1;
+        this.minMissingVanilla = -1;
     }
 
     /** Session teardown (the reset family): everything dies with the session. */
     void reset() {
         hardReset();
+        this.lastMissingVanilla = -1;
+        this.minMissingVanilla = -1;
         this.sizeEwmaBytes = -1;
         this.pingBaselineMs = -1;
         this.lastPingMs = -1;

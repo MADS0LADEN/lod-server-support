@@ -689,6 +689,8 @@ class LodRequestManagerTickTest {
         manager.governor.tick(1, 0, 0, 0, 1, false, 50, true);
         manager.governor.tick(1 + TransferRateGovernor.INTERVAL_MILLIS,
                 800 * 1024, 100, 20_000, 1, false, 2_000, true);
+        manager.governor.tick(1 + 2 * TransferRateGovernor.INTERVAL_MILLIS,
+                1600 * 1024, 200, 40_000, 1, false, 2_000, true); // debounce
         assertTrue(manager.governor.isEngaged(), "rig engagement");
     }
 
@@ -719,6 +721,8 @@ class LodRequestManagerTickTest {
             manager.governor.tick(1, 0, 0, 0, 1, false, 50, true);
             manager.governor.tick(1 + TransferRateGovernor.INTERVAL_MILLIS,
                     800 * 1024, 100, 20_000, 1, false, 2_000, true);
+            manager.governor.tick(1 + 2 * TransferRateGovernor.INTERVAL_MILLIS,
+                    1600 * 1024, 200, 40_000, 1, false, 2_000, true); // debounce
             assertTrue(manager.governor.isEngaged(), "rig engagement");
             plainTick(overworld); // the production tick reads config false → hard reset
             assertFalse(manager.governor.isEngaged(),
@@ -739,6 +743,91 @@ class LodRequestManagerTickTest {
         plainTick(dim("overworld"));
         assertFalse(manager.governor.isEngaged(),
                 "a v16 session must exclude (and hard-reset) the governor");
+    }
+
+    @Test
+    void pingProbeFiresAtOneHertzOnlyWhileGovernorActive() {
+        // Live round 5: the governor's congestion signal moved off the 30 s tab ping
+        // onto our own 1 Hz probe — the traced runaway lasted exactly the tab-ping
+        // blind spot. Pins the cadence (per second, never per tick) and the active
+        // gate (an inactive governor sends no probes).
+        var overworld = dim("overworld");
+        long[] now = {5_000};
+        int[] probes = {0};
+        manager.governor.clock = () -> now[0];
+        manager.transferGovernorEnabled = () -> true;
+        manager.pingProbeSender = () -> probes[0]++;
+        plainTick(overworld);
+        plainTick(overworld);
+        plainTick(overworld);
+        assertEquals(1, probes[0], "same-millisecond ticks share one probe");
+        now[0] = 5_999;
+        plainTick(overworld);
+        assertEquals(1, probes[0], "sub-second elapse must not probe");
+        now[0] = 6_000;
+        plainTick(overworld);
+        assertEquals(2, probes[0], "the 1 Hz cadence fires on the second");
+        manager.transferGovernorEnabled = () -> false;
+        now[0] = 9_000;
+        plainTick(overworld);
+        assertEquals(2, probes[0], "an inactive governor sends no probes");
+    }
+
+    @Test
+    void liveMissingVanillaSampleReachesTheGovernorAtProbeCadence() {
+        // The vanilla-first wiring pin (round-5 shape): tickWithContext samples the
+        // LIVE missingVanilla supplier on the 1 Hz probe cadence and feeds the
+        // governor's floor/excess tracking — never the scanner's periodic cache
+        // (unbounded staleness under fast cadence; stale-dimension seeds). Unplugged,
+        // the final kept-up interval climbs (or movement-holds); wired, the 20→40
+        // excess forces the vanilla-first CUT.
+        var overworld = dim("overworld");
+        engageGovernor();
+        long engageEnd = 1 + 2 * TransferRateGovernor.INTERVAL_MILLIS;
+        long[] now = {engageEnd};
+        manager.governor.clock = () -> now[0];
+        // First probe second: the floor sample (20)...
+        manager.tickWithContext(0, 0, overworld, 0, 0, 0L, -1, () -> 20);
+        // ...next probe second: the excess view (40). Sub-second ticks in between
+        // must NOT sample (the cadence gate).
+        manager.tickWithContext(0, 0, overworld, 0, 0, 0L, -1, () -> 999_999);
+        now[0] = engageEnd + 1_000;
+        manager.tickWithContext(0, 0, overworld, 0, 0, 0L, -1, () -> 40);
+        long desired = manager.governor.getDesiredBytesPerSec();
+        // A kept-up interval (measured = desired over EXACTLY one interval from the
+        // engage evaluation, generous offer) evaluated directly: the wired governor
+        // cuts below desired; unplugged it reads kept-up and CLIMBS (a longer elapsed
+        // here would read as an offer-backed shortfall and cut unplugged too — the
+        // vacuity this timing avoids).
+        manager.governor.tick(engageEnd + TransferRateGovernor.INTERVAL_MILLIS,
+                1600 * 1024 + desired * 2, 300, 60_000, 1, false, 2_000, true);
+        assertTrue(manager.governor.getDesiredBytesPerSec() < desired,
+                "the live missing-vanilla sample must reach the governor and cut");
+    }
+
+    @Test
+    void probeGateExcludesLegacySessionsAndHarnessJvms() {
+        // The other two arms of the probe gate (round-5 review n5): a v16 session and
+        // a harness JVM must both stay probe-silent.
+        int[] probes = {0};
+        setupManager(new SessionConfigS2CPayload(
+                LSSConstants.V16_COMPAT_PROTOCOL_VERSION, true, 2, true));
+        manager.transferGovernorEnabled = () -> true;
+        manager.pingProbeSender = () -> probes[0]++;
+        manager.governor.clock = () -> 5_000;
+        plainTick(dim("overworld"));
+        assertEquals(0, probes[0], "a legacy session never probes");
+        System.setProperty("lss.soak", "true");
+        try {
+            setupManager(config(2, true));
+            manager.transferGovernorEnabled = () -> true;
+            manager.pingProbeSender = () -> probes[0]++;
+            manager.governor.clock = () -> 5_000;
+            plainTick(dim("overworld"));
+            assertEquals(0, probes[0], "a harness JVM never probes");
+        } finally {
+            System.clearProperty("lss.soak");
+        }
     }
 
     @Test

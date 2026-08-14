@@ -405,6 +405,98 @@ real-ping-probe net rows settled all three hypotheses:
 movement discomfort at 4 Mbps is vanilla's own traffic (control test:
 receiveServerLods=false on the same route).
 
+## Live round 4 (2026-08-13, 6 Mbps — "acceptable", then the high-bandwidth PASS)
+
+At 6 Mbps (just above vanilla's recommended 5): join hurts ~10 s (the
+resolution-wave burst; the governor engaged at +1225 ms excess 9 s in, cut to
+68 KB/s, healed), then flying feels GOOD — vanilla fits with headroom. The
+governor re-engaged silently (once-per-session INFO latch) and converged at
+~693 KB/s ≈ link capacity. **The high-bandwidth direct connection (no proxy)
+was then tested and "works great"** — the governor never engages on a fast
+link, closing that acceptance item.
+
+## Live round 5 (2026-08-13, the fly-then-stop DESYNC — the sawtooth trace)
+
+User report: "lots of desync when I move a lot then come to a stop", still at
+6 Mbps. The 185 s trace (`lss-trace-20260813-204246.jsonl`) is decisive and
+falsified one shipped design decision:
+
+- **Rows 0-119 (~2 min): engaged at 611 KB/s — ping ~75 ms even flying at
+  33 blk/s.** The governed state was delivering the design goal during
+  movement.
+- **Row 120: the ping-normal disengage (path b, review m10) fired** — 30
+  intervals of the calm the cap itself was producing. The classic AIMD trap:
+  the controller read its own success as "no longer needed".
+- **Rows 120-149: line-rate runaway.** Wire jumped to ~730 KB/s, the flight
+  declared the full disc, the server queue went deep, ping climbed 419 →
+  4741 ms over ~25 s, `miss_view` climbed 20 → 43 (vanilla 20+ chunks behind
+  its permanent edge-ring floor) — and the player rubber-banded on stopping
+  (the server's move tracer booked new `rejected`/`silent` events in this
+  exact window; the moved-wrongly class, 26.2 clients walk into unreceived
+  terrain). The runaway lasted the full **30 s tab-ping blind spot** — the
+  governor's congestion input refreshes at 600-tick cadence with (3l+s)/4
+  smoothing, so it could not see what it had un-capped.
+- **Row 150: the tab ping finally refreshed → re-engaged at 605 KB/s → ping
+  instantly back to ~75 ms.** The user's "settles at an acceptable level but
+  not very consistent" IS this sawtooth (period ~90 s).
+
+Fixes (branch `fix/vanilla-first-cut`, 2-subagent-reviewed):
+1. **The ping-normal disengage is DELETED** — disengagement is rate-evidence
+   only (10 qualifying intervals above 4 MB/s). Normal ping under a binding
+   cap is the governor's own success, never link health. A frozen
+   (demand-limited) engaged session now stays engaged, deliberately: the cap
+   sits above actual demand and the kept-up climb resumes with demand
+   (net +2.5·STEP per 4 kept-up intervals with the drain bleed, so a healed
+   link's rate disengage stays reachable).
+2. **The governor's ping input moved to a client-driven 1 Hz probe**
+   (`ServerboundPingRequestPacket` → vanilla's pong handler → the debug
+   overlay's ping logger; tab ping stays as the no-sample fallback) — the
+   trace's own probe mechanism, promoted. Any future runaway is visible in
+   ~2 s, not ~25. Probe is `governorActive && !harnessJvm()`-gated (soak
+   inertness).
+3. **The vanilla-first cut**: a missing-vanilla-chunks count feeds a
+   session-MIN floor (the permanent view-edge ring, ~20 on the rig); while
+   ENGAGED, an interval seeing excess ≥ 8 over the floor CUTS unconditionally
+   (before the offer-backing freeze — a PRIORITY decision, not rate evidence:
+   the world around the player is missing, so LSS's link share is starving
+   vanilla's catch-up). Unengaged (fast-link) sessions never evaluate it.
+   Floor clears on reset + dimension change.
+
+**2-subagent review round (control-loop + wiring lenses), all findings fixed:**
+- **M1 (engage debounce):** the raw 1 Hz probe is spikier than the damped tab
+  signal the 250 ms threshold was calibrated on, and the deleted escape made a
+  false engagement sticky — ENGAGE now requires **2 consecutive qualifying
+  congested intervals** (`ENGAGE_CONSECUTIVE_INTERVALS`); a transient resets
+  the pending streak. The residual "engaged forever while server-limited"
+  state was analyzed and accepted: the AIMD oscillates desired within ±STEP of
+  the achieved rate (kept-up climb ↔ offer-backed cut), so a stuck engagement
+  barely constrains — pinned by
+  `bindingCapWithNormalPingNeverDisengagesWhileServerLimited`.
+- **M2 (floor over a settings-dependent baseline):** client render distance /
+  server view distance can change mid-session, and a stale-LOW floor would
+  read the new permanent ring as perpetual excess → pinned at MIN with the
+  disengage streak suppressed. Fixed with the ping baseline's own pattern: the
+  floor **drifts up toward the newest sample** by max(1, gap/8) per evaluated
+  interval (never past it; min-snap restores a lower floor instantly) — a
+  spurious floor heals in ~a dozen intervals, a genuine vanilla-behind episode
+  keeps its gap while the view keeps falling behind.
+- **M3 + wiring-M1 (stale input):** the scanner's cached count updates only on
+  PERIODIC fires — unbounded staleness in the governed 4 Hz steady state, and
+  one tick after a dimension change it still holds the OLD dimension's count
+  (the floor-relearn defeat). Fixed structurally: the manager samples the
+  **live** `missingVanilla` supplier on the same 1 Hz probe cadence
+  (`governorActive && !harnessJvm()` gated — one O(RD²) sweep/second, only
+  while active); the scanner's cache stays the diagnostic it always was.
+- **m2:** the cut now anchors `min(desired, measured)` (the MINOR-3 drain
+  rule) — the post-cut in-flight tail measures above desired and a bare
+  measured anchor would RAISE the cap mid-shed
+  (`vanillaFirstCutNeverRaisesDesired`).
+- **n1/m4:** the probe throttle seeds at `Long.MIN_VALUE/2` (a 0 seed sits
+  AHEAD of a spec-legal negative nanoTime epoch and silences the probe
+  forever). Wiring review verified in 26.2 bytecode: the ping logger RESETS on
+  every disconnect path (no cross-server stale samples), pong units are ms,
+  and `Connection.send` off-main matches the trace's proven pattern.
+
 ## Test plan
 
 - T1: governor AIMD unit suite (engagement gate incl. demand-backing, the

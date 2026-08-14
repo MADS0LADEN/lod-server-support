@@ -116,21 +116,52 @@ public class LodRequestManager {
             LSSClientNetworking::getWireBytesReceived;
     java.util.function.LongSupplier columnsReceivedSupplier =
             LSSClientNetworking::getColumnsReceived;
-    /** The client's own tab-list ping (<=0 = no sample) — Mechanism A's congestion
-     *  conjunct. */
-    IntSupplier ownPingSupplier = LodRequestManager::readOwnTabPing;
+    /** The client's own ping (<=0 = no sample) — Mechanism A's congestion conjunct.
+     *  Reads the debug overlay's ping logger FIRST (fed by our own 1 Hz probe below —
+     *  fresh within ~1 s) and falls back to the tab-list ping, which vanilla refreshes
+     *  only every 600 ticks with (3l+s)/4 smoothing — live round 5's runaway rode that
+     *  30 s blind spot for its whole duration. */
+    IntSupplier ownPingSupplier = LodRequestManager::readOwnPing;
+    /** 1 Hz ping-probe sender seam (vanilla answers {@code ServerboundPingRequestPacket}
+     *  with a pong that the debug overlay's ping logger records unconditionally). */
+    Runnable pingProbeSender = LodRequestManager::sendPingProbe;
+    /** Seeded far-negative, not 0: the JLS permits a negative nanoTime epoch, where a
+     *  0 seed would sit AHEAD of the clock and silence the probe forever (round-5
+     *  review n1). MIN/2 keeps the first comparison overflow-free. */
+    private long lastPingProbeMillis = Long.MIN_VALUE / 2;
     /** Config kill switch seam (the adaptiveCadenceEnabled pattern). */
     java.util.function.BooleanSupplier transferGovernorEnabled =
             () -> LSSClientConfig.CONFIG.enableAdaptiveTransferRate;
 
-    private static int readOwnTabPing() {
+    private static int readOwnPing() {
         var mc = Minecraft.getInstance(); // null under fabric-loader-junit (headless)
         if (mc == null) return -1;
+        try {
+            var logger = mc.getDebugOverlay().getPingLogger();
+            int size = logger.size();
+            if (size > 0) return (int) Math.min(Integer.MAX_VALUE, logger.get(size - 1));
+        } catch (Exception e) {
+            // fall through to the tab ping
+        }
         var conn = mc.getConnection();
         var player = mc.player;
         if (conn == null || player == null) return -1;
         var info = conn.getPlayerInfo(player.getUUID());
         return info != null ? info.getLatency() : -1;
+    }
+
+    private static void sendPingProbe() {
+        var mc = Minecraft.getInstance();
+        if (mc == null) return;
+        try {
+            var connection = mc.getConnection();
+            if (connection != null) {
+                connection.send(new net.minecraft.network.protocol.ping
+                        .ServerboundPingRequestPacket(net.minecraft.util.Util.getMillis()));
+            }
+        } catch (Exception e) {
+            // A congestion probe is never worth a client-side failure.
+        }
     }
 
     /** min-composition with BOTH off-sentinels explicit (review m2): {@code <= 0}
@@ -281,6 +312,26 @@ public class LodRequestManager {
         // (tab-list lookup) is skipped while inactive.
         boolean governorActive =
                 this.transferGovernorEnabled.getAsBoolean() && !isLegacySession();
+        if (governorActive && !TransferRateGovernor.harnessJvm()) {
+            // The 1 Hz congestion probe feeding readOwnPing's logger read (harness JVMs
+            // stay probe-silent — the governor's own inertness gate is internal to
+            // tick(), so the manager must share it here). ClientNetTrace probes too
+            // while tracing (double at ~2 Hz is a few dozen bytes/s — harmless).
+            long nowMs = this.governor.clock.getAsLong();
+            if (nowMs - this.lastPingProbeMillis >= 1_000L) {
+                this.lastPingProbeMillis = nowMs;
+                this.pingProbeSender.run();
+                // Vanilla-first input, sampled LIVE on the same 1 Hz cadence (round-5
+                // review M3/M1-wiring): the scanner's cached copy updates only on
+                // PERIODIC fires — unbounded staleness in the governed 4 Hz steady
+                // state, and one tick after a dimension change it still holds the OLD
+                // dimension's count, which would seed the freshly-cleared floor. The
+                // live count is this tick's view of the CURRENT level; the scanner's
+                // cache stays what it always was, a diagnostic. Cost: one O(RD²)
+                // loaded-chunk sweep per second, only while the governor is active.
+                this.governor.noteMissingVanilla(missingVanilla.getAsInt());
+            }
+        }
         this.governor.tick(this.governor.clock.getAsLong(),
                 this.wireBytesReceivedSupplier.getAsLong(),
                 this.columnsReceivedSupplier.getAsLong(),
