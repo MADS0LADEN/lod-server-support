@@ -184,7 +184,14 @@ public final class FarPlayerClientSupport {
     }
 
     /** Disconnect: the tracker + the prefs-sent latch + the renderer's proxy set die
-     *  with the connection. */
+     *  with the connection.
+     *
+     *  <p>FORWARD CONSTRAINT (N-1b review): {@code FarPlayerRenderer} is a PER-LOADER
+     *  class this xplat file compiles against — a coupling XplatLoaderPurityTest cannot
+     *  see (it scans loader-API packages, not module homes). Every loader module that
+     *  compiles xplat must ship a same-FQN {@code FarPlayerRenderer} exposing
+     *  {@code clearInstance()} (the N-3 NeoForge renderer — or its render-path-cut
+     *  no-op variant — satisfies this). */
     static void onSessionEnd() {
         TRACKER.clear();
         lastSentPrefs = null;

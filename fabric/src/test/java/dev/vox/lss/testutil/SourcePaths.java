@@ -28,24 +28,33 @@ public final class SourcePaths {
      * @throws AssertionError when the file exists in neither tree — a moved-without-retarget signal
      */
     public static Path mainSource(String javaPath) {
+        // Collect across the WHOLE walk before returning (review: an early depth-0
+        // return from the module CWD would skip the repo-root xplat probe, so a
+        // copy-instead-of-git-mv would silently prefer fabric's copy in exactly the
+        // Gradle case). Distinct real paths only — the same file is reachable through
+        // several (dir, tree) combinations.
+        java.util.Set<Path> hits = new java.util.LinkedHashSet<>();
         Path dir = Path.of("").toAbsolutePath();
         for (int depth = 0; depth < 5 && dir != null; depth++, dir = dir.getParent()) {
-            java.util.List<Path> hits = new java.util.ArrayList<>();
             for (String tree : SOURCE_TREES) {
                 Path candidate = dir.resolve(tree + javaPath);
                 if (Files.exists(candidate)) {
-                    hits.add(candidate);
+                    try {
+                        hits.add(candidate.toRealPath());
+                    } catch (java.io.IOException e) {
+                        throw new java.io.UncheckedIOException(e);
+                    }
                 }
             }
-            // A file present in BOTH trees is a botched half-move (copy instead of
-            // git mv) — fail loudly rather than silently preferring fabric's copy.
-            if (hits.size() > 1) {
-                throw new AssertionError("production source " + javaPath
-                        + " exists in more than one tree: " + hits);
-            }
-            if (hits.size() == 1) {
-                return hits.get(0);
-            }
+        }
+        // A file present in BOTH trees is a botched half-move (copy instead of
+        // git mv) — fail loudly rather than silently preferring fabric's copy.
+        if (hits.size() > 1) {
+            throw new AssertionError("production source " + javaPath
+                    + " exists in more than one tree: " + hits);
+        }
+        if (hits.size() == 1) {
+            return hits.iterator().next();
         }
         throw new AssertionError("cannot locate production source " + javaPath
                 + " under fabric/ or xplat/ (cwd=" + Path.of("").toAbsolutePath() + ")");

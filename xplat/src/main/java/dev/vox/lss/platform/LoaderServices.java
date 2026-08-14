@@ -72,9 +72,13 @@ public interface LoaderServices {
     }
 
     /** Entrypoint-first installation; later installs overwrite (the client entrypoint upgrades
-     *  the common impl to the client-capable one; tests inject fakes the same way). */
+     *  the common impl to the client-capable one; tests inject fakes the same way). Locked so
+     *  an install can never interleave inside {@link #get()}'s fallback critical section and
+     *  be overwritten by the ServiceLoader-resolved common impl. */
     static void install(LoaderServices services) {
-        Holder.INSTANCE = services;
+        synchronized (Holder.class) {
+            Holder.INSTANCE = services;
+        }
     }
 
     /** Mutable holder — an interface cannot hold non-final state directly. */
