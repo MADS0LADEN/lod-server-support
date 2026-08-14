@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # Test server script for LOD Server Support (LSS)
-# Sets up Fabric/Paper/Folia servers and runs them on different ports.
+# Sets up Fabric/Paper/Folia/NeoForge servers and runs them on different ports.
 # Fabric: localhost:25564   Paper: localhost:25566   Folia: localhost:25567
+# NeoForge: localhost:25569   (25568 = the legacy protocol-16 server)
 # (25565 is deliberately left free: the soak/benchmark harness binds it and a test
 #  server there shows up identically in the multiplayer list — accidental joins
 #  contaminate soak runs.)
@@ -12,6 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FABRIC_DIR="$SCRIPT_DIR/test-server/fabric"
 PAPER_DIR="$SCRIPT_DIR/test-server/paper"
 FOLIA_DIR="$SCRIPT_DIR/test-server/folia"
+NEOFORGE_DIR="$SCRIPT_DIR/test-server/neoforge"
 # Legacy = an OLD LSS release (protocol 16) on the SAME Minecraft version, for eyeballing the
 # client-side v16 backward-compat path (a current v0.7.0+ client joining a pre-v0.7.0 server).
 # See docs/planning/v16-client-compat-design.md.
@@ -25,6 +27,16 @@ FABRIC_INSTALLER_VERSION="1.1.1"
 # --- Paper/Folia versions ---
 PAPER_MC_VERSION="26.2"
 FOLIA_MC_VERSION="26.2"
+
+# --- NeoForge version ---
+# Pinned to the version the neoforge module BUILDS AGAINST (gradle.properties
+# neoforge_version) so the rig can never drift from the compile target.
+NEOFORGE_VERSION="${NEOFORGE_VERSION:-$(sed -n 's/^neoforge_version=//p' "$SCRIPT_DIR/gradle.properties" | tr -d '\r')}"
+if [ -z "$NEOFORGE_VERSION" ]; then
+    echo "ERROR: could not read neoforge_version from gradle.properties" >&2
+    exit 1
+fi
+NEOFORGE_INSTALLER_URL="https://maven.neoforged.net/releases/net/neoforged/neoforge/${NEOFORGE_VERSION}/neoforge-${NEOFORGE_VERSION}-installer.jar"
 
 # --- Download URLs ---
 FABRIC_SERVER_URL="https://meta.fabricmc.net/v2/versions/loader/${FABRIC_MC_VERSION}/${FABRIC_LOADER_VERSION}/${FABRIC_INSTALLER_VERSION}/server/jar"
@@ -264,6 +276,18 @@ build_paper_jar() {
     if [ -n "$force" ] || [ ! -f "$jar" ]; then
         echo "Building Paper LSS JAR..." >&2
         (cd "$SCRIPT_DIR" && ./gradlew :paper:shadowJar) >&2
+    fi
+    echo "$jar"
+}
+
+build_neoforge_jar() {
+    local force="${1:-}" jar
+    # shadowJar is THE artifact (the plain jar task is disabled — a slim jar would
+    # match release globs; stage N-4).
+    jar="$SCRIPT_DIR/neoforge/build/libs/lod-server-support-neoforge.jar"
+    if [ -n "$force" ] || [ ! -f "$jar" ]; then
+        echo "Building NeoForge LSS JAR..." >&2
+        (cd "$SCRIPT_DIR" && ./gradlew :neoforge:shadowJar) >&2
     fi
     echo "$jar"
 }
@@ -601,6 +625,61 @@ run_folia() {
 }
 
 # ============================================================
+# NeoForge (best-effort tier — stage N; server-side LSS, same wire as Fabric)
+# ============================================================
+
+setup_neoforge() {
+    echo "=== Setting up NeoForge server (${NEOFORGE_VERSION}) ==="
+    local mods_dir="$NEOFORGE_DIR/mods"
+    mkdir -p "$NEOFORGE_DIR" "$mods_dir"
+
+    # The installer lays down libraries/ + the version's unix_args.txt; that file is the
+    # installed marker (one-time, downloads the vanilla server jar + NeoForge libraries).
+    local args_file="libraries/net/neoforged/neoforge/${NEOFORGE_VERSION}/unix_args.txt"
+    if [ ! -f "$NEOFORGE_DIR/$args_file" ]; then
+        download "$NEOFORGE_INSTALLER_URL" "$NEOFORGE_DIR/neoforge-installer.jar"
+        echo "  Running the NeoForge server installer (one-time, downloads libraries)..."
+        # Flag spelling differs across installer generations — try both.
+        (cd "$NEOFORGE_DIR" && java -jar neoforge-installer.jar --install-server . > installer.log 2>&1) \
+            || (cd "$NEOFORGE_DIR" && java -jar neoforge-installer.jar --installServer . >> installer.log 2>&1) \
+            || { echo "ERROR: NeoForge installer failed — see $NEOFORGE_DIR/installer.log" >&2; return 1; }
+        if [ ! -f "$NEOFORGE_DIR/$args_file" ]; then
+            echo "ERROR: installer ran but $args_file is missing — see $NEOFORGE_DIR/installer.log" >&2
+            return 1
+        fi
+    fi
+
+    if [ ! -f "$NEOFORGE_DIR/eula.txt" ]; then
+        echo "eula=true" > "$NEOFORGE_DIR/eula.txt"
+    fi
+
+    write_server_properties "$NEOFORGE_DIR" 25569 "LSS Test Server (NeoForge)"
+    write_ops_json "$NEOFORGE_DIR"
+    # Same config file + location as Fabric (LoaderServices.configDir -> <server>/config).
+    write_lss_config "$NEOFORGE_DIR/config"
+
+    echo "=== Installing NeoForge mods ==="
+    echo "  Installing LSS..."
+    local lss_jar
+    lss_jar=$(build_neoforge_jar)
+    rm -f "$mods_dir"/lod-server-support-neoforge*.jar
+    cp "$lss_jar" "$mods_dir/"
+    echo "  Installed: $(basename "$lss_jar")"
+}
+
+run_neoforge() {
+    cd "$NEOFORGE_DIR"
+    # Launch via the installer's args file (what the generated run.sh does), with our own
+    # RAM + the dev admission trace. Fabric and vanilla clients CAN join this server:
+    # LSS registers every payload channel .optional() and adds no registry content, so
+    # NeoForge's connection negotiation treats a client without the mod as
+    # vanilla-compatible (the stage-N interop matrix; a Fabric client WITH LSS announces
+    # the lss:* channels via minecraft:register and gets a full LOD session).
+    java -Xmx${SERVER_RAM} -Xms${SERVER_RAM} "$ADMISSION_TRACE_FLAG" \
+        @"libraries/net/neoforged/neoforge/${NEOFORGE_VERSION}/unix_args.txt" nogui
+}
+
+# ============================================================
 # Legacy (protocol-16 LSS server, for v16 client-compat eyeballing)
 # ============================================================
 
@@ -693,14 +772,17 @@ case "${1:-run}" in
         echo ""
         setup_folia
         echo ""
+        setup_neoforge
+        echo ""
         echo "Setup complete. Run '$0 run' to start all servers."
         ;;
     update)
         echo "=== Updating LSS JARs ==="
         fabric_jar=$(build_fabric_jar force)
         paper_jar=$(build_paper_jar force)
+        neoforge_jar=$(build_neoforge_jar force)
 
-        mkdir -p "$FABRIC_DIR/mods" "$PAPER_DIR/plugins" "$FOLIA_DIR/plugins"
+        mkdir -p "$FABRIC_DIR/mods" "$PAPER_DIR/plugins" "$FOLIA_DIR/plugins" "$NEOFORGE_DIR/mods"
 
         rm -f "$FABRIC_DIR/mods"/lod-server-support-fabric*.jar
         cp "$fabric_jar" "$FABRIC_DIR/mods/"
@@ -714,6 +796,10 @@ case "${1:-run}" in
         rm -f "$FOLIA_DIR/plugins"/lod-server-support-paper*.jar
         cp "$paper_jar" "$FOLIA_DIR/plugins/"
         echo "  Folia:  $(basename "$paper_jar")"
+
+        rm -f "$NEOFORGE_DIR/mods"/lod-server-support-neoforge*.jar
+        cp "$neoforge_jar" "$NEOFORGE_DIR/mods/"
+        echo "  NeoForge: $(basename "$neoforge_jar")"
 
         echo "  Restart the servers to apply."
         ;;
@@ -833,6 +919,20 @@ case "${1:-run}" in
         echo ""
         run_folia
         ;;
+    run-neoforge)
+        setup_neoforge
+        echo ""
+        echo "=== Starting NeoForge server (${NEOFORGE_VERSION}) ==="
+        echo "  Connect to: localhost:25569"
+        echo "  Fabric/vanilla clients can join — LSS channels are .optional() and add no"
+        echo "  registry content (a red/incompatible marker in the client's server LIST is"
+        echo "  cosmetic; the join itself works). A Fabric client WITH LSS+Voxy gets a full"
+        echo "  LOD session — the cross-loader wire is the point of this rig."
+        echo "  NOTE best-effort tier: the /lsslod command tree + wire behavior should match"
+        echo "  Fabric exactly; a NEOFORGE client would run LSS inert (no Voxy build exists)."
+        echo ""
+        run_neoforge
+        ;;
     run-legacy)
         setup_legacy
         echo ""
@@ -859,7 +959,7 @@ case "${1:-run}" in
         echo "Done."
         ;;
     *)
-        echo "Usage: $0 {setup|run|run-fabric|run-fabric-no-c2me|run-fabric-antixray|run-fabric-via|run-fabric-store|run-paper|run-paper-store|run-folia|run-legacy|update|clean}"
+        echo "Usage: $0 {setup|run|run-fabric|run-fabric-no-c2me|run-fabric-antixray|run-fabric-via|run-fabric-store|run-paper|run-paper-store|run-folia|run-neoforge|run-legacy|update|clean}"
         echo "  (LSS_VIA=1 stages ViaVersion+ViaBackwards on run-paper too; LSS_VIA_GUARD=0 = guard kill-switch A/B)"
         echo ""
         echo "  setup      - Download and set up all servers"
@@ -880,9 +980,12 @@ case "${1:-run}" in
         echo "               has it off). No backfill on Paper (Fabric-only) — the store"
         echo "               warms from serves"
         echo "  run-folia  - Set up and start Folia server only (port 25567)"
+        echo "  run-neoforge - Set up and start the NeoForge server only (port 25569; the"
+        echo "               stage-N best-effort loader — server-side LSS, same wire as"
+        echo "               Fabric; Fabric clients join fine, channels are optional)"
         echo "  run-legacy - Set up and start an OLD LSS v${LEGACY_LSS_VERSION} (protocol 16) server (port 25568),"
         echo "               for eyeballing the client-side v16 backward-compat path"
-        echo "  update     - Rebuild and install LSS JARs for all servers (NOT the legacy one)"
+        echo "  update     - Rebuild and install LSS JARs for all servers incl. NeoForge (NOT the legacy one)"
         echo "  clean      - Delete all test server directories"
         echo ""
         echo "Environment variables:"
