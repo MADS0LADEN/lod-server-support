@@ -24,15 +24,32 @@ repositories {
     mavenCentral()
 }
 
+// The gametest smoke subset (plan §5.2) lives in its own source set — like the
+// fabric module's, it exists only for the dev gametest run and never ships
+// (shadowJar packs sourceSets.main alone).
+sourceSets {
+    gametest {
+        // src/gametest/{java,resources} are this source set's DEFAULT dirs — do not
+        // redeclare them (a second srcDir of the same path duplicates every resource).
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+}
+
 neoForge {
     version = project.neoforge_version
 
     // The fabric accesswidener's 2-line PalettedContainer widening, AT dialect.
     accessTransformers = project.files('src/main/resources/META-INF/accesstransformer.cfg')
 
+    addModdingDependenciesTo(sourceSets.gametest)
+
     mods {
         lss {
             sourceSet sourceSets.main
+        }
+        lsstest {
+            sourceSet sourceSets.gametest
         }
     }
 
@@ -40,7 +57,17 @@ neoForge {
         server {
             server()
             programArgument '--nogui'
-            systemProperty 'neoforge.enabledGameTestNamespaces', 'lss'
+            // The gametest companion mod must not join plain server runs.
+            loadedMods = [mods.lss]
+        }
+        gameTestServer {
+            type = "gameTestServer"
+            // Filter to OUR tests: the 26.2 TEST_INSTANCE registry also carries every
+            // vanilla datapack test; unfiltered, the run executes hundreds of them.
+            programArguments.addAll('--tests', 'lsstest:*')
+            // GameTestServer is not a DedicatedServer — the same activation gate the
+            // fabric gametest JVMs open (see fabric/build.gradle).
+            systemProperty 'lss.test.integratedServer', 'true'
         }
     }
 }
@@ -84,6 +111,8 @@ dependencies {
     testImplementation platform('org.junit:junit-bom:5.11.3')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    gametestImplementation project(':common')
 }
 
 processResources {

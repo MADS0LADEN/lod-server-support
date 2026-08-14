@@ -1,0 +1,16 @@
+modLoader="javafml"
+loaderVersion="[4,)"
+license="MIT"
+
+[[mods]]
+modId="lsstest"
+version="1.0.0"
+displayName="LSS NeoForge GameTests"
+description='''Dev-only gametest companion (the fabric lss-test twin) — never ships.'''
+
+[[dependencies.lsstest]]
+    modId="lss"
+    type="required"
+    versionRange="[0,)"
+    ordering="AFTER"
+    side="BOTH"
