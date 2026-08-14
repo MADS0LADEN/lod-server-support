@@ -3,12 +3,13 @@
 **Status: PREPARED, deploy pending user action** (2026-08-13). The archon panel
 token is expired (401 — see the checklist escalation), so this deploy is
 user-driven with everything below agent-prepared. The program PAUSES here; stage G
-starts on explicit user sign-off (mega plan v1.4, the F→G pause row). **v1.5/v1.6
-addendum (2026-08-14): stage N (NeoForge, neoforge-support-plan.md v1.1) is
-planned, and sign-off now ALSO picks its position — plan §0.6: Option A (N before
-G; N-4 then re-arms these gates with a fresh rig deploy + re-validation window
-before any tag), Option B (tag v0.11.0 first from this validated tree; N + the
-1.21.1 line become v0.12.0), or the hybrid (N-1 xplat only, post-tags).**
+starts on explicit user sign-off (mega plan v1.4, the F→G pause row).
+**v1.5-v1.7 addendum (2026-08-14): stage N (NeoForge, neoforge-support-plan.md
+v1.2) is planned and the §0.6 sequencing is DECIDED — N precedes G, and v0.11.0
+releases all four MC lines × three loaders simultaneously (1.21.1 incl. Paper).
+Sign-off here covers the manual-testing pause only; stage N follows it, N-4
+re-arms these gates (fresh per-line pre-flights + a fresh rig deploy +
+re-validation window), then G tags all four lines in one session.**
 
 ## 1. What to deploy
 

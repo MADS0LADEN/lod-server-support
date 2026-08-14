@@ -19,7 +19,7 @@ cuts are acceptable where the platform/version fights, automated coverage is
 reduced (neoforge = contract tests + a ~8-12-test gametest smoke subset + a
 2-scenario `SOAK_PLATFORM=neoforge` set whose SKIP is expected — the plan's §5.5
 manual smoke checklist is then the per-release floor; no Tier 3 on either; 1.21.1
-additionally ships the spike's feature-drop list and has NO Paper module), and
+additionally ships the spike's feature-drop list), and
 variant-specific issues triage at lower priority. Cuts beyond the plan's
 pre-authorized list need a dated decisions-log entry (the §6.2 cut protocol);
 release notes for NeoForge/1.21.1-affecting items must name the tier and any cut
@@ -30,7 +30,9 @@ variant with the normal Voxy API surface — `VoxyCompat`'s graceful-degrade lad
 (no-sink, warn-once, no capability bit) is the contract when it doesn't match; on
 26.2 no such build exists yet, so the client half ships compiled-and-inert by
 construction. Accepted recurring cost: a full release becomes up to 4 lines × 3
-loaders ≈ 12 artifacts, permanently. **Wire compatibility is NEVER tiered** —
+loaders ≈ 12 artifacts, permanently — and v0.11.0 itself releases all four MC
+lines × three loaders SIMULTANEOUSLY (user decision 2026-08-14; the 1.21.1 line
+ships Fabric + Paper + NeoForge). **Wire compatibility is NEVER tiered** —
 every jar speaks the same protocol at full fidelity, and every never-tiered claim
 names a test that reds when violated (plan §1.2).
 

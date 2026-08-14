@@ -1,11 +1,21 @@
-# NeoForge support plan — client + server, best-effort tier (2026-08-14, v1.1)
+# NeoForge support plan — client + server, best-effort tier (2026-08-14, v1.2)
 
 **Status: PLANNED — folded into the v0.11.0 mega plan as stage N (post-pause,
-pre-G), with MC 1.21.1 added as a stage-G backport target. The N-before-G
-sequencing carries an explicit user decision point — §0.6.** Research basis:
+pre-G). Sequencing RESOLVED (user, 2026-08-14): N precedes G, and v0.11.0
+releases ALL FOUR MC lines (26.2, 26.1, 1.21.11, 1.21.1) × THREE loaders
+(Fabric, NeoForge, Paper) simultaneously — §0.6. The 1.21.1 line ships the
+Paper module.** Research basis:
 docs/planning/neoforge-1.21.1-port-spike.md (+ its all-four-lines addendum) —
 availability, API-drift, renderer, and precedent facts live there and are not
 re-argued here.
+
+**v1.2 (2026-08-14): user decisions folded.** (1) **§0.6 RESOLVED as Option A**
+— stage N before G, one simultaneous four-line × three-loader release; the
+pause sign-off now covers manual testing only. (2) **The 1.21.1 no-Paper cut
+is REVERSED** — the line ships Fabric + NeoForge + Paper; v1.1's
+`ReleaseWorkflowContractTest` relocation work item is dropped (the test keeps
+its `paper/src/test` home on all four lines; the tag-guard anchoring in §4.2
+STANDS). Effort re-totaled (§8): ~39-60 d added (~8-12 wk).
 
 **v1.1 (2026-08-14): revised after the 3-Opus review round** (architecture
 lens; CI/release lens; scoping/tier-honesty lens — verdicts and fold record in
@@ -63,14 +73,13 @@ feature-drop list (`useBackgroundReadSplit`/`useSelectiveNbtParse` flag-off,
 Voxy reset ladder degraded). Anything NOT pre-authorized here goes through the
 §6 cut protocol.
 
-### 0.3 Sequencing — default per directive, decision presented
+### 0.3 Sequencing — DECIDED (user, 2026-08-14): N before G, one simultaneous release
 
-Default: stage N lands on MAIN after the F-pause sign-off and before G, so the
-backport process carries the module (the user's make-it-part-of-the-backport-
-process directive), and 1.21.1 joins G as a new branch. The schedule and
-program-risk consequences of that default, and the alternative orderings, are
-laid out in **§0.6 — the user picks at the pause gate** (the same gate that
-already blocks G). Two structural repairs apply if the default stands:
+Stage N lands on MAIN after the F-pause sign-off and before G, so the backport
+process carries the module; **v0.11.0 then releases ALL FOUR MC lines × THREE
+loaders at the same time** — the four tags push in one release session, so the
+slowest line gates them all (§0.6 records the decision and the alternatives it
+overrode). Two structural consequences:
 
 - **F-gate re-arm (review MAJOR):** stage F's pre-flight and pause validated a
   tree that N then rewrites (~16k lines moved + a new subproject). N-4
@@ -79,13 +88,15 @@ already blocks G). Two structural repairs apply if the default stands:
   short re-validation window before G tags anything. Sign-off on the pause
   authorizes N to start — it does NOT carry forward as sign-off on the
   post-N tree.
-- **1.21.1 line scope:** Fabric + NeoForge, **no Paper module** — this is a
-  scoping cut made by THIS plan under the §6 cut protocol (v1.0 mis-cited it
-  as a "spike decision"; the spike made no such call). Grounds: the line is
-  best-effort, the Paper 1.21.1 port is real additional work (its own
-  MC-retarget of the NMS/Moonrise surfaces), and no user ask names it. It is
-  *revisitable*: the `support/mc1.20.1` line ships a Paper module, so
-  portability to old-API Paper is proven precedent — demand can re-open it.
+- **1.21.1 line scope (v1.2 — the v1.1 no-Paper cut is REVERSED by user
+  decision): Fabric + NeoForge + Paper.** The Paper module port retargets the
+  NMS/Moonrise surfaces per the two in-repo templates —
+  `support/mc1.20.1` (pre-Moonrise Paper) and `support/mc1.21.8`
+  (early-Moonrise Paper); 1.21.1 sits between them. Recorded gotcha applies:
+  paperweight codebook can't parse Java 25, so paper tasks need Java 21
+  locally on old lines. ~4-7 d added to G (§8). Side benefit:
+  `ReleaseWorkflowContractTest` keeps its `paper/src/test` home on all four
+  lines — v1.1's relocation work item is dropped.
 
 ### 0.4 Soaks — abbreviated, with the skip expected and the floor defined
 
@@ -112,12 +123,13 @@ same commit the check lands — the task and the check land together.
 (`brandedConfigCandidates` needs no NeoForge analogue of the Paper
 data-folder fork: NeoForge configs live in the shared `config/` dir.)
 
-### 0.6 The sequencing decision (presented, not resolved)
+### 0.6 The sequencing decision — RESOLVED (user, 2026-08-14): Option A
 
-Both options satisfy "make NeoForge part of the backport process" — NeoForge
-rides the normal machinery either way. They differ in what gets risked. The
-program is at the pause gate anyway; this is the decision to take alongside
-sign-off.
+**Decision: Option A — stage N before G, and v0.11.0 ships all four MC lines ×
+three loaders simultaneously.** The pause sign-off now covers manual testing
+only (the F-gate re-arm in N-4 restores the validated-tree property before any
+tag). The table below stays as the decision record — what was weighed and
+overridden:
 
 | | **Option A — N before G (this plan's default, per the include-it-in-v0.11.0 directive)** | **Option B — v0.11.0 ships first; N + the 1.21.1 line become v0.12.0** |
 |---|---|---|
@@ -343,15 +355,17 @@ modern-on-Java-21): dirty hook → `ChunkSerializer.write` (bytecode-verify
 serializer old-API translation, far-player renderer → 1.21.1 immediate-mode
 idiom (old `RenderLevelStageEvent` semantics on the NeoForge side), golden
 regen (keep `xver-live-corpus` un-regenerated — the XVER proof), Java 21
-(`ScopedValue` → the 1.21.11 line's AntiXray pass-through). Line scope:
-**Fabric + NeoForge, no Paper (a §6-protocol cut recorded at §0.3 — not a
-spike decision), no Tier 3, best-effort tier** — feature cuts per the spike's
-drop list are pre-authorized. **Line-mechanics consequences (review MAJORs):**
+(`ScopedValue` → the 1.21.11 line's AntiXray pass-through). Line scope (v1.2):
+**Fabric + NeoForge + Paper (the v1.1 no-Paper cut reversed by user decision
+2026-08-14 — §0.3), no Tier 3, best-effort tier** — feature cuts per the
+spike's drop list are pre-authorized. The Paper module retargets
+`PaperChunkDiskReader`/`PaperChunkGenerationService`'s NMS/Moonrise surfaces
+per the `support/mc1.20.1` (pre-Moonrise) and `support/mc1.21.8`
+(early-Moonrise) templates. **Line-mechanics consequences (review MAJORs):**
 
-- **`ReleaseWorkflowContractTest` lives in `paper/src/test` — a module this
-  line does not have.** On `support/mc1.21.1` the twin relocates to
-  `fabric/src/test` (package-private copy; the test is pure file-reading, no
-  Paper types). Pinned in the line's port checklist.
+- **`ReleaseWorkflowContractTest` stays in `paper/src/test` on all four
+  lines** (v1.2 — the line ships Paper, so v1.1's relocation-to-fabric work
+  item is moot; uniformity across lines restored).
 - **Tag scheme: `+mc1.21.1` is a PREFIX of `+mc1.21.11`** — every glob or
   `contains()` guard collides. §4.2 carries the fix; the line's release.yml
   flavor and contract-test twin use exact-suffix/boundary forms from day one.
@@ -438,8 +452,8 @@ the documented ~90-file adaptation-set effort").
   declare neoforge/minecraft ranges correctly or the listing's environment
   tags mislead (review note). Support-line flavors follow the existing
   support-line convention (a MOD_VERSION derive step, NOT `github.ref_name`,
-  which embeds the `+mc…` suffix there); the 1.21.1 flavor publishes
-  fabric+neoforge (no Paper step).
+  which embeds the `+mc…` suffix there); the 1.21.1 flavor publishes all
+  three — fabric + paper + neoforge (v1.2).
 - **Tag scheme collision (review MAJOR — empirically verified):**
   `+mc1.21.1` is a prefix of `+mc1.21.11`, so `v*+mc1.21.1*`-style globs
   match BOTH lines — PREV_TAG resolution, the wrong-line tag guard, and
@@ -560,7 +574,7 @@ recorded in the release PR description. All on 26.2 unless noted:
 |---|---|---|
 | **Full** | Fabric + Paper on main (26.2) | complete gauntlets (T1/T2/T3), 20-scenario soaks ×3 platforms, live-rig burn-in, first-priority triage |
 | **Correct, not perfect** | the 26.1 + 1.21.11 support lines (Fabric + Paper) | full builds + T1/T2, representative smoke soaks, NO live rig (the rig is 26.2 Fabric only), no exhaustive gauntlets — the recorded support-line effort budget |
-| **Best-effort** | NeoForge (all lines) + the whole MC 1.21.1 line | tracks the mainline feature set; cuts allowed via §6.2; coverage per §5; lowest triage priority |
+| **Best-effort** | NeoForge (all lines) + the whole MC 1.21.1 line (Fabric + Paper + NeoForge) | tracks the mainline feature set; cuts allowed via §6.2; coverage per §5; lowest triage priority |
 
 ### 6.2 Cut protocol
 
@@ -610,8 +624,9 @@ bootstrap, reset-ladder degrade), the far-player **render path** no-op
    top of the documented ~90-file adaptation set — the shape most likely to
    trigger the fresh-re-port escape hatch (cost: re-deriving that set), and
    (b) the fresh 1.21.1 cut, which inherits the move for free (fresh cut).
-   Mitigation: N-1a lands alone in a quiet window; §0.6's Option B/hybrid
-   removes (a) entirely.
+   Mitigation: N-1a lands alone in a quiet window. (The §0.6 decision accepted
+   (a) with eyes open — the fresh-re-port escape hatch's trigger condition in
+   §3 is the fallback if the delta-port conflicts mass out.)
 2. **Natives under NeoForge's module layer** (sqlite/zstd via jarJar,
    `META-INF/jarjar/`) — least charted; shading fallback pre-authorized;
    decision at N-2 gates the release_check design (§4.2).
@@ -623,8 +638,9 @@ bootstrap, reset-ladder degrade), the far-player **render path** no-op
    renderer exists.
 4. **NeoForge API drift on support lines** (21.1 old render/gametest idioms vs
    26.x) — bounded by the spike's drift map; the glue is thin by design.
-5. **Schedule**: the sequencing decision (§0.6) is the schedule risk in full;
-   under Option A every v0.11.0 tag waits on N plus the F-gate re-arm.
+5. **Schedule**: RESOLVED-ACCEPTED (§0.6) — every v0.11.0 tag waits on N, the
+   F-gate re-arm, and the full four-line × three-loader G; the simultaneous
+   release means the slowest line gates all four tags (~8-12 wk added, §8).
 6. **Send-throw semantics + upstream #1913** — the two mixed-loader hazards
    (§1.2): the send wrapper covers the throw class; the handshake-arms-the-
    session assumption covers #1913 and is verified live at N-3 against the
@@ -646,13 +662,16 @@ bootstrap, reset-ladder degrade), the far-player **render path** no-op
 | N-4 CI/release/VSS/docs + F-gate re-arm | 3-4 d |
 | **Stage N total (main)** | **~17-25 d** |
 | G increment: 26.1 + 1.21.11 neoforge carry | ~5-9 d |
-| G increment: the 1.21.1 line (fabric+neoforge, contract-test relocation, tag-scheme twins) | ~13-19 d |
-| **Program total added** | **~35-53 d (~7-10.5 wk)** |
+| G increment: the 1.21.1 line, Fabric + NeoForge halves (tag-scheme twins) | ~13-19 d |
+| G increment: the 1.21.1 Paper module (v1.2 — templates: mc1.20.1 + mc1.21.8) | ~4-7 d |
+| **Program total added** | **~39-60 d (~8-12 wk)** |
 
 Exceeds the spike's 27-42 d matrix estimate honestly: the spike's main-line
 number was server-first scoped (client dormant, renderer deferred); this plan
-restores the full client half per directive and adds the review round's
-hardening (seams, send wrapper, CI collision fixes, soak driver OR floor).
+restores the full client half per directive, adds the review round's
+hardening (seams, send wrapper, CI collision fixes, soak driver OR floor),
+and v1.2 adds the 1.21.1 Paper module. The simultaneous-release decision
+means these are all on the v0.11.0 critical path.
 
 ## 9. Review record (3-Opus round, 2026-08-14)
 
