@@ -1,7 +1,6 @@
 package dev.vox.lss.compat;
 
 import dev.vox.lss.common.LSSLogger;
-import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
 
@@ -68,7 +67,7 @@ public final class AntiXrayCompat {
      */
     private static ScopedValue.Carrier buildCarrierProduction() {
         try {
-            return buildCarrier(FabricLoader.getInstance().isModLoaded("antixray"),
+            return buildCarrier(dev.vox.lss.platform.LoaderServices.get().isModLoaded("antixray"),
                     AntiXrayCompat::resolveArgumentsScopedValues);
         } catch (Throwable t) {
             return null;   // can't log — logging is part of what may have failed
@@ -228,7 +227,7 @@ public final class AntiXrayCompat {
 
     private static EngineProbe buildEngineProbeProduction() {
         try {
-            return buildEngineProbe(FabricLoader.getInstance().isModLoaded("antixray"), Class::forName);
+            return buildEngineProbe(dev.vox.lss.platform.LoaderServices.get().isModLoaded("antixray"), Class::forName);
         } catch (Throwable t) {
             return level -> ABSENT;   // same throw-free-initializer floor as the carrier
         }

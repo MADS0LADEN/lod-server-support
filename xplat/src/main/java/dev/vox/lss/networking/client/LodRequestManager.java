@@ -8,7 +8,6 @@ import dev.vox.lss.config.LSSClientConfig;
 import dev.vox.lss.networking.payloads.BatchChunkRequestC2SPayload;
 import dev.vox.lss.networking.payloads.SessionConfigS2CPayload;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
-import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.resources.ResourceKey;
@@ -547,7 +546,7 @@ public class LodRequestManager {
         void send(BatchChunkRequestC2SPayload payload);
     }
 
-    private BatchSender batchSender = payload -> ClientPlayNetworking.send(payload);
+    private BatchSender batchSender = payload -> dev.vox.lss.platform.LoaderServices.get().sendToServer(payload);
 
     private void sendRequests(long[] positionBuffer, long[] timestampBuffer, int count) {
         // Snapshot to exact-length arrays: BatchChunkRequestC2SPayload's StreamCodec reads

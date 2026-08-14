@@ -11,9 +11,12 @@ public class LSSClient implements ClientModInitializer {
     public void onInitializeClient() {
         // FIRST: resolve display branding (a client can start without the server init).
         Brand.load(LSSClient.class.getClassLoader());
+        // Upgrade LSSMod's common LoaderServices install to the client-capable impl
+        // (adds sendToServer) before any client networking runs.
+        dev.vox.lss.platform.FabricClientLoaderServices.installProductionClient();
         LSSClientNetworking.init();
         LSSClientCommands.init();
-        dev.vox.lss.networking.client.FarPlayerClientSupport.initRenderer();
+        dev.vox.lss.networking.client.FarPlayerRenderer.initRenderer();
         ModCompat.init();
         BenchmarkBridge.initClient();
     }

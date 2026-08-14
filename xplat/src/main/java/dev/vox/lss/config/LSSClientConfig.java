@@ -2,7 +2,6 @@ package dev.vox.lss.config;
 
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.config.JsonConfig;
-import net.fabricmc.loader.api.FabricLoader;
 
 public class LSSClientConfig extends JsonConfig {
     // Brand-primary first, other brand as fallback: the VSS jar (Brand.shortName()=="VSS") prefers
@@ -13,7 +12,7 @@ public class LSSClientConfig extends JsonConfig {
     private static final String[] CANDIDATES = brandedConfigCandidates("client");
 
     public static LSSClientConfig CONFIG =
-            load(LSSClientConfig.class, CANDIDATES, FabricLoader.getInstance().getConfigDir());
+            load(LSSClientConfig.class, CANDIDATES, dev.vox.lss.platform.LoaderServices.get().configDir());
 
     public boolean receiveServerLods = true;
     public int lodDistanceChunks = 0;

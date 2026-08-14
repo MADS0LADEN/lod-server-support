@@ -1,6 +1,5 @@
 package dev.vox.lss.compat;
 
-import net.fabricmc.loader.api.FabricLoader;
 
 import java.util.OptionalInt;
 
@@ -15,7 +14,7 @@ public final class ModCompat {
     private static boolean voxyLoaded;
 
     public static void init() {
-        if (FabricLoader.getInstance().isModLoaded("voxy")) {
+        if (dev.vox.lss.platform.LoaderServices.get().isModLoaded("voxy")) {
             voxyLoaded = VoxyCompat.init();
         }
     }

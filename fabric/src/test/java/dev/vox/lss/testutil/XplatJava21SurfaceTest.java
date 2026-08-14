@@ -1,0 +1,125 @@
+package dev.vox.lss.testutil;
+
+import org.junit.jupiter.api.Test;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+import java.util.stream.Stream;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * The N-1b Java-21 tripwire (neoforge-support-plan.md §1.1): xplat is compiled
+ * by each consumer module, so nothing builds it standalone and a post-Java-21
+ * JDK API leak would surface months later on a 1.21.x backport branch (built at
+ * Java 21 — the paperweight constraint). The plan's preferred {@code --release 21}
+ * compile is structurally impossible here: MC 26.2 ships class-file major 69
+ * (Java 25), which a --release 21 javac refuses to read. So this scans the
+ * COMPILED xplat classes' constant pools (raw-bytes substring, the
+ * FoliaWiringContractTest precedent) for post-21 JDK API references instead.
+ *
+ * <p>Known-25-only exclusion list (the plan's "currently 1 entry"):
+ * {@code AntiXrayCompat} uses {@link ScopedValue} directly — the 1.21.x lines
+ * replace it with their pass-through variant at port time.
+ *
+ * <p>Limitation, stated: a constant-pool scan catches API references, not
+ * post-21 SYNTAX — the backport line's own Java-21 compile catches that.
+ */
+class XplatJava21SurfaceTest {
+
+    /** Post-Java-21 JDK API surfaces that could plausibly leak in. */
+    private static final List<String> POST_21_API = List.of(
+            // NOTE: raw-substring matching — every entry must not be a prefix of a
+            // pre-21 API name ("java/io/IO" matched IOException and is deliberately
+            // absent; the Java 25 console class is not a plausible server-code leak).
+            "java/lang/ScopedValue",
+            "java/util/concurrent/StructuredTaskScope",
+            "java/lang/classfile",
+            "java/lang/foreign/",
+            "java/util/stream/Gatherer");
+
+    /** xplat files allowed to use Java-25-only API (each 1.21.x line patches them). */
+    private static final Set<String> KNOWN_25_ONLY = Set.of(
+            "dev/vox/lss/compat/AntiXrayCompat");
+
+    @Test
+    void compiledXplatClassesReferenceNoPost21JdkApi() throws IOException {
+        Path srcRoot = find("xplat/src/main/java");
+        Path classesRoot = find("fabric/build/classes/java/main");
+        List<String> offenders = new ArrayList<>();
+        List<String> missing = new ArrayList<>();
+        try (Stream<Path> files = Files.walk(srcRoot)) {
+            files.filter(p -> p.toString().endsWith(".java")).forEach(p -> {
+                String rel = srcRoot.relativize(p).toString().replace('\\', '/');
+                String fqcnPath = rel.substring(0, rel.length() - ".java".length());
+                if (KNOWN_25_ONLY.contains(fqcnPath)) {
+                    return;
+                }
+                List<Path> classFiles = classFilesFor(classesRoot, fqcnPath);
+                if (classFiles.isEmpty()) {
+                    missing.add(fqcnPath);
+                    return;
+                }
+                for (Path cf : classFiles) {
+                    byte[] bytes;
+                    try {
+                        bytes = Files.readAllBytes(cf);
+                    } catch (IOException e) {
+                        throw new java.io.UncheckedIOException(e);
+                    }
+                    String pool = new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1);
+                    for (String api : POST_21_API) {
+                        if (pool.contains(api)) {
+                            offenders.add(fqcnPath + " -> " + api);
+                        }
+                    }
+                }
+            });
+        }
+        assertTrue(missing.isEmpty(),
+                "xplat sources with no compiled class under fabric — run compileJava, or fix"
+                        + " this test's class lookup: " + missing);
+        assertTrue(offenders.isEmpty(),
+                "post-Java-21 JDK API leaked into xplat (breaks the Java-21 backport lines;"
+                        + " seam it, avoid it, or add a documented KNOWN_25_ONLY entry): "
+                        + offenders);
+    }
+
+    /** The class file plus any nested classes (Foo$Bar, Foo$1...). */
+    private static List<Path> classFilesFor(Path classesRoot, String fqcnPath) {
+        List<Path> out = new ArrayList<>();
+        Path dir = classesRoot.resolve(fqcnPath).getParent();
+        String simple = fqcnPath.substring(fqcnPath.lastIndexOf('/') + 1);
+        if (dir == null || !Files.isDirectory(dir)) {
+            return out;
+        }
+        try (Stream<Path> siblings = Files.list(dir)) {
+            siblings.forEach(p -> {
+                String name = p.getFileName().toString();
+                if (name.equals(simple + ".class")
+                        || (name.startsWith(simple + "$") && name.endsWith(".class"))) {
+                    out.add(p);
+                }
+            });
+        } catch (IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+        return out;
+    }
+
+    private static Path find(String repoRelative) {
+        Path dir = Path.of("").toAbsolutePath();
+        for (int depth = 0; depth < 5 && dir != null; depth++, dir = dir.getParent()) {
+            Path candidate = dir.resolve(repoRelative);
+            if (Files.isDirectory(candidate)) {
+                return candidate;
+            }
+        }
+        throw new AssertionError("cannot locate " + repoRelative + " from "
+                + Path.of("").toAbsolutePath());
+    }
+}

@@ -22,10 +22,8 @@ class StoreEnvironmentContractTest {
 
     /** Survives both the Gradle CWD (module dir) and an IDE repo-root CWD. */
     private static Path serviceSource() {
-        var moduleRelative = Path.of(
-                "src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java");
-        if (Files.exists(moduleRelative)) return moduleRelative;
-        return Path.of("fabric").resolve(moduleRelative);
+        return dev.vox.lss.testutil.SourcePaths.mainSource(
+                "dev/vox/lss/networking/server/RequestProcessingService.java");
     }
 
     @Test

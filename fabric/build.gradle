@@ -84,6 +84,9 @@ dependencies {
 
 test {
     useJUnitPlatform()
+    // N-1b: auto-detect LoaderServicesTestInstaller (META-INF/services Extension) so the
+    // LoaderServices seam is installed for every Tier-1 class without per-test wiring.
+    systemProperty 'junit.jupiter.extensions.autodetection.enabled', 'true'
     // GameTestEntrypointContractTest reads these at runtime (repo-walk); without declaring
     // them as inputs, adding a gametest class or editing the entrypoint list leaves the
     // task UP-TO-DATE locally and the contract never re-checks.

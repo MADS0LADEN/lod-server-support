@@ -60,7 +60,7 @@ final class ChunkSendState {
     private static ChunkSendState buildProduction() {
         boolean moonrise;
         try {
-            moonrise = net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("moonrise");
+            moonrise = dev.vox.lss.platform.LoaderServices.get().isModLoaded("moonrise");
         } catch (Throwable t) {
             moonrise = false;
         }

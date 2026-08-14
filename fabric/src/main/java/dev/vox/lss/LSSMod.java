@@ -15,6 +15,10 @@ public class LSSMod implements ModInitializer {
         // init reads Brand.shortName() to pick its config filename (brandedConfigCandidates). Do
         // not remove as "redundant with LSSClient" — keep branding resolved before any config touch.
         Brand.load(LSSMod.class.getClassLoader());
+        // SECOND: the loader seam — before any config/compat touch (they read
+        // configDir/isModLoaded through it). Client entrypoint upgrades this to
+        // the client-capable impl (entrypoint order: main runs first).
+        dev.vox.lss.platform.FabricLoaderServices.installProduction();
         LSSNetworking.registerPayloads();
         LSSServerNetworking.init();
         // Tracer lifecycle hangs off LSSMod, never off RequestProcessingService — it must
