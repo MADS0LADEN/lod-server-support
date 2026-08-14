@@ -1,0 +1,28 @@
+modLoader="javafml"
+loaderVersion="[4,)"
+license="MIT"
+issueTrackerURL="https://github.com/VoX/lod-server-support/issues"
+
+[[mods]]
+modId="lss"
+version="${mod_version}"
+displayName="LOD Server Support"
+authors="VoX"
+description='''Distributes LOD chunk data from servers to clients for LOD rendering mods (Voxy API surface). Server-side works with any LSS/VSS client; the client half needs a community Voxy build for NeoForge.'''
+
+[[mixins]]
+config="lss.neoforge.mixins.json"
+
+[[dependencies.lss]]
+    modId="neoforge"
+    type="required"
+    versionRange="[26.2,)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.lss]]
+    modId="minecraft"
+    type="required"
+    versionRange="[${minecraft_version}]"
+    ordering="NONE"
+    side="BOTH"

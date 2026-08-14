@@ -1,0 +1,171 @@
+plugins {
+    id 'java'
+    id 'net.neoforged.moddev' version '2.0.144'
+    id 'com.gradleup.shadow' version '9.4.2'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = 'lod-server-support-neoforge'
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(25)
+
+// CI naming parity with the fabric module (release.yml feeds mod_version from the tag).
+def ciArchiveVersion = providers.environmentVariable('CI').map { it == 'true' }.getOrElse(false)
+        ? "${project.mod_version}+${project.minecraft_version}" : ''
+tasks.withType(AbstractArchiveTask).configureEach {
+    archiveVersion = ciArchiveVersion
+}
+
+repositories {
+    mavenCentral()
+}
+
+// The gametest smoke subset (plan §5.2) lives in its own source set — like the
+// fabric module's, it exists only for the dev gametest run and never ships
+// (shadowJar packs sourceSets.main alone).
+sourceSets {
+    gametest {
+        // src/gametest/{java,resources} are this source set's DEFAULT dirs — do not
+        // redeclare them (a second srcDir of the same path duplicates every resource).
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+}
+
+neoForge {
+    version = project.neoforge_version
+
+    // The fabric accesswidener's 2-line PalettedContainer widening, AT dialect.
+    accessTransformers = project.files('src/main/resources/META-INF/accesstransformer.cfg')
+
+    addModdingDependenciesTo(sourceSets.gametest)
+
+    mods {
+        lss {
+            sourceSet sourceSets.main
+        }
+        lsstest {
+            sourceSet sourceSets.gametest
+        }
+    }
+
+    runs {
+        server {
+            server()
+            programArgument '--nogui'
+            // The gametest companion mod must not join plain server runs.
+            loadedMods = [mods.lss]
+        }
+        gameTestServer {
+            type = "gameTestServer"
+            // Filter to OUR tests: the 26.2 TEST_INSTANCE registry also carries every
+            // vanilla datapack test; unfiltered, the run executes hundreds of them.
+            programArguments.addAll('--tests', 'lsstest:*')
+            // GameTestServer is not a DedicatedServer — the same activation gate the
+            // fabric gametest JVMs open (see fabric/build.gradle).
+            systemProperty 'lss.test.integratedServer', 'true'
+        }
+    }
+}
+
+// Stage N (neoforge-support-plan.md §1.1): the xplat shared source set — the same
+// loader-neutral sources the fabric module compiles. THIS compile is the enforcement
+// of xplat's loader purity and of the same-FQN twin contract.
+sourceSets {
+    main {
+        java {
+            srcDir '../xplat/src/main/java'
+        }
+    }
+}
+
+// N-2 packaging decision (plan §2, pre-authorized fallback taken): Paper-style
+// SHADING, not jarJar — known-good in-repo, and the no-relocate rule applies
+// (relocating org.sqlite / com.github.luben breaks their native loaders). The
+// dedicated `shade` configuration keeps MDG's MC/NeoForge classpath out of the jar.
+configurations {
+    shade
+}
+
+configurations.all {
+    resolutionStrategy {
+        // common declares slf4j 2.0.18; MC 26.2's dependency graph STRICTLY pins
+        // 2.0.17. Force MC's version (API-compatible) — the runtime provider is the
+        // game's own slf4j anyway (same posture as the fabric/paper modules).
+        force 'org.slf4j:slf4j-api:2.0.17'
+    }
+}
+
+dependencies {
+    implementation project(':common')
+    shade project(':common')
+    implementation 'org.xerial:sqlite-jdbc:3.49.1.0'
+    shade 'org.xerial:sqlite-jdbc:3.49.1.0'
+    implementation 'com.github.luben:zstd-jni:1.5.7-3'
+    shade 'com.github.luben:zstd-jni:1.5.7-3'
+
+    testImplementation platform('org.junit:junit-bom:5.11.3')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    gametestImplementation project(':common')
+}
+
+processResources {
+    def props = [mod_version    : project.mod_version,
+                 minecraft_version: project.minecraft_version,
+                 neoforge_version : project.neoforge_version]
+    inputs.properties props
+    filesMatching('META-INF/neoforge.mods.toml') {
+        expand props
+    }
+}
+
+// Native strip lists — keep in sync with paper/build.gradle + fabric's slimStoreDepJars
+// (linux/win/mac × x64/arm64, + Linux-Musl for sqlite; zstd-jni has no musl natives).
+def storeNativeKeep = [
+    'org/sqlite/native/Linux/x86_64/', 'org/sqlite/native/Linux/aarch64/',
+    'org/sqlite/native/Linux-Musl/x86_64/', 'org/sqlite/native/Linux-Musl/aarch64/',
+    'org/sqlite/native/Windows/x86_64/', 'org/sqlite/native/Windows/aarch64/',
+    'org/sqlite/native/Mac/x86_64/', 'org/sqlite/native/Mac/aarch64/',
+    'linux/amd64/', 'linux/aarch64/', 'win/amd64/', 'win/aarch64/',
+    'darwin/x86_64/', 'darwin/aarch64/',
+]
+def storeNativeRoots = ['org/sqlite/native/', 'linux/', 'win/', 'darwin/', 'freebsd/', 'aix/']
+def storeNativeStrip = { el ->
+    def p = el.relativePath.pathString
+    storeNativeRoots.any { p.startsWith(it) } && !storeNativeKeep.any { p.startsWith(it) }
+}
+
+shadowJar {
+    configurations = [project.configurations.shade]
+    archiveClassifier = ''
+    mergeServiceFiles()
+    // Dev-only packages never ship (release_check pins this on every jar family).
+    exclude 'dev/vox/lss/benchmark/**'
+    // MC's game layer bundles slf4j (26.2 strictly pins 2.0.17) — shipping common's
+    // transitive copy is dead weight at best, a provider-binding hazard at worst
+    // (N-2 review; the paper shadowJar's exact excludes).
+    exclude 'org/slf4j/**'
+    exclude 'META-INF/maven/org.slf4j/**'
+    exclude storeNativeStrip
+    // zstd-jni's BSD-2 notice must accompany the natives we redistribute.
+    from(rootProject.file("LICENSE")) {
+        rename { "${it}_lod-server-support-neoforge" }
+    }
+    from(rootProject.file("THIRD-PARTY-NOTICES"))
+}
+
+jar {
+    archiveClassifier = 'slim'
+}
+
+build.dependsOn shadowJar
+
+test {
+    useJUnitPlatform()
+}

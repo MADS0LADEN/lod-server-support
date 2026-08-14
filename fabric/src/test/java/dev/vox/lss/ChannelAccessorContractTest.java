@@ -268,8 +268,8 @@ class ChannelAccessorContractTest {
         var yieldAttach = java.util.regex.Pattern.compile(
                 "withYieldLine\\(DiagnosticsFormatter\\.yieldDiagLineOrNull\\(\\s*"
                         + "config\\.lodYieldsToVanillaTransport", java.util.regex.Pattern.DOTALL);
-        String fabric = Files.readString(
-                Path.of("src/main/java/dev/vox/lss/networking/server/LSSServerCommands.java"));
+        String fabric = Files.readString(dev.vox.lss.testutil.SourcePaths.mainSource(
+                "dev/vox/lss/networking/server/LSSServerCommands.java"));
         assertTrue(yieldAttach.matcher(fabric).find(),
                 "LSSServerCommands must feed the LIVE config flag to yieldDiagLineOrNull");
         String paper = Files.readString(

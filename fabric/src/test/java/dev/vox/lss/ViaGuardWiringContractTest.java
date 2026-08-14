@@ -26,6 +26,13 @@ class ViaGuardWiringContractTest {
         return Files.readString(Path.of(path)).replaceAll("\\s+", " ");
     }
 
+    /** The shared receiver glue (xplat since N-2) — where the Via consult lives now. */
+    private static String normalizedGlue() throws Exception {
+        return Files.readString(dev.vox.lss.testutil.SourcePaths.mainSource(
+                "dev/vox/lss/networking/server/ServerReceiverGlue.java"))
+                .replaceAll("\\s+", " ");
+    }
+
     /** The composition: probe consulted ONLY behind the config flag, ternary to
      *  NO_SIGNAL. Matches both platforms' shapes (`config.` / `this.lssConfig.`). */
     private static final Pattern GATED_PROBE = Pattern.compile(
@@ -35,8 +42,7 @@ class ViaGuardWiringContractTest {
 
     @Test
     void fabricGatesTheProbeAndFeedsTheRealNativeProtocol() throws Exception {
-        String src = normalized(
-                "src/main/java/dev/vox/lss/networking/server/LSSServerNetworking.java");
+        String src = normalizedGlue();
         assertTrue(GATED_PROBE.matcher(src).find(),
                 "Fabric must consult the Via probe ONLY behind enableViaMismatchGuard"
                         + " (ternary to NO_SIGNAL) — an unconditional consult makes the"
@@ -71,14 +77,13 @@ class ViaGuardWiringContractTest {
     void theDenialPrecedesTheReplyOnBothPlatforms() throws Exception {
         // Order pin: the VIA_MISMATCH early return must come BEFORE any reply/register
         // dispatch — a denial placed after the reply leaks the SessionConfig frame.
-        for (String path : new String[]{
-                "src/main/java/dev/vox/lss/networking/server/LSSServerNetworking.java",
-                "../paper/src/main/java/dev/vox/lss/paper/LSSPaperPlugin.java"}) {
-            String src = normalized(path);
+        for (String src : new String[]{
+                normalizedGlue(),
+                normalized("../paper/src/main/java/dev/vox/lss/paper/LSSPaperPlugin.java")}) {
             int denial = src.indexOf("Outcome.VIA_MISMATCH");
             int reply = src.indexOf("decision.sendSessionConfig()");
             assertTrue(denial >= 0 && reply >= 0 && denial < reply,
-                    path + ": the VIA_MISMATCH check must precede the reply dispatch");
+                    "the VIA_MISMATCH check must precede the reply dispatch (glue or paper)");
         }
     }
 }
