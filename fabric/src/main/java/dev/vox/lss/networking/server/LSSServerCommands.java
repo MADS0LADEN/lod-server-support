@@ -77,7 +77,8 @@ class LSSServerCommands {
 
     private static int listSettings(CommandSourceStack source) {
         source.sendSuccess(() -> Component.literal(
-                "Runtime-settable keys (applied + persisted to lss-server-config.json):"), false);
+                "Runtime-settable keys (applied + persisted to "
+                        + dev.vox.lss.common.Brand.lowerShortName() + "-server-config.json):"), false);
         for (var line : dev.vox.lss.common.config.RuntimeSettings.listLines(LSSServerConfig.CONFIG)) {
             source.sendSuccess(() -> Component.literal("  " + line), false);
         }
@@ -165,8 +166,10 @@ class LSSServerCommands {
             return 0;
         }
         if (!service.invalidateStoreAllDimensions()) {
+            // Unreachable since the in-memory tier's deletion (a non-null store is always
+            // SQLite); kept as defensive armor with an honest message.
             source.sendFailure(Component.literal(
-                    "Invalidate-all requires the persistent store — this session degraded to the in-memory tier at boot (SQLite could not open; see the startup warning)"));
+                    "Invalidate-all requires the persistent SQLite store engine"));
             return 0;
         }
         source.sendSuccess(() -> Component.literal(
@@ -250,9 +253,9 @@ class LSSServerCommands {
                 // LIVE store mode, not the config's ask (review MINOR-3): a codec-probe
                 // degrade renders store=unavailable, never a lying store=memory h=0.
                 // enabled=false is an OFF store, not a degraded one — without that term
-                // a disabled server rendered store=unavailable, which formatToken
-                // documents as "requested but the codec native failed", sending admins
-                // after a zstd problem that does not exist (v0.9.0 final review).
+                // a disabled server rendered store=unavailable, which reads as the
+                // degraded-boot state (codec or SQLite-init failure), sending admins
+                // after a problem that does not exist (v0.9.0 final review).
                 !config.enabled
                         || dev.vox.lss.common.store.LodStoreMode.normalize(config.lodStore)
                                 == dev.vox.lss.common.store.LodStoreMode.OFF

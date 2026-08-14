@@ -366,6 +366,43 @@ class TransferRateGovernorTest {
                 "the oscillation stays below the rate-disengage threshold");
     }
 
+    @Test
+    void adoptFromCoversEveryStateFieldOrDocumentsTheReset() throws Exception {
+        // Final-review B-N3: a future governor field silently missing from adoptFrom
+        // would regress the manager-rebuild carry invisibly (the gate pin asserts only
+        // engaged + desired). Every instance field must be either COPIED by adoptFrom
+        // or on the documented reseed list (the interval accumulator + per-interval
+        // latches + the injectable clock).
+        var reseeded = java.util.Set.of(
+                "intervalSeeded", "intervalStartMillis", "intervalStartWireBytes",
+                "intervalStartColumns", "intervalStartDeclared", "awaitingAtStart",
+                "haltSeenThisInterval", "movementSeenThisInterval", "clock");
+        var src = new TransferRateGovernor();
+        int seed = 7;
+        for (var f : TransferRateGovernor.class.getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+            if (reseeded.contains(f.getName())) continue;
+            f.setAccessible(true);
+            Class<?> ty = f.getType();
+            if (ty == int.class) f.setInt(src, ++seed);
+            else if (ty == long.class) f.setLong(src, ++seed);
+            else if (ty == boolean.class) f.setBoolean(src, true);
+            else if (ty == double.class) f.setDouble(src, ++seed + 0.5);
+            else org.junit.jupiter.api.Assertions.fail("unhandled field type " + ty
+                    + " for '" + f.getName() + "' — extend adoptFrom AND this pin");
+        }
+        var dst = new TransferRateGovernor();
+        dst.adoptFrom(src);
+        for (var f : TransferRateGovernor.class.getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+            if (reseeded.contains(f.getName())) continue;
+            f.setAccessible(true);
+            org.junit.jupiter.api.Assertions.assertEquals(f.get(src), f.get(dst),
+                    "'" + f.getName() + "' must be copied by adoptFrom (or added to the"
+                            + " documented reseed list)");
+        }
+    }
+
     // ---- Vanilla-first (live round 5: the fly-then-stop desync) ----
 
     /** Engaged at ~300 KB/s with the missing floor learned at 20 (the view-edge ring). */

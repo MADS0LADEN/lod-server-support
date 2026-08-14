@@ -408,8 +408,8 @@ public class PaperRequestProcessingService {
                 wireCompressionLive = true;
             }
         }
-        // LOD store: memory tier for "memory", memory + SQLite for "full" — attached to
-        // both consumers BEFORE the processor starts / any submit. Environment resolved
+        // LOD store: the SQLite engine for "on"/"full" (the memory tier is deleted) —
+        // attached to both consumers BEFORE the processor starts / any submit. Environment resolved
         // eagerly on the construction thread (levels loaded at plugin enable); the
         // periodic re-sweep (lodStoreResweepSeconds) is PAPER's stale bound for its
         // unfired-event dirty gaps. A failed codec/native probe degrades to store-off
@@ -459,9 +459,8 @@ public class PaperRequestProcessingService {
                     storeRegistryFingerprint(server));
             lodStore = dev.vox.lss.common.store.LodStores.createOrNull(env);
             if (lodStore == null) {
-                LSSLogger.warn("lodStore=" + storeMode.configValue() + " requested but the "
-                        + dev.vox.lss.common.store.StoreCodec.NAME + " codec native cannot "
-                        + "load on this platform — running WITHOUT the LOD store");
+                // LodStores.createOrNull logged the per-cause warn (codec vs SQLite init —
+                // final-review A-M1: one shared message here misattributed SQLite failures).
             } else {
                 diskReader.attachStore(lodStore);
                 // C4: pre-migration wirefmt=19 store rows translate to the canonical

@@ -76,7 +76,8 @@ public final class FarPlayerBroadcastService {
      *  PremiumVanish/EssentialsX) through the snapshot instead; Fabric passes null —
      *  there is no cross-mod vanish convention on Fabric (recorded descope,
      *  v0.11.0-progress decisions log), so a Fabric vanish mod's players rely on the
-     *  exclude list / permission node. */
+     *  exclude LIST only (Fabric has no permission node — FabricFarPlayerSnapshots
+     *  hardcodes hidden=false; the lss./vss.farplayers.hidden nodes are Paper). */
     @FunctionalInterface
     public interface VanishBridge {
         boolean canSee(UUID viewer, UUID target);

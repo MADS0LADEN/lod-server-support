@@ -120,7 +120,7 @@ class PaperCommandsTest {
                 .thenReturn(mock(dev.vox.lss.common.store.LodStoreService.class));
         when(service.invalidateStoreAllDimensions()).thenReturn(false);
         assertTrue(run(commands(service, null), "store", "invalidate", "all"));
-        assertEquals(List.of("Invalidate-all requires the persistent store — this session degraded to the in-memory tier at boot (SQLite could not open; see the startup warning)"),
+        assertEquals(List.of("Invalidate-all requires the persistent SQLite store engine"),
                 messages);
     }
 

@@ -135,13 +135,8 @@ public final class LSSConstants {
      *  half-pooling would hand store-off servers pure downside on exactly the workloads
      *  where disk reads dominate (both gate reviews' convergent MAJOR). */
     public static final int AUTO_DISK_READ_GATE_DIVISOR = 2;
-    /** Transport-deference ceiling bounds (0 = OFF, the default — the AUTO mode that
-     *  briefly occupied 0 was deleted, adaptive-transfer-rate-plan.md; explicit
-     *  values are operator-FIXED entry-gate ceilings). The 64 KB floor only rules out
-     *  meaninglessly tiny values: under the surviving entry gate an oversized payload
-     *  still ships whole once {@code pending <= ceiling}, so a small fixed ceiling
-     *  cannot wedge on one legal payload. The transport YIELD needs no floor at all
-     *  (writability-gated; yield plan §1.2). */
+    /** Global bandwidth ceiling bound — same 1 GiB rationale as the per-player bound
+     *  above (bounds only what an admin deliberately types). */
     public static final long MAX_BYTES_PER_SECOND_GLOBAL_LIMIT = 1_073_741_824;
     public static final int MIN_CONCURRENT_GENERATIONS = 1;
     /** Global generation ceiling. Raised 256 -> 512 2026-08-02: WantSetBudgetInvariantTest

@@ -372,19 +372,19 @@ public abstract class ServerConfigBase extends JsonConfig {
      *
      * <p>Unknown values still normalize to "off" (a typo silently DISABLES the feature
      * instead of enabling a storage engine — predictable either way, and the config
-     * echo names the effective mode). "memory" remains one of those unknowns; the
-     * in-memory tier survives only as the SQLite-init degrade (see LodStores).
+     * echo names the effective mode). "memory" remains one of those unknowns — the
+     * in-memory tier itself is DELETED (2026-08-13); a failed SQLite init runs
+     * store-less (see LodStores).
      *
      * <p><b>Harness note:</b> the soak/benchmark stagings and gametest run dirs pin
      * this OFF explicitly (store scenarios excepted) — their law baselines and source
      * pins were calibrated store-off, and re-baselining them buys nothing.
      */
     public String lodStore = "off";
-    // NOTE: lodStoreMemoryMB is RETIRED (2026-08-02) along with the "memory" mode — the
-    // in-memory tier survives only as the boot-time degrade when SQLite cannot init, at
-    // a fixed budget (LodStores.DEGRADE_MAX_BYTES). GSON ignores the key on load and
-    // validate()'s next save drops it from the file, same as the retired
-    // syncOnLoadConcurrencyLimitPerPlayer.
+    // NOTE: lodStoreMemoryMB is RETIRED (2026-08-02) along with the "memory" mode, and
+    // the in-memory tier itself was DELETED 2026-08-13 (a failed SQLite init runs
+    // store-less). GSON ignores the key on load and validate()'s next save drops it
+    // from the file, same as the retired syncOnLoadConcurrencyLimitPerPlayer.
     /**
      * Periodic LOD-store freshness re-sweep (seconds; 0 = off). This is PAPER's stale
      * bound: its dirty detection is event-driven with documented unfired-event gaps

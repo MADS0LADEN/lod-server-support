@@ -40,6 +40,10 @@ class MoveRowGoldenTest {
         config.put("bytesPerSecondLimitGlobal", 62914560);
         config.put("lodDistanceChunks", 256);
         config.put("lodStore", "full");
+        // Historical fixture value: the key was deleted from the live config echo
+        // (2026-08-13) but stays in this map so the SHARED golden fixture
+        // (scripts/testdata/move-trace-rows.jsonl) needs no regeneration — the
+        // validator tolerates unknown config keys by design.
         config.put("outboundBufferCeilingKB", 0);
         config.put("lodYieldsToVanillaTransport", false);
         rows.add(MoveRow.boot("b0a1", 1754400000000L, 120, "0.10.0", "26.2",

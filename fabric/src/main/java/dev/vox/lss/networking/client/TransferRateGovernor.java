@@ -18,11 +18,12 @@ import java.util.function.LongSupplier;
  * engage, because the measured rate equals the demand or serve rate whenever the link
  * is not the bottleneck (review M1 — without the ping conjunct every walking player on
  * a healthy link would engage fleet-wide). The congestion signal is the client's own
- * tab-list ping against a rolling-min baseline; 26.2 broadcasts UPDATE_LATENCY every
- * 600 ticks (30 s) and smooths {@code (3·old+new)/4}, so the signal is coarse —
- * staleness only delays engagement (the safe direction), and the drain bias is the
- * DETERMINISTIC every-8th-kept-up variant because a ping-driven one would over-cut
- * for up to one refresh period after the queue actually drained.
+ * 1 Hz ping probe (live round 5 — the manager sends ServerboundPingRequestPacket and
+ * reads the debug-overlay ping logger; the tab-list ping, which 26.2 refreshes only
+ * every 600 ticks with {@code (3·old+new)/4} smoothing, survives as the no-sample
+ * fallback) against a rolling-min baseline, debounced over TWO consecutive qualifying
+ * intervals. The drain bias is the DETERMINISTIC every-4th-kept-up variant (live
+ * round 2) because a ping-driven one would over-cut after the queue actually drained.
  *
  * <p>All state is main-client-thread confined and dies with the session
  * ({@link #reset()} — the adaptive-cadence reset-family precedent). Intervals whose

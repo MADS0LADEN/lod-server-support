@@ -316,6 +316,9 @@ SERVER_MONOTONIC = (
     # drop, dedup-primary departure), healed by the client's 1 Hz re-declaration;
     # range_filtered = dropped by the Chebyshev ingress guard (the movement race).
     "service.superseded", "service.range_filtered",
+    # Send-pacer receipt (budget-stopped partial flush ticks) — attribution-only, but a
+    # counter, so monotonicity is free armor (final-review consistency note).
+    "service.paced_ticks",
     # Compressed columns (protocol 19, compressed-columns-implementation-plan.md §4):
     # wire_bytes = SHIPPED payload volume (zstd frames for capable sessions) — the
     # observed-bandwidth match next to the raw-denominated bytes_sent (law A2 stays
@@ -1001,14 +1004,18 @@ def evaluate_laws(ctx):
         violations += law_A6_client(run, csnaps)
 
     # B2 over raw series, armed by the scenario's bandwidth cap override — either
-    # spelling (the mb* keys are the canonical ones since 2026-08-08; bytes* are the
-    # legacy readers the mod honors forever).
-    cap = ctx.config.get("bytesPerSecondLimitGlobal")
-    if not (isinstance(cap, int) and not isinstance(cap, bool)):
-        mb = ctx.config.get("mbPerSecondLimitGlobal")
-        if isinstance(mb, (int, float)) and not isinstance(mb, bool):
-            cap = int(mb * 1024 * 1024)
-    if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
+    # spelling, with MB WINNING when both are present (final-review C-M3: this mirrors
+    # the mod's resolveBandwidthKeys ladder exactly; the checker preferring bytes would
+    # arm B2 at a value the server is not enforcing).
+    cap = None
+    mb = ctx.config.get("mbPerSecondLimitGlobal")
+    if isinstance(mb, (int, float)) and not isinstance(mb, bool):
+        cap = int(mb * 1024 * 1024)
+    if cap is None:
+        b = ctx.config.get("bytesPerSecondLimitGlobal")
+        if isinstance(b, int) and not isinstance(b, bool):
+            cap = b
+    if isinstance(cap, int) and cap > 0:
         violations += law_B2(snaps, cap)
 
     # Quiescent-pair windows. Client-law endpoints use each qpoint's BOUNDED at-or-before
@@ -3240,6 +3247,7 @@ def _srv(wall=1000, seg=0, over=None):
                         "duplicate_skips": 0, "queue_full": 0, "up_to_date": 0,
                         "in_memory": 0, "disk_resolved": 0, "gen_drained": 0,
                         "superseded": 0, "range_filtered": 0, "re_resolved": 0,
+                        "paced_ticks": 0,
                         "grace_skipped": 0, "miss_dropped": 0},
             "disk": {"submitted": 0, "completed": 0, "not_found": 0, "all_air": 0,
                      "errors": 0, "saturated": 0, "successful": 0, "pending": 0,

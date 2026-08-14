@@ -380,6 +380,11 @@ def check_vss_pair_fabric(lss_jar, vss_jar, problems):
     # sentence (the exact defect the rewrite exists to fix). Skipped when the jar has no
     # lang entry (synthetic selftest fixtures); the byte-copy loop cannot drop entries.
     LANG = "assets/lss/lang/en_us.json"
+    if LANG in _names(lss_jar) and LANG not in _names(vss_jar):
+        # Structurally impossible via the byte-copy loop; a hit means the resource
+        # moved and the build's rewrite keys on the old literal path.
+        problems.append(f"{vbase}: {LANG} present in the LSS jar but missing from the"
+                        " VSS jar — the lang rewrite and this pin key on that path")
     if LANG in _names(vss_jar):
         try:
             vlang = json.loads(_read(vss_jar, LANG))
@@ -398,7 +403,7 @@ def check_vss_pair_fabric(lss_jar, vss_jar, problems):
 # `name:` LEFT this list 2026-08-13 (XANTHA's release patch): the VSS plugin presents as
 # VoxyServerSide — check_vss_paper_identity pins the rebranded value instead, and the
 # data-folder fork it causes is documented there.
-VSS_PAPER_IDENTITY_PREFIXES = ("main:", "api-version:", "folia-supported:")
+VSS_PAPER_IDENTITY_PREFIXES = ("main:", "api-version:", "folia-supported:", "version:")
 
 
 def check_vss_pair_paper(lss_jar, vss_jar, problems):
@@ -631,7 +636,8 @@ def discover(problems, expected_version=None, root=ROOT):
         check_store_natives_paper(jar, problems)
         check_third_party_notices(jar, False, problems)
     # The vss jars ship to real users → identical safety gate, plus the identity guardrail
-    # that pins them as branded byte-copies (mod id `lss` / plugin name LodServerSupport),
+    # that pins them as branded byte-copies (mod id `lss`; plugin name VoxyServerSide since
+    # the 2026-08-13 rebrand),
     # plus a descriptor pair-diff against the LSS jar they were repackaged from (only the
     # branding fields may differ — and must). A vss jar without its LSS counterpart cannot
     # be pair-verified and is a failure: the repackage task guarantees the source jar exists.
@@ -1064,6 +1070,8 @@ def _selftest():
                 "version": "0.7.0", "entrypoints": {"main": ["dev.vox.lss.LSSMod"]},
                 "mixins": ["lss.mixins.json"], "icon": "assets/lss/icon.png"}),
             "assets/lss/icon.png": "PNG",
+            "assets/lss/lang/en_us.json": json.dumps(
+                {"lss.config.page": "LOD Server Support", "lss.x": "LSS toggles"}),
         })
         pair_ok_vfab = os.path.join(td, "pair-ok-vss-fabric.jar")
         _make_jar(pair_ok_vfab, {
@@ -1073,10 +1081,30 @@ def _selftest():
                 "mixins": ["lss.mixins.json"], "icon": "assets/lss/icon-vss.png"}),
             "assets/lss/icon.png": "PNG",
             "assets/lss/icon-vss.png": "PNG2",
+            "assets/lss/lang/en_us.json": json.dumps(
+                {"lss.config.page": "Voxy Server Side", "lss.x": "VSS toggles"}),
         })
         p = []
         check_vss_pair_fabric(pair_lss_fab, pair_ok_vfab, p)
         check(p == [], f"clean fabric pair flagged: {p}")
+
+        # a vss jar whose lang VALUES kept the LSS branding MUST fail (the V-M2 pin's
+        # catch side — a silently no-opped lang rewrite ships LSS-branded Sodium pages)
+        pair_nolang_vfab = os.path.join(td, "pair-nolang-vss-fabric.jar")
+        _make_jar(pair_nolang_vfab, {
+            "fabric.mod.json": json.dumps({
+                "id": "lss", "name": "Voxy Server Side", "description": "VSS.",
+                "version": "0.7.0", "entrypoints": {"main": ["dev.vox.lss.LSSMod"]},
+                "mixins": ["lss.mixins.json"], "icon": "assets/lss/icon-vss.png"}),
+            "assets/lss/icon.png": "PNG",
+            "assets/lss/icon-vss.png": "PNG2",
+            "assets/lss/lang/en_us.json": json.dumps(
+                {"lss.config.page": "LOD Server Support", "lss.x": "LSS toggles"}),
+        })
+        p = []
+        check_vss_pair_fabric(pair_lss_fab, pair_nolang_vfab, p)
+        check(any("still carries LSS branding" in m for m in p),
+              f"un-rebranded vss lang values not caught: {p}")
 
         # a vss descriptor whose NON-branding field drifted (entrypoints fork) MUST fail
         pair_forked_vfab = os.path.join(td, "pair-forked-vss-fabric.jar")
