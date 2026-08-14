@@ -1,6 +1,10 @@
 package dev.vox.lss.common.store;
 
+import dev.vox.lss.common.Brand;
 import dev.vox.lss.common.LSSLogger;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 /**
  * Factory for the LOD store (both platform services call here). {@code lodStore} has
@@ -27,6 +31,21 @@ import dev.vox.lss.common.LSSLogger;
  * a fixed budget with no knob.
  */
 public final class LodStores {
+
+    /**
+     * Brand-preferred LOD-store directory under the world root ({@code <brand>-lod}),
+     * adopting the OTHER brand's existing directory when the preferred one is absent —
+     * a jar swap keeps its (multi-GB, rebuildable-but-expensive) store the same way the
+     * configs adopt their cross-brand file. (XANTHA's v0.10.0 VSS release patch used a
+     * bare brand resolve; the adoption arm is the swap-continuity addition.)
+     */
+    public static Path brandedStoreDir(Path worldRoot) {
+        boolean vss = "VSS".equalsIgnoreCase(Brand.shortName());
+        Path preferred = worldRoot.resolve((vss ? "vss" : "lss") + "-lod");
+        Path other = worldRoot.resolve((vss ? "lss" : "vss") + "-lod");
+        if (!Files.isDirectory(preferred) && Files.isDirectory(other)) return other;
+        return preferred;
+    }
 
     private LodStores() {}
 

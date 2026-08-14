@@ -27,7 +27,14 @@ permissions:
     description: Access to LSS admin commands
     default: op
   # Far players (v0.11.0 E1): server-side privacy lever — holders are never served as
-  # far players regardless of the farPlayers mode (FARP §3.2).
+  # far players regardless of the farPlayers mode (FARP §3.2). BOTH brand spellings are
+  # declared (default false) and the enforcement honors either: Bukkit resolves an
+  # UNDECLARED node to the op default, so a single-brand declaration plus a cross-brand
+  # check would silently hide every op — and declaring both keeps the privacy grant
+  # working across an LSS<->VSS jar swap.
   lss.farplayers.hidden:
     description: Players with this permission are never shown as far players
+    default: false
+  vss.farplayers.hidden:
+    description: Players with this permission are never shown as far players (VSS spelling)
     default: false

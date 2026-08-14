@@ -61,7 +61,7 @@ class PaperConfigLoadTest {
         Path dataFolder = tempDir.resolve("LodServerSupport"); // first run: folder doesn't exist yet
         PaperConfig c = PaperConfig.load(dataFolder);
 
-        assertEquals(300, c.lodDistanceChunks);
+        assertEquals(512, c.lodDistanceChunks);
         assertFalse(DEFAULT_EVENTS.isEmpty(), "compiled updateEvents defaults must not be empty");
         assertEquals(DEFAULT_EVENTS, c.updateEvents);
         assertTrue(Files.isRegularFile(dataFolder.resolve(FILE)));
@@ -95,7 +95,7 @@ class PaperConfigLoadTest {
 
         PaperConfig c = assertDoesNotThrow(() -> PaperConfig.load(dataFolder));
 
-        assertEquals(300, c.lodDistanceChunks); // defaults, not the half-written value
+        assertEquals(512, c.lodDistanceChunks); // defaults, not the half-written value
         assertEquals(DEFAULT_EVENTS, c.updateEvents);
         assertEquals(broken, Files.readString(dataFolder.resolve(FILE)));
     }
@@ -106,7 +106,7 @@ class PaperConfigLoadTest {
 
         PaperConfig c = assertDoesNotThrow(() -> PaperConfig.load(dataFolder));
 
-        assertEquals(300, c.lodDistanceChunks);
+        assertEquals(512, c.lodDistanceChunks);
         assertEquals(DEFAULT_EVENTS, c.updateEvents);
         assertEquals("", Files.readString(dataFolder.resolve(FILE)));
     }
@@ -204,7 +204,7 @@ class PaperConfigLoadTest {
         PaperConfig c = assertDoesNotThrow(() -> PaperConfig.load(dataFolder));
 
         assertEquals(DEFAULT_EVENTS, c.updateEvents);
-        assertEquals(300, c.lodDistanceChunks); // the valid customization is reverted with the rest
+        assertEquals(512, c.lodDistanceChunks); // the valid customization is reverted with the rest
         assertEquals(broken, Files.readString(dataFolder.resolve(FILE)));
 
         List<Class<?>> registered = new ArrayList<>();

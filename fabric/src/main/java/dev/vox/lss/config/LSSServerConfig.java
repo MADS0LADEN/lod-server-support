@@ -5,5 +5,5 @@ import net.fabricmc.loader.api.FabricLoader;
 
 public class LSSServerConfig extends ServerConfigBase {
     public static final LSSServerConfig CONFIG =
-            load(LSSServerConfig.class, FILE_NAME, FabricLoader.getInstance().getConfigDir());
+            load(LSSServerConfig.class, serverConfigCandidates(), FabricLoader.getInstance().getConfigDir());
 }

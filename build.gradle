@@ -1,2 +1,13 @@
 // Root project — no source code here.
 // Subprojects: common (pure Java), fabric (Fabric mod), paper (Paper plugin)
+
+// Convenience aggregate for the Voxy Server Side branded pair (XANTHA's publish flow):
+//   ./gradlew vssJars   ->  fabric/build/libs/voxy-server-side-fabric*.jar
+//                           paper/build/libs/voxy-server-side-paper*.jar
+// Each platform's vssJar is a byte-copy rebrand of the LSS jar (wire-identical; see the
+// vssJar tasks in fabric/ and paper/ build.gradle). Version-stamped names: CI=true.
+tasks.register('vssJars') {
+    description = 'Builds both Voxy Server Side branded jars (Fabric + Paper).'
+    group = 'build'
+    dependsOn ':fabric:vssJar', ':paper:vssJar'
+}

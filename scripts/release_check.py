@@ -333,23 +333,25 @@ def check_vss_fabric_identity(jar, problems):
 
 
 def check_vss_paper_identity(jar, problems):
-    """The VSS Paper jar is a branded byte-copy of the LSS shadowJar. `name: LodServerSupport`
-    IS the plugin identity + config-folder name and MUST stay verbatim — only the top-level
-    description is rebranded (Paper plugins carry no display name/icon distinct from `name`)."""
+    """The VSS Paper jar is a branded byte-copy of the LSS shadowJar. Since 2026-08-13
+    (XANTHA's release patch) the plugin NAME rebrands to VoxyServerSide — the data folder
+    deliberately forks to plugins/VoxyServerSide/ (a Paper-side jar swap starts a fresh
+    config folder; the filename candidates only adopt within one folder). main/api-version/
+    folia-supported stay verbatim — the identity + wire contract."""
     base = os.path.basename(jar)
     try:
         yml = _read(jar, "plugin.yml")
     except KeyError:
         return  # check_paper_jar already flags a missing plugin.yml
-    if not re.search(r"^name:\s*LodServerSupport\s*$", yml, re.MULTILINE):
-        problems.append(f"{base}: vss Paper jar plugin name must stay 'LodServerSupport' "
-                        "— forking it breaks LSS/VSS interchangeability + the config folder")
+    if not re.search(r"^name:\s*VoxyServerSide\s*$", yml, re.MULTILINE):
+        problems.append(f"{base}: vss Paper jar plugin name must be 'VoxyServerSide' "
+                        "(the name rebrand is part of the VSS presentation since 2026-08-13)")
 
 
 # fabric.mod.json fields the VSS rebrand MAY touch; everything else must be byte-equal to the
 # LSS jar's descriptor (the build comments in fabric/build.gradle claim this invariant — this
 # check enforces it, so a future vssJar edit can't silently fork entrypoints/mixins/depends).
-VSS_FABRIC_ALLOWED_DIFF = {"name", "description", "icon", "contact"}
+VSS_FABRIC_ALLOWED_DIFF = {"name", "description", "icon", "contact", "authors"}
 
 
 def check_vss_pair_fabric(lss_jar, vss_jar, problems):
@@ -376,16 +378,17 @@ def check_vss_pair_fabric(lss_jar, vss_jar, problems):
 
 
 # plugin.yml lines that are the identity + wire contract: the VSS rebrand must leave every
-# one of them byte-identical to the LSS jar (rebranding them would break interchangeability,
-# the config-folder name, or — for a client on the other brand — nothing on the wire, but the
-# plugin identity a server operator depends on). `main:` also pins the package/class names.
-VSS_PAPER_IDENTITY_PREFIXES = ("name:", "main:", "api-version:", "folia-supported:")
+# one of them byte-identical to the LSS jar. `main:` also pins the package/class names.
+# `name:` LEFT this list 2026-08-13 (XANTHA's release patch): the VSS plugin presents as
+# VoxyServerSide — check_vss_paper_identity pins the rebranded value instead, and the
+# data-folder fork it causes is documented there.
+VSS_PAPER_IDENTITY_PREFIXES = ("main:", "api-version:", "folia-supported:")
 
 
 def check_vss_pair_paper(lss_jar, vss_jar, problems):
     """The VSS Paper jar rebrands plugin.yml's DISPLAY + LOCAL-command surface only. Line
     count must be unchanged (every rewrite is in-place). The identity/wire lines
-    (name/main/api-version/folia) must be byte-identical. And the rebrand must actually have
+    (main/api-version/folia; name rebrands since 2026-08-13) must be byte-identical. And the rebrand must actually have
     happened: the VSS jar carries vsslod / vss.admin / the Voxy description and NONE of the
     LSS tokens; the LSS jar carries the LSS tokens. The command name + permission node are
     LOCAL (never on the wire), so this rebrand does not affect LSS<->VSS compatibility."""
@@ -424,7 +427,10 @@ def check_vss_pair_paper(lss_jar, vss_jar, problems):
                             "(replaceFirst silently no-opped) — VSS would show the LSS "
                             "description / Modrinth link")
     # The rebrand must have swapped every LSS token for its VSS counterpart.
-    for tok in ("lsslod", "lss.admin", "lss.farplayers.hidden",
+    # lss.farplayers.hidden is deliberately NOT in this list: BOTH brand spellings ship
+    # in BOTH jars since 2026-08-13 (Bukkit's undeclared-node op default made the rename
+    # + cross-brand enforcement silently hide ops) — see plugin.yml + the vssJar comment.
+    for tok in ("lsslod", "lss.admin",
                 "LOD Server Support admin", "Access to LSS admin"):
         if tok not in ltext:
             problems.append(f"{vbase}: LSS plugin.yml is missing expected token {tok!r} "

@@ -13,14 +13,25 @@ import java.util.List;
 public abstract class ServerConfigBase extends JsonConfig {
     protected static final String FILE_NAME = "lss-server-config.json";
 
+    /** Brand-preferred server-config filenames ({@code vss-server-config.json} first on a
+     *  VSS jar) with the other brand's file as the adoption fallback — the migration story
+     *  the old brand-INVARIANT rule demanded: {@code JsonConfig.load} adopts whichever file
+     *  EXISTS as the save target, so an LSS<->VSS jar swap keeps its config, and only a
+     *  genuinely fresh install creates the brand's own file. A METHOD, not a static field:
+     *  the candidate order must read the brand AFTER the platform's Brand.load, and a
+     *  class-init-time field would freeze whatever the classloading order happened to see.
+     *  (Folded from XANTHA's v0.10.0 VSS release patch, 2026-08-13.) */
+    protected static String[] serverConfigCandidates() {
+        return brandedConfigCandidates("server");
+    }
+
     public boolean enabled = true;
-    /** LOD radius in chunks. 300 by user decision 2026-08-12 (v0.11.0 stage A) — a
-     *  middle landing after 256 → 512 → 300 (the 2026-08-08 rework's 512 was generous
-     *  but sized the default workload/disk footprint above what a typical server
-     *  wants out of the box). Note what scales with it — the timestamp cache (see
+    /** LOD radius in chunks. Back to 512 by user decision 2026-08-13 (reverting the
+     *  2026-08-12 stage-A cut to 300 — history: 256 → 512 (2026-08-08 rework) → 300 →
+     *  512). Note what scales with it — the timestamp cache (see
      *  effectiveTimestampCacheMB, AUTO follows this automatically) and, with the
      *  store on (a fresh install's default), the warmed disk footprint. */
-    public int lodDistanceChunks = 300;
+    public int lodDistanceChunks = 512;
     /**
      * Per-player bandwidth cap. Went 20 -> 50 -> 25 MiB on 2026-08-02, 25 -> 15 MiB on
      * 2026-08-05 (v0.9.1), then 15 -> 25 MiB on 2026-08-08 (all user decisions; the
@@ -643,12 +654,11 @@ public abstract class ServerConfigBase extends JsonConfig {
 
     @Override
     protected String getFileName() {
-        // Deliberately brand-INVARIANT: both LSS and VSS servers use lss-server-config.json.
-        // Unlike the client config (LSSClientConfig, which is brand-driven via
-        // brandedConfigCandidates), the server config was never brand-specific, so keeping one
-        // shared name is what makes an LSS<->VSS server jar swap trivially keep its config. Do
-        // NOT route this through brandedConfigCandidates("server") without a migration story.
-        return FILE_NAME;
+        // Brand-preferred since 2026-08-13 (XANTHA's release patch): the candidates
+        // mechanism IS the migration story the old brand-invariant comment demanded —
+        // an existing lss-server-config.json is adopted (read AND written) by a VSS jar,
+        // so a jar swap keeps its config; only a fresh VSS install creates vss-*.
+        return serverConfigCandidates()[0];
     }
 
     /** MiB — the mb* bandwidth keys' unit. */

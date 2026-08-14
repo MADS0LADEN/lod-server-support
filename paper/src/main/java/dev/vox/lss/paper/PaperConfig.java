@@ -86,6 +86,6 @@ public class PaperConfig extends ServerConfigBase {
     }
 
     public static PaperConfig load(Path dataFolder) {
-        return load(PaperConfig.class, FILE_NAME, dataFolder);
+        return load(PaperConfig.class, serverConfigCandidates(), dataFolder);
     }
 }

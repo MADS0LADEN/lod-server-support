@@ -27,6 +27,7 @@ research/
 bin/
 
 benchmark-results/
+compress-gate-results/
 benchmark-worlds/
 benchmark-compare-results/
 soak-results/

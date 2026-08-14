@@ -30,6 +30,17 @@ class ConfigBrandCandidatesTest {
     }
 
     @Test
+    void serverKindFollowsTheBrandOrderToo() {
+        // The server config joined the branded-candidates mechanism 2026-08-13 (XANTHA's
+        // release patch): a VSS server prefers vss-server-config.json and adopts an
+        // existing lss- file (the load/adopt mechanism is pinned in JsonConfigLoadTest).
+        Brand.apply("VSS", "Voxy Server Side", "vss", "vsslod");
+        assertArrayEquals(
+                new String[]{"vss-server-config.json", "lss-server-config.json"},
+                Probe.candidates("server"));
+    }
+
+    @Test
     void lssBrandPrefersItsOwnFileThenFallsBackToVss() {
         Brand.apply("LSS", "LOD Server Support", "lss", "lsslod");
         assertArrayEquals(

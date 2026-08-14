@@ -47,7 +47,6 @@ public abstract class AbstractChunkDiskReader {
     private final LogThrottle timeoutWarn = new LogThrottle(SATURATION_WARN_INTERVAL_MS);
     // Gate refusals are the same self-healing drop class — same aggregation; the message
     // names the remedy (the operator signal the gate plan requires).
-    private final LogThrottle gateWarn = new LogThrottle(SATURATION_WARN_INTERVAL_MS);
 
     // Disk-read concurrency gate (disk-read-concurrency-gate-plan.md): bounds the
     // EXPENSIVE phase only — store hits are served before it. Constructed at pool size
@@ -575,18 +574,14 @@ public abstract class AbstractChunkDiskReader {
             // check let N workers pass at cap-1 concurrently, admitting up to N-1 extras).
             if (this.gateParkedCount.incrementAndGet() > this.gateParkCapacity) {
                 this.gateParkedCount.decrementAndGet();
+                // DELIBERATELY LOG-FREE (2026-08-13, operator-log-hygiene decision — the
+                // overflow WARN fired on a live server and repeated on its throttle
+                // interval): overflow is RACE ARMOR (submissions already in flight when
+                // the park filled), self-heals by re-declaration ≤ 1 s, and is fully
+                // observable as the always-rendered `gated=` diag token / the exporters'
+                // `disk.gated` counter. The actionable capacity signal is the LATCHED
+                // gate-stop WARN on the router-retention path, not this race.
                 this.diag.recordGated();
-                long refused = this.gateWarn.recordAndTryAcquire(System.nanoTime() / 1_000_000);
-                if (refused > 0) {
-                    // Amendment 2: overflow is RACE ARMOR now (submissions already in
-                    // flight when the park filled) — the router's retention conjunct
-                    // holds sustained pressure upstream, so no capacity remedy here;
-                    // that advice lives on the latched gate-stop WARN.
-                    LSSLogger.warn("Disk read gate park overflowed (read_gate="
-                            + this.readGate.capacity() + "/" + this.readGate.capacity()
-                            + ", park full): " + refused + " read(s) dropped since the last"
-                            + " warning — clients re-request automatically");
-                }
                 addResult(playerUuid, ChunkReadResult.saturated(playerUuid, chunkX, chunkZ, dimension, submissionOrder));
                 return;
             }

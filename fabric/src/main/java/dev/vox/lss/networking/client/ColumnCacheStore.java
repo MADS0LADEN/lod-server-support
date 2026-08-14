@@ -77,7 +77,14 @@ public class ColumnCacheStore {
     static Path resolveCacheRoot(Path configDir, Path gameDir) {
         Path legacy = configDir.resolve("lss").resolve("cache");
         if (Files.isDirectory(legacy)) return legacy;
-        return gameDir.resolve(".lss").resolve("cache");
+        // Brand-preferred dot-dir (.vss on a VSS jar) with cross-brand adoption — a jar
+        // swap keeps the populated cache instead of orphaning it (the same adoption rule
+        // as the branded config candidates).
+        boolean vss = "VSS".equalsIgnoreCase(Brand.shortName());
+        Path preferred = gameDir.resolve(vss ? ".vss" : ".lss").resolve("cache");
+        Path other = gameDir.resolve(vss ? ".lss" : ".vss").resolve("cache");
+        if (!Files.isDirectory(preferred) && Files.isDirectory(other)) return other;
+        return preferred;
     }
 
     /** The resolved root — package-visible for the tests that used to rebuild it by hand. */
