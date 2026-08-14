@@ -71,7 +71,8 @@ final class ClientNetTrace {
      * {@link ClientTraceLog#enabled()}. Main client thread only.
      */
     static void maybeEmit(Minecraft mc, LocalPlayer player, ClientLevel level, int viewDistance,
-                          int queueSize, long queueBytes, int ingestBacklog, int inFlight) {
+                          int queueSize, long queueBytes, int ingestBacklog, int inFlight,
+                          long governedBps, int governedCols, double rttP50, double rttP95) {
         long now = System.currentTimeMillis();
         if (now < nextEmitMs) return;
         nextEmitMs = now + INTERVAL_MS;
@@ -109,7 +110,15 @@ final class ClientNetTrace {
                 + ",\"qb\":" + queueBytes
                 + ",\"ingest\":" + ingestBacklog
                 + ",\"inflight\":" + inFlight
-                + ",\"spd\":" + String.format(java.util.Locale.ROOT, "%.2f", speedPerTick * 20.0));
+                + ",\"spd\":" + String.format(java.util.Locale.ROOT, "%.2f", speedPerTick * 20.0)
+                // The transfer governor's state in the same timeline (live round 3's
+                // instrument): gov=0 means unengaged; rtt_* is LSS's own
+                // declaration->first-answer RTT (1-4 Hz sampled — the highest-frequency
+                // latency probe on a warm store, where server processing is ~20 us).
+                + ",\"gov\":" + governedBps
+                + ",\"gov_r\":" + governedCols
+                + ",\"rtt_p50\":" + String.format(java.util.Locale.ROOT, "%.1f", rttP50)
+                + ",\"rtt_p95\":" + String.format(java.util.Locale.ROOT, "%.1f", rttP95));
 
         sendPingProbe(mc);
     }
