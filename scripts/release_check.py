@@ -1013,12 +1013,12 @@ def _selftest():
         check_fabric_jar(leaky_vfab, p)
         check(any("benchmark" in m for m in p), "vss jar dev-code leak not caught by shared gate")
 
-        # A clean vss Paper jar: name STILL LodServerSupport → passes both gates.
+        # A clean vss Paper jar: name VoxyServerSide (the 2026-08-13 rebrand) → passes.
         good_vpap = os.path.join(td, "voxy-server-side-paper.jar")
         _make_jar(good_vpap, {
-            "plugin.yml": ("name: LodServerSupport\nversion: 0.7.0\n"
+            "plugin.yml": ("name: VoxyServerSide\nversion: 0.7.0\n"
                            "folia-supported: true\n"
-                           "description: Server-side backend for Voxy...\n"),
+                           "description: Render distant Voxy LODs on servers\n"),
             "dev/vox/lss/paper/LSSPaperPlugin.class": "x",
             "dev/vox/lss/common/PositionUtil.class": "x",
         }, manifest="Manifest-Version: 1.0\npaperweight-mappings-namespace: mojang\n")
@@ -1027,18 +1027,18 @@ def _selftest():
         check_vss_paper_identity(good_vpap, p)
         check(p == [], f"clean vss paper jar flagged: {p}")
 
-        # A vss Paper jar whose plugin name was forked MUST fail — that IS the config-folder
-        # + plugin identity, and forking it breaks interchangeability.
-        forked_vpap = os.path.join(td, "voxy-server-side-paper-forked.jar")
-        _make_jar(forked_vpap, {
-            "plugin.yml": "name: VoxyServerSide\nversion: 0.7.0\n",
+        # A vss Paper jar that KEPT the LSS plugin name MUST fail — the rebrand silently
+        # no-opped (the pre-2026-08-13 shape, now the regression direction).
+        unrenamed_vpap = os.path.join(td, "voxy-server-side-paper-unrenamed.jar")
+        _make_jar(unrenamed_vpap, {
+            "plugin.yml": "name: LodServerSupport\nversion: 0.7.0\n",
             "dev/vox/lss/paper/LSSPaperPlugin.class": "x",
             "dev/vox/lss/common/PositionUtil.class": "x",
         }, manifest="Manifest-Version: 1.0\npaperweight-mappings-namespace: mojang\n")
         p = []
-        check_vss_paper_identity(forked_vpap, p)
-        check(any("must stay 'LodServerSupport'" in m for m in p),
-              f"forked vss plugin name not caught: {p}")
+        check_vss_paper_identity(unrenamed_vpap, p)
+        check(any("must be 'VoxyServerSide'" in m for m in p),
+              f"un-renamed vss plugin name not caught: {p}")
 
         # ---- VSS≡LSS pair checks: only branding fields may differ, and must ----
         pair_lss_fab = os.path.join(td, "pair-lss-fabric.jar")
@@ -1107,6 +1107,7 @@ def _selftest():
                           "main: dev.vox.lss.paper.LSSPaperPlugin\n"
                           "api-version: '26.2'\n"
                           "description: LSS plugin.\n"
+                          "author: VoX\n"
                           "website: https://modrinth.com/plugin/lod-server-support\n"
                           "commands:\n  lsslod:\n"
                           "    description: LOD Server Support admin commands\n"
@@ -1115,19 +1116,27 @@ def _selftest():
                           "permissions:\n  lss.admin:\n"
                           "    description: Access to LSS admin commands\n"
                           "    default: op\n"
+                          # BOTH brand spellings ship in BOTH jars (2026-08-13) — the
+                          # undeclared-node op default made a single-brand rename unsafe.
                           "  lss.farplayers.hidden:\n"
                           "    description: hidden\n"
+                          "    default: false\n"
+                          "  vss.farplayers.hidden:\n"
+                          "    description: hidden (VSS spelling)\n"
                           "    default: false\n")
-        # Mirror vssJar's exact rewrites.
+        # Mirror vssJar's exact rewrites (2026-08-13 shape: name/author rebrand too; the
+        # farplayers node is deliberately NOT renamed — both spellings ship in both jars).
         VSS_PLUGIN_YML = (LSS_PLUGIN_YML
-            .replace("description: LSS plugin.", "description: VSS plugin.", 1)
+            .replace("name: LodServerSupport", "name: VoxyServerSide", 1)
+            .replace("description: LSS plugin.",
+                     "description: Render distant Voxy LODs on servers", 1)
+            .replace("author: VoX", "author: Xantha, VoX", 1)
             .replace("website: https://modrinth.com/plugin/lod-server-support",
                      "website: https://modrinth.com/plugin/voxy-server-side", 1)
             .replace("lsslod", "vsslod")
             .replace("LOD Server Support admin commands", "Voxy Server Side admin commands")
             .replace("Access to LSS admin commands", "Access to VSS admin commands")
-            .replace("lss.admin", "vss.admin")
-            .replace("lss.farplayers.hidden", "vss.farplayers.hidden"))
+            .replace("lss.admin", "vss.admin"))
         pair_lss_pap = os.path.join(td, "pair-lss-paper.jar")
         _make_jar(pair_lss_pap, {"plugin.yml": LSS_PLUGIN_YML})
         pair_ok_vpap = os.path.join(td, "pair-ok-vss-paper.jar")
@@ -1153,10 +1162,11 @@ def _selftest():
               and any("missing expected VSS token 'vsslod'" in m for m in p),
               f"paper partial rebrand not caught: {p}")
 
-        # rebranding an IDENTITY line (plugin name / config-folder name) MUST fail
+        # rebranding an IDENTITY line (main: — the package/class contract) MUST fail
         pair_idname_vpap = os.path.join(td, "pair-idname-vss-paper.jar")
         _make_jar(pair_idname_vpap, {"plugin.yml": VSS_PLUGIN_YML.replace(
-            "name: LodServerSupport", "name: VoxyServerSide", 1)})
+            "main: dev.vox.lss.paper.LSSPaperPlugin",
+            "main: dev.vox.vss.paper.VSSPaperPlugin", 1)})
         p = []
         check_vss_pair_paper(pair_lss_pap, pair_idname_vpap, p)
         check(any("identity line" in m for m in p),
@@ -1174,7 +1184,8 @@ def _selftest():
               f"paper website no-op not caught: {p}")
         pair_nodesc_vpap = os.path.join(td, "pair-nodesc-vss-paper.jar")
         _make_jar(pair_nodesc_vpap, {"plugin.yml": VSS_PLUGIN_YML.replace(
-            "description: VSS plugin.", "description: LSS plugin.", 1)})
+            "description: Render distant Voxy LODs on servers",
+            "description: LSS plugin.", 1)})
         p = []
         check_vss_pair_paper(pair_lss_pap, pair_nodesc_vpap, p)
         check(any("'description:' line was not rebranded" in m for m in p),
@@ -1346,21 +1357,26 @@ def _selftest():
                   "main: dev.vox.lss.paper.LSSPaperPlugin\napi-version: '26.2'\n"
                   "folia-supported: true\n"
                   "description: LSS plugin.\n"
+                  "author: VoX\n"
                   "website: https://modrinth.com/plugin/lod-server-support\n"
                   "commands:\n  lsslod:\n"
                   "    description: LOD Server Support admin commands\n"
                   "    usage: /lsslod <stats|diag>\n    permission: lss.admin\n"
                   "permissions:\n  lss.admin:\n"
                   "    description: Access to LSS admin commands\n    default: op\n"
-                  "  lss.farplayers.hidden:\n    description: hidden\n    default: false\n")
+                  "  lss.farplayers.hidden:\n    description: hidden\n    default: false\n"
+                  "  vss.farplayers.hidden:\n    description: hidden\n    default: false\n")
+        # The 2026-08-13 rewrite shape: name/author rebrand; farplayers nodes NOT renamed.
         PY_VSS = (PY_LSS
-                  .replace("description: LSS plugin.", "description: VSS plugin.", 1)
+                  .replace("name: LodServerSupport", "name: VoxyServerSide", 1)
+                  .replace("description: LSS plugin.",
+                           "description: Render distant Voxy LODs on servers", 1)
+                  .replace("author: VoX", "author: Xantha, VoX", 1)
                   .replace("plugin/lod-server-support", "plugin/voxy-server-side", 1)
                   .replace("lsslod", "vsslod")
                   .replace("LOD Server Support admin commands", "Voxy Server Side admin commands")
                   .replace("Access to LSS admin commands", "Access to VSS admin commands")
-                  .replace("lss.admin", "vss.admin")
-            .replace("lss.farplayers.hidden", "vss.farplayers.hidden"))
+                  .replace("lss.admin", "vss.admin"))
         BRAND_LSS = ("shortName=LSS\ndisplayName=LOD Server Support\n"
                      "clientCommand=lss\nserverCommand=lsslod\n")
         BRAND_VSS = ("shortName=VSS\ndisplayName=Voxy Server Side\n"
