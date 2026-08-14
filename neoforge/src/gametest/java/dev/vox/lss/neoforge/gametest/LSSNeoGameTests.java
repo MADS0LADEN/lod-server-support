@@ -158,16 +158,21 @@ public final class LSSNeoGameTests {
         helper.assertTrue(service != null, "service must be up");
         var player = helper.makeMockServerPlayerInLevel();
         List<SessionConfigS2CPayload> replies = new ArrayList<>();
-        ServerReceiverGlue.handleHandshake(
-                new HandshakeC2SPayload(LSSConstants.PROTOCOL_VERSION,
-                        LSSConstants.CAPABILITY_VOXEL_COLUMNS),
-                player, service, replies::add);
-        helper.assertTrue(replies.size() == 1, "a v20 handshake must reply the SessionConfig");
-        helper.assertTrue(replies.get(0).protocolVersion() == LSSConstants.PROTOCOL_VERSION,
-                "the reply must echo the native protocol");
-        helper.assertTrue(service.getPlayers().containsKey(player.getUUID()),
-                "a v20 consumer handshake must register the player");
-        service.removePlayer(player.getUUID());
+        try {
+            ServerReceiverGlue.handleHandshake(
+                    new HandshakeC2SPayload(LSSConstants.PROTOCOL_VERSION,
+                            LSSConstants.CAPABILITY_VOXEL_COLUMNS),
+                    player, service, replies::add);
+            helper.assertTrue(replies.size() == 1, "a v20 handshake must reply the SessionConfig");
+            helper.assertTrue(replies.get(0).protocolVersion() == LSSConstants.PROTOCOL_VERSION,
+                    "the reply must echo the native protocol");
+            helper.assertTrue(service.getPlayers().containsKey(player.getUUID()),
+                    "a v20 consumer handshake must register the player");
+        } finally {
+            // Failure-path ghost guard (N-2 review NIT): the mock must never stay
+            // registered in the LIVE service past this test.
+            service.removePlayer(player.getUUID());
+        }
         helper.assertTrue(!service.getPlayers().containsKey(player.getUUID()),
                 "removePlayer must clean the registration up");
         helper.succeed();
@@ -251,12 +256,20 @@ public final class LSSNeoGameTests {
                 case 1 -> {
                     var result = reader.getPlayerQueue(readerId).poll();
                     helper.assertTrue(result != null, "waiting for the disk read result");
+                    // Assert BEFORE shutdown so a real read failure names itself instead
+                    // of surfacing as a poll-timeout (N-2 review NIT; also restores the
+                    // fabric original's saturation assert).
+                    boolean notFound = result.notFound();
+                    boolean saturated = result.saturated();
+                    byte[] bytes = result.sectionBytes();
                     reader.shutdown();
-                    helper.assertTrue(!result.notFound(),
+                    helper.assertTrue(!notFound,
                             "generated chunk must exist on disk after unload");
-                    helper.assertTrue(result.sectionBytes() != null,
+                    helper.assertTrue(!saturated,
+                            "single read on a fresh reader must not saturate");
+                    helper.assertTrue(bytes != null,
                             "superflat chunk must have non-air content on disk");
-                    diskBytes.set(result.sectionBytes());
+                    diskBytes.set(bytes);
                     step.set(2);
                     helper.assertTrue(false, "disk bytes captured, reloading chunk");
                 }

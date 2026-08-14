@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -76,6 +77,16 @@ class NeoForgeModuleContractTest {
                         + " and both WireParityTest censuses");
         assertEquals(6, count(src, Pattern.compile("playToClient\\(")),
                 "exactly the 6 S2C channels");
+        // CROSS-LOADER census (N-2 review): the registrar's total must track the shared
+        // CHANNEL_* constant count — a fabric-side channel add reds THIS module's build
+        // instead of shipping a NeoForge jar that silently lacks the new channel.
+        long sharedChannels = Arrays.stream(dev.vox.lss.common.LSSConstants.class.getFields())
+                .filter(f -> f.getName().startsWith("CHANNEL_"))
+                .count();
+        assertEquals(sharedChannels, 4 + 6,
+                "LSSConstants declares " + sharedChannels + " CHANNEL_* constants but this"
+                        + " registrar registers 10 — add the new channel to LSSNetworking"
+                        + " (both loaders) and both WireParityTest censuses");
     }
 
     // ---- mixin config + AT ----

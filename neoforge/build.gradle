@@ -125,12 +125,39 @@ processResources {
     }
 }
 
+// Native strip lists — keep in sync with paper/build.gradle + fabric's slimStoreDepJars
+// (linux/win/mac × x64/arm64, + Linux-Musl for sqlite; zstd-jni has no musl natives).
+def storeNativeKeep = [
+    'org/sqlite/native/Linux/x86_64/', 'org/sqlite/native/Linux/aarch64/',
+    'org/sqlite/native/Linux-Musl/x86_64/', 'org/sqlite/native/Linux-Musl/aarch64/',
+    'org/sqlite/native/Windows/x86_64/', 'org/sqlite/native/Windows/aarch64/',
+    'org/sqlite/native/Mac/x86_64/', 'org/sqlite/native/Mac/aarch64/',
+    'linux/amd64/', 'linux/aarch64/', 'win/amd64/', 'win/aarch64/',
+    'darwin/x86_64/', 'darwin/aarch64/',
+]
+def storeNativeRoots = ['org/sqlite/native/', 'linux/', 'win/', 'darwin/', 'freebsd/', 'aix/']
+def storeNativeStrip = { el ->
+    def p = el.relativePath.pathString
+    storeNativeRoots.any { p.startsWith(it) } && !storeNativeKeep.any { p.startsWith(it) }
+}
+
 shadowJar {
     configurations = [project.configurations.shade]
     archiveClassifier = ''
     mergeServiceFiles()
     // Dev-only packages never ship (release_check pins this on every jar family).
     exclude 'dev/vox/lss/benchmark/**'
+    // MC's game layer bundles slf4j (26.2 strictly pins 2.0.17) — shipping common's
+    // transitive copy is dead weight at best, a provider-binding hazard at worst
+    // (N-2 review; the paper shadowJar's exact excludes).
+    exclude 'org/slf4j/**'
+    exclude 'META-INF/maven/org.slf4j/**'
+    exclude storeNativeStrip
+    // zstd-jni's BSD-2 notice must accompany the natives we redistribute.
+    from(rootProject.file("LICENSE")) {
+        rename { "${it}_lod-server-support-neoforge" }
+    }
+    from(rootProject.file("THIRD-PARTY-NOTICES"))
 }
 
 jar {
