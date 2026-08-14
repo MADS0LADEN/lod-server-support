@@ -231,7 +231,7 @@ class PaperCommandsTest {
         assertTrue(run(commands(service, config), "diag"));
 
         assertEquals("=== LSS LOD Diagnostics ===", messages.get(0));
-        assertTrue(messages.get(1).startsWith("Config: enabled=false, lodDist=300, bw/player="),
+        assertTrue(messages.get(1).startsWith("Config: enabled=false, lodDist=512, bw/player="),
                 "the Config line must render the disabled flag and the config values: " + messages.get(1));
         assertTrue(messages.stream().anyMatch(m -> m.equals("Xray: active=off, masked_sections=0")),
                 "no active mask manager renders the off xray line: " + messages);
@@ -295,7 +295,7 @@ class PaperCommandsTest {
         config.validate();
         assertTrue(run(commands(mock(PaperRequestProcessingService.class), config), "set"));
         assertTrue(messages.get(0).startsWith("Runtime-settable keys"), String.valueOf(messages));
-        assertTrue(messages.contains("  lodDistanceChunks = 300"),
+        assertTrue(messages.contains("  lodDistanceChunks = 512"),
                 "listing shows current values: " + messages);
         assertEquals(1 + dev.vox.lss.common.config.RuntimeSettings.keyNames().size(),
                 messages.size());

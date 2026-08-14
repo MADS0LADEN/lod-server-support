@@ -339,9 +339,11 @@ tasks.register('vssJar') {
     // remapped release jar directly (with the nested common JiJ + Fabric-Mapping-Namespace).
     // String dependency so it resolves at graph-build time, not config time.
     dependsOn 'jar'
+    def iconFile = rootProject.file('branding/vss/icon.png')
     def srcJar = layout.buildDirectory.file("libs/${lssFabricJarName}")
     def outFile = layout.buildDirectory.file("libs/${vssFabricJarName}")
     inputs.file(srcJar)
+    inputs.file(iconFile)
     outputs.file(outFile)
     doLast {
         def src = srcJar.get().asFile
@@ -356,11 +358,14 @@ tasks.register('vssJar') {
                     if (e.name == 'fabric.mod.json') {
                         // Read the BUILT descriptor (Loom already injected `version` + `jars`);
                         // change ONLY the branding fields, preserving everything else.
+                        // Field values folded from XANTHA's v0.10.0 release patch (2026-08-13);
+                        // the dedicated VSS icon is RESTORED (branding/vss/icon.png, injected
+                        // below as assets/lss/icon-vss.png).
                         def json = new groovy.json.JsonSlurper().parse(zf.getInputStream(e))
                         json.name = 'Voxy Server Side'
-                        json.description = 'Server-side backend for Voxy multiplayer LOD rendering. Identical to LOD Server Support (same mod, second distribution channel) — fully interchangeable.'
-                        // The dedicated VSS icon was DELETED (user decision 2026-08-08);
-                        // the descriptor keeps the standard LSS icon already in the jar.
+                        json.description = 'Render distant Voxy LODs on servers'
+                        json.authors = ['Xantha', 'VoX']
+                        json.icon = 'assets/lss/icon-vss.png'
                         if (json.contact instanceof Map) {
                             json.contact.homepage = 'https://modrinth.com/plugin/voxy-server-side'
                         }
@@ -379,6 +384,22 @@ tasks.register('vssJar') {
                         zos.putNextEntry(ne)
                         zos.write(props.getBytes('UTF-8'))
                         zos.closeEntry()
+                    } else if (e.name == 'assets/lss/lang/en_us.json') {
+                        // Display-string rebrand in the lang file VALUES only (keys stay
+                        // lss.* — they are addressed by the untouched mod id). Without this
+                        // the VSS Sodium pages read "LOD Server Support"/"LSS" mid-sentence.
+                        def lang = new groovy.json.JsonSlurper().parse(zf.getInputStream(e))
+                        def rebranded = lang.collectEntries { k, v ->
+                            [k, v.toString()
+                                    .replace('LOD Server Support', 'Voxy Server Side')
+                                    .replace('LSS', 'VSS')]
+                        }
+                        byte[] lb = groovy.json.JsonOutput.prettyPrint(
+                                groovy.json.JsonOutput.toJson(rebranded)).getBytes('UTF-8')
+                        def ne = new ZipEntry(e.name)
+                        zos.putNextEntry(ne)
+                        zos.write(lb)
+                        zos.closeEntry()
                     } else {
                         // Byte-preserving copy: keep the original compression method, and for
                         // STORED entries (e.g. the nested common jar) carry size/crc so the
@@ -395,6 +416,11 @@ tasks.register('vssJar') {
                         zos.closeEntry()
                     }
                 }
+                // The restored VSS icon rides as a NEW entry beside the LSS icon (the
+                // descriptor above points at it); nothing else in the jar changes.
+                zos.putNextEntry(new ZipEntry('assets/lss/icon-vss.png'))
+                zos.write(iconFile.bytes)
+                zos.closeEntry()
             }
         } finally {
             zf.close()

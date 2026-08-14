@@ -323,9 +323,9 @@ EOF
 #     rig throttled exactly the bandwidth behaviour it exists to eyeball.
 # A dev rig that contradicts the shipped defaults tests a configuration no player runs.
 # Only genuinely rig-specific keys belong here now; everything else falls through to the
-# mod's own defaults. NOTE the shipped default lodDistanceChunks is 300 since v0.11.0
-# stage A (was 512 from the 2026-08-08 rework; still ~22x the old rig's 64-chunk area) —
-# set LSS_LOD_DISTANCE to dial it back on a small box or when running all three servers.
+# mod's own defaults. NOTE the shipped default lodDistanceChunks is 512 (restored
+# 2026-08-13, reverting stage A's 300; ~64x the old rig's 64-chunk area) — set
+# LSS_LOD_DISTANCE to dial it back on a small box or when running all three servers.
 write_lss_config() {
     local dir="$1"
     echo "  Writing lss-server-config.json (shipped defaults; lodStore=${LSS_LODSTORE}, backfill=${LSS_LODSTORE_BACKFILL}${LSS_LOD_DISTANCE:+, lodDistance=${LSS_LOD_DISTANCE}}$([ "$LSS_VIA_GUARD" = 0 ] && echo ', viaGuard=OFF'))"

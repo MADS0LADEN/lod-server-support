@@ -253,7 +253,7 @@ public class RequestProcessingService {
                 maskFingerprints.put(dim, maskFp);
             }
             var env = new dev.vox.lss.common.store.SqliteLodStore.Environment(
-                    worldRoot.resolve("lss-lod"), server.getServerVersion(),
+                    dev.vox.lss.common.store.LodStores.brandedStoreDir(worldRoot), server.getServerVersion(),
                     LSSConstants.PROTOCOL_VERSION, regionDirs::get, maskFingerprints::get,
                     config.lodStoreResweepSeconds, config.lodStoreMaxBytes(),
                     storeRegistryFingerprint(server));

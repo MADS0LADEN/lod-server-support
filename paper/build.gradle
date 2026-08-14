@@ -186,15 +186,22 @@ tasks.register('vssJar') {
                     def e = entries.nextElement()
                     if (e.name == 'plugin.yml') {
                         def text = zf.getInputStream(e).getText('UTF-8')
-                        // Rewrite the top-level description/website AND the LOCAL command +
-                        // permission branding. name/main/version/api-version and the
-                        // folia-supported ABSENCE are all preserved — those are the
-                        // interchangeability/identity contract. The command name and
-                        // permission node are LOCAL (an admin types /vsslod on their own
-                        // server), never on the wire, so LSS and VSS stay wire-compatible.
-                        // release_check.py's pair check pins this exact scope.
+                        // Rewrite the plugin NAME + top-level description/author/website AND
+                        // the LOCAL command + permission branding (name rebrand folded from
+                        // XANTHA's v0.10.0 release patch, 2026-08-13 — the VSS plugin now
+                        // presents as VoxyServerSide; its data folder therefore FORKS to
+                        // plugins/VoxyServerSide/, so a Paper-side jar swap starts a fresh
+                        // config folder — the config-filename candidates only adopt within
+                        // one folder. main/version/api-version and folia-supported are
+                        // preserved — identity + wire contract. Command name and permission
+                        // node are LOCAL, never on the wire, so LSS and VSS stay
+                        // wire-compatible. release_check.py's pair check pins this scope.
+                        text = text.replaceFirst(/(?m)^name:.*$/,
+                                'name: VoxyServerSide')
                         text = text.replaceFirst(/(?m)^description:.*$/,
-                                'description: Server-side backend for Voxy multiplayer LOD rendering. Identical to LOD Server Support (same plugin, second distribution channel) — fully interchangeable.')
+                                'description: Render distant Voxy LODs on servers')
+                        text = text.replaceFirst(/(?m)^author:.*$/,
+                                'author: Xantha, VoX')
                         text = text.replaceFirst(/(?m)^website:.*$/,
                                 'website: https://modrinth.com/plugin/voxy-server-side')
                         // Command key + usage: lsslod -> vsslod (both occurrences).
@@ -203,13 +210,12 @@ tasks.register('vssJar') {
                         text = text.replace('LOD Server Support admin commands', 'Voxy Server Side admin commands')
                         text = text.replace('Access to LSS admin commands', 'Access to VSS admin commands')
                         text = text.replace('lss.admin', 'vss.admin')
-                        // Far players (E1): the privacy node rebrands too (R-1 surface 5 —
-                        // extend HERE and the release_check token lists together, or the
-                        // VSS jar silently ships an lss.* node).
-                        // NOTE: display/declaration rename only — the Java
-                        // enforcement literal in PaperFarPlayerSnapshots stays lss.*
-                        // (documented drift; fix before any VSS re-enable).
-                        text = text.replace('lss.farplayers.hidden', 'vss.farplayers.hidden')
+                        // Far players privacy node: NOT renamed since 2026-08-13 — the
+                        // shipped plugin.yml declares BOTH brand spellings (default false)
+                        // and the Java enforcement dual-checks them, because Bukkit
+                        // resolves an UNDECLARED node to the op default (a rename here
+                        // plus the lss.* enforcement literal was silently hiding every
+                        // op on a VSS server). Both jars carry both nodes.
                         def ne = new ZipEntry('plugin.yml')
                         zos.putNextEntry(ne)
                         zos.write(text.getBytes('UTF-8'))

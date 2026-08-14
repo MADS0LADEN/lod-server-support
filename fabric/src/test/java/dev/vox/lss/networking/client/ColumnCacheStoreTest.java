@@ -670,4 +670,24 @@ class ColumnCacheStoreTest {
                 ColumnCacheStore.resolveCacheRoot(configDir, gameDir),
                 "a non-directory at the legacy path must not be adopted");
     }
+
+    @Test
+    void resolveCacheRootAdoptsTheOtherBrandsDotDir(@org.junit.jupiter.api.io.TempDir Path tmp) throws IOException {
+        // The cross-brand adoption arm (VSS-restore round, 2026-08-13): a populated
+        // .vss/cache from a VSS install is adopted by an LSS jar when .lss is absent —
+        // a jar swap keeps the cache instead of orphaning it. Testable without brand
+        // switching because adoption is symmetric.
+        Path configDir = tmp.resolve("config");
+        Path gameDir = tmp.resolve("game");
+        Files.createDirectories(configDir);
+        Files.createDirectories(gameDir.resolve(".vss").resolve("cache"));
+        assertEquals(gameDir.resolve(".vss").resolve("cache"),
+                ColumnCacheStore.resolveCacheRoot(configDir, gameDir),
+                "the other brand's existing dot-dir cache must be adopted");
+        // Once the OWN brand's dir exists it wins (no flip-flopping after a fresh create).
+        Files.createDirectories(gameDir.resolve(".lss").resolve("cache"));
+        assertEquals(gameDir.resolve(".lss").resolve("cache"),
+                ColumnCacheStore.resolveCacheRoot(configDir, gameDir),
+                "the own brand's dir takes precedence once present");
+    }
 }

@@ -9,10 +9,13 @@ import java.util.Properties;
  * and each platform's entrypoint calls {@link #load} as its FIRST action — before any
  * service (and thus any branded thread name, log line, or command) is created.
  *
- * <p><b>Display-only, never on the wire.</b> The mod id, plugin name, protocol version,
- * channel ids ({@code lss:*}), and payload formats are all untouched by branding, so an
- * LSS client and a VSS server (or vice versa) stay fully wire-compatible regardless of
- * which brand each side carries. This class only affects text a human reads.
+ * <p><b>Never on the wire.</b> The mod id, protocol version, channel ids ({@code lss:*}),
+ * and payload formats are all untouched by branding, so an LSS client and a VSS server
+ * (or vice versa) stay fully wire-compatible regardless of which brand each side carries.
+ * Branding affects text a human reads plus a small set of LOCAL names — config filenames
+ * ({@code JsonConfig.brandedConfigCandidates}), the LOD-store directory
+ * ({@code LodStores.brandedStoreDir}), and the client cache dot-dir — each with
+ * adopt-the-other-brand's-existing-file fallback so a jar swap keeps its data.
  */
 public final class Brand {
 
@@ -54,6 +57,12 @@ public final class Brand {
 
     /** Short acronym for chat/console/thread text: {@code "LSS"} or {@code "VSS"}. */
     public static String shortName() { return shortName; }
+
+    /** Lowercased acronym for LOCAL filesystem names ({@code "lss"} / {@code "vss"}):
+     *  the store directory and cache dot-dir. Never a wire or identity token. */
+    public static String lowerShortName() {
+        return shortName.toLowerCase(java.util.Locale.ROOT);
+    }
 
     /** Full display name: {@code "LOD Server Support"} or {@code "Voxy Server Side"}. */
     public static String displayName() { return displayName; }
