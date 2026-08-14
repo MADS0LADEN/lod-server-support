@@ -6,7 +6,6 @@ import dev.vox.lss.common.PositionUtil;
 import dev.vox.lss.common.tracking.DirtyColumnTracker;
 import dev.vox.lss.config.LSSServerConfig;
 import dev.vox.lss.networking.payloads.DirtyColumnsS2CPayload;
-import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.Level;
@@ -43,7 +42,7 @@ class DirtyColumnBroadcaster {
         @Override public int chunkX(PlayerRequestState state) { return state.getPlayer().getBlockX() >> 4; }
         @Override public int chunkZ(PlayerRequestState state) { return state.getPlayer().getBlockZ() >> 4; }
         @Override public void send(PlayerRequestState state, DirtyColumnsS2CPayload payload) {
-            ServerPlayNetworking.send(state.getPlayer(), payload);
+            dev.vox.lss.platform.LoaderServices.get().sendToPlayer(state.getPlayer(), payload);
         }
     };
 

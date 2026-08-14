@@ -1,7 +1,6 @@
 package dev.vox.lss.compat;
 
 import dev.vox.lss.common.LSSLogger;
-import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
 
@@ -92,7 +91,7 @@ public final class MoonriseReadCompat {
      *  triggers resolution or Moonrise classloading. */
     public static boolean moonriseDetected() {
         try {
-            return FabricLoader.getInstance().isModLoaded("moonrise");
+            return dev.vox.lss.platform.LoaderServices.get().isModLoaded("moonrise");
         } catch (Throwable t) {
             return false;
         }

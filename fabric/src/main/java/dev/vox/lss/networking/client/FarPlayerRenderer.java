@@ -114,7 +114,7 @@ public final class FarPlayerRenderer {
         }
     }
 
-    /** Installed by {@link FarPlayerClientSupport#initRenderer()} (called from
+    /** Installed by {@link #initRenderer()} (called from
      *  {@code LSSClient}); static so the session-end path can clear it. */
     static void install(FarPlayerRenderer renderer) {
         instance = renderer;
@@ -688,5 +688,26 @@ public final class FarPlayerRenderer {
             double max = Math.max(64, maxRenderDistanceBlocks);
             return distanceSquared <= max * max;
         }
+    }
+
+    /**
+     * E2 renderer wiring, called once from {@link dev.vox.lss.LSSClient} (moved here
+     * from FarPlayerClientSupport at N-1b — Fabric event registration is per-loader
+     * wiring; the support class is xplat): the COLLECT_SUBMITS pass (contained — a
+     * renderer bug degrades to no proxies) plus the ENTITY_LOAD edge trigger (a real
+     * player entity appearing kills its proxy the same frame — the crossfade guard;
+     * UNLOAD needs no hook, the per-frame real-present conjunct picks it up next pass).
+     */
+    public static void initRenderer() {
+        var renderer = new FarPlayerRenderer();
+        FarPlayerRenderer.install(renderer);
+        net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents
+                .COLLECT_SUBMITS.register(renderer::render);
+        net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientEntityEvents
+                .ENTITY_LOAD.register((entity, world) -> {
+                    if (entity instanceof net.minecraft.world.entity.player.Player p) {
+                        FarPlayerRenderer.onRealPlayerLoad(p.getUUID());
+                    }
+                });
     }
 }

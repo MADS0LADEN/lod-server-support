@@ -549,7 +549,7 @@ class VoxyCompat {
      *  the production hooks, run the ladder. Main client thread only. */
     static ModCompat.VoxyResetOutcome resetVoxyProduction() {
         if (!initResetDomain()) return ModCompat.VoxyResetOutcome.UNAVAILABLE;
-        var gameDir = net.fabricmc.loader.api.FabricLoader.getInstance().getGameDir();
+        var gameDir = dev.vox.lss.platform.LoaderServices.get().gameDir();
         return resetVoxy(productionHandleHooks(gameDir,
                 VoxyCompat::fallbackVoxyBasePath,
                 () -> net.minecraft.client.Minecraft.getInstance().levelRenderer,

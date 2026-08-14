@@ -6,7 +6,6 @@ import dev.vox.lss.common.PositionUtil;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongArrays;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
-import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 
@@ -61,8 +60,8 @@ public class ColumnCacheStore {
     private static Path cacheDir() {
         Path dir = cacheDir;
         if (dir == null) {
-            dir = resolveCacheRoot(FabricLoader.getInstance().getConfigDir(),
-                    FabricLoader.getInstance().getGameDir());
+            dir = resolveCacheRoot(dev.vox.lss.platform.LoaderServices.get().configDir(),
+                    dev.vox.lss.platform.LoaderServices.get().gameDir());
             cacheDir = dir;
         }
         return dir;

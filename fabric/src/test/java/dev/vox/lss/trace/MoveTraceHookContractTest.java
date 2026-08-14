@@ -242,11 +242,10 @@ class MoveTraceHookContractTest {
         return dev.vox.lss.testutil.SourcePaths.mainSource("dev/vox/lss/trace/MoveDesyncHooks.java");
     }
 
-    /** Survives both the Gradle CWD (module dir) and an IDE repo-root CWD. */
+    /** The trace @Inject shim stays per-loader; its @Accessor sibling lives in xplat
+     *  since N-1b — SourcePaths resolves either tree, from either CWD. */
     private static Path mixinSource(String fileName) {
-        var moduleRelative = Path.of("src/main/java/dev/vox/lss/mixin/trace").resolve(fileName);
-        if (Files.exists(moduleRelative)) return moduleRelative;
-        return Path.of("fabric").resolve(moduleRelative);
+        return dev.vox.lss.testutil.SourcePaths.mainSource("dev/vox/lss/mixin/trace/" + fileName);
     }
 
     private static Path resource(String fileName) {

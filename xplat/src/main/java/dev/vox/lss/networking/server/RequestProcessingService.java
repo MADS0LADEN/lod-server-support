@@ -19,7 +19,6 @@ import dev.vox.lss.config.LSSServerConfig;
 import dev.vox.lss.networking.payloads.BatchChunkRequestC2SPayload;
 import dev.vox.lss.networking.payloads.BatchResponseS2CPayload;
 import dev.vox.lss.networking.payloads.SessionConfigS2CPayload;
-import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.resources.ResourceKey;
@@ -414,7 +413,7 @@ public class RequestProcessingService {
                 // backs off ~1 s and retries. Sent directly (MAIN thread), off the pipeline.
                 var types = new byte[bounced.length];
                 java.util.Arrays.fill(types, LSSConstants.RESPONSE_RATE_LIMITED_V16);
-                ServerPlayNetworking.send(player,
+                dev.vox.lss.platform.LoaderServices.get().sendToPlayer(player,
                         new BatchResponseS2CPayload(types, bounced, bounced.length));
             }
             return;
@@ -513,7 +512,7 @@ public class RequestProcessingService {
                 LSSConstants.CHANNEL_FAR_PLAYER_ROSTER.equals(channel)
                         ? new dev.vox.lss.networking.payloads.FarPlayerRosterS2CPayload(body)
                         : new dev.vox.lss.networking.payloads.FarPlayerUpdatesS2CPayload(body);
-        net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking.send(player, payload);
+        dev.vox.lss.platform.LoaderServices.get().sendToPlayer(player, payload);
         this.bandwidthLimiter.recordSend(body.length);
         return true;
     }
@@ -572,7 +571,7 @@ public class RequestProcessingService {
                     net.minecraft.SharedConstants.getCurrentVersion()
                             .dataVersion().version());
             try {
-                ServerPlayNetworking.send(state.getPlayer(), payload);
+                dev.vox.lss.platform.LoaderServices.get().sendToPlayer(state.getPlayer(), payload);
                 pushed++;
             } catch (Exception e) {
                 LSSLogger.error("Session-config re-push failed for " + state.getPlayerName(), e);
@@ -716,7 +715,7 @@ public class RequestProcessingService {
     }
 
     /** Test seam (D9): puts one column payload on the wire for one player. Production default
-     *  is {@code ServerPlayNetworking.send}; ServiceGlueTest injects recording/throwing senders. */
+     *  is {@code LoaderServices.sendToPlayer}; ServiceGlueTest injects recording/throwing senders. */
     @FunctionalInterface
     interface ColumnPayloadSender {
         void send(PlayerRequestState state, CustomPacketPayload payload) throws Exception;
@@ -820,7 +819,7 @@ public class RequestProcessingService {
                 }
                 return;
             }
-            ServerPlayNetworking.send(state.getPlayer(), col.asV16());
+            dev.vox.lss.platform.LoaderServices.get().sendToPlayer(state.getPlayer(), col.asV16());
             this.v16Compat.onColumnSent(uuid,
                     PositionUtil.packPosition(col.chunkX(), col.chunkZ()));
             return;
@@ -846,10 +845,10 @@ public class RequestProcessingService {
                 }
                 return;
             }
-            ServerPlayNetworking.send(state.getPlayer(), col.asV18());
+            dev.vox.lss.platform.LoaderServices.get().sendToPlayer(state.getPlayer(), col.asV18());
             return;
         }
-        ServerPlayNetworking.send(state.getPlayer(), payload);
+        dev.vox.lss.platform.LoaderServices.get().sendToPlayer(state.getPlayer(), payload);
     }
 
     // Package-private static: ServiceGlueTest drives this glue with hand-rolled states and an
@@ -1124,7 +1123,7 @@ public class RequestProcessingService {
             // v16 observation: UP_TO_DATE / NOT_GENERATED terminally answer their positions —
             // prune them from the synthetic want-set. The frame itself is wire-identical.
             this.v16Compat.observeBatchResponse(state.getPlayerUUID(), types, positions, count);
-            ServerPlayNetworking.send(state.getPlayer(),
+            dev.vox.lss.platform.LoaderServices.get().sendToPlayer(state.getPlayer(),
                     new BatchResponseS2CPayload(types, positions, count));
         });
     }

@@ -29,8 +29,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ChannelAccessorContractTest {
 
     private static String source(String simpleName) throws Exception {
-        Path p = Path.of("src/main/java/dev/vox/lss/mixin/" + simpleName + ".java");
-        assertTrue(Files.exists(p), "missing mixin source: " + p.toAbsolutePath());
+        // Accessor INTERFACES live in xplat since N-1b (shared with neoforge);
+        // @Inject shims stay per-loader — SourcePaths resolves either tree.
+        Path p = dev.vox.lss.testutil.SourcePaths.mainSource(
+                "dev/vox/lss/mixin/" + simpleName + ".java");
         return Files.readString(p);
     }
 
@@ -80,8 +82,8 @@ class ChannelAccessorContractTest {
         // placement shrinks the bank (up to ~6.25 MB at default caps) on the FIRST
         // post-cut tick. Applied anywhere else, a cut leaves the old-cap bank intact
         // for one full burst.
-        String fabric = Files.readString(Path.of(
-                "src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
+        String fabric = Files.readString(dev.vox.lss.testutil.SourcePaths.mainSource(
+                "dev/vox/lss/networking/server/RequestProcessingService.java"));
         assertTrue(fabric.contains("state.getPingBackstop().apply(perPlayerCap)"),
                 "Fabric must apply the ping factor to the flush allocation");
         String paper = Files.readString(Path.of(
@@ -108,8 +110,8 @@ class ChannelAccessorContractTest {
         // dropped config pass-through reverts the fleet to unpaced bank dumps with
         // every unit test green. Plus the paced= diag plumb (the golden constructs
         // PlayerDiag through the compat ctor, so a literal 0 would stay green).
-        String fabric = Files.readString(Path.of(
-                "src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
+        String fabric = Files.readString(dev.vox.lss.testutil.SourcePaths.mainSource(
+                "dev/vox/lss/networking/server/RequestProcessingService.java"));
         assertTrue(fabric.contains("config.enableSendPacing"),
                 "Fabric must pass enableSendPacing into the flush");
         String paper = Files.readString(Path.of(
@@ -132,8 +134,8 @@ class ChannelAccessorContractTest {
 
     @Test
     void bothPlatformsInstallTheChannelPressureProbeAtRegistration() throws Exception {
-        String fabric = Files.readString(Path.of(
-                "src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
+        String fabric = Files.readString(dev.vox.lss.testutil.SourcePaths.mainSource(
+                "dev/vox/lss/networking/server/RequestProcessingService.java"));
         assertTrue(fabric.contains("setChannelPressureProbe(FabricChannelPressure.forPlayer(player))"),
                 "Fabric must install the probe on the state it creates, or the gauge is dead");
         String paper = Files.readString(Path.of(
@@ -162,7 +164,7 @@ class ChannelAccessorContractTest {
         // config — a dropped argument leaves lodYieldsToVanillaTransport silently inert
         // on one platform, which no Tier 1 state test can see.
         String fabric = Files.readString(
-                Path.of("src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
+                dev.vox.lss.testutil.SourcePaths.mainSource("dev/vox/lss/networking/server/RequestProcessingService.java"));
         assertTrue(fabric.contains("config.lodYieldsToVanillaTransport"),
                 "the Fabric flush wiring must pass config.lodYieldsToVanillaTransport");
         Path paperPath = Path.of("../paper/src/main/java/dev/vox/lss/paper/PaperRequestProcessingService.java");
@@ -188,7 +190,7 @@ class ChannelAccessorContractTest {
                 "LSSLogger\\.info\\(config\\.effectiveConfigEcho\\(readerThreads,\\s*"
                         + "wireCompressionLive,\\s*gateCapacity\\)\\)");
         String fabric = Files.readString(
-                Path.of("src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
+                dev.vox.lss.testutil.SourcePaths.mainSource("dev/vox/lss/networking/server/RequestProcessingService.java"));
         assertTrue(echoCall.matcher(fabric).find(),
                 "Fabric must echo effectiveConfigEcho(readerThreads, wireCompressionLive, gateCapacity)");
         String paper = Files.readString(
@@ -249,8 +251,8 @@ class ChannelAccessorContractTest {
         // literal or wrong field at the ctor call site ships a permanently inert split
         // with every test green (the echo call site has the same pin for the same
         // reason).
-        String fabric = Files.readString(Path.of(
-                "src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java"));
+        String fabric = Files.readString(dev.vox.lss.testutil.SourcePaths.mainSource(
+                "dev/vox/lss/networking/server/RequestProcessingService.java"));
         assertTrue(fabric.contains("config.useBackgroundReadSplit"),
                 "the ChunkDiskReader construction must pass config.useBackgroundReadSplit");
         assertTrue(fabric.contains("config.useSelectiveNbtParse"),

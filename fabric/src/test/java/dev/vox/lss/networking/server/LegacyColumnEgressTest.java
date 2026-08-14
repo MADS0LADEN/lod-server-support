@@ -299,8 +299,8 @@ class LegacyColumnEgressTest {
         // toward shipping v20 dictionary bodies to legacy clients (the C1-1 CRITICAL
         // failure mode) while every tier stays green — the soak lever is the only
         // thing that would notice, and it is not in CI. Pin the attach call site.
-        Path src = corpusDir("..").normalize().getParent()
-                .resolve("main/java/dev/vox/lss/networking/server/RequestProcessingService.java");
+        Path src = dev.vox.lss.testutil.SourcePaths.mainSource(
+                "dev/vox/lss/networking/server/RequestProcessingService.java");
         String body = Files.readString(src);
         assertTrue(body.contains("offThreadProcessor.attachDialectTracker(this.dialects)"),
                 "RequestProcessingService must attach its dialect tracker to the "

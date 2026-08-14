@@ -5,7 +5,6 @@ import dev.vox.lss.common.LSSLogger;
 import dev.vox.lss.common.farplayers.FarPlayerClientTracker;
 import dev.vox.lss.common.farplayers.FarPlayerWire;
 import dev.vox.lss.config.LSSClientConfig;
-import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 
 /**
  * The client half of far players, phase A (E1, FARP §3.3 — tracker + prefs, no
@@ -111,7 +110,7 @@ public final class FarPlayerClientSupport {
         Boolean present = seeuPresent;
         if (present == null) {
             try {
-                var loader = net.fabricmc.loader.api.FabricLoader.getInstance();
+                var loader = dev.vox.lss.platform.LoaderServices.get();
                 // "voxyseeu" is the pre-rename mod id (the vendored clone's config
                 // migration shows the rename) — an old SeeU build must trip the
                 // gate too (E3 review NIT-3).
@@ -139,7 +138,7 @@ public final class FarPlayerClientSupport {
                 config.farPlayersShareSelf, config.farPlayersShareDistanceBlocks);
         if (prefs.equals(lastSentPrefs)) return;
         try {
-            ClientPlayNetworking.send(new dev.vox.lss.networking.payloads
+            dev.vox.lss.platform.LoaderServices.get().sendToServer(new dev.vox.lss.networking.payloads
                     .FarPlayerPrefsC2SPayload(FarPlayerWire.encodePrefs(prefs)));
             lastSentPrefs = prefs;
         } catch (Exception e) {
@@ -185,31 +184,18 @@ public final class FarPlayerClientSupport {
     }
 
     /** Disconnect: the tracker + the prefs-sent latch + the renderer's proxy set die
-     *  with the connection. */
+     *  with the connection.
+     *
+     *  <p>FORWARD CONSTRAINT (N-1b review): {@code FarPlayerRenderer} is a PER-LOADER
+     *  class this xplat file compiles against — a coupling XplatLoaderPurityTest cannot
+     *  see (it scans loader-API packages, not module homes). Every loader module that
+     *  compiles xplat must ship a same-FQN {@code FarPlayerRenderer} exposing
+     *  {@code clearInstance()} (the N-3 NeoForge renderer — or its render-path-cut
+     *  no-op variant — satisfies this). */
     static void onSessionEnd() {
         TRACKER.clear();
         lastSentPrefs = null;
         FarPlayerRenderer.clearInstance();
-    }
-
-    /**
-     * E2 renderer wiring, called once from {@link dev.vox.lss.LSSClient}: the
-     * COLLECT_SUBMITS pass (contained — a renderer bug degrades to no proxies) plus
-     * the ENTITY_LOAD edge trigger (a real player entity appearing kills its proxy the
-     * same frame — the crossfade guard; UNLOAD needs no hook, the per-frame
-     * real-present conjunct picks it up next pass).
-     */
-    public static void initRenderer() {
-        var renderer = new FarPlayerRenderer();
-        FarPlayerRenderer.install(renderer);
-        net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents
-                .COLLECT_SUBMITS.register(renderer::render);
-        net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientEntityEvents
-                .ENTITY_LOAD.register((entity, world) -> {
-                    if (entity instanceof net.minecraft.world.entity.player.Player p) {
-                        FarPlayerRenderer.onRealPlayerLoad(p.getUUID());
-                    }
-                });
     }
 
     /**
