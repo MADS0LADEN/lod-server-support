@@ -149,3 +149,65 @@ culture on any port.
 3. xplat extraction + neoforge module (the 13–18 d half), soak-gated.
 4. Decide the Voxy-fork relationship (outreach to j-shelfwood / the #160
    community about a pinnable renderer build) before announcing.
+
+
+## Addendum (2026-08-14): NeoForge across ALL FOUR lines (main-first strategy)
+
+Follow-up research (primary-source fact sheet in the session transcript) for the
+question "add NeoForge to main and let backports carry it to 1.21.1 / 1.21.11 /
+26.1.x". Verdict: **the strategy is sound and is the industry-standard shape**
+(Sodium, Iris, and Lithium all run `common/fabric/neoforge` subprojects with one
+branch per MC version — exactly our layout + one module).
+
+**Availability — no blockers**: NeoForge has PROMOTED (non-beta) builds for all
+four lines: 21.1.248 (1.21.1, the long-lived legacy target), 21.11.45 (1.21.11),
+26.1.2.95 (26.1, their current primary stable modding target), 26.2.0.59 (26.2).
+No skipped versions in our range.
+
+**API drift 21.1→26.2 on OUR surfaces — small**: payload networking
+(RegisterPayloadHandlersEvent/PayloadRegistrar/optional()/PacketDistributor) and
+the event bus/@Mod shape are STABLE across the whole span (one rename:
+client-side sends moved to ClientPacketDistributor); ModDevGradle 2 everywhere.
+The two rework zones are VANILLA-driven (the 1.21.9 render extract/submit split
++ the 26.2 FeatureRenderDispatcher wave; the 1.21.5 data-driven gametest
+change) — i.e. they diverge per MC version exactly where our Fabric side
+already diverges, so the backport process handles them identically.
+
+**Renderer matrix (the hard constraint)**: official Voxy is Fabric-only but
+covers 26.2/26.1/1.21.6-1.21.11 (NOT 1.21.1). Voxy-on-NeoForge exists only via
+the 1.21.1 community fork and the Foxy loader-shim (26.1.2 only). Distant
+Horizons ships a single fabric+neoforge jar on ALL four lines but has no LSS
+ingest bridge. ⇒ **scope NeoForge as SERVER-FIRST**: a NeoForge server serving
+Fabric+Voxy clients is full product value (the wire is loader-agnostic); the
+NeoForge CLIENT half compiles but stays dormant (no consumer → capability bit
+never set) until a renderer lands there. Defer the far-player client renderer +
+Sodium config screens on NeoForge accordingly.
+
+**Effort (server-first v1 scoping)**:
+
+| Step | Estimate |
+|---|---|
+| Main (26.2): xplat extraction + neoforge module (no MC retarget) | ~10-15 d |
+| 26.1 backport increment | ~2-4 d |
+| 1.21.11 backport increment (NeoForge 21.11's Identifier rename rides the branch's existing vanilla names) | ~3-5 d |
+| 1.21.1 (new branch: full MC retarget + old-idiom NeoForge glue) | ~12-18 d |
+| **Total matrix** | **~27-42 dev-days (6-8 weeks)** |
+
+Plus the RECURRING tax — the real cost of the strategy: a full release becomes
+up to 4 lines × 3 loaders ≈ 12 artifacts. Mitigation per the support-line
+effort budget: NeoForge jars gate on contract tests + one soak platform
+(`SOAK_PLATFORM=neoforge`) + release_check arms, not full per-line gauntlets.
+
+**Especially-hard list (confirmed)**:
+1. The renderer matrix above (solved by server-first scoping; a DH ingest
+   bridge is the strategic alternative and a separate program).
+2. Release/validation multiplication (recurring, not one-time).
+3. The xplat refactor's blast radius on main — every open branch crosses it;
+   land it in a quiet window (right after v0.11.0 ships).
+4. NeoForge's <32 KiB C2S payload bound: our want-set batch maxes ~16.5 KiB
+   (1024 × 16 B + envelope) — fits, but needs a build-time pin so a future
+   budget raise cannot silently cross it.
+5. Rendering/gametest glue divergence per branch (vanilla-driven; same
+   divergence axis the Fabric side already carries).
+6. Java targets: xplat code must stay Java-21-clean for the 1.21.x branches
+   (existing backport discipline; ScopedValue is the one known offender).
