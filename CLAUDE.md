@@ -140,6 +140,10 @@ from the deadline but their READINESS checks are not.
                               #  there is indistinguishable in the server list and an accidental
                               #  join contaminates a running soak)
 ./test-server.sh run-folia    # one platform only (also run-fabric, run-paper)
+./test-server.sh run-neoforge # NeoForge server :25569 (stage-N best-effort loader; version
+                              #  pinned to gradle.properties neoforge_version, installer cached
+                              #  under test-server/neoforge/. Fabric/vanilla clients JOIN FINE —
+                              #  LSS channels are .optional() and add no registry content)
 ./test-server.sh run-fabric-no-c2me  # Fabric with c2me*.jar parked as .disabled (A/B vs C2ME; run-fabric re-enables)
 ./test-server.sh run-fabric-store    # run-fabric with the LOD store ON (lodStore=on) + the background
                                      # backfill (lodStoreBackfill=true auto-walks regions) — warm rejoins
@@ -171,9 +175,10 @@ from the deadline but their READINESS checks are not.
 # LSS_LODSTORE=off) and otherwise match plain run-fabric / run-paper now that on is default.
 ```
 
-Downloads real server jars (Fabric launcher; Paper/Folia latest stable via fill.papermc.io),
-installs the built LSS jars (Folia gets the same Paper plugin jar), and stages
-offline-mode config under `test-server/<platform>/`. For joining with a real client and
+Downloads real server jars (Fabric launcher; Paper/Folia latest stable via fill.papermc.io;
+NeoForge via the maven.neoforged.net installer), installs the built LSS jars (Folia gets
+the same Paper plugin jar; NeoForge gets the shadowJar), and stages offline-mode config
+under `test-server/<platform>/`. For joining with a real client and
 eyeballing LOD behavior — the automated gates are the test tiers and the soak harness above.
 
 ### The SoakPlayer dummy rig (far-player live gates)
