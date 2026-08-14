@@ -56,10 +56,13 @@ final class TransferRateGovernor {
     /** Disengage path (b): consecutive intervals of normal ping (~1 min — closes the
      *  frozen-engaged state, review m10). */
     static final int DISENGAGE_PING_NORMAL_INTERVALS = 30;
-    /** The deterministic drain bias (review M3): every Nth consecutive kept-up interval
-     *  bleeds standing queue instead of probing up — a rate-matched loop never drains
-     *  queue it INHERITED (the pre-engagement burst can bank ~cap/4). */
-    static final int DRAIN_EVERY_KEPT_UP = 8;
+    /** The deterministic drain bias (review M3; retuned at live round 2): every Nth
+     *  consecutive kept-up interval bleeds standing queue instead of probing up — a
+     *  rate-matched loop never drains queue it INHERITED, and an AIMD equilibrium
+     *  HOVERS AT capacity (the first live session measured ~500 ms standing queue at
+     *  convergence — the climb/overshoot cycle keeps the link full). 8→4 with a
+     *  deeper bleed halves the time spent at/above capacity. */
+    static final int DRAIN_EVERY_KEPT_UP = 4;
     /** Asymmetric column-size EWMA (review M4): fast-up so a terrain batch after an
      *  ocean crossing under-counts R instead of over-bursting; slow-down so
      *  ghost-clear runs decay the estimate gently. */
@@ -82,6 +85,7 @@ final class TransferRateGovernor {
     private long intervalStartDeclared;
     private boolean awaitingAtStart;
     private boolean haltSeenThisInterval;
+    private boolean movementSeenThisInterval;
 
     // ---- Ping baseline ----
     private int pingBaselineMs = -1;       // -1 = unseeded (zero/absent samples ignored)
@@ -137,6 +141,8 @@ final class TransferRateGovernor {
             return;
         }
         if (halted) this.haltSeenThisInterval = true;
+        // movementSeenThisInterval is latched by noteMovement() (the manager's
+        // chunk-crossing hook) and cleared at each interval seed.
         long elapsed = nowMillis - this.intervalStartMillis;
         if (elapsed < INTERVAL_MILLIS) return;
 
@@ -209,14 +215,23 @@ final class TransferRateGovernor {
             this.desiredBytesPerSec =
                     Math.max(measured - STEP_BYTES_PER_SEC / 2, MIN_RATE_BYTES_PER_SEC);
             this.keptUpStreak = 0;
+        } else if (this.movementSeenThisInterval) {
+            // Live round 2: a kept-up interval that saw chunk crossings HOLDS — the
+            // climb must not probe into the window where vanilla's own chunk bursts
+            // are about to compete for the link (the measured movement spikes:
+            // ~1500 ms while climbing +STEP into a moving player's vanilla traffic).
+            // Shortfall above still cuts normally during movement; only the up-probe
+            // pauses. The streak is untouched (movement neither earns nor forfeits
+            // drain cadence).
         } else if (++this.keptUpStreak % DRAIN_EVERY_KEPT_UP == 0) {
             // Deterministic drain interval: bleed standing queue instead of probing
             // up. Anchored at min(desired, measured) (impl review MINOR-3): when the
             // size EWMA lags a regime change, measured can exceed desired, and a
             // measured-anchored drain would RAISE desired several-fold in one step —
-            // the opposite of a bleed.
+            // the opposite of a bleed. Depth STEP/2 since live round 2 (with STEP/4
+            // the bleed barely outran the climb's overshoot).
             this.desiredBytesPerSec = Math.max(
-                    Math.min(this.desiredBytesPerSec, measured) - STEP_BYTES_PER_SEC / 4,
+                    Math.min(this.desiredBytesPerSec, measured) - STEP_BYTES_PER_SEC / 2,
                     MIN_RATE_BYTES_PER_SEC);
         } else {
             this.desiredBytesPerSec += STEP_BYTES_PER_SEC;
@@ -301,6 +316,7 @@ final class TransferRateGovernor {
         this.intervalStartDeclared = declared;
         this.awaitingAtStart = awaitingSize > 0;
         this.haltSeenThisInterval = false;
+        this.movementSeenThisInterval = false;
     }
 
     private void hardReset() {
@@ -312,8 +328,15 @@ final class TransferRateGovernor {
         this.intervalSeeded = false;
         this.intervalStartMillis = 0;
         this.haltSeenThisInterval = false;
+        this.movementSeenThisInterval = false;
         // The size estimator and ping baseline survive a config-toggle reset (they are
         // measurements, not control state) but die with the session in reset().
+    }
+
+    /** Chunk-crossing hook (live round 2): latches the movement hold for the current
+     *  measurement interval — see the kept-up branch. Main client thread. */
+    void noteMovement() {
+        this.movementSeenThisInterval = true;
     }
 
     /** Dimension change (impl review MINOR-2): same connection, same link — the

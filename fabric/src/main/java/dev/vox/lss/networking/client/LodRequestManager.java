@@ -369,6 +369,9 @@ public class LodRequestManager {
             this.lastChunkX = playerCx;
             this.lastChunkZ = playerCz;
             this.scanner.recenter();
+            // Live round 2: a crossing holds the governor's up-probe for the current
+            // interval — vanilla's own chunk bursts are about to compete for the link.
+            this.governor.noteMovement();
         }
     }
 

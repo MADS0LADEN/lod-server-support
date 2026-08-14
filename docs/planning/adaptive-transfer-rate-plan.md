@@ -353,6 +353,32 @@ Removed outright (same branch, before the new mechanisms land):
   structural claim. B stays structurally inert on loopback (ping ~0 never
   crosses 750 ms excess) — that half keeps its structural pin.
 
+## Live round 2 (2026-08-13, the honest ungoverned-manual test)
+
+The first "PASS" was accidentally run with the manual 50-col/s cap still set.
+The honest test (manual cap 0, governor alone): **~500 ms steady, spikes to
+~1500 ms under movement** — significantly better than the pre-program ~5 s,
+but two mechanisms showed up in the receipts (`governed=60/s (320 KB/s)`,
+server `pingf=0.02, yielded=747, paced=852, sq=308`):
+
+1. **The AIMD equilibrium hovers AT capacity**: the climb/overshoot cycle
+   keeps the link full, so a standing few-hundred-ms queue never drains —
+   the steady ~500 ms. RETUNED: drain every 4th kept-up (was 8th) at STEP/2
+   depth (was STEP/4) — the bleed now outruns the climb's overshoot.
+2. **Movement spikes are vanilla competing**: the governor kept climbing
+   +STEP into the window where a moving player's vanilla chunk bursts share
+   the link; the cut then took 1-2 intervals — the spike's duration.
+   ADDED: the movement hold — a kept-up interval that saw a chunk crossing
+   (the manager's recenter hook) holds `desired` (no up-probe; shortfall
+   still cuts; the drain streak is untouched).
+3. **The backstop fired during the spikes** (`pingf=0.02`) and behaved
+   exactly as designed: its binding cut landed at ~1 MB/s allocation —
+   ABOVE the governor's 320 KB/s ask — so it never actually throttled the
+   session (the operating-region separation held in the BINDING sense even
+   though the spike excess crossed 750 ms). The server's standing
+   `sq=308` is resolved-but-unsent RAM, not link latency (obuf stayed
+   ~3 KB); the relevance prune + re-declaration own it.
+
 ## Test plan
 
 - T1: governor AIMD unit suite (engagement gate incl. demand-backing, the

@@ -172,15 +172,16 @@ class TransferRateGovernorTest {
     }
 
     @Test
-    void everyEighthKeptUpIsADrainInterval() {
-        // Review M3's second defect: a rate-matched loop never drains INHERITED queue —
-        // the deterministic drain bias bleeds it every DRAIN_EVERY_KEPT_UP kept-ups.
+    void everyFourthKeptUpIsADrainInterval() {
+        // Review M3's second defect + live round 2's retune: an AIMD equilibrium
+        // hovers AT capacity (measured ~500 ms standing queue live), so the bleed
+        // runs every 4th kept-up at STEP/2 depth.
         var g = new TransferRateGovernor();
         long t = 0;
         tick(g, t, 0, 0, 1, false, NORMAL_PING);
         tick(g, t += INTERVAL, 800 * KB, 100, 1, false, CONGESTED_PING);
         long bytes = 800 * KB;
-        // Feed exactly-kept-up intervals (measured = desired): 7 step up, the 8th drains.
+        // Feed exactly-kept-up intervals (measured = desired): 3 step up, the 4th drains.
         for (int keptUp = 1; keptUp <= TransferRateGovernor.DRAIN_EVERY_KEPT_UP; keptUp++) {
             long desiredBefore = g.getDesiredBytesPerSec();
             long measuredBps = desiredBefore;
@@ -190,10 +191,42 @@ class TransferRateGovernorTest {
                 assertEquals(desiredBefore + STEP, g.getDesiredBytesPerSec(),
                         "kept-up " + keptUp + " probes up");
             } else {
-                assertEquals(measuredBps - STEP / 4, g.getDesiredBytesPerSec(),
-                        "the 8th consecutive kept-up bleeds standing queue instead");
+                assertEquals(measuredBps - STEP / 2, g.getDesiredBytesPerSec(),
+                        "the 4th consecutive kept-up bleeds standing queue instead");
             }
         }
+    }
+
+    @Test
+    void movementIntervalHoldsTheClimb() {
+        // Live round 2: the ~1500 ms movement spikes were the governor climbing +STEP
+        // into the window where vanilla's own chunk bursts compete for the link. A
+        // kept-up interval that saw a chunk crossing HOLDS desired; shortfall during
+        // movement still cuts.
+        var g = new TransferRateGovernor();
+        long t = 0;
+        tick(g, t, 0, 0, 1, false, NORMAL_PING);
+        tick(g, t += INTERVAL, 800 * KB, 100, 1, false, CONGESTED_PING);
+        long desired = g.getDesiredBytesPerSec();
+        long bytes = 800 * KB;
+        // Kept-up interval WITH movement: held.
+        bytes += desired * 2;
+        g.noteMovement();
+        tick(g, t += INTERVAL, bytes, 200, 1, false, CONGESTED_PING);
+        assertEquals(desired, g.getDesiredBytesPerSec(),
+                "a moving kept-up interval must not probe up");
+        // The same shape WITHOUT movement climbs — the hold was the movement's doing.
+        bytes += desired * 2;
+        tick(g, t += INTERVAL, bytes, 300, 1, false, CONGESTED_PING);
+        assertEquals(desired + STEP, g.getDesiredBytesPerSec(),
+                "a stationary kept-up interval probes up");
+        // Shortfall during movement still cuts (the hold pauses only the up-probe).
+        long slow = (desired + STEP) / 2;
+        bytes += slow * 2;
+        g.noteMovement();
+        tick(g, t += INTERVAL, bytes, 400, 1, false, CONGESTED_PING);
+        assertEquals(Math.max(slow - STEP / 2, TransferRateGovernor.MIN_RATE_BYTES_PER_SEC),
+                g.getDesiredBytesPerSec(), "movement never suppresses a genuine cut");
     }
 
     @Test
@@ -212,11 +245,11 @@ class TransferRateGovernorTest {
             tick(g, t += INTERVAL, bytes, 100 + keptUp * 10L, 1, false, CONGESTED_PING);
         }
         long desiredBefore = g.getDesiredBytesPerSec();
-        // The 8th kept-up measures DOUBLE desired (EWMA-lag shape): must bleed down
-        // from desired, never jump up toward measured.
+        // The drain-cadence kept-up measures DOUBLE desired (EWMA-lag shape): must
+        // bleed down from desired, never jump up toward measured.
         bytes += desiredBefore * 4;
         tick(g, t += INTERVAL, bytes, 200, 1, false, CONGESTED_PING);
-        assertEquals(desiredBefore - STEP / 4, g.getDesiredBytesPerSec(),
+        assertEquals(desiredBefore - STEP / 2, g.getDesiredBytesPerSec(),
                 "the drain anchors at min(desired, measured)");
     }
 
