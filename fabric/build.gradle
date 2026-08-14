@@ -102,6 +102,17 @@ test {
     }
 }
 
+// Stage N-1a (neoforge-support-plan.md §2): loader-neutral MC logic lives in the
+// xplat/ shared SOURCE SET (not a Gradle project — it has MC deps, so each loader
+// module compiles it against its own toolchain; packages unchanged).
+sourceSets {
+    main {
+        java {
+            srcDir '../xplat/src/main/java'
+        }
+    }
+}
+
 fabricApi {
     configureTests {
         createSourceSet = true

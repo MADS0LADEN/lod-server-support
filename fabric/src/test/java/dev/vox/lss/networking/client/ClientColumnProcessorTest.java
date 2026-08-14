@@ -823,16 +823,8 @@ class ClientColumnProcessorTest {
      *  and silently ships untranslated columns to every consumer. */
     @org.junit.jupiter.api.Test
     void productionDrainRoutesThroughTheV20TranslationWithTheV16Gate() throws Exception {
-        java.nio.file.Path src = java.nio.file.Path.of("").toAbsolutePath();
-        for (int depth = 0; depth < 5 && src != null; depth++, src = src.getParent()) {
-            var candidate = src.resolve(
-                    "src/main/java/dev/vox/lss/networking/client/ClientColumnProcessor.java");
-            var nested = src.resolve("fabric").resolve(
-                    "src/main/java/dev/vox/lss/networking/client/ClientColumnProcessor.java");
-            if (java.nio.file.Files.exists(candidate)) { src = candidate; break; }
-            if (java.nio.file.Files.exists(nested)) { src = nested; break; }
-        }
-        assertNotNull(src, "cannot locate ClientColumnProcessor source");
+        java.nio.file.Path src = dev.vox.lss.testutil.SourcePaths.mainSource(
+                "dev/vox/lss/networking/client/ClientColumnProcessor.java");
         String text = java.nio.file.Files.readString(src);
         int prodDrain = text.indexOf("private void drainColumnQueue(ClientLevel level");
         assertTrue(prodDrain >= 0, "production drain entry missing");
