@@ -69,6 +69,38 @@ public final class LSSNeoGameTests {
     public LSSNeoGameTests(IEventBus modBus) {
         modBus.addListener(RegisterEvent.class, LSSNeoGameTests::registerFunctions);
         modBus.addListener(RegisterGameTestsEvent.class, LSSNeoGameTests::registerTests);
+        // The N-3 executable client gate (plan §0.1): the "throwaway LSSApi consumer
+        // test mod" — with -Dlss.smoke.consumer=true on a CLIENT run, register a
+        // consumer that logs decoded column receipts. Proves the whole client half
+        // (handshake, capability bit, want-set, decode, dispatch) with no renderer.
+        if (net.neoforged.fml.loading.FMLEnvironment.getDist().isClient()
+                && Boolean.getBoolean("lss.smoke.consumer")) {
+            SmokeConsumer.register();
+        }
+    }
+
+    /** Logs every 200th column receipt (and the first) — the end-to-end evidence line. */
+    static final class SmokeConsumer implements dev.vox.lss.api.VoxelColumnConsumer {
+        private final java.util.concurrent.atomic.AtomicLong count =
+                new java.util.concurrent.atomic.AtomicLong();
+
+        static void register() {
+            dev.vox.lss.api.LSSApi.registerColumnConsumer(new SmokeConsumer());
+            dev.vox.lss.common.LSSLogger.info("[lss-smoke] column consumer registered");
+        }
+
+        @Override
+        public void onVoxelColumnReceived(net.minecraft.client.multiplayer.ClientLevel level,
+                                          net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension,
+                                          int chunkX, int chunkZ,
+                                          dev.vox.lss.api.VoxelColumnData columnData) {
+            long n = count.incrementAndGet();
+            if (n == 1 || n % 200 == 0) {
+                dev.vox.lss.common.LSSLogger.info("[lss-smoke] columns received=" + n
+                        + " last=" + chunkX + "," + chunkZ
+                        + " sections=" + columnData.sections().length);
+            }
+        }
     }
 
     private static void registerFunctions(RegisterEvent event) {

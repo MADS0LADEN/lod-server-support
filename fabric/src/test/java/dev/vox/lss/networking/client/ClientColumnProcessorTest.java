@@ -737,7 +737,8 @@ class ClientColumnProcessorTest {
         var events = new ArrayList<String>();
         var manager = new OrderRecordingManager(events);
 
-        var processorField = LSSClientNetworking.class.getDeclaredField("columnProcessor");
+        // The static processor lives in the loader-neutral glue since N-3.
+        var processorField = ClientNetGlue.class.getDeclaredField("columnProcessor");
         processorField.setAccessible(true);
         var staticProcessor = (ClientColumnProcessor) processorField.get(null);
         try {

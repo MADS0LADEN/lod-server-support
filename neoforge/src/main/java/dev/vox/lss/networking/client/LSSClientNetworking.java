@@ -12,100 +12,111 @@ import net.neoforged.neoforge.network.handling.IPayloadContext;
 
 /**
  * NeoForge client-side networking — the fabric {@code LSSClientNetworking}
- * twin (same FQN, per-loader tree). <b>N-2 state: the compile-surface twin
- * only</b> — the static surface xplat compiles against (the benchmark exporter,
- * LodRequestManager's counter suppliers, LSSApi's ingest-failure sink) with
- * inert values, and no-op payload handlers so the registrar binds. N-3 wires
- * the real client session (the fabric class's session state is the template).
- * A NeoForge SERVER build never executes any of this; on a NeoForge client the
- * inert surface means "no LOD session" — exactly the plan §0.1
- * compiled-and-inert posture until the client half lands.
+ * twin (same FQN, per-loader tree). Since N-3 this is REAL: every member
+ * delegates to the loader-neutral {@link ClientNetGlue} (xplat — the session
+ * state + receiver bodies both loaders share); this class carries only the
+ * payload-handler adapters the registrar binds and the static surface xplat
+ * compiles against.
+ *
+ * <p>DELIBERATELY STATELESS (no static fields): the registrar's method
+ * references load this class on the DEDICATED server too — class init must
+ * never touch {@code ClientNetGlue}/{@code Minecraft} (client-only classes);
+ * handler bodies resolve lazily and only ever run on physical clients.
  */
 public class LSSClientNetworking {
 
     public static boolean isServerEnabled() {
-        return false;
+        return ClientNetGlue.isServerEnabled();
     }
 
     public static int getSessionVersion() {
-        return 0;
+        return ClientNetGlue.getSessionVersion();
     }
 
     public static boolean hasReceivedSessionConfig() {
-        return false;
+        return ClientNetGlue.hasReceivedSessionConfig();
     }
 
     public static int getServerLodDistance() {
-        return 0;
+        return ClientNetGlue.getServerLodDistance();
     }
 
     public static long getColumnsReceived() {
-        return 0L;
+        return ClientNetGlue.getColumnsReceived();
     }
 
     public static long getBytesReceived() {
-        return 0L;
+        return ClientNetGlue.getBytesReceived();
     }
 
     public static long getWireBytesReceived() {
-        return 0L;
+        return ClientNetGlue.getWireBytesReceived();
     }
 
     public static long getColumnsDropped() {
-        return 0L;
+        return ClientNetGlue.getColumnsDropped();
     }
 
     public static long getConnectionStartMs() {
-        return 0L;
+        return ClientNetGlue.getConnectionStartMs();
     }
 
     public static LodRequestManager getRequestManager() {
-        return null;
+        return ClientNetGlue.getRequestManager();
     }
 
     public static int getQueuedColumnCount() {
-        return 0;
+        return ClientNetGlue.getQueuedColumnCount();
     }
 
     public static long getQueuedColumnBytes() {
-        return 0L;
+        return ClientNetGlue.getQueuedColumnBytes();
     }
 
-    /** LSSApi's ingest-failure sink — inert until N-3 (no session to forget stamps in). */
+    /** LSSApi's ingest-failure sink — see {@link ClientNetGlue#reportIngestFailure}. */
     public static void reportIngestFailure(ResourceKey<Level> dimension, int chunkX, int chunkZ) {
+        ClientNetGlue.reportIngestFailure(dimension, chunkX, chunkZ);
     }
 
-    /** ClientColumnProcessor's silent-clear report path — inert until N-3. */
+    /** ClientColumnProcessor's silent-clear report path. */
     static void reportUndispatchedColumns(LodRequestManager manager) {
+        ClientNetGlue.reportUndispatchedColumns(manager);
     }
 
-    /** The fabric LAN path's host handshake — no LAN hook on NeoForge v1. */
+    /** No LAN hook on NeoForge v1 (plan §5.4) — nothing ever calls this here; the
+     *  same-FQN surface keeps the twins aligned. */
     public static void triggerHostHandshake() {
     }
 
-    // ---- Payload handlers (bound by the registrar; no-ops until N-3) ----
+    // ---- Payload handlers (bound by the registrar; executesOn(MAIN)) ----
 
     public static void handleSessionConfigPayload(SessionConfigS2CPayload payload,
                                                   IPayloadContext context) {
+        ClientNetGlue.onSessionConfigFrame(payload);
     }
 
     public static void handleBatchResponsePayload(BatchResponseS2CPayload payload,
                                                   IPayloadContext context) {
+        ClientNetGlue.onBatchResponseFrame(payload);
     }
 
     public static void handleDirtyColumnsPayload(DirtyColumnsS2CPayload payload,
                                                  IPayloadContext context) {
+        ClientNetGlue.onDirtyColumnsFrame(payload);
     }
 
     public static void handleVoxelColumnPayload(VoxelColumnS2CPayload payload,
                                                 IPayloadContext context) {
+        ClientNetGlue.onVoxelColumnFrame(payload);
     }
 
     public static void handleFarPlayerRosterPayload(FarPlayerRosterS2CPayload payload,
                                                     IPayloadContext context) {
+        ClientNetGlue.onFarPlayerRosterFrame(payload.body());
     }
 
     public static void handleFarPlayerUpdatesPayload(FarPlayerUpdatesS2CPayload payload,
                                                      IPayloadContext context) {
+        ClientNetGlue.onFarPlayerUpdatesFrame(payload.body());
     }
 }

@@ -60,6 +60,17 @@ neoForge {
             // The gametest companion mod must not join plain server runs.
             loadedMods = [mods.lss]
         }
+        // N-3 client smokes: `-Plss.smoke.join=<host:port>` quick-plays into a server;
+        // `-Plss.smoke.consumer=true` arms the lsstest companion's logging LSSApi
+        // consumer (the plan §0.1 executable gate). Without the properties this is a
+        // plain dev client to the main menu.
+        client {
+            client()
+            if (findProperty('lss.smoke.join') != null) {
+                programArguments.addAll('--quickPlayMultiplayer', findProperty('lss.smoke.join').toString())
+            }
+            systemProperty 'lss.smoke.consumer', (findProperty('lss.smoke.consumer') ?: 'false').toString()
+        }
         gameTestServer {
             type = "gameTestServer"
             // Filter to OUR tests: the 26.2 TEST_INSTANCE registry also carries every

@@ -88,7 +88,34 @@ class NeoForgeLoaderSeamContractTest {
                 "sendToPlayer must pre-check channel negotiation (Fabric-parity silent no-op)");
         assertTrue(impl.contains("catch (UnsupportedOperationException"),
                 "the pre-check race window still needs the throw contained");
-        // The CLIENT send containment lands with the client impl at N-3; this pin
-        // will grow the client-side assertions there (tracked in the plan §2 N-3).
+        // The CLIENT half (N-3): the unprompted-first-send containment — a null
+        // connection or an un-negotiated channel must be a silent no-op.
+        String client = read(
+                "neoforge/src/main/java/dev/vox/lss/platform/NeoForgeClientLoaderServices.java");
+        assertTrue(client.contains("connection == null || !connection.hasChannel(payload.type())"),
+                "sendToServer must pre-check the connection + channel (the #160 crash class)");
+        assertTrue(client.contains("catch (UnsupportedOperationException"),
+                "the client send's race window needs the throw contained too");
+    }
+
+    /** N-3 wiring pins: the reflective bootstrap target exists under the exact name the
+     *  entrypoint loads, and the far-player RENDER-PATH cut keeps its precise form —
+     *  the capability arm term is shared xplat code the neoforge module must not
+     *  suppress (the bit is the PREFS CARRIER; plan §N-3/§6.2 wire-safety list). */
+    @Test
+    void clientBootstrapExistsUnderTheReflectiveName() throws IOException {
+        String mod = read("neoforge/src/main/java/dev/vox/lss/neoforge/LSSNeoMod.java");
+        assertTrue(mod.contains(
+                        "CLIENT_BOOTSTRAP_CLASS = \"dev.vox.lss.neoforge.LSSNeoClientBootstrap\""),
+                "the reflective constant must name the bootstrap class");
+        assertTrue(NeoForgeModuleContractTest.exists(
+                        "neoforge/src/main/java/dev/vox/lss/neoforge/LSSNeoClientBootstrap.java"),
+                "the bootstrap class must exist (a rename strands the client half inert"
+                        + " with only an INFO line)");
+        String renderer = read(
+                "neoforge/src/main/java/dev/vox/lss/networking/client/FarPlayerRenderer.java");
+        assertTrue(!renderer.contains("capabilityBit") && !renderer.contains("FarPlayerClientSupport"),
+                "the render-path cut must stay RENDER-ONLY — arm/capability state is"
+                        + " shared xplat code this twin must never touch");
     }
 }
