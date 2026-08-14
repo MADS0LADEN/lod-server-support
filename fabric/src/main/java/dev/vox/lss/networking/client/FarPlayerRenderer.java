@@ -132,13 +132,24 @@ public final class FarPlayerRenderer {
     }
 
     /** The ENTITY_LOAD edge trigger: a REAL player entity appearing kills its proxy
-     *  the same frame (crossfade guard — never render both). Main client thread. */
+     *  the same frame (crossfade guard — never render both). Main client thread.
+     *  CONTAINED (issue-#160 review MAJOR-1): this fires from ClientLevel's entity-add
+     *  path during PACKET HANDLING with no latch above it, and stopRiding dispatches
+     *  virtually into the modded vehicle class (Create's removePassenger reads
+     *  contraption state a bare client-created instance does not have) — an escaping
+     *  throw here crashed the client on the COMMON approach-a-mounted-far-player path.
+     *  The proxy is already removed either way; a stuck link dies with it. */
     static void onRealPlayerLoad(UUID uuid) {
         var r = instance;
         if (r != null) {
             var removed = r.proxies.remove(uuid);
             if (removed != null && removed.isPassenger()) {
-                removed.stopRiding(); // m2: never leave the link on the live mount
+                try {
+                    removed.stopRiding(); // m2: never leave the link on the live mount
+                } catch (Throwable t) {
+                    // Modded removePassenger threw on half-initialized state — the
+                    // proxy is dropped regardless; nothing renders it again.
+                }
             }
         }
     }
@@ -152,8 +163,12 @@ public final class FarPlayerRenderer {
         for (var mount : vehicles.values()) {
             try {
                 mount.entity.ejectPassengers();
-            } catch (Exception ignored) {
-                // The maps drop either way; a stuck link dies with the instance.
+            } catch (Throwable ignored) {
+                // Throwable, not Exception (issue-#160 review MINOR-3): clear() runs
+                // INSIDE the whole-pass catch, so a LinkageError from a modded
+                // removePassenger here would escape render() entirely — the one
+                // remaining render-thread crash window. The maps drop either way; a
+                // stuck link dies with the instance.
             }
         }
         proxies.clear();
@@ -243,9 +258,35 @@ public final class FarPlayerRenderer {
                             : current);
             boolean allowWalk = config.farPlayersMaxAnimationDistanceBlocks > 0
                     && distance <= config.farPlayersMaxAnimationDistanceBlocks;
-            proxy.apply(tracked, sample, position, config.farPlayersNameTags,
-                    maxRender > 0 ? maxRender : 16384, allowWalk, animationTick,
-                    itemCache);
+            // Rider-while-seated attribution (issue-#160 review MINOR-1): from frame 2
+            // of a ride the proxy IS a passenger, and apply's snapTo/setPose reach
+            // makeBoundingBox — which Create-class mixins wrap with vehicle-state
+            // reads (getSeatPos on a bare client-created contraption is the literal
+            // issue-#160 NPE). Seated, that throw must latch the VEHICLE's type and
+            // re-apply unmounted — not fall through to the whole-pass latch and kill
+            // the feature for the session.
+            if (proxy.isPassenger()) {
+                try {
+                    proxy.apply(tracked, sample, position, config.farPlayersNameTags,
+                            maxRender > 0 ? maxRender : 16384, allowWalk, animationTick,
+                            itemCache);
+                } catch (Throwable t) {
+                    latchSeatedFailure(tracked, proxy, t);
+                    // Unmounted, the vehicle-state mixin path is inert — one retry.
+                    // Guarded: if even the link-break threw (latchSeatedFailure dropped
+                    // the proxy), a still-seated retry would re-throw into the
+                    // whole-pass latch — skip this rider this frame instead.
+                    if (!proxy.isPassenger()) {
+                        proxy.apply(tracked, sample, position, config.farPlayersNameTags,
+                                maxRender > 0 ? maxRender : 16384, allowWalk,
+                                animationTick, itemCache);
+                    }
+                }
+            } else {
+                proxy.apply(tracked, sample, position, config.farPlayersNameTags,
+                        maxRender > 0 ? maxRender : 16384, allowWalk, animationTick,
+                        itemCache);
+            }
             active.add(tracked.uuid());
 
             // R-10 v1.3 mounts: the rider renders at its OWN wire position (the
@@ -262,24 +303,54 @@ public final class FarPlayerRenderer {
                 try {
                     renderMount(wireVehicle, tracked, proxy, level, now, animationTick,
                             dispatcher, partialTick, cameraPosition, poseStack, context);
-                } catch (Exception e) {
+                } catch (Throwable e) {
+                    // Throwable, not Exception (MINOR-3): a LinkageError from a modded
+                    // entity class init must latch the TYPE, not the whole feature.
                     mountLadder.latchRenderFailure(wireVehicle.typeIdentity(), e);
                     vehicles.remove(wireVehicle.uuid());
-                    if (proxy.isPassenger()) proxy.stopRiding();
+                    stopRidingContained(proxy); // MINOR-2: a throwing removePassenger
+                    // here escaped this catch to the whole-pass latch — same frame,
+                    // whole feature off where the type was already latched.
                 }
             } else if (proxy.isPassenger()) {
-                proxy.stopRiding(); // dismount edge
+                // Dismount edge (MINOR-2): the wire says unmounted, the local link may
+                // sit on a broken modded vehicle. A throwing dismount drops the proxy
+                // wholesale (fresh unmounted proxy next frame) instead of feature-off.
+                if (!stopRidingContained(proxy)) {
+                    proxies.remove(tracked.uuid());
+                    active.remove(tracked.uuid());
+                    continue;
+                }
             }
 
-            var renderState = dispatcher.extractEntity(proxy, partialTick);
-            dispatcher.submit(
-                    renderState,
-                    context.levelState().cameraRenderState,
-                    position.x - cameraPosition.x,
-                    position.y - cameraPosition.y,
-                    position.z - cameraPosition.z,
-                    poseStack,
-                    context.submitNodeCollector());
+            // Rider extraction while seated runs extraction mixins against the vehicle
+            // (MINOR-1's second half): attribute a seated throw to the vehicle type and
+            // skip this rider this frame — it renders unmounted next frame.
+            if (proxy.isPassenger()) {
+                try {
+                    var renderState = dispatcher.extractEntity(proxy, partialTick);
+                    dispatcher.submit(
+                            renderState,
+                            context.levelState().cameraRenderState,
+                            position.x - cameraPosition.x,
+                            position.y - cameraPosition.y,
+                            position.z - cameraPosition.z,
+                            poseStack,
+                            context.submitNodeCollector());
+                } catch (Throwable t) {
+                    latchSeatedFailure(tracked, proxy, t);
+                }
+            } else {
+                var renderState = dispatcher.extractEntity(proxy, partialTick);
+                dispatcher.submit(
+                        renderState,
+                        context.levelState().cameraRenderState,
+                        position.x - cameraPosition.x,
+                        position.y - cameraPosition.y,
+                        position.z - cameraPosition.z,
+                        poseStack,
+                        context.submitNodeCollector());
+            }
         }
         // Prune with the ride link BROKEN (E3 review m2): a proxy dropped while
         // riding otherwise stays in the mount's passenger list — no ghost render
@@ -289,8 +360,8 @@ public final class FarPlayerRenderer {
         while (proxyIt.hasNext()) {
             var entry = proxyIt.next();
             if (!active.contains(entry.getKey())) {
-                if (entry.getValue().isPassenger()) entry.getValue().stopRiding();
-                proxyIt.remove();
+                if (entry.getValue().isPassenger()) stopRidingContained(entry.getValue());
+                proxyIt.remove(); // dropped either way — a stuck link dies with it
             }
         }
         // Vehicle lifecycle (R-10): evict instances no rider referenced this frame
@@ -298,6 +369,36 @@ public final class FarPlayerRenderer {
         vehicles.keySet().removeIf(uuid -> !activeVehicles.contains(uuid));
         activeVehicles.clear();
         submittedVehicles.clear();
+    }
+
+    /** Contained dismount: modded removePassenger overrides can throw on the same
+     *  half-initialized state that motivated the type latch (issue-#160 review
+     *  MINOR-2). Returns false when the link could not be cleanly broken — the caller
+     *  drops the proxy so a broken link never persists. */
+    private static boolean stopRidingContained(Proxy proxy) {
+        try {
+            proxy.stopRiding();
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** Attributes a rider-while-seated throw (apply/extract reaching vehicle-state
+     *  mixins — the literal issue-#160 stack) to the VEHICLE's type: latch it, drop
+     *  the mount instance, break the link (contained), so the rider continues
+     *  unmounted and the feature keeps working for every other type (MINOR-1). */
+    private void latchSeatedFailure(FarPlayerClientTracker.TrackedFarPlayer tracked,
+                                    Proxy proxy, Throwable t) {
+        var wireVehicle = tracked.latest().vehicle();
+        String type = wireVehicle != null ? wireVehicle.typeIdentity()
+                : String.valueOf(proxy.getVehicle() == null ? null
+                        : proxy.getVehicle().getType());
+        mountLadder.latchRenderFailure(type, t);
+        if (wireVehicle != null) vehicles.remove(wireVehicle.uuid());
+        if (!stopRidingContained(proxy)) {
+            proxies.remove(tracked.uuid());
+        }
     }
 
     /** The per-rider mount pass: resolve/create/link/submit. Throws propagate to the
