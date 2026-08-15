@@ -236,17 +236,17 @@ class ReleaseWorkflowContractTest {
     // ---- publish steps ----
 
     @Test
-    void githubReleaseStepShipsExactlyTheLssTrio() {
+    void githubReleaseStepShipsExactlyTheComposedLssAssets() {
         // VSS publishing is disabled as of v0.8.0 (user decision at the tri-release): the
         // vssJar tasks still build the branded byte-copies and release_check still gates
-        // the pair, but no VSS jar may be distributed — from ANY line.
+        // the pair, but no VSS jar may be distributed — from ANY line. Since the v0.11.0
+        // NeoForge scope cut (user decision 2026-08-15) the asset list is COMPOSED in the
+        // line.env step: fabric+paper always, neoforge only where LINE_SHIP_NEOFORGE=true
+        // (fail_on_unmatched_files makes a static neoforge glob a hard failure on lines
+        // that skip its build).
         String gh = stepBlock("- uses: softprops/action-gh-release");
-        for (String glob : new String[]{
-                "fabric/build/libs/lod-server-support-fabric-*.jar",
-                "paper/build/libs/lod-server-support-paper-*.jar",
-                "neoforge/build/libs/lod-server-support-neoforge-*.jar"}) {
-            assertTrue(gh.contains(glob), "the gh-release assets must include " + glob);
-        }
+        assertTrue(gh.contains("files: ${{ env.RELEASE_FILES }}"),
+                "the gh-release assets must come from the composed RELEASE_FILES list");
         assertFalse(gh.contains("voxy-server-side-"),
                 "no VSS jar may be attached to the GitHub release");
         assertTrue(gh.contains("fail_on_unmatched_files: true"),
@@ -254,6 +254,53 @@ class ReleaseWorkflowContractTest {
         assertTrue(gh.contains("make_latest: ${{ env.LINE_MAKE_LATEST }}"),
                 "make_latest is line data (true on main, false on support lines) — "
                         + "lineEnvIsLockedToTheBuildToolchain pins the value per line");
+        // The composition itself: fabric+paper unconditional, neoforge flag-guarded.
+        assertTrue(releaseYml.contains("echo \"fabric/build/libs/lod-server-support-fabric-*.jar\""),
+                "RELEASE_FILES must always include the fabric jar");
+        assertTrue(releaseYml.contains("echo \"paper/build/libs/lod-server-support-paper-*.jar\""),
+                "RELEASE_FILES must always include the paper jar");
+        int guard = releaseYml.indexOf("if [ \"${LINE_SHIP_NEOFORGE}\" = \"true\" ]");
+        int neoGlob = releaseYml.indexOf("echo \"neoforge/build/libs/lod-server-support-neoforge-*.jar\"");
+        assertTrue(guard >= 0 && neoGlob > guard,
+                "the neoforge asset glob must sit INSIDE the LINE_SHIP_NEOFORGE guard");
+        // Guard-BOUNDED, not just guard-after (review m1: an echo moved below the fi
+        // was the one mutation the ordering pin missed — it would ship the glob
+        // unconditionally; fail_on_unmatched_files contains it, but loudly-red here
+        // beats a failed release run).
+        int fi = releaseYml.indexOf("\n            fi", guard);
+        assertTrue(fi > guard && neoGlob < fi,
+                "the neoforge asset glob must sit BEFORE the guard's closing fi");
+    }
+
+    @Test
+    void neoforgeShippingIsGatedPerLine() {
+        // v0.11.0 scope (user decision 2026-08-15): NeoForge ships ONLY on the 1.21.1
+        // line. This 26.2 line does NOT ship it — the value pin makes re-enabling a
+        // conscious per-line decision, and the step gates keep release.yml
+        // branch-invariant (the V-1 principle: behavior from line.env data).
+        assertEquals("false", env("LINE_SHIP_NEOFORGE"),
+                "this line must not ship NeoForge at v0.11.0 — flip line.env AND"
+                        + " release_check.py SHIP_NEOFORGE together, consciously");
+        assertTrue(stepBlock("- name: Build NeoForge + contract tests")
+                        .contains("if: env.LINE_SHIP_NEOFORGE == 'true'"),
+                "the release-pipeline NeoForge build must be flag-gated");
+        assertTrue(stepBlock("- name: Upload NeoForge to Modrinth")
+                        .contains("env.LINE_SHIP_NEOFORGE == 'true'"),
+                "the NeoForge Modrinth step must be flag-gated");
+        // The two-file coupling the message above promises (review MAJOR M1): the
+        // release_check.py mirror has no other automated pin, and the drift vector is
+        // the recurring main->support forward merge on a file already hand-resolved
+        // per line — a desync toward False silently un-gates the shipping line's
+        // family requirements.
+        try {
+            String rc = Files.readString(locate("scripts/release_check.py"));
+            assertTrue(rc.contains("\nSHIP_NEOFORGE = "
+                            + (env("LINE_SHIP_NEOFORGE").equals("true") ? "True" : "False") + "\n"),
+                    "release_check.py SHIP_NEOFORGE must mirror line.env LINE_SHIP_NEOFORGE"
+                            + " — flip both together, consciously");
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
     }
 
     @Test

@@ -2,7 +2,7 @@
 
 Streams LOD (Level of Detail) chunk data from your server to connected clients, so [Voxy](https://modrinth.com/mod/voxy) can render terrain hundreds of chunks out — including terrain the player has never visited.
 
-Supports **Fabric** clients, and **Fabric**, **NeoForge**, **Paper**, **Purpur** and **Folia** servers. NeoForge support is best-effort tier (server works fully; the client half needs a community Voxy build for NeoForge, which doesn't exist on 26.2 yet).
+Supports **Fabric** clients, and **Fabric**, **Paper**, **Purpur** and **Folia** servers — plus **NeoForge** servers on the MC 1.21.1 line. NeoForge support is best-effort tier, and v0.11.0 ships it for 1.21.1 only (the one version where a community Voxy build exists for the client half).
 
 https://github.com/user-attachments/assets/721fb344-890e-4e03-ab36-539444427f7b
 
@@ -18,7 +18,7 @@ https://github.com/user-attachments/assets/721fb344-890e-4e03-ab36-539444427f7b
 | **Fabric client** | `lod-server-support-fabric.jar` | `mods/` | `config/lss-client-config.json` |
 | **Fabric server** | `lod-server-support-fabric.jar` | `mods/` | `config/lss-server-config.json` |
 | **Paper / Purpur / Folia** | `lod-server-support-paper.jar` | `plugins/` | `plugins/LodServerSupport/lss-server-config.json` |
-| **NeoForge server** | `lod-server-support-neoforge.jar` | `mods/` | `config/lss-server-config.json` |
+| **NeoForge server** (MC 1.21.1 only) | `lod-server-support-neoforge.jar` | `mods/` | `config/lss-server-config.json` |
 
 Restart after installing. Downloads are on [Modrinth](https://modrinth.com/plugin/lod-server-support); GitHub Releases mirror every version.
 
@@ -28,9 +28,9 @@ Each Minecraft version has its own build, versioned `v<x.y.z>+mc<version>`; only
 
 | Minecraft | LSS Version | Fabric | NeoForge | Paper | Folia | Voxy | Java |
 |---|---|---|---|---|---|---|---|
-| **26.2** | v0.11.0+mc26.2 | ✅ | ✅ (server) | ✅ | ✅ | 0.2.17-alpha+ | 25+ |
-| **26.1.x** | v0.11.0+mc26.1 | ✅ | ✅ (server) | ✅ | ✅ | 0.2.14-alpha+ | 25+ |
-| **1.21.11** | v0.11.0+mc1.21.11 | ✅ | ✅ (server) | ✅ | ✅ | 0.2.15-beta+ | 21+ |
+| **26.2** | v0.11.0+mc26.2 | ✅ | — | ✅ | ✅ | 0.2.17-alpha+ | 25+ |
+| **26.1.x** | v0.11.0+mc26.1 | ✅ | — | ✅ | ✅ | 0.2.14-alpha+ | 25+ |
+| **1.21.11** | v0.11.0+mc1.21.11 | ✅ | — | ✅ | ✅ | 0.2.15-beta+ | 21+ |
 | **1.21.1** | v0.11.0+mc1.21.1 | ✅ | ✅ (server) | ✅ | — | community fork | 21+ |
 
 > [!IMPORTANT]

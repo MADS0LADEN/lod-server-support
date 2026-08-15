@@ -31,9 +31,16 @@ variant with the normal Voxy API surface — `VoxyCompat`'s graceful-degrade lad
 (no-sink, warn-once, no capability bit) is the contract when it doesn't match; on
 26.2 no such build exists yet, so the client half ships compiled-and-inert by
 construction. Accepted recurring cost: a full release becomes up to 4 lines × 3
-loaders ≈ 12 artifacts, permanently — and v0.11.0 itself releases all four MC
-lines × three loaders SIMULTANEOUSLY (user decision 2026-08-14; the 1.21.1 line
-ships Fabric + Paper + NeoForge). **Wire compatibility is NEVER tiered** —
+loaders ≈ 12 artifacts, permanently — but **v0.11.0 SHIPS NeoForge on the 1.21.1
+line ONLY** (user decision 2026-08-15, superseding the 2026-08-14 all-lines
+plan): 1.21.1 is the one line with a working NeoForge client pairing (the
+community Voxy port, live-proven), while 26.x/1.21.11 NeoForge clients have no
+Voxy route (Foxy is structurally broken — see the decisions log) and their
+server-side value alone did not justify shipping. Gated by `LINE_SHIP_NEOFORGE`
+in `.github/line.env` + `SHIP_NEOFORGE` in release_check.py (flip both together;
+`ReleaseWorkflowContractTest.neoforgeShippingIsGatedPerLine` pins each line's
+value) — release.yml stays branch-invariant, and build.yml still builds + tests
+the NeoForge module on EVERY line so the port stays maintained for re-enable. **Wire compatibility is NEVER tiered** —
 every jar speaks the same protocol at full fidelity, and every never-tiered claim
 names a test that reds when violated (plan §1.2).
 
@@ -493,7 +500,7 @@ Releases are triggered by pushing an **annotated tag** (`git tag -a`). The tag a
 1. Review commits since the last tag: `git log $(git describe --tags --abbrev=0)..HEAD --oneline`
 2. **Pre-flight the exact release build locally** before tagging — the tag triggers an irreversible GitHub + Modrinth publish, so it must be green first:
    `CI=true ./gradlew :fabric:build -x runClientGameTest :paper:test :paper:shadowJar :neoforge:build -Pmod_version=<version> && python3 scripts/release_check.py --version <version>`
-   (`release_check.py` must print `OK`; `--version` pins the check to the jars just built — stale jars in build/libs otherwise fail the run; `:fabric:build` runs Tier 1 + Tier 2, `:paper:test` gates the Paper jar, `:neoforge:build` runs the contract suite + builds the six-family jar set `release_check.py` now hard-requires. CI runs Tier 3 (`:fabric:runClientGameTest`) as a separate build.yml job — check it is green on the release commit before tagging.)
+   (`release_check.py` must print `OK`; `--version` pins the check to the jars just built — stale jars in build/libs otherwise fail the run; `:fabric:build` runs Tier 1 + Tier 2, `:paper:test` gates the Paper jar, `:neoforge:build` runs the contract suite (still a gate), but this line does NOT ship NeoForge (`LINE_SHIP_NEOFORGE=false` — v0.11.0 ships it on 1.21.1 only), so `release_check.py` hard-requires only the four Fabric/Paper families and merely sanity-checks any NeoForge jars it finds. CI runs Tier 3 (`:fabric:runClientGameTest`) as a separate build.yml job — check it is green on the release commit before tagging.)
 3. Get the release commit onto `main` via PR (protected branch): push the release branch, `gh pr create --base main`, then `gh pr merge --merge`. Use **`--merge`** (a merge commit) — `--squash`/`--rebase` rewrite SHAs and orphan the tag.
 4. Write release notes to a file (format below) and create the annotated tag with **`--cleanup=verbatim`** so the `###` headers survive:
    `git tag -a v<version> -F <notes-file> --cleanup=verbatim`
