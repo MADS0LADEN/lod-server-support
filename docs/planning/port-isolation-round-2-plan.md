@@ -1,10 +1,15 @@
 # Port-isolation round 2 — hindsight hardening after the v0.11.0 ports
 
-**Status: PLANNED (v1.1, 2026-08-15 — v1.0 reviewed by a 1-Fable adversarial pass:
-3 MAJOR / 9 MINOR, "fit to execute after fixes"; all folded here. Sequencing
-user-confirmed: executes on MAIN, after the v0.11.0 release round (G-4) — none of
-this touches the frozen release branches; the payoff lands on the next port and
-every future main→branch patch flow.)**
+**Status: EXECUTING (v1.2, 2026-08-15 — the post-release re-review: every item
+re-validated against the changes landed after v1.1 (the LINE_SHIP_NEOFORGE ship
+gate, the jarJar sqlite fix + its release_check hardening, the NeoForge metadata
+parity fix, the LINE_NEOFORGE_NAME flip, the README replacement, and the v0.11.0
+release itself — all four tags published, so the G-4 precondition is satisfied and
+the branches are frozen at v0.11.0+hotfixes). All ten items stand; three
+amendments marked [v1.2] inline. v1.1 history: v1.0 reviewed by a 1-Fable
+adversarial pass, 3 MAJOR / 9 MINOR, "fit to execute after fixes", all folded.
+Executes on MAIN; the payoff lands on the next port and every future main→branch
+patch flow.)**
 
 Round 1 (version-port-isolation-plan.md, stages V-1/V-2/V-3) ran BEFORE the ports on
 predicted churn. This round runs AFTER them, on the recorded churn of three real
@@ -55,6 +60,8 @@ resource edit breaks Tier 2 at entrypoint resolution. Guard:
 entrypoint lists exactly the client-gametest classes present in the source set)
 instead of presence; runbook step 8 names the boolean as the only build edit
 (the build.yml Tier-3 job deletion stays a one-hunk hand edit). ~40 lines.
+[v1.2] The "13 mentions across 9 files" census predates the ship-gate/jarJar
+release_check rounds — re-count at execution; the mechanism is count-independent.
 **Evidence:** review MAJOR "CI red by construction" + the recorded 10-file 1.21.1
 tail incl. the file deletion + resource edit the v1.0 design missed; the
 dormant-arm pattern's payoff record.
@@ -94,7 +101,14 @@ membership in `LINE_PAPER_LOADERS` (already per-line, already correct everywhere
 plugin.yml templates the flag conditionally via processResources (the file already
 templates `${version}`/`${api_version}`); `PluginYmlContractTest` and
 `release_check.py` read line.env and flip assertion polarity off the same datum; one
-new pin asserts the expanded yml agrees with line.env in both polarities. The
+new pin asserts the expanded yml agrees with line.env in both polarities. [v1.2]
+The same line.env read ALSO absorbs `SHIP_NEOFORGE`: the ship-gate round (post-v1.1,
+pre-release) landed it as a hand-mirrored constant with a
+`neoforgeShippingIsGatedPerLine` cross-pin because it shipped same-day; deriving it
+from `LINE_SHIP_NEOFORGE` retires the mirror and its forward-merge drift vector
+outright (the contract test keeps pinning line.env's per-line VALUE — the judgment —
+while release_check stops carrying a copy). This is §0 verbatim: the mirror is a
+label, the read is a derivation. The
 judgment ("does Folia exist upstream?") stays a judgment — the derivation's honest
 value is SINGLE-POINT-OF-EDIT plus adjacency: the field lives in the one file a
 fresh cut must touch anyway (the MC rows are cross-pinned), not a hard forcing
@@ -126,7 +140,9 @@ g211's `"fabric-api": "${fabric_api_dependency}"` templating on main (m3 — the
 mechanism exists only on that tree; main/g26/g21 carry hand literals), and derive
 the neoforge.mods.toml loader floor `[X.Y,)` from `neoforge_version`'s first two
 components (m4 — a labeled hand row that churned on all three ports, the exact
-"label without derivation" class §0 indicts). GATE (review MAJOR M3): pre/post
+"label without derivation" class §0 indicts). [v1.2] neoforge.mods.toml has since
+gained `logoFile` + the fabric-matching description (the metadata-parity fix) —
+the byte-diff gate simply runs against the current content. GATE (review MAJOR M3): pre/post
 byte-diff of the expanded fabric.mod.json + neoforge.mods.toml on main —
 byte-identical before merge. Guard: FabricModJsonContractTest extension (suggests
 expands non-empty). ~80 lines. **Evidence:** compat-arm IDs stale on ALL THREE
@@ -210,8 +226,9 @@ residual consumer lines on the fresh cut — acceptable, no further seam).
 - Never regenerate `xver-live-corpus` (the cross-version claim itself).
 - Don't lower the 1.21.1 fabricloader floor absent a real compatibility pass
   (2026-08-15 decision).
-- Don't grow release_check.py into a general line.env engine beyond R2-5's two
-  targeted reads.
+- Don't grow release_check.py into a general line.env engine beyond R2-5's one
+  read consuming its three data (folia direction, mapping namespace, ship_neoforge
+  — [v1.2] widened from "two targeted reads" to retire the SHIP_NEOFORGE mirror).
 
 ## §4 Sequencing and gates
 
