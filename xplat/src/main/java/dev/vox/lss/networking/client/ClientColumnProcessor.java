@@ -402,7 +402,7 @@ class ClientColumnProcessor {
      * Append an all-air {@link VoxelColumnData.SectionData} for every section-Y in
      * {@code [minSectionY, minSectionY + levelSectionCount)} that the decoded column does not
      * already carry, so a resync overwrites ghost terrain the server cleared. A fresh all-air
-     * {@link LevelChunkSection} per absent Y — {@code new LevelChunkSection(factory)} is all-air
+     * {@link LevelChunkSection} per absent Y — {@code SectionConstruction.empty(factory)} is all-air
      * until written — with null light layers (dark), consistent with the absent-means-all-zero
      * light default.
      */
@@ -442,7 +442,7 @@ class ClientColumnProcessor {
         // minSectionY (a supported case — see decodeTruncatesSectionsBeyondLevelHeight);
         // fill must stay inside the client level like the air-fill does.
         for (int y = Math.max(top + 1, minSectionY); y <= levelTop; y++) {
-            out.add(new VoxelColumnData.SectionData(y, new LevelChunkSection(factory),
+            out.add(new VoxelColumnData.SectionData(y, dev.vox.lss.platform.SectionConstruction.empty(factory),
                     null, new DataLayer(FULL_BRIGHT_SKY.clone())));
         }
         return out.toArray(new VoxelColumnData.SectionData[0]);
@@ -461,7 +461,7 @@ class ClientColumnProcessor {
             if (!seen.contains(y)) {
                 // brightSky is set ONLY for the whole-column clear in a sky dimension —
                 // below/among-band fills on a non-empty resync must stay dark.
-                out.add(new VoxelColumnData.SectionData(y, new LevelChunkSection(factory), null,
+                out.add(new VoxelColumnData.SectionData(y, dev.vox.lss.platform.SectionConstruction.empty(factory), null,
                         brightSky ? new DataLayer(FULL_BRIGHT_SKY.clone()) : null));
             }
         }
@@ -534,7 +534,7 @@ class ClientColumnProcessor {
             for (int i = 0; i < sectionCount; i++) {
                 int sectionY = buf.readByte();
 
-                var section = new LevelChunkSection(factory);
+                var section = dev.vox.lss.platform.SectionConstruction.empty(factory);
                 section.read(buf);
 
                 DataLayer blockLight = null;

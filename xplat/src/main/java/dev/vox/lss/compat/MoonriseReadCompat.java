@@ -111,7 +111,7 @@ public final class MoonriseReadCompat {
     }
 
     /**
-     * Pure resolution ladder, instance-scoped (the {@code AntiXrayCompat.buildCarrier} shape)
+     * Pure resolution ladder, instance-scoped (the {@code ScopedCarrier.buildCarrier} shape)
      * so tests are order-independent: mod absent → unavailable with no classloading at all;
      * any resolution failure → unavailable + exactly one drift warning (build runs once per
      * instance, so once-ness is structural). Never throws.

@@ -184,8 +184,10 @@ untouched.
 
 **S2. Section-construction seam.** `PalettedContainerFactory` vs the older
 `Registry<Biome>` ctor family churned 4+ files on the 1.21.8 port and returns for
-1.21.1. One `SectionConstruction` helper per loader family (xplat + Paper twin,
-kept byte-for-byte textual twins like the mask filters) owning create-empty,
+1.21.1. One `SectionConstruction` helper per loader family (xplat + Paper twin;
+AS BUILT the twins deliberately DIFFER — the per-family ctor variance IS the seam,
+so no byte-identity pin exists for them, unlike the mask filters; recorded at the
+V-2 execution review) owning create-empty,
 rebuild-from-containers, biome-container access; consumers:
 `ClientColumnProcessor`, both `XrayMaskFilter`s, both NBT serializers' object
 path. **Constraint carried from the 1.21.11 branch (review):** the helper must
@@ -215,8 +217,8 @@ as written).** One invocation site; the 1.21.11 flavor is a pure pass-through
 `XplatJava21SurfaceTest` exclusion list — it **empties it** (the list is literally
 the one-element set naming AntiXrayCompat), removing the single standing Java-25
 exception every Java-21 line must otherwise carry through shared xplat source.
-The 7 crash-shim tests move with the carrier; the 5 engine-probe tests (verified
-line-invariant) stay.
+The 8 crash-shim tests move with the carrier (count corrected at execution); the
+5 engine-probe tests (verified line-invariant) stay, plus a new delegate pin.
 
 **S6. Version-volatile file rule — reframed as a REGRESSION GUARD (review).**
 Stage N already put `FarPlayerRenderer`/`ChunkSaveDataHook` in per-loader trees,
@@ -314,11 +316,23 @@ byte-identical resources):** P1 + P2 (with the pinned dry-run), P3, P4, T1, T3,
 T4-wording, S6's list-pin, D1-D3. ~3-4 days. No re-arm, no re-deploy, and G's
 four-line release round inherits all of it.
 
-**Phase 2 — after the user's pause sign-off, BEFORE stage G's port work begins
-(hard sequencing, not "if the review agrees"):** S1 (+descriptor-derived tests),
-S2, S5, S7, the S3-replacement one-liner. ~2 days. Changes class bytes → folds
-into G's natural pre-port re-validation instead of invalidating the tested jar
-mid-pause. S1's payoff lands exactly in G's 1.21.11/1.21.1 cuts.
+**Phase 2 — EXECUTED 2026-08-14 (V-2, post-sign-off, before G's port work):**
+S1 (`NativeSectionShape` — THREE-field descriptor as amended by the execution
+review's MAJOR-1/2: NATIVE_COUNT_SHORTS + the LINE-level cursor fold (the recorded
+1.21.11 cursor SUMS for both families' v20→native egress — a field the planned
+two-field shape could not express) + the two family folds; consumed by the cursor
+emit, both serializers' `writeNativeCountHeader` AND `emitV20Direct` count headers
+AND the exact pre-size arithmetic; all three folds throw on 2-short lines; the
+three relationship tests derived; `NativeSectionShapeTest` carries the
+scope-hygiene pins incl. V20-never-descriptor-derived), S2 (`SectionConstruction`/`PaperSectionConstruction`
+family helpers + `SectionConstructionPinTest` — zero main-source ctor sites
+outside them), S5 (`ScopedCarrier` per-loader byte-identical twins — the
+`XplatJava21SurfaceTest` exclusion list is EMPTY; twins pinned identical in
+`NeoForgeModuleContractTest`; the 8 shim tests moved to `ScopedCarrierTest`),
+S7 (the ASM census in `SaveHookContractTest` — exactly one copyOf INVOKESTATIC
+in the real 26.2 `ChunkMap.save`), and the S3-replacement one-liner
+(`TicketType.NO_TIMEOUT`/`FLAG_LOADING` constants, values verified 0L/2).
+All golden suites passed WITHOUT regeneration — the byte-identity proof.
 
 **Phase 3 — branch-first, back-flow after (review: "with the 1.21.1 port" IS
 stage G, and a main-side refactor mid-G is the worst slot):** S4 (scope-capped)

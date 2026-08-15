@@ -2,10 +2,8 @@ package dev.vox.lss.paper;
 
 import dev.vox.lss.common.LSSLogger;
 import dev.vox.lss.common.XrayMaskPolicy.FallbackKind;
-import net.minecraft.core.Holder;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
-import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -169,15 +167,10 @@ final class PaperXrayMaskFilter {
         if (!needsMasking(section, sectionY, mask)) return section;
         PalettedContainer<BlockState> masked = maskedStates(section.getStates(), sectionY, mask, kind, factory,
                 replacedCellsOut);
-        var biomes = section.getBiomes();
-        if (!(biomes instanceof PalettedContainer<Holder<Biome>> biomeContainer)) {
-            // Unreachable on live sections and codecRO-parsed sections alike (both yield the
-            // concrete type); the instanceof exists because Paper's section ctor requires
-            // it, and the twins stay textually identical. Contained by every serve path.
-            throw new IllegalStateException("section biomes are not a mutable PalettedContainer");
-        }
-        // The biome container is reused by REFERENCE (read-only here); only states differ.
-        return new LevelChunkSection(masked, biomeContainer);
+        // The biome container is reused by REFERENCE (read-only here); only states
+        // differ. Construction + the mutable-narrow live in the S2 seam.
+        return PaperSectionConstruction.withStates(
+                masked, PaperSectionConstruction.biomes(section));
     }
 
     /** One pass, one allocation: reads the source container, writes same-or-replacement

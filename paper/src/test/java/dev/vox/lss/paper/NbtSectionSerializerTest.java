@@ -612,12 +612,42 @@ class NbtSectionSerializerTest {
                 "both modules must carry the same corpus cases");
         assertFalse(paper.isEmpty(), "corpus must not be empty");
         for (var entry : paper.entrySet()) {
-            long mismatch = Files.mismatch(entry.getValue(), fabric.get(entry.getKey()));
-            assertEquals(-1L, mismatch, () -> entry.getKey()
-                    + ": fabric and paper fixtures diverge at byte " + mismatch
-                    + " — the two serializers no longer produce identical wire bytes;"
-                    + " regenerate on BOTH modules from the same code state and fix the drift");
+            if (dev.vox.lss.common.wire.NativeSectionShape.familiesFoldIdentically()) {
+                long mismatch = Files.mismatch(entry.getValue(), fabric.get(entry.getKey()));
+                assertEquals(-1L, mismatch, () -> entry.getKey()
+                        + ": fabric and paper fixtures diverge at byte " + mismatch
+                        + " — the two serializers no longer produce identical wire bytes;"
+                        + " regenerate on BOTH modules from the same code state and fix the drift");
+            } else {
+                // The S1-derived flip (recorded 1.21.11 flavor): the two families FOLD
+                // the count header differently on this line (vanilla vs Moonrise recalc),
+                // so byte identity is structurally impossible — compare with the count
+                // headers normalized to zero; everything else must still match exactly.
+                org.junit.jupiter.api.Assertions.assertArrayEquals(
+                        countNormalized(Files.readAllBytes(fabric.get(entry.getKey()))),
+                        countNormalized(Files.readAllBytes(entry.getValue())),
+                        entry.getKey() + ": fixtures diverge beyond the per-family count"
+                                + " headers — a real serializer drift");
+            }
         }
+    }
+
+    /** Re-emits a v20 corpus body with every section's count header zeroed — the
+     *  strict-vs-normalized parity's normalized arm (dormant while the families fold
+     *  identically; exercised on 1-short lines). */
+    private static byte[] countNormalized(byte[] body) {
+        var column = dev.vox.lss.common.wire.WireSectionCursor.parse(
+                body, dev.vox.lss.common.wire.WireSectionCursor.Layout.V20);
+        var sections = new java.util.ArrayList
+                <dev.vox.lss.common.wire.WireSectionCursor.WireSection>(column.sections().size());
+        for (var s : column.sections()) {
+            sections.add(new dev.vox.lss.common.wire.WireSectionCursor.WireSection(
+                    s.sectionY(), 0, 0, s.blocks(), s.biomes(), s.blockLight(), s.skyLight()));
+        }
+        return dev.vox.lss.common.wire.WireSectionCursor.emit(
+                new dev.vox.lss.common.wire.WireSectionCursor.WireColumn(
+                        column.dictionary(), sections),
+                dev.vox.lss.common.wire.WireSectionCursor.Layout.V20);
     }
 
     private static Path locateRepoRelative(String repoRelative) {
