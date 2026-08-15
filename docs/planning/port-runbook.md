@@ -62,8 +62,14 @@ docs/planning/per-version-surfaces.md; this doc is the ORDER and the rules.
    the line's own MC artifact; contract-test flavors re-derived; hand rows recorded
    in the port PR description.
 8. **Harness retarget**: test-server.sh's LINE DATA block (MC/CDN URLs, legacy LSS
-   pin); soak.sh needs NOTHING for the base-world guard since V-1/T3a (the
-   mc-version marker is data-driven from gradle.properties).
+   pin, the Java gate) AND the CI workflows (build.yml/release.yml carry per-line
+   java-version + task-set deltas — the 1.21.1 cut missed both and CI was red by
+   construction, review 2026-08-15); fabric/build.gradle's localRuntime compat-arm
+   Modrinth IDs are per-line too. soak.sh: the BASE-WORLD GUARD needs nothing
+   (V-1/T3a — the mc-version marker is data-driven), but the WORLD-STAGING LAYOUT
+   is per-line forever: 1.21.x Bukkit uses split world_nether/world_the_end dirs
+   and needs the world* glob flavor at all four staging sites (the v0.11 delta-port
+   read "needs NOTHING" as covering this and lost the v0.10 flavor — same review).
 9. **Validation**: Tier 1+2 local, `CI=true` release build + `release_check
    --version`, CI green incl. Tier 3 where the line has it, per-line soak smokes.
    **Rehearse the release pipeline** with the workflow_dispatch dry-run on the

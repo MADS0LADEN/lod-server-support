@@ -105,6 +105,31 @@ class NativeSectionShapeTest {
                         + "code (javadoc may NAME the constants it disclaims)");
     }
 
+
+    @Test
+    void longArrayPrefixReferencesAreAlwaysNativeGated() throws Exception {
+        // Scope hygiene for the FOURTH descriptor axis (review 2026-08-15, the M8 gap):
+        // NATIVE_LONG_ARRAY_PREFIXED is a NATIVE-layout fact. V20 is prefix-free on
+        // every line by wire spec, so a cursor site that consults the flag without a
+        // layout == Layout.NATIVE guard would fork the never-tiered wire on prefixed
+        // lines — and both ends of that line would agree, exactly the failure the
+        // V20_* literal pin above guards. Every reference must sit in a conjunction
+        // with the NATIVE-layout test on the same line.
+        Path cursor = locate("common/src/main/java/dev/vox/lss/common/wire/WireSectionCursor.java");
+        String source = Files.readString(cursor);
+        int refs = 0;
+        for (String line : source.split("\n")) {
+            if (!line.contains("NATIVE_LONG_ARRAY_PREFIXED")) continue;
+            if (line.strip().startsWith("//") || line.strip().startsWith("*")) continue;
+            refs++;
+            assertTrue(line.contains("layout == Layout.NATIVE &&"),
+                    "un-gated NATIVE_LONG_ARRAY_PREFIXED reference (V20 must stay"
+                            + " prefix-free — wire spec): " + line.strip());
+        }
+        assertTrue(refs >= 4, "expected the four gated cursor sites, found " + refs
+                + " — if sites moved, re-derive this pin with them");
+    }
+
     private static Path locate(String repoRelative) {
         Path dir = Path.of("").toAbsolutePath();
         for (int i = 0; i < 6 && dir != null; i++, dir = dir.getParent()) {
