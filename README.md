@@ -6,7 +6,7 @@ Supports **Fabric** clients, and **Fabric**, **NeoForge**, **Paper**, **Purpur**
 
 https://github.com/user-attachments/assets/721fb344-890e-4e03-ab36-539444427f7b
 
-**Try it live:** join `lod-server-support.modrinth.gg` with [Voxy](https://modrinth.com/mod/voxy) and this mod installed. The server runs Minecraft 26.2, but clients on **any supported version** — 26.2, 26.1.x, or 1.21.11 — can join and get full LOD streaming (cross-version columns, with ViaVersion bridging the Minecraft protocol).
+**Try it live:** join `lod-server-support.modrinth.gg` with [Voxy](https://modrinth.com/mod/voxy) and this mod installed. The server runs Minecraft 26.2, but clients on **any supported version** — 26.2, 26.1.x, 1.21.11, or 1.21.1 — can join and get full LOD streaming (cross-version columns, with ViaVersion bridging the Minecraft protocol).
 
 ## Installation
 
@@ -29,8 +29,9 @@ Each Minecraft version has its own build, versioned `v<x.y.z>+mc<version>`; only
 | Minecraft | LSS Version | Fabric | NeoForge | Paper | Folia | Voxy | Java |
 |---|---|---|---|---|---|---|---|
 | **26.2** | v0.11.0+mc26.2 | ✅ | ✅ (server) | ✅ | ✅ | 0.2.17-alpha+ | 25+ |
-| **26.1.x** | v0.11.0+mc26.1 | ✅ | — | ✅ | ✅ | 0.2.14-alpha+ | 25+ |
-| **1.21.11** | v0.11.0+mc1.21.11 | ✅ | — | ✅ | ✅ | 0.2.15-beta+ | 21+ |
+| **26.1.x** | v0.11.0+mc26.1 | ✅ | ✅ (server) | ✅ | ✅ | 0.2.14-alpha+ | 25+ |
+| **1.21.11** | v0.11.0+mc1.21.11 | ✅ | ✅ (server) | ✅ | ✅ | 0.2.15-beta+ | 21+ |
+| **1.21.1** | v0.11.0+mc1.21.1 | ✅ | ✅ (server) | ✅ | — | community fork | 21+ |
 
 > [!IMPORTANT]
 > **Mixed versions are fine back to v0.4.x.** LSS translates between protocol versions in both directions, so old clients keep working against new servers and vice versa. Against anything older — or with the compat layers turned off — you simply get vanilla render distance and no error.

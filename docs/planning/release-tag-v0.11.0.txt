@@ -13,7 +13,6 @@
 
 ### Configuration
 
-- **`lodDistanceChunks` default 512 → 300** — a mid-range default; the automatic timestamp-cache sizing follows it. Raise it freely on capable servers.
 - **`dirtyBroadcastIntervalSeconds: 0` now disables dirty broadcasts** — previously 0 clamped to the fastest cadence. With 0, connected clients pick up terrain edits only on rejoin or their own re-requests; server-side freshness bookkeeping keeps running, so rejoins always see current terrain.
 - **`maxConcurrentDiskReads`** — new key (default auto): caps concurrent expensive region-file reads so server CPU stays bounded independently of bandwidth. Store-served LODs never consume its capacity; auto = half the reader pool with the LOD store on, no limit with it off. Applies on all platforms including Folia (experimental).
 - **Far-player keys** — server: `farPlayers`, `farPlayersUpdateIntervalTicks`, `farPlayersMaxDistanceBlocks` (default 2048), `farPlayersMinDistanceBlocks`, `farPlayersSendSpectators`, `farPlayersExclude`. Client: the Sodium "Far Players" page carries enable, "Share My Position", name tags, and the render-distance cap; the animation-distance cap and visibility-ring overrides live in `lss-client-config.json`.
