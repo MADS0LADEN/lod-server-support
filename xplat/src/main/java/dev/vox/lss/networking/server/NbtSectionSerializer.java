@@ -451,7 +451,7 @@ final class NbtSectionSerializer {
             for (int i = 0; i < parsed.size(); i++) {
                 var p = parsed.get(i);
                 if (p.transcoded() != null) continue;
-                var section = new LevelChunkSection(p.states(), p.biomes());
+                var section = dev.vox.lss.platform.SectionConstruction.fromContainers(p.states(), p.biomes(), factory);
                 var masked = XrayMaskFilter.mask(section, p.sectionY(),
                         maskEntry.mask(), maskEntry.kind(), factory, replacedCells);
                 maskedSections[i] = masked;
@@ -495,10 +495,10 @@ final class NbtSectionSerializer {
             var p = parsed.get(i);
             size += 1 // sectionY byte
                     + (p.transcoded() != null
-                            ? 4 + p.transcoded().serializedSize()
+                            ? dev.vox.lss.common.wire.NativeSectionShape.NATIVE_COUNT_SHORTS * 2 + p.transcoded().serializedSize()
                             : maskedSections != null
                                     ? maskedSections[i].getSerializedSize()
-                                    : 4 + p.states().getSerializedSize() + p.biomes().getSerializedSize())
+                                    : dev.vox.lss.common.wire.NativeSectionShape.NATIVE_COUNT_SHORTS * 2 + p.states().getSerializedSize() + p.biomes().getSerializedSize())
                     + 1 + (p.litByBlock() ? 2048 : 0)
                     + 1 + (p.litBySky() ? 2048 : 0);
         }
@@ -512,16 +512,14 @@ final class NbtSectionSerializer {
                 if (p.transcoded() != null) {
                     // Headless transcoded write — LevelChunkSection.write's shape with the
                     // container bytes emitted straight from the disk descriptors.
-                    buf.writeShort(p.nonEmptyCount());
-                    buf.writeShort(p.fluidCount());
+                    writeNativeCountHeader(buf, p.nonEmptyCount(), p.fluidCount());
                     p.transcoded().write(buf);
                 } else if (maskedSections != null) {
                     maskedSections[i].write(buf);
                 } else {
                     // Headless section write — exactly LevelChunkSection.write's shape:
-                    // the two count shorts, then the two containers.
-                    buf.writeShort(p.nonEmptyCount());
-                    buf.writeShort(p.fluidCount());
+                    // the count header, then the two containers.
+                    writeNativeCountHeader(buf, p.nonEmptyCount(), p.fluidCount());
                     p.states().write(buf);
                     p.biomes().write(buf);
                 }
@@ -958,6 +956,21 @@ final class NbtSectionSerializer {
                 biomeIdentityLookup(registryAccess));
     }
 
+    /** V-2/S1 headerDerivation, FABRIC family: the native count header this family's
+     *  vanilla writes, derived from {@code NativeSectionShape} — 26.x: the two-short
+     *  pair verbatim (matching {@code LevelChunkSection.write}); a 1-short line writes
+     *  the family fold (1.21.11: {@code nonEmpty + fluid}). Both headless write sites
+     *  route here so a port edits the DESCRIPTOR, not the sites. */
+    private static void writeNativeCountHeader(FriendlyByteBuf buf, int nonEmpty, int fluid) {
+        if (dev.vox.lss.common.wire.NativeSectionShape.NATIVE_COUNT_SHORTS == 2) {
+            buf.writeShort(nonEmpty);
+            buf.writeShort(fluid);
+        } else {
+            buf.writeShort(dev.vox.lss.common.wire.NativeSectionShape
+                    .foldedCountFabricFamily(nonEmpty, fluid));
+        }
+    }
+
     /** The direct transcode-path v20 emit (C6 follow-up): every section's descriptor
      *  carries palette GLOBAL ids in wire order + the disk long words verbatim, which
      *  is exactly the translator's indexed input — so the dictionary walk (first-seen,
@@ -980,7 +993,17 @@ final class NbtSectionSerializer {
                     // production gates Y to the world range, but the range-free corpus/
                     // tool overload serializes garbage Y and the byte-identity claim
                     // must hold there too (review finding 2).
-                    (byte) p.sectionY(), p.nonEmptyCount(), p.fluidCount(),
+                    (byte) p.sectionY(),
+                    // Derived (V-2 review MAJOR-2): the direct route must stay
+                    // byte-identical to the translate route, whose v20 counts pass
+                    // through this family's NATIVE header — a 1-short line carries
+                    // (familyFold, 0) there, so the direct emit must match.
+                    dev.vox.lss.common.wire.NativeSectionShape.NATIVE_COUNT_SHORTS == 2
+                            ? p.nonEmptyCount()
+                            : dev.vox.lss.common.wire.NativeSectionShape
+                                    .foldedCountFabricFamily(p.nonEmptyCount(), p.fluidCount()),
+                    dev.vox.lss.common.wire.NativeSectionShape.NATIVE_COUNT_SHORTS == 2
+                            ? p.fluidCount() : 0,
                     dev.vox.lss.common.wire.NativeToV20Translator.convertIndexed(
                             t.blockBits(), t.blockIds(), t.blockData(), true, dict, blockIdentity),
                     dev.vox.lss.common.wire.NativeToV20Translator.convertIndexed(

@@ -200,6 +200,22 @@ class NeoForgeModuleContractTest {
         }
     }
 
+    @Test
+    void scopedCarrierTwinsAreByteIdentical() throws IOException {
+        // V-2/S5: unlike the renderer twins (which legitimately diverge — the neoforge
+        // render path is cut), ScopedCarrier has no loader surface at all, so the twins
+        // must stay BYTE-identical — a fix landing in one tree only is silent drift the
+        // compile cannot see (both compile fine alone).
+        byte[] fab = Files.readAllBytes(
+                resolve("fabric/src/main/java/dev/vox/lss/compat/ScopedCarrier.java"));
+        byte[] neo = Files.readAllBytes(
+                resolve("neoforge/src/main/java/dev/vox/lss/compat/ScopedCarrier.java"));
+        assertTrue(java.util.Arrays.equals(fab, neo),
+                "the ScopedCarrier twins drifted — apply the change to BOTH trees "
+                        + "(they are version-volatile whole-file swaps at port time, "
+                        + "but on ONE line they are the same file)");
+    }
+
     /** Repo-relative resolution surviving both the Gradle CWD (module dir) and repo root. */
     static Path resolve(String repoRelative) {
         Path dir = Path.of("").toAbsolutePath();

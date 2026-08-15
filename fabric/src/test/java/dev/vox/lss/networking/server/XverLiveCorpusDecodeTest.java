@@ -151,10 +151,21 @@ class XverLiveCorpusDecodeTest {
                 var sn = nativeColumn.sections().get(i);
                 String at = fixture + " section " + i;
                 assertEquals(sv.sectionY(), sn.sectionY(), at);
-                assertEquals(sv.nonEmptyBlockCount(), sn.nonEmptyBlockCount(),
-                        at + ": nonEmptyBlockCount must pass through the decode");
-                assertEquals(sv.fluidCount(), sn.fluidCount(),
-                        at + ": fluidCount must pass through the decode");
+                // Derived from the S1 descriptor: this native body is CURSOR-emitted
+                // (V20ToNativeTranslator), so a one-short line carries the LINE-level
+                // cursor fold (review MAJOR-1 — not the per-family serializer fold,
+                // which coincides on 1.21.11's fabric side but is a different field).
+                assertEquals(dev.vox.lss.common.wire.NativeSectionShape.NATIVE_COUNT_SHORTS == 2
+                                ? sv.nonEmptyBlockCount()
+                                : dev.vox.lss.common.wire.NativeSectionShape
+                                        .foldedCountForNativeHeader(sv.nonEmptyBlockCount(),
+                                                sv.fluidCount()),
+                        sn.nonEmptyBlockCount(),
+                        at + ": the native count header must match the family shape");
+                assertEquals(dev.vox.lss.common.wire.NativeSectionShape.NATIVE_COUNT_SHORTS == 2
+                                ? sv.fluidCount() : 0,
+                        sn.fluidCount(),
+                        at + ": fluidCount survives only where the line carries it");
                 int[] v20Blocks = resolvedValues(sv.blocks(), 4096);
                 int[] nativeBlocks = resolvedValues(sn.blocks(), 4096);
                 for (int v = 0; v < 4096; v++) {

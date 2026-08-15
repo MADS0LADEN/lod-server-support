@@ -20,8 +20,14 @@ import java.util.Map;
 import java.util.UUID;
 
 public class ChunkGenerationService {
-    // flags=2 (LOADING) makes the chunk load/generate; timeout=0 means we manage lifetime ourselves
-    private static final TicketType LSS_GEN_TICKET = new TicketType(0, 2);
+    // FLAG_LOADING makes the chunk load/generate; NO_TIMEOUT means we manage lifetime
+    // ourselves (the purge iterates every ticket but its predicate never selects a
+    // no-timeout one). Vanilla's named constants,
+    // not literals (V-2/S3 replacement): the record ctor is positional (long, int), and a
+    // signature reorder in a future MC bump reds this line at compile instead of silently
+    // swapping timeout and flags.
+    private static final TicketType LSS_GEN_TICKET =
+            new TicketType(TicketType.NO_TIMEOUT, TicketType.FLAG_LOADING);
 
     record GenerationCallback(UUID playerUuid, long submissionOrder) {}
 

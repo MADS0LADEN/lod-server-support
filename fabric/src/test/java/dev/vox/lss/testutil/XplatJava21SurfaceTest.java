@@ -22,9 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * COMPILED xplat classes' constant pools (raw-bytes substring, the
  * FoliaWiringContractTest precedent) for post-21 JDK API references instead.
  *
- * <p>Known-25-only exclusion list (the plan's "currently 1 entry"):
- * {@code AntiXrayCompat} uses {@link ScopedValue} directly — the 1.21.x lines
- * replace it with their pass-through variant at port time.
+ * <p>Known-25-only exclusion list: EMPTY since V-2/S5 — {@code ScopedCarrier}
+ * (the one ScopedValue user) moved to the per-loader trees as a version-volatile
+ * twin, so a Java-21 line swaps that file instead of patching shared xplat source.
+ * Keep it empty: a new entry means a new per-line patch burden on every support
+ * line — seam the API into a per-loader twin instead.
  *
  * <p>Limitation, stated: a constant-pool scan catches API references, not
  * post-21 SYNTAX — the backport line's own Java-21 compile catches that.
@@ -42,9 +44,8 @@ class XplatJava21SurfaceTest {
             "java/lang/foreign/",
             "java/util/stream/Gatherer");
 
-    /** xplat files allowed to use Java-25-only API (each 1.21.x line patches them). */
-    private static final Set<String> KNOWN_25_ONLY = Set.of(
-            "dev/vox/lss/compat/AntiXrayCompat");
+    /** xplat files allowed to use Java-25-only API (EMPTY — see the class javadoc). */
+    private static final Set<String> KNOWN_25_ONLY = Set.of();
 
     @Test
     void compiledXplatClassesReferenceNoPost21JdkApi() throws IOException {

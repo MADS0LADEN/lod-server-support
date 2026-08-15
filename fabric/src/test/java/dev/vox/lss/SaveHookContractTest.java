@@ -80,6 +80,53 @@ class SaveHookContractTest {
     }
 
     @Test
+    void vanillaSavePathRoutesThroughCopyOf() throws Exception {
+        // V-2/S7 (version-port-isolation-plan.md §3): the uncovered gap between the two
+        // pins above — "copyOf still EXISTS but the platform save path no longer ROUTES
+        // through it" (require = 0 hides a dead hook; dirty detection dies silently).
+        // ASM invoke-census over ChunkMap's save method(s), the MoveTraceHookContractTest
+        // idiom: named-namespace vanilla bytecode via getResourceAsStream. The
+        // Moonrise/C2ME arms cannot be censused from Tier 1 (reflective-only, off the
+        // classpath) — they stay hand-verified per line as D1 checklist rows.
+        try (var in = net.minecraft.server.level.ChunkMap.class.getResourceAsStream(
+                "/net/minecraft/server/level/ChunkMap.class")) {
+            org.junit.jupiter.api.Assertions.assertNotNull(in,
+                    "ChunkMap bytecode must be resource-loadable in the named namespace");
+            var node = new org.objectweb.asm.tree.ClassNode();
+            new org.objectweb.asm.ClassReader(in).accept(node,
+                    org.objectweb.asm.ClassReader.SKIP_DEBUG
+                            | org.objectweb.asm.ClassReader.SKIP_FRAMES);
+            int copyOfCalls = 0;
+            var sites = new java.util.ArrayList<String>();
+            for (var mn : node.methods) {
+                // Whole-class census, deliberately not save-scoped (V-2 review): the
+                // real 26.2 class has exactly one copyOf INVOKESTATIC anywhere (in
+                // save), so this is exact today — and a future line hoisting the call
+                // into a lambda$save$N helper keeps the pin GREEN there, correctly:
+                // the mixin injects into copyOf itself, so a lambda-hosted call still
+                // fires the hook (a save-scoped census would false-alarm dead-hook).
+                for (var insn : mn.instructions) {
+                    if (insn instanceof org.objectweb.asm.tree.MethodInsnNode call
+                            && call.getOpcode() == org.objectweb.asm.Opcodes.INVOKESTATIC
+                            && call.owner.equals(
+                                    "net/minecraft/world/level/chunk/storage/SerializableChunkData")
+                            && call.name.equals("copyOf")) {
+                        copyOfCalls++;
+                        sites.add(mn.name + mn.desc);
+                    }
+                }
+            }
+            assertEquals(1, copyOfCalls,
+                    "ChunkMap must invoke SerializableChunkData.copyOf exactly once — "
+                            + "zero means the vanilla save path stopped routing through the "
+                            + "hook's target (require=0 would hide that as silently dead "
+                            + "dirty detection); more than one means the snapshot choke "
+                            + "point split and the whole targeting scheme needs "
+                            + "re-verification. Sites: " + sites);
+        }
+    }
+
+    @Test
     void vanillaCopyOfTargetStillExists() throws Exception {
         // The other half of the require=0 contract: an MC bump that renames or reshapes
         // copyOf must turn this red instead of silently killing dirty detection on EVERY

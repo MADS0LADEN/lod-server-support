@@ -28,6 +28,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>{@code ChunkSaveDataHook} — the mixin target class itself is per-line
  *       ({@code SerializableChunkData.copyOf} exists only 1.21.2+; older lines hook
  *       {@code ChunkSerializer.write}).</li>
+ *   <li>{@code ScopedCarrier} (V-2/S5) — {@code ScopedValue} is Java-25-only API; the
+ *       Java-21 lines replace the file with a pass-through. Its extraction is what
+ *       EMPTIES {@code XplatJava21SurfaceTest}'s exclusion list — moving it into
+ *       xplat re-creates the per-line shared-source patch that list existed for.</li>
  * </ul>
  */
 class VersionVolatileFileListTest {
@@ -35,6 +39,7 @@ class VersionVolatileFileListTest {
     private static final String[] VERSION_VOLATILE = {
             "dev/vox/lss/networking/client/FarPlayerRenderer.java",
             "dev/vox/lss/mixin/ChunkSaveDataHook.java",
+            "dev/vox/lss/compat/ScopedCarrier.java",
     };
 
     @Test

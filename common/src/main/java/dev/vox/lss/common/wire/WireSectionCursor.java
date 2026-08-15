@@ -157,7 +157,11 @@ public final class WireSectionCursor {
         for (int i = 0; i < sectionCount; i++) {
             int sectionY = in.readByte();
             int nonEmpty = in.readShort();
-            int fluid = in.readShort();
+            // V-2/S1: the second count short is NATIVE-per-line (26.x carries the
+            // split pair, 1.21.x one short — NativeSectionShape); V20 ALWAYS carries
+            // both (line-invariant wire spec, never descriptor-derived).
+            int fluid = (layout == Layout.V20
+                    || NativeSectionShape.NATIVE_COUNT_SHORTS == 2) ? in.readShort() : 0;
             WireContainer blocks = readContainer(in, layout, BLOCK_ENTRIES, true, dictSize);
             WireContainer biomes = readContainer(in, layout, BIOME_ENTRIES, false, dictSize);
             byte[] blockLight = in.readByte() != 0 ? in.readBytes(LIGHT_BYTES) : null;
@@ -255,8 +259,22 @@ public final class WireSectionCursor {
             checkShortRange(s.nonEmptyBlockCount(), "nonEmptyBlockCount");
             checkShortRange(s.fluidCount(), "fluidCount");
             out.writeByte(s.sectionY());
-            out.writeShort(s.nonEmptyBlockCount());
-            out.writeShort(s.fluidCount());
+            if (layout == Layout.V20 || NativeSectionShape.NATIVE_COUNT_SHORTS == 2) {
+                out.writeShort(s.nonEmptyBlockCount());
+                out.writeShort(s.fluidCount());
+            } else {
+                // One-short NATIVE emit: the LINE-level fold (V-2 review MAJOR-1 —
+                // recorded 1.21.11: nonEmpty + fluid, because that line's vanilla
+                // counts fluid cells into its single count and the consumer of
+                // cursor-emitted native bytes is always a CLIENT of that line).
+                // A line rule, deliberately not a family fold: this cursor is common
+                // and serves BOTH families' v20→native egress. The folded SUM gets
+                // its own range check (the recorded flavor's rule).
+                int folded = NativeSectionShape.foldedCountForNativeHeader(
+                        s.nonEmptyBlockCount(), s.fluidCount());
+                checkShortRange(folded, "foldedCount");
+                out.writeShort(folded);
+            }
             writeContainer(out, s.blocks(), layout, BLOCK_ENTRIES, true, dictSize);
             writeContainer(out, s.biomes(), layout, BIOME_ENTRIES, false, dictSize);
             writeLight(out, s.blockLight());
