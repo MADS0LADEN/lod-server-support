@@ -122,6 +122,9 @@ public final class MoonriseReadCompat {
             Class<?> io = lookup.lookup(REGION_FILE_IO_CLASS);
             Method method = findLoadDataAsync(io);
             if (method == null) {
+                // PER-PLATFORM INVARIANT (surfaces row 16): the IO entry class is
+                // verified against THIS platform's real artifact (moonrise-opt jar
+                // here; Paper's dev bundle for the Paper twin) — never transferred.
                 warn.warn("no matching 7-arg loadDataAsync overload", null);
                 return new MoonriseReadCompat(null);
             }
