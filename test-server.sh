@@ -19,6 +19,9 @@ NEOFORGE_DIR="$SCRIPT_DIR/test-server/neoforge"
 # See docs/planning/v16-client-compat-design.md.
 LEGACY_DIR="$SCRIPT_DIR/test-server/fabric-legacy"
 
+# ======================= LINE DATA (per-MC-line values) =======================
+# The port runbook's step 8 edits exactly this block (MC versions, CDN URLs, the
+# legacy LSS pin below) — nothing else in this script is per-line.
 # --- Fabric versions ---
 FABRIC_MC_VERSION="26.2"
 FABRIC_LOADER_VERSION="0.19.3"

@@ -46,7 +46,10 @@ docs/planning/per-version-surfaces.md; this doc is the ORDER and the rules.
    rows 1-6, 9, 11.
 6. **Fixtures**: regenerate the v20 corpus FIRST (the serializer test's
    `LSS_REGEN_GOLDENS` gate), then natives via `NativeCorpusRegenTool` (same env
-   var). Two NON-mechanical rows: `duplicate-air.bin` (hand byte-fold preserving the
+   var) — as TWO separate `--tests`-scoped invocations: the shared lever fires both
+   stages inside one whole-module JVM in arbitrary test order (natives possibly
+   derived from stale v20), and only the mandatory flag-off re-run's bijection pin
+   would catch it. Two NON-mechanical rows: `duplicate-air.bin` (hand byte-fold preserving the
    duplicate palette — fromV20 would collapse it) and `xray-masked.bin` (the
    mask-filter golden test's own regen). `xver-live-corpus` is NEVER regenerated.
 7. **The per-version-surfaces walk** (the R-7 step): every table row verified against

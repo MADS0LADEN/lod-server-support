@@ -13,7 +13,7 @@ the cut (the Folia-experimental rule).
 | `useBackgroundReadSplit` / `useSelectiveNbtParse` compiled OFF | old lines where the IOWorker/NBT internals fight | the flags are the rollback; spike pre-authorization |
 | Sodium config menu deleted | lines whose Sodium API differs beyond the shim (1.21.8 precedent) | one file + fail-open entrypoint; config-file keys keep working |
 | AntiXray crash shim → pass-through | Java-21 lines (ScopedValue is preview) | the 1.21.11 flavor; becomes a one-file swap after V-2/S5 |
-| Degraded `/lss reset` ladder | lines whose Voxy build lacks the holder surface | confirm-gated fallback ships; full ladder needs Voxy 0.2.18+ |
+| Degraded `/lss reset` ladder | lines whose Voxy build lacks the holder surface | confirm-gated fallback ships; the full ladder needs a resolvable Voxy holder surface (0.2.18's static holder or the 0.2.11/dev instanceof-fallback rung) |
 | Far-player RENDER path | NeoForge v1 (no community Voxy build); per-line render reworks may lag | tracker/wire/prefs-carrier bit stay LIVE — the render path is the only cuttable half (the capability bit is never cut) |
 | `SOAK_PLATFORM=<line>` abbreviated or skipped | best-effort lines | the stage-N decision precedent; the §5.5-style manual checklist becomes the per-release floor, recorded once |
 

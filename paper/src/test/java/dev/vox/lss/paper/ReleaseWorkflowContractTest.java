@@ -59,6 +59,10 @@ class ReleaseWorkflowContractTest {
             if (s.isEmpty() || s.startsWith("#")) continue;
             int eq = s.indexOf('=');
             assertTrue(eq > 0, "line.env carries a non-KEY=VALUE line: '" + line + "'");
+            assertEquals(line, line.strip(),
+                    "line.env values are consumed VERBATIM by the workflow — trailing "
+                            + "whitespace would make the guard refuse this line's own tags: '"
+                            + line + "'");
             lineEnv.put(s.substring(0, eq), s.substring(eq + 1));
         }
         minecraftVersion = Files.readAllLines(locate("gradle.properties")).stream()
@@ -116,6 +120,16 @@ class ReleaseWorkflowContractTest {
         String suffix = env("LINE_TAG_SUFFIX");
         assertTrue(suffix.isEmpty() || suffix.equals("+mc" + env("LINE_MC_FABRIC")),
                 "LINE_TAG_SUFFIX must be '' (main) or '+mc<LINE_MC_FABRIC>', got '" + suffix + "'");
+        // V-1 review MINOR: single-row drift armor — whole-file clobbers red above, but a
+        // typo'd NeoForge token alone would publish into another line's Modrinth id
+        // namespace (labrinth rejects nothing). Every publish-feeding row ties back.
+        assertTrue(env("LINE_MC_NEOFORGE").startsWith(env("LINE_MC_FABRIC")),
+                "LINE_MC_NEOFORGE must refine the line token, never another line's");
+        for (String loader : new String[]{"FABRIC", "PAPER", "NEOFORGE"}) {
+            assertTrue(env("LINE_GAME_VERSIONS_" + loader).contains(env("LINE_MC_" + loader)),
+                    "LINE_GAME_VERSIONS_" + loader + " must contain its own LINE_MC_" + loader
+                            + " token");
+        }
         if (isMainline) {
             assertEquals("true", env("LINE_MAKE_LATEST"),
                     "main-line releases carry the Latest badge");
