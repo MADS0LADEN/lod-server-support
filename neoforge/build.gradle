@@ -94,12 +94,21 @@ sourceSets {
     }
 }
 
-// N-2 packaging decision (plan §2, pre-authorized fallback taken): Paper-style
-// SHADING, not jarJar — known-good in-repo, and the no-relocate rule applies
-// (relocating org.sqlite / com.github.luben breaks their native loaders). The
-// dedicated `shade` configuration keeps MDG's MC/NeoForge classpath out of the jar.
+// N-2 packaging decision (plan §2), AMENDED by neoforge-jarjar-sqlite-plan.md
+// (2026-08-15): Paper-style SHADING for common + zstd-jni — the no-relocate rule
+// applies (relocating org.sqlite / com.github.luben breaks their native loaders),
+// and the dedicated `shade` configuration keeps MDG's MC/NeoForge classpath out of
+// the jar. sqlite-jdbc is the exception: it rides as a STOCK jarJar nested library
+// (META-INF/jarjar/) so FML dedupes it against other sqlite-carrying mods — the
+// flat-shaded shape hard-failed module resolution beside the community Voxy
+// NeoForge port (ResolutionException: both modules export org.sqlite.*).
 configurations {
     shade
+    // Resolution-only carrier for the nested jarJar library (stock bytes; no
+    // transitives — the sqlite-jdbc POM has none at runtime).
+    jarJarStore {
+        transitive = false
+    }
 }
 
 configurations.all {
@@ -111,11 +120,12 @@ configurations.all {
     }
 }
 
+def sqliteJdbcVersion = '3.49.1.0'
 dependencies {
     implementation project(':common')
     shade project(':common')
-    implementation 'org.xerial:sqlite-jdbc:3.49.1.0'
-    shade 'org.xerial:sqlite-jdbc:3.49.1.0'
+    implementation "org.xerial:sqlite-jdbc:${sqliteJdbcVersion}"
+    jarJarStore "org.xerial:sqlite-jdbc:${sqliteJdbcVersion}"
     implementation 'com.github.luben:zstd-jni:1.5.7-3'
     shade 'com.github.luben:zstd-jni:1.5.7-3'
 
@@ -136,13 +146,10 @@ processResources {
     }
 }
 
-// Native strip lists — keep in sync with paper/build.gradle + fabric's slimStoreDepJars
-// (linux/win/mac × x64/arm64, + Linux-Musl for sqlite; zstd-jni has no musl natives).
+// Native strip lists — zstd-jni only on this module (sqlite rides NESTED with all
+// of its stock natives, neoforge-jarjar-sqlite-plan.md). Keep the zstd rows in sync
+// with paper/build.gradle + fabric's slimStoreDepJars (linux/win/mac × x64/arm64).
 def storeNativeKeep = [
-    'org/sqlite/native/Linux/x86_64/', 'org/sqlite/native/Linux/aarch64/',
-    'org/sqlite/native/Linux-Musl/x86_64/', 'org/sqlite/native/Linux-Musl/aarch64/',
-    'org/sqlite/native/Windows/x86_64/', 'org/sqlite/native/Windows/aarch64/',
-    'org/sqlite/native/Mac/x86_64/', 'org/sqlite/native/Mac/aarch64/',
     'linux/amd64/', 'linux/aarch64/', 'win/amd64/', 'win/aarch64/',
     'darwin/x86_64/', 'darwin/aarch64/',
 ]
@@ -152,10 +159,49 @@ def storeNativeStrip = { el ->
     storeNativeRoots.any { p.startsWith(it) } && !storeNativeKeep.any { p.startsWith(it) }
 }
 
+// The nested library's jarJar descriptor (neoforge-jarjar-sqlite-plan.md §3):
+// generated from the RESOLVED artifact so a version bump cannot desync it. Range
+// [<version>,<major+1>.0.0.0) — a future-major copy nested by another mod then
+// fails as a hard jarjar version conflict at boot instead of silently winning
+// selection under our compiled-against API.
+def generateJarJarMetadata = tasks.register('generateJarJarMetadata') {
+    def cfg = configurations.jarJarStore
+    def outFile = layout.buildDirectory.file('generated/jarjar/metadata.json')
+    inputs.files(cfg)
+    outputs.file(outFile)
+    doLast {
+        def artifact = cfg.singleFile
+        def version = (artifact.name =~ /^sqlite-jdbc-(.+)\.jar$/)[0][1]
+        def nextMajor = (version.tokenize('.')[0] as int) + 1
+        outFile.get().asFile.text = """\
+{
+  "jars": [
+    {
+      "identifier": {
+        "group": "org.xerial",
+        "artifact": "sqlite-jdbc"
+      },
+      "version": {
+        "range": "[${version},${nextMajor}.0.0.0)",
+        "artifactVersion": "${version}"
+      },
+      "path": "META-INF/jarjar/${artifact.name}",
+      "isObfuscated": false
+    }
+  ]
+}
+"""
+    }
+}
+
 shadowJar {
     configurations = [project.configurations.shade]
     archiveClassifier = ''
     mergeServiceFiles()
+    // sqlite rides NESTED as a stock jarJar library (module-dedupe against other
+    // sqlite-carrying mods) — see the packaging comment at the configurations block.
+    from(project.configurations.jarJarStore) { into 'META-INF/jarjar' }
+    from(generateJarJarMetadata) { into 'META-INF/jarjar' }
     // Dev-only packages never ship (release_check pins this on every jar family).
     exclude 'dev/vox/lss/benchmark/**'
     // MC's game layer bundles slf4j (26.2 strictly pins 2.0.17) — shipping common's
