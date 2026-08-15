@@ -17,13 +17,18 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * FP-027: real corrupt-region-file tolerance through the live disk-read pipeline. A region
  * file with a VALID header but garbage zlib chunk data is read by vanilla's
- * {@code RegionFileStorage}, whose inflate failure is caught upstream and surfaces to the
- * reader as an empty/absent chunk — so in MC 26.1.2 a corrupt chunk resolves as NOT-FOUND,
- * not as a thrown ERROR (empirically confirmed: errors=0, not_found=1). What FP-027 actually
- * guarantees, and what this test pins, is CONTAINMENT: the corrupt read completes through the
- * pool without erroring or going thread-fatal, frees its slot, leaks nothing, and the SAME
- * reader pool then serves a valid disk read. (The error-vs-not-found classification is a
- * vanilla-internal detail; the containment + pool-survival contract is the load-bearing one.)
+ * {@code RegionFileStorage}. On 26.x the inflate failure is caught upstream and surfaces
+ * as an empty/absent chunk (not-found, the label this line normally produces); on the
+ * 1.21.x lines vanilla PROPAGATES the ZipException and the SAME read resolves as ERROR —
+ * and even ON this line, constrained/WSL2 boxes have produced the errors=1/not_found=0
+ * shape environmentally (the CLAUDE.md flake-catalog entry this test used to red on).
+ * What FP-027 actually guarantees, and what this test pins, is CONTAINMENT: the corrupt
+ * read completes through the pool without going thread-fatal, frees its slot, leaks
+ * nothing, and the SAME reader pool then serves a valid disk read. The
+ * error-vs-not-found classification is a vanilla-internal detail, so the assertion
+ * accepts EITHER label (V-1/T3b, adopted from the support branches — where the 1.21.11
+ * line confirmed the error flavor empirically). A failure of this test is now a REAL
+ * containment/pool regression, never a label flake.
  *
  * <p>The corrupt chunk sits ~1900 chunks away in a region no IO worker has ever opened
  * (region file handles are cached per region; writing under an open handle would race).
@@ -112,10 +117,10 @@ public class RegionFaultGameTests {
             // read intact. This is the FP-027 guarantee; the not-found vs error label is vanilla's.
             helper.assertTrue(diskDiag.getSubmittedCount() == 2 && diskDiag.getCompletedCount() == 2
                             && diskDiag.getSuccessfulReadCount() == 1 && state.getTotalSectionsSent() == 1
-                            && diskDiag.getNotFoundCount() == 1 && diskDiag.getErrorCount() == 0
+                            && (diskDiag.getNotFoundCount() + diskDiag.getErrorCount()) == 1
                             && diskDiag.getSaturationCount() == 0,
-                    "waiting for both reads to complete with the corrupt one contained as not-found "
-                            + "and the valid one served (errors=" + diskDiag.getErrorCount()
+                    "waiting for both reads to complete with the corrupt one contained as an "
+                            + "empty resolution (not-found or error) and the valid one served (errors=" + diskDiag.getErrorCount()
                             + " success=" + diskDiag.getSuccessfulReadCount()
                             + " sent=" + state.getTotalSectionsSent()
                             + " submitted=" + diskDiag.getSubmittedCount()

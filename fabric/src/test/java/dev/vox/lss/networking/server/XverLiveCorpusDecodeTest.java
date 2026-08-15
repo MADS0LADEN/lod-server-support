@@ -19,14 +19,20 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The 26.2 side of §9's cross-line fixture corpus (C6): every checked-in
- * {@code xver-live-corpus/} fixture — v20 bodies captured from REAL played terrain by
- * {@link XverLiveCorpusCaptureTool} — must decode STRICTLY against this line's own
- * registries: every dictionary identity resolves (zero fallbacks on the same line),
- * and the translated native body re-parses with identical section structure. The
- * 26.1 / 1.21.11 backport suites (D3 phase 7) run the same fixtures against THEIR
- * registries with per-line fallback expectations — the only automated coverage the
- * actual issue-#85 scenario (cross-MC v20 serving) has anywhere.
+ * §9's cross-line fixture corpus (C6), LINE-NEUTRAL WORDING since V-1/T4: every
+ * checked-in {@code xver-live-corpus/} fixture — v20 bodies captured from REAL played
+ * terrain on the capture line (the 26.2 mainline) by {@link XverLiveCorpusCaptureTool}
+ * — must decode STRICTLY against the registries of the line this test RUNS ON: every
+ * dictionary identity resolves and the translated native body re-parses with identical
+ * section structure. On the capture line itself a miss means the capture and the
+ * registry drifted (an MC bump without a corpus re-capture). On a support line a miss
+ * is either registry drift on that line's own bump, or a re-captured corpus
+ * introducing genuinely new mainline identities — only the latter may move to the
+ * documented client fallback expectations ({@code unknownBlockFallback} / ladder
+ * containment), never a silent widening of the strict resolvers. This is the only
+ * automated coverage the actual issue-#85 scenario (cross-MC v20 serving) has
+ * anywhere; the standing rule is that this corpus is NEVER regenerated on a support
+ * line (decoding capture-line columns IS the cross-version claim).
  */
 class XverLiveCorpusDecodeTest {
 
@@ -104,15 +110,16 @@ class XverLiveCorpusDecodeTest {
             var column = WireSectionCursor.parse(v20, WireSectionCursor.Layout.V20);
             assertTrue(column.dictionary().size() > 0, fixture + ": empty dictionary");
 
-            // Strict resolvers: on the SAME line every captured identity must be known
-            // — a miss here means the capture and the registry drifted (an MC bump
-            // without a corpus re-capture), never a legitimate fallback.
+            // Strict resolvers, line-neutral (V-1/T4): every captured identity must
+            // resolve on the line this test runs on — see the class javadoc for what a
+            // miss means on the capture line vs a support line.
             byte[] nativeBody = V20ToNativeTranslator.translate(v20,
                     identity -> {
                         Integer id = blockIds.get(identity);
                         if (id == null) {
                             throw new AssertionError(fixture + ": block identity '"
-                                    + identity + "' unknown on its OWN line");
+                                    + identity + "' (captured on the 26.2 mainline) is "
+                                    + "unknown on this line — see the class javadoc");
                         }
                         return id;
                     },
@@ -120,7 +127,8 @@ class XverLiveCorpusDecodeTest {
                         Integer id = biomeIds.get(identity);
                         if (id == null) {
                             throw new AssertionError(fixture + ": biome identity '"
-                                    + identity + "' unknown on its OWN line");
+                                    + identity + "' (captured on the 26.2 mainline) is "
+                                    + "unknown on this line — see the class javadoc");
                         }
                         return id;
                     },

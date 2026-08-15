@@ -1,7 +1,7 @@
 name: LodServerSupport
 version: '${version}'
 main: dev.vox.lss.paper.LSSPaperPlugin
-api-version: '26.2'
+api-version: '${api_version}'
 # Re-declared 2026-08-01: Folia published its first MC 26.2 build (26.2-1, channel BETA,
 # 2026-07-28), so the flag no longer auto-loads onto a nonexistent platform. Folia support
 # remains EXPERIMENTAL on this line exactly as on 1.21.8/1.21.11/26.1.x — single-player soak

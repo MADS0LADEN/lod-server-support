@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -13,48 +15,62 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Contract test for the MAIN-line workflow files ({@code .github/workflows/}), read from the
- * source tree like {@link PluginYmlContractTest} — the mirror of the support branches'
- * flavor of this test. Since the v0.8.0 tri-line release the repo carries three release.yml
- * variants (main + two support lines) that publish under the SAME version number, so the
- * dominant regression vector is a merge auto-resolving one line's scoping into another:
- * compilation catches none of that, and release.yml gates an IRREVERSIBLE publish. This
- * lives in {@code :paper:test} because both build.yml and release.yml run {@code :paper:test}
- * BEFORE any publish step, so a regression here physically blocks the tag run that would
- * have shipped it.
+ * Contract test for the workflow files ({@code .github/workflows/}) + the release-line
+ * data file ({@code .github/line.env}), read from the source tree like
+ * {@link PluginYmlContractTest}.
  *
- * <p>Assertions are scoped to their STEP block wherever a value could be satisfied by the
- * wrong step. FULL-LINE comments are stripped before asserting; trailing inline comments are
- * not, so avoid other-line tokens in those.
+ * <p><b>V-1/P2 (version-port-isolation-plan.md):</b> release.yml is BRANCH-INVARIANT —
+ * every per-line value comes from {@code line.env} — and THIS TEST is branch-invariant
+ * with it: expectations derive from the same data file, switched on {@code IS_MAINLINE}
+ * (an empty {@code LINE_TAG_SUFFIX}). The anti-merge armor that used to live in
+ * duplicated per-line constants is now a three-link chain, each link independently
+ * red-able: line.env ↔ {@code gradle.properties}' {@code minecraft_version} (pinned
+ * here — the build itself consumes it) ↔ the resolved MC artifact
+ * ({@code ToolchainContractTest}'s artifact anchor). A forward merge that clobbers
+ * line.env back to another line's shape breaks the lockstep pin; one that clobbers
+ * gradle.properties too breaks the artifact anchor and the build itself.
+ *
+ * <p>This lives in {@code :paper:test} because both build.yml and release.yml run
+ * {@code :paper:test} BEFORE any publish step, so a regression here physically blocks
+ * the tag run that would have shipped it. If a line ever ships without the Paper
+ * module, this gate must be re-homed first (the port runbook records this coupling).
+ *
+ * <p>Assertions are scoped to their STEP block wherever a value could be satisfied by
+ * the wrong step. FULL-LINE comments are stripped before asserting.
  */
 class ReleaseWorkflowContractTest {
 
-    // ---- the line's expected values (the support branches carry their own flavors) ----
-    // NOTE: GitHub's filter-pattern language treats '+' as a quantifier, so a pattern
-    // containing '*+' is INVALID — it phantom-fails every push and a real tag triggers
-    // NOTHING. The literal-'+' scoping must stay in shell (the guard step), never the glob.
-    private static final String TRIGGER_LINE = "tags: ['v*']";
-    private static final String GUARD_CASE_LINE = "*+mc*)";
-    private static final String PREV_TAG_PIPELINE =
-            "git tag -l 'v*' --sort=-v:refname | grep -v \"^${TAG}$\" | grep -v '+mc' | head -1 || true";
     private static final String LSS_MODRINTH_ID = "lKiXKLvv";
     private static final String VSS_MODRINTH_ID = "84zcagOb";
-    private static final String[] MODRINTH_VERSION_IDS = {
-            "version: ${{ github.ref_name }}+fabric+mc26.2",
-            "version: ${{ github.ref_name }}+paper+mc26.2",
-            // Stage N (neoforge-support-plan.md §4.2) — best-effort tier.
-            "version: ${{ github.ref_name }}+neoforge+mc26.2",
-    };
-    /** Support-line MC tokens: must not appear outside comments anywhere in release.yml. */
-    private static final String[] FORBIDDEN_LINE_TOKENS = {"26.1", "1.21.11"};
 
     private static String releaseYml;   // comment-stripped
     private static String buildYml;     // comment-stripped
+    private static Map<String, String> lineEnv;
+    private static String minecraftVersion;  // gradle.properties, the build's own token
+    private static boolean isMainline;
 
     @BeforeAll
     static void load() throws Exception {
         releaseYml = stripComments(Files.readString(locate(".github/workflows/release.yml")));
         buildYml = stripComments(Files.readString(locate(".github/workflows/build.yml")));
+        lineEnv = new HashMap<>();
+        for (String line : Files.readAllLines(locate(".github/line.env"))) {
+            String s = line.strip();
+            if (s.isEmpty() || s.startsWith("#")) continue;
+            int eq = s.indexOf('=');
+            assertTrue(eq > 0, "line.env carries a non-KEY=VALUE line: '" + line + "'");
+            lineEnv.put(s.substring(0, eq), s.substring(eq + 1));
+        }
+        minecraftVersion = Files.readAllLines(locate("gradle.properties")).stream()
+                .filter(l -> l.startsWith("minecraft_version="))
+                .map(l -> l.substring("minecraft_version=".length()).strip())
+                .findFirst().orElseThrow();
+        isMainline = env("LINE_TAG_SUFFIX").isEmpty();
+    }
+
+    private static String env(String key) {
+        assertTrue(lineEnv.containsKey(key), "line.env must define " + key);
+        return lineEnv.get(key);
     }
 
     private static String stripComments(String yaml) {
@@ -80,45 +96,123 @@ class ReleaseWorkflowContractTest {
         return end < 0 ? releaseYml.substring(start) : releaseYml.substring(start, end);
     }
 
+    // ---- the line data file itself ----
+
+    @Test
+    void lineEnvIsLockedToTheBuildToolchain() {
+        // The lockstep link (P2): the data file's MC identity must agree with
+        // gradle.properties' minecraft_version — the token the BUILD consumes (CI jar
+        // names, the neoforge TOML expansion, release_check's --version matching). A
+        // forward merge clobbering line.env alone reds here; clobbering both reds
+        // ToolchainContractTest's artifact anchor and the build itself.
+        assertTrue(minecraftVersion.startsWith(env("LINE_MC_FABRIC")),
+                "LINE_MC_FABRIC (" + env("LINE_MC_FABRIC") + ") must be a prefix of "
+                        + "gradle.properties minecraft_version (" + minecraftVersion + ")");
+        assertTrue(env("LINE_MC_PAPER").startsWith(env("LINE_MC_FABRIC")),
+                "the Paper MC token refines the line token (e.g. 26.1.2 vs 26.1), never "
+                        + "a different line");
+        // The tag suffix must embed the fabric token (or be empty on main): the guard's
+        // whole meaning is 'this tag belongs to this MC line'.
+        String suffix = env("LINE_TAG_SUFFIX");
+        assertTrue(suffix.isEmpty() || suffix.equals("+mc" + env("LINE_MC_FABRIC")),
+                "LINE_TAG_SUFFIX must be '' (main) or '+mc<LINE_MC_FABRIC>', got '" + suffix + "'");
+        if (isMainline) {
+            assertEquals("true", env("LINE_MAKE_LATEST"),
+                    "main-line releases carry the Latest badge");
+            assertEquals("26.2", env("LINE_MC_FABRIC"),
+                    "mainline is the 26.2 line — a support cut must flip line.env in the "
+                            + "same commit that retargets gradle.properties");
+        } else {
+            assertEquals("false", env("LINE_MAKE_LATEST"),
+                    "support-line releases must not steal the Latest badge");
+        }
+    }
+
+    @Test
+    void releaseWorkflowCarriesNoHardcodedMcTokens() {
+        // The branch-invariance pin (P1): with every MC token data-driven, NO version
+        // literal of any line may appear in the workflow body. This replaces the old
+        // FORBIDDEN_LINE_TOKENS list — under parameterization the strongest form is
+        // 'no line's token, not even ours'.
+        for (String token : new String[]{"26.2", "26.1", "1.21", "1.20"}) {
+            assertFalse(releaseYml.contains(token),
+                    "release.yml must not hardcode MC " + token + " — line.env owns MC identity");
+        }
+    }
+
+    // ---- trigger + guards ----
+
     @Test
     void triggerIsTheBroadGlobWithNoQuantifierConstruct() {
-        assertTrue(releaseYml.contains(TRIGGER_LINE),
-                "release.yml must trigger on the plain v* glob (" + TRIGGER_LINE + ")");
+        assertTrue(releaseYml.contains("tags: ['v*']"),
+                "release.yml must trigger on the plain v* glob on EVERY line (on: cannot "
+                        + "be data-driven; the guard step owns line scoping)");
         assertFalse(Pattern.compile("tags:.*\\*\\+").matcher(releaseYml).find(),
                 "no tag filter may contain '*+' — GitHub treats '+' as a quantifier, the "
                         + "pattern is invalid, and a real tag push would trigger NOTHING");
     }
 
     @Test
-    void guardStepRefusesSupportLineTags() {
-        // A support-line tag (v0.8.0+mc26.1 etc.) mistakenly pushed onto a main commit must
-        // not publish: it would ship 26.2 jars under a support-line name, and
-        // ${GITHUB_REF_NAME#v} would feed the +mc suffix into -Pmod_version. This lives in
-        // a shell guard because the on.push.tags filter cannot express a literal '+'.
-        String guard = stepBlock("- name: Refuse support-line tags");
-        assertTrue(guard.contains(GUARD_CASE_LINE) && guard.contains("exit 1"),
-                "the guard step must fail the run on any *+mc* tag");
-        assertTrue(releaseYml.indexOf("- name: Refuse support-line tags")
-                        < releaseYml.indexOf("- uses: actions/checkout"),
-                "the guard must be the FIRST step — before checkout, builds, or any publish");
+    void guardStepRefusesWrongLineTagsBeforeAnyBuildOrPublish() {
+        // V-1 re-pin (a deliberate decision, not drift): the guard is data-driven, so it
+        // cannot precede checkout anymore. The invariant is now 'before any build, gate,
+        // or publish step' — checkout and the env load publish nothing.
+        String guard = stepBlock("- name: Refuse wrong-line tags");
+        assertTrue(guard.contains("LINE_TAG_SUFFIX") && guard.contains("exit 1"),
+                "the guard must compare the tag's +suffix against LINE_TAG_SUFFIX and fail");
+        int checkout = releaseYml.indexOf("- uses: actions/checkout");
+        int loadLine = releaseYml.indexOf("- name: Load line identity");
+        int guardIdx = releaseYml.indexOf("- name: Refuse wrong-line tags");
+        int firstBuildAdjacent = releaseYml.indexOf("- uses: actions/setup-java");
+        assertTrue(checkout >= 0 && checkout < loadLine && loadLine < guardIdx
+                        && guardIdx < firstBuildAdjacent,
+                "order must be checkout < load-line < guard < setup-java — the guard sits "
+                        + "before every build, gate, and publish step");
     }
 
     @Test
-    void prevTagLookupsExcludeSupportLineTags() {
+    void dispatchIsARehearsalThatCanNeverPublish() {
+        // The dry-run lever (P1 review MAJOR): dispatch exercises the resolved pipeline
+        // end-to-end; publishing stays push-gated, and dry_run=false is refused loudly.
+        assertTrue(releaseYml.contains("workflow_dispatch:"),
+                "the rehearsal trigger must exist — it is the only safe way to exercise "
+                        + "this irreversible pipeline (throwaway tags are forbidden)");
+        assertTrue(Pattern.compile("dry_run:\\s*\\n\\s+description:[^\\n]*\\n\\s+type: boolean\\s*\\n\\s+default: true")
+                        .matcher(releaseYml).find(),
+                "dry_run must stay type: boolean, default: true — a merge flipping the "
+                        + "default must red here");
+        String refuse = stepBlock("- name: Refuse non-dry dispatch");
+        assertTrue(refuse.contains("exit 1"), "dry_run=false must fail the run, not publish");
+        // Every publish step is push-event-gated.
+        for (String step : new String[]{"- uses: softprops/action-gh-release",
+                "- name: Upload Fabric to Modrinth", "- name: Upload Paper to Modrinth",
+                "- name: Upload NeoForge to Modrinth"}) {
+            assertTrue(stepBlock(step).contains("if: github.event_name == 'push'"),
+                    step + " must be push-gated so a dispatch rehearsal can never publish");
+        }
+    }
+
+    @Test
+    void prevTagLookupsAreLineScoped() {
         // Both PREV_TAG computations (lightweight-tag notes fallback + compare link) must
-        // filter '+mc' tags, or version-sort slots a support tag adjacent to this line's
-        // and the notes/compare span across release lines.
-        long hits = Pattern.compile(Pattern.quote(PREV_TAG_PIPELINE)).matcher(releaseYml)
-                .results().count();
+        // scope to THIS line's tags via LINE_TAG_SUFFIX (with main's '+mc' exclusion arm),
+        // or version-sort slots another line's tag adjacent and the notes/compare span
+        // across release lines.
+        String pipeline = "git tag -l \"v*${LINE_TAG_SUFFIX}\" --sort=-v:refname | "
+                + "if [ -z \"${LINE_TAG_SUFFIX}\" ]; then grep -v '+mc'; else cat; fi | "
+                + "grep -v \"^${TAG}$\" | head -1 || true";
+        long hits = Pattern.compile(Pattern.quote(pipeline)).matcher(releaseYml).results().count();
         assertEquals(2, hits,
-                "release.yml must keep BOTH mainline-scoped PREV_TAG pipelines: " + PREV_TAG_PIPELINE);
+                "release.yml must keep BOTH line-scoped PREV_TAG pipelines: " + pipeline);
     }
 
+    // ---- publish steps ----
+
     @Test
-    void githubReleaseStepShipsExactlyTheLssPair() {
+    void githubReleaseStepShipsExactlyTheLssTrio() {
         // VSS publishing is disabled as of v0.8.0 (user decision at the tri-release): the
-        // vssJar tasks still build the branded byte-copies and release_check still gates the
-        // pair, but no VSS jar may be distributed — from ANY line now.
+        // vssJar tasks still build the branded byte-copies and release_check still gates
+        // the pair, but no VSS jar may be distributed — from ANY line.
         String gh = stepBlock("- uses: softprops/action-gh-release");
         for (String glob : new String[]{
                 "fabric/build/libs/lod-server-support-fabric-*.jar",
@@ -130,16 +224,13 @@ class ReleaseWorkflowContractTest {
                 "no VSS jar may be attached to the GitHub release");
         assertTrue(gh.contains("fail_on_unmatched_files: true"),
                 "fail_on_unmatched_files guards against publishing an empty release");
-        assertFalse(gh.contains("make_latest: false"),
-                "main-line releases carry the Latest badge — make_latest: false is the "
-                        + "support-branch flavor of this step");
+        assertTrue(gh.contains("make_latest: ${{ env.LINE_MAKE_LATEST }}"),
+                "make_latest is line data (true on main, false on support lines) — "
+                        + "lineEnvIsLockedToTheBuildToolchain pins the value per line");
     }
 
     @Test
-    void onlyTheLssModrinthStepsExist() {
-        // Three LSS steps (fabric + paper + neoforge since stage N), and NO VSS channel
-        // anywhere: restoring the 84zcagOb steps would irreversibly resume publishing to
-        // the retired second distribution channel.
+    void onlyTheLssModrinthStepsExistAndUseTheDataDrivenIds() {
         assertEquals(3, Pattern.compile(Pattern.quote("modrinth-id: " + LSS_MODRINTH_ID))
                         .matcher(releaseYml).results().count(),
                 "all three LSS Modrinth steps must target " + LSS_MODRINTH_ID);
@@ -148,74 +239,70 @@ class ReleaseWorkflowContractTest {
         assertFalse(releaseYml.contains("voxy-server-side-"),
                 "release.yml must not upload/attach VSS jars (the vssJar tasks still BUILD "
                         + "them — only publishing is out)");
-        for (String id : MODRINTH_VERSION_IDS) {
-            assertEquals(1, Pattern.compile(Pattern.quote(id)).matcher(releaseYml).results().count(),
-                    "exactly one (LSS) step per version id form '" + id + "'");
+        // The version-id TEMPLATES are branch-invariant; the resolved ids per line come
+        // from line.env. Exactly one step per loader family.
+        for (String template : new String[]{
+                "version: v${{ env.MOD_VERSION }}+fabric+mc${{ env.LINE_MC_FABRIC }}",
+                "version: v${{ env.MOD_VERSION }}+paper+mc${{ env.LINE_MC_PAPER }}",
+                "version: v${{ env.MOD_VERSION }}+neoforge+mc${{ env.LINE_MC_NEOFORGE }}"}) {
+            assertEquals(1, Pattern.compile(Pattern.quote(template)).matcher(releaseYml)
+                            .results().count(),
+                    "exactly one Modrinth step per version-id template '" + template + "'");
+        }
+        // Loaders: fabric fixed; paper's list is line data (Folia's presence has flipped
+        // per line); neoforge fixed.
+        assertTrue(stepBlock("- name: Upload Fabric to Modrinth").contains("loaders: fabric"));
+        assertTrue(stepBlock("- name: Upload Paper to Modrinth")
+                .contains("loaders: ${{ env.PAPER_LOADERS }}"));
+        assertTrue(stepBlock("- name: Upload NeoForge to Modrinth").contains("loaders: neoforge"));
+        if (isMainline) {
+            assertTrue(env("LINE_PAPER_LOADERS").contains("folia"),
+                    "the 26.2 Paper step advertises folia (jar declares folia-supported; "
+                            + "all four SOAK_PLATFORM=folia scenarios pass)");
         }
     }
 
     @Test
-    void neoforgeStepCarriesTheServerSideCaveatInItsName() {
-        // Plan §0.1: no community Voxy build exists on 26.2 NeoForge, so the client half
-        // ships compiled-and-inert. Search results and version lists never render release
-        // notes — the version NAME is the only surface every browser sees. The name is
-        // deliberately SHORT (N-4 review MAJOR-1): labrinth caps version names at 64
-        // chars and 400s longer ones MID-PUBLISH — the fuller sentence lives in the
-        // changelog. Do not grow this string past the cap.
-        String name = "name: ${{ github.ref_name }} - NeoForge (MC 26.2, server-side)";
-        assertTrue(releaseYml.contains(name),
-                "the NeoForge Modrinth step's version name must carry the server-side caveat");
-        assertTrue(name.length() - "name: ${{ github.ref_name }}".length() + "v0.99.99".length() <= 64,
-                "the NeoForge version name must stay under labrinth's 64-char cap");
-        assertTrue(releaseYml.contains("loaders: neoforge"),
-                "the NeoForge step must declare its loader");
-        // The step's files glob must name the NEOFORGE jar (N-4 review NIT: a copy-paste
-        // fabric glob would publish the wrong jar as the NeoForge version, suite green).
-        int stepStart = releaseYml.indexOf("- name: Upload NeoForge to Modrinth");
-        assertTrue(stepStart >= 0, "the NeoForge Modrinth step must exist");
-        int nextStep = releaseYml.indexOf("- name:", stepStart + 1);
-        String stepBlock = nextStep >= 0
-                ? releaseYml.substring(stepStart, nextStep) : releaseYml.substring(stepStart);
-        assertTrue(stepBlock.contains(
-                        "files: neoforge/build/libs/lod-server-support-neoforge-*.jar"),
+    void neoforgeStepNameIsDataDrivenAndUnderTheLabrinthCap() {
+        // The version NAME is the only surface every Modrinth browser sees, and labrinth
+        // caps names at 64 chars, 400ing longer ones MID-PUBLISH (N-4 review MAJOR). The
+        // cap is computed over the RESOLVED name from line.env, not a literal.
+        String neo = stepBlock("- name: Upload NeoForge to Modrinth");
+        assertTrue(neo.contains("name: v${{ env.MOD_VERSION }} - ${{ env.LINE_NEOFORGE_NAME }}"),
+                "the NeoForge name must resolve from LINE_NEOFORGE_NAME");
+        String resolved = "v0.99.99 - " + env("LINE_NEOFORGE_NAME");
+        assertTrue(resolved.length() <= 64,
+                "the resolved NeoForge version name ('" + resolved + "', "
+                        + resolved.length() + " chars) must stay under labrinth's 64-char cap");
+        assertTrue(env("LINE_NEOFORGE_NAME").contains("server-side")
+                        || env("LINE_NEOFORGE_NAME").contains("NeoForge"),
+                "the name must still identify the loader/caveat");
+        assertTrue(neo.contains("files: neoforge/build/libs/lod-server-support-neoforge-*.jar"),
                 "the NeoForge step must ship the neoforge LSS jar, not another loader's");
-        // Publish ORDER (N-4 review MINOR): the best-effort-tier step runs LAST, so any
-        // failure in it strands only the best-effort artifact — never Paper (full tier),
-        // which would otherwise be left unpublished after GitHub + Fabric already shipped.
-        assertTrue(stepStart > releaseYml.indexOf("- name: Upload Paper to Modrinth"),
+        // Publish ORDER: the best-effort-tier step runs LAST, so a failure in it strands
+        // only the best-effort artifact — never Paper (full tier).
+        assertTrue(releaseYml.indexOf("- name: Upload NeoForge to Modrinth")
+                        > releaseYml.indexOf("- name: Upload Paper to Modrinth"),
                 "the NeoForge Modrinth step must come AFTER the Paper step");
     }
 
     @Test
-    void paperStepAdvertisesFolia() {
-        // INVERTED for v0.9.0. This used to pin the folia loader's ABSENCE, on the premise
-        // that no Folia 26.2 build existed and the loader would surface an unloadable jar.
-        // Folia published 26.2-1 on 2026-07-28, plugin.yml declares folia-supported again
-        // (PluginYmlContractTest pins that PRESENCE), and all four SOAK_PLATFORM=folia
-        // scenarios passed — so the guarded failure inverted too: it is now a Paper jar
-        // that Folia CAN load but that Modrinth's loader filter hides from Folia admins,
-        // while the README's compatibility table claims the platform is supported.
-        assertTrue(Pattern.compile("(?m)^\\s+folia\\s*$").matcher(releaseYml).find(),
-                "the Paper Modrinth step must advertise the folia loader now that the jar "
-                        + "declares folia-supported and the Folia soaks pass");
-    }
-
-    @Test
-    void otherLineTokensAbsentOutsideComments() {
-        for (String token : FORBIDDEN_LINE_TOKENS) {
-            assertFalse(releaseYml.contains(token),
-                    "release.yml must not reference MC " + token + " outside comments on main");
+    void javaVersionIsLineData() {
+        assertTrue(stepBlock("- uses: actions/setup-java")
+                        .contains("java-version: ${{ env.LINE_JAVA_VERSION }}"),
+                "release.yml's Java version is line data (25 on 26.x, 21 on 1.21.x)");
+        if (isMainline) {
+            assertEquals("25", env("LINE_JAVA_VERSION"), "MC 26.2 builds on Java 25");
         }
     }
+
+    // ---- build.yml ----
 
     @Test
     void buildWorkflowRunsOnSupportBranches() {
         // build.yml is shared in spirit across lines; keeping the branches filter identical
         // on main makes the recurring main→support merges conflict-free and ensures a
-        // support branch pushed before its own build.yml edit still gets CI. (The
-        // v0.10.0 'feat/protocol-20' integration-branch entry was dropped with the C6
-        // merge, together with its pin — the support lines already pin this 2-entry
-        // form, so a D3 re-port taking main's build.yml stays contract-clean.)
+        // support branch pushed before its own build.yml edit still gets CI.
         long hits = Pattern.compile(
                         Pattern.quote("branches: [main, 'support/**']"))
                 .matcher(buildYml).results().count();

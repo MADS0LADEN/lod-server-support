@@ -57,8 +57,11 @@ test {
 
 processResources {
     inputs.property "version", project.version
+    inputs.property "api_version", project.minecraft_version
     filesMatching("plugin.yml") {
-        expand "version": project.version
+        // V-1/P3: api-version equals gradle.properties' minecraft_version on every
+        // recorded line — templated so a support cut never edits this resource.
+        expand "version": project.version, "api_version": project.minecraft_version
     }
 }
 

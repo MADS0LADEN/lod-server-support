@@ -1,0 +1,26 @@
+# Per-version surfaces — the R-7 re-verification table (V-1/D1)
+
+The pinned-vanilla surfaces every port round must re-verify against the target line's
+own MC artifact. Before V-1 this list was reconstructible only from javadoc trails and
+progress-doc archaeology; this table is now canonical ON MAIN, and the support
+branches' CLAUDE.md banners are POINTERS here plus a line-specific status column —
+never a second live copy (two copies drift within one port).
+
+Legend: "pin" = the contract test that reds on drift; "hand" = per-line manual
+verification recorded in the port PR (no automatable pin exists).
+
+| # | Surface | What to verify per line | Pin / hand |
+|---|---|---|---|
+| 1 | `IOWorker` priority ordinal + `consecutiveExecutor`/`storage` handles | The package-private `IOWorker$Priority` ordinal LSS hardcodes still means BACKGROUND; the accessor targets still exist (1.21.1: the executor is still `ProcessorMailbox` — a different shape, see the spike) | `SerializerParityGameTests` byte-parity (behavioral); accessor resolution is loud-fail (`defaultRequire: 1`) |
+| 2 | `RegionFile` record-resolution branches (`RegionFileRawRead`) | The three `createChunkInputStream` branches (inline / external `.mcc` / oversized) still match vanilla's | vanilla-anchored byte-parity tests; javadoc annotation per line |
+| 3 | `NbtIo` root protocol (`SelectiveChunkNbtLoader`) | Root-tag read shape + the byte-accounting constants still mirror `CompoundTag$1` | full-parse fallback + kill switch contain drift; hand-check the constants |
+| 4 | `handleMovePlayer` warn/teleport census (move tracer) | The invoke census + slice anchor still match the line's bytecode | `MoveTraceHookContractTest` (ASM `ClassReader` scan) — re-flavor per line |
+| 5 | `publishServer` overload set (LAN hook) | The mixin descriptor names the overload the GUI actually calls; single-vs-split overload set per line | `LanHookContractTest` — re-flavor per line (the whole 26.1 port was this) |
+| 6 | `SerializableChunkData.copyOf` save choke point (dirty hook) | The class EXISTS on this line (≤1.21.1: it does not — target `ChunkSerializer.write`) AND the platform save paths (vanilla + Moonrise + C2ME) actually invoke it | `SaveHookContractTest` (existence, reflective); the platform-save-path invoke census is per-line HAND verification until V-2/S7 lands the ASM census; Moonrise/C2ME arms stay hand-verified (reflective-only, off the test classpath) |
+| 7 | `folia-supported` direction | Does THIS line's Folia exist upstream? Present-pin vs absent-pin flips accordingly | `PluginYmlContractTest` + `release_check.py` — the fresh-cut inherits main's PRESENCE pin and must actively re-derive it |
+| 8 | Corpus identity rule | `xver-live-corpus` is NEVER regenerated on a support line (decoding capture-line columns IS the cross-version claim); `nbt-corpus` regenerates v20-first then natives (see the runbook §fixtures) | `XverLiveCorpusDecodeTest` (line-neutral since V-1/T4) |
+| 9 | Native count-short shape | One short (1.21.x, fold rule differs by platform: Fabric sums fluid, Paper omits it) vs split pair (26.x) | until V-2/S1: hand-flavor at ~8 sites; after S1: the per-line shape descriptor + regenerated goldens |
+| 10 | Toolchain: Java release + mixin `compatibilityLevel` + mappings namespace | Class-file major == 44 + line.env `LINE_JAVA_VERSION`; both mixin configs match; `release_check.py` `FABRIC_MAPPING_NAMESPACE` (official on 26.x / intermediary under loom-remap) | `ToolchainContractTest` (fabric + paper, V-1/T3c — incl. the resolved-MC-artifact anchor) |
+| 11 | Ticket API shape (`ChunkGenerationService`) | The `TicketType` ctor/params still mean (timeout, flags) | compile (class literal); use the named vanilla constants (V-2's one-liner) so reorders red the compile |
+| 12 | Version-volatile file list | `FarPlayerRenderer` + `ChunkSaveDataHook` stay per-loader-tree whole-file replacements | `VersionVolatileFileListTest` (V-1/S6) |
+| 13 | Release-line identity | `.github/line.env` values (tag suffix, MC tokens, game-versions, loaders, NeoForge name prose, make_latest, Java) vs gradle.properties vs the resolved artifact | `ReleaseWorkflowContractTest` + `ToolchainContractTest` (the three-link chain) |

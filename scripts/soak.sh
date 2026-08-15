@@ -111,6 +111,14 @@ case "$SOAK_PLATFORM" in
         ;;
 esac
 
+# Base worlds are MC-version-specific; fresh-backfill stamps this marker when it saves one.
+# The version comes from gradle.properties so the guard and the stamp can never drift
+# apart (a drifted pair silently clears the base world on EVERY run).
+# (V-1/T3a — reverse-flow: this guard was independently re-invented on four support
+# branches; a base world from another line silently invalidates a soak.)
+MC_LINE_VERSION=$(grep -oP '^minecraft_version=\K.*' "$PROJECT_ROOT/gradle.properties")
+WORLD_VERSION_MARKER="$BASE_WORLD_DIR/mc-version"
+
 source "$PROJECT_ROOT/scripts/lib/mc-run.sh"
 
 usage() {
@@ -293,6 +301,13 @@ echo "========================================="
 # client-cache snapshot taken at the same instant as the base world — a base world
 # saved by an older fresh-backfill (pre-snapshot) must be regenerated.
 if [[ " $FRESH_WORLD_SCENARIOS " != *" $SCENARIO "* ]]; then
+    # Another line's base world will not downgrade (MC refuses newer-DataVersion worlds).
+    # Clear a stale base so the '! -d .../world' check below regenerates it naturally;
+    # unstamped pre-marker bases also clear once and regenerate. (V-1/T3a.)
+    if [[ -d "$BASE_WORLD_DIR" && "$(cat "$WORLD_VERSION_MARKER" 2>/dev/null)" != "$MC_LINE_VERSION" ]]; then
+        echo "[soak] Base world at $BASE_WORLD_DIR is not for MC $MC_LINE_VERSION — clearing (will re-run fresh-backfill)"
+        rm -rf "$BASE_WORLD_DIR"
+    fi
     if [[ ! -d "$BASE_WORLD_DIR/world" ]]; then
         echo "[soak] No base world at $BASE_WORLD_DIR/world — running fresh-backfill first"
         "$SELF" fresh-backfill
@@ -555,6 +570,7 @@ if [[ "$SCENARIO" == "fresh-backfill" && -d "$SERVER_RUN_DIR/world" ]]; then
     mkdir -p "$BASE_WORLD_DIR"
     rm -rf "$BASE_WORLD_DIR/world"
     cp -r "$SERVER_RUN_DIR/world" "$BASE_WORLD_DIR/world"
+    printf '%s' "$MC_LINE_VERSION" > "$WORLD_VERSION_MARKER"
     # Stage D: collect from whichever root the client actually used this run — a
     # fresh run dir writes .lss/cache while a legacy dir adopts config/lss/cache;
     # checking only the old path would silently turn every warm scenario cold.
