@@ -690,11 +690,11 @@ class LodRequestManagerTickTest {
      *  400 KB/s over 8 KB columns → desired 272 KB/s, R = 34, burst = ceil(34/4) = 9. */
     private void engageGovernor() {
         manager.transferGovernorEnabled = () -> true; // the local-config note above
-        manager.governor.tick(1, 0, 0, 0, 1, false, 50, true);
+        manager.governor.tick(1, 0, 0, 0, 0, 1, false, 50, true);
         manager.governor.tick(1 + TransferRateGovernor.INTERVAL_MILLIS,
-                800 * 1024, 100, 20_000, 1, false, 2_000, true);
+                800 * 1024, 100, 20_000, 20_000, 1, false, 2_000, true);
         manager.governor.tick(1 + 2 * TransferRateGovernor.INTERVAL_MILLIS,
-                1600 * 1024, 200, 40_000, 1, false, 2_000, true); // debounce
+                1600 * 1024, 200, 40_000, 40_000, 1, false, 2_000, true); // debounce
         assertTrue(manager.governor.isEngaged(), "rig engagement");
     }
 
@@ -722,11 +722,11 @@ class LodRequestManagerTickTest {
         boolean old = LSSClientConfig.CONFIG.enableAdaptiveTransferRate;
         LSSClientConfig.CONFIG.enableAdaptiveTransferRate = false;
         try {
-            manager.governor.tick(1, 0, 0, 0, 1, false, 50, true);
+            manager.governor.tick(1, 0, 0, 0, 0, 1, false, 50, true);
             manager.governor.tick(1 + TransferRateGovernor.INTERVAL_MILLIS,
-                    800 * 1024, 100, 20_000, 1, false, 2_000, true);
+                    800 * 1024, 100, 20_000, 20_000, 1, false, 2_000, true);
             manager.governor.tick(1 + 2 * TransferRateGovernor.INTERVAL_MILLIS,
-                    1600 * 1024, 200, 40_000, 1, false, 2_000, true); // debounce
+                    1600 * 1024, 200, 40_000, 40_000, 1, false, 2_000, true); // debounce
             assertTrue(manager.governor.isEngaged(), "rig engagement");
             plainTick(overworld); // the production tick reads config false → hard reset
             assertFalse(manager.governor.isEngaged(),
@@ -804,7 +804,7 @@ class LodRequestManagerTickTest {
         // here would read as an offer-backed shortfall and cut unplugged too — the
         // vacuity this timing avoids).
         manager.governor.tick(engageEnd + TransferRateGovernor.INTERVAL_MILLIS,
-                1600 * 1024 + desired * 2, 300, 60_000, 1, false, 2_000, true);
+                1600 * 1024 + desired * 2, 300, 60_000, 60_000, 1, false, 2_000, true);
         assertTrue(manager.governor.getDesiredBytesPerSec() < desired,
                 "the live missing-vanilla sample must reach the governor and cut");
     }
@@ -879,5 +879,23 @@ class LodRequestManagerTickTest {
         org.junit.jupiter.api.Assertions.assertTrue(firstCounts.get(0) <= 2,
                 "the first walk must be clamped by the ramp's burst cap, got "
                         + firstCounts.get(0));
+        // Negative arm (impl review: without it a supplier hardcoded to true passes):
+        // the same production wiring with the shipped toggle OFF declares uncapped.
+        boolean old = LSSClientConfig.CONFIG.enableJoinSlowStart;
+        LSSClientConfig.CONFIG.enableJoinSlowStart = false;
+        try {
+            var m2 = new LodRequestManager();
+            m2.onSessionConfig(config(8, true), "lss-slow-start-pin-off");
+            m2.markCacheLoadedForTest();
+            var offCounts = new java.util.ArrayList<Integer>();
+            m2.setBatchSenderForTest(p -> offCounts.add(p.count()));
+            m2.tickWithContext(0, 0, dim("overworld"), 0, 0, 0L, -1, () -> 0);
+            org.junit.jupiter.api.Assertions.assertFalse(offCounts.isEmpty());
+            org.junit.jupiter.api.Assertions.assertTrue(offCounts.get(0) > 2,
+                    "toggle off: the first walk is uncapped (the supplier reads config,"
+                            + " not a constant), got " + offCounts.get(0));
+        } finally {
+            LSSClientConfig.CONFIG.enableJoinSlowStart = old;
+        }
     }
 }

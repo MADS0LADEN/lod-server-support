@@ -350,6 +350,11 @@ public class LodRequestManager {
                 this.wireBytesReceivedSupplier.getAsLong(),
                 this.columnsReceivedSupplier.getAsLong(),
                 this.declaredColumnsCumulative,
+                // Answered positions of ANY response type (impl review MAJOR — the
+                // ramp's byte-free growth evidence: a warm rejoin's answers are
+                // up_to_date frames that move zero wire bytes).
+                this.metrics.getTotalColumnsReceived() + this.metrics.getTotalUpToDate()
+                        + this.metrics.getTotalNotGenerated(),
                 this.tracker.size(), halted,
                 governorActive ? this.ownPingSupplier.getAsInt() : -1,
                 governorActive);
@@ -954,8 +959,9 @@ public class LodRequestManager {
     public long getRateGated() { return this.scanner.getRateGated(); }
 
     /** Governor receipt for /lss diag (review n14: rate_gated conflates manual and
-     *  governed refusals — this label disambiguates): "<cols>/s (<KB>/s)" while
-     *  engaged, "off" otherwise. */
+     *  governed refusals — this label disambiguates). Four shapes since the slow
+     *  start: ENGAGED keeps the pre-phase "<cols>/s (<KB>/s)" (the live-round
+     *  receipt format), RAMP renders "ramp@<KB>/s (<cols>/s)", plus "open"/"off". */
     public String getGovernedRateLabel() {
         return switch (this.governor.getPhase()) {
             case ENGAGED -> this.governor.sustainedColumnsPerSecond() + "/s ("

@@ -84,7 +84,8 @@ public class LSSClientConfig extends JsonConfig {
     // ping rising >250 ms over its session baseline while LOD delivery measures under
     // 4 MB/s — an AIMD loop paces LOD downloads BELOW link capacity through the same
     // machinery as lodColumnsPerSecondLimit (min-composes with it; the manual knob
-    // stays a hard bound). Fast links never engage; a governed session logs one INFO.
+    // stays a hard bound). Fast links never reach the congestion AIMD (they ramp
+    // open in ~35 s under join slow start below); a governed session logs one INFO.
     // Kill switch: false = manual-knob-only, exactly the pre-governor shape.
     public boolean enableAdaptiveTransferRate = true;
     // Join slow start (join-slow-start-plan.md, user decision 2026-08-14 — join
