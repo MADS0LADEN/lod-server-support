@@ -20,18 +20,29 @@ NEOFORGE_DIR="$SCRIPT_DIR/test-server/neoforge"
 LEGACY_DIR="$SCRIPT_DIR/test-server/fabric-legacy"
 
 # ======================= LINE DATA (per-MC-line values) =======================
-# The port runbook's step 8 edits exactly this block (MC versions, CDN URLs, the
-# legacy LSS pin below) — nothing else in this script is per-line.
+# SHRUNK by R2-6: the MC versions and the Java gate now DERIVE (gradle.properties
+# minecraft_version + line.env LINE_JAVA_VERSION — the same data the build itself
+# consumes, so the rig can never drift from the compile target). Only the CDN URLs
+# + the legacy LSS pin below remain genuine LINE DATA, and the startup self-check
+# reds loudly when a kept URL disagrees with the derived data.
+MC_LINE_VERSION="$(sed -n 's/^minecraft_version=//p' "$SCRIPT_DIR/gradle.properties" | tr -d '\r')"
+if [ -z "$MC_LINE_VERSION" ]; then
+    echo "ERROR: could not read minecraft_version from gradle.properties" >&2
+    exit 1
+fi
+LINE_JAVA_VERSION="$(sed -n 's/^LINE_JAVA_VERSION=//p' "$SCRIPT_DIR/.github/line.env" | tr -d '\r')"
+if [ -z "$LINE_JAVA_VERSION" ]; then
+    echo "ERROR: could not read LINE_JAVA_VERSION from .github/line.env" >&2
+    exit 1
+fi
 # --- Fabric versions ---
-# NOTE: the Java-version gate below (JAVA_MAJOR check) is ALSO per-line data —
-#       a Java-21 line port must retarget it (round-3 review NIT).
-FABRIC_MC_VERSION="26.2"
+FABRIC_MC_VERSION="$MC_LINE_VERSION"
 FABRIC_LOADER_VERSION="0.19.3"
 FABRIC_INSTALLER_VERSION="1.1.1"
 
 # --- Paper/Folia versions ---
-PAPER_MC_VERSION="26.2"
-FOLIA_MC_VERSION="26.2"
+PAPER_MC_VERSION="$MC_LINE_VERSION"
+FOLIA_MC_VERSION="$MC_LINE_VERSION"
 
 # --- NeoForge version ---
 # Pinned to the version the neoforge module BUILDS AGAINST (gradle.properties
@@ -66,13 +77,31 @@ LEGACY_LSS_VERSION="0.6.2"
 LEGACY_LSS_MC="26.2"
 LEGACY_LSS_FABRIC_URL="https://github.com/VoX/lod-server-support/releases/download/v${LEGACY_LSS_VERSION}/lod-server-support-fabric-${LEGACY_LSS_VERSION}%2B${LEGACY_LSS_MC}.jar"
 
-# --- Java version check ---
+# --- Java version check (derived from line.env, R2-6) ---
 JAVA_MAJOR=$(java -version 2>&1 | head -1 | sed 's/.*"\([0-9]\+\).*/\1/')
-if [ "$JAVA_MAJOR" -lt 25 ] 2>/dev/null; then
-    echo "ERROR: Java 25+ required for MC 26.2. Found: Java $JAVA_MAJOR" >&2
-    echo "  Set JAVA_HOME to a JDK 25+ installation." >&2
+if [ "$JAVA_MAJOR" -lt "$LINE_JAVA_VERSION" ] 2>/dev/null; then
+    echo "ERROR: Java ${LINE_JAVA_VERSION}+ required for MC ${MC_LINE_VERSION}. Found: Java $JAVA_MAJOR" >&2
+    echo "  Set JAVA_HOME to a JDK ${LINE_JAVA_VERSION}+ installation." >&2
     exit 1
 fi
+
+# --- LINE DATA self-check (R2-6): the kept hand URLs must agree with the derived
+# data — an inherited URL from another line reds HERE, not as a mid-run 404/mixin
+# crash. C2ME's Modrinth version ID also lives in gradle.properties; the URL must
+# embed the same ID or the two drift internally.
+case "$FABRIC_API_URL" in *"${MC_LINE_VERSION}"*) : ;; *)
+    echo "ERROR: FABRIC_API_URL does not mention MC ${MC_LINE_VERSION} — stale line data" >&2
+    exit 1 ;;
+esac
+case "$C2ME_URL" in *"mc${MC_LINE_VERSION}"*) : ;; *)
+    echo "ERROR: C2ME_URL does not mention mc${MC_LINE_VERSION} — stale line data" >&2
+    exit 1 ;;
+esac
+C2ME_MODRINTH_ID="$(sed -n 's/^c2me_modrinth_version=//p' "$SCRIPT_DIR/gradle.properties" | tr -d '\r')"
+case "$C2ME_URL" in *"/${C2ME_MODRINTH_ID}/"*) : ;; *)
+    echo "ERROR: C2ME_URL version ID disagrees with gradle.properties c2me_modrinth_version (${C2ME_MODRINTH_ID})" >&2
+    exit 1 ;;
+esac
 
 # --- Settings ---
 SERVER_RAM="${SERVER_RAM:-2G}"

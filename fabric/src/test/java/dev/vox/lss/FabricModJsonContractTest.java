@@ -54,6 +54,29 @@ class FabricModJsonContractTest {
     }
 
     @Test
+    void suggestsRangesAreTemplatedAndBackedByProperties() {
+        // R2-6: the suggests ranges are gradle.properties data expanded at build time —
+        // stale hand copies shipped on all three v0.11 ports. The source must carry the
+        // placeholders and the properties must expand them non-empty.
+        var suggests = modJson.getAsJsonObject("suggests");
+        org.junit.jupiter.api.Assertions.assertEquals("${suggests_sodium}",
+                suggests.get("sodium").getAsString(),
+                "suggests.sodium must be the processResources placeholder");
+        org.junit.jupiter.api.Assertions.assertEquals("${suggests_voxy}",
+                suggests.get("voxy").getAsString(),
+                "suggests.voxy must be the processResources placeholder");
+        for (String key : new String[]{"suggests_sodium", "suggests_voxy",
+                "sodium_version", "modmenu_version",
+                "moonrise_modrinth_version", "c2me_modrinth_version"}) {
+            String v = gradleProps.getProperty(key);
+            org.junit.jupiter.api.Assertions.assertNotNull(v,
+                    key + " missing from gradle.properties (R2-6 line data)");
+            org.junit.jupiter.api.Assertions.assertFalse(v.isBlank(),
+                    key + " must expand non-empty");
+        }
+    }
+
+    @Test
     void dependsMinecraftPinsThisLineBothWays() {
         // V-1/P3: the SOURCE resource carries the template token — the actual range is
         // per-line DATA in gradle.properties (minecraft_dependency), pinned by FORM here

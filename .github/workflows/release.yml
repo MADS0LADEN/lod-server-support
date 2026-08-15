@@ -101,6 +101,14 @@ jobs:
           expand GV_PAPER "${LINE_GAME_VERSIONS_PAPER}"
           expand GV_NEOFORGE "${LINE_GAME_VERSIONS_NEOFORGE}"
           expand PAPER_LOADERS "${LINE_PAPER_LOADERS}"
+          # Paper Modrinth display prose derives from the same loader list (R2-7) —
+          # release.yml carries ZERO per-line name tokens.
+          display=""
+          for l in ${LINE_PAPER_LOADERS}; do
+            cap="$(tr '[:lower:]' '[:upper:]' <<< "${l:0:1}")${l:1}"
+            display="${display:+$display/}$cap"
+          done
+          echo "LINE_PAPER_DISPLAY=$display" >> "$GITHUB_ENV"
           # Release-asset list is line data: NeoForge ships only where
           # LINE_SHIP_NEOFORGE=true (v0.11.0 scope, user decision 2026-08-15).
           {
@@ -232,7 +240,7 @@ jobs:
           modrinth-id: lKiXKLvv
           modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
           files: paper/build/libs/lod-server-support-paper-*.jar
-          name: v${{ env.MOD_VERSION }} - Paper/Purpur/Folia (MC ${{ env.LINE_MC_PAPER }})
+          name: v${{ env.MOD_VERSION }} - ${{ env.LINE_PAPER_DISPLAY }} (MC ${{ env.LINE_MC_PAPER }})
           version: v${{ env.MOD_VERSION }}+paper+mc${{ env.LINE_MC_PAPER }}
           version-type: release
           # The loader list is per-line data (Folia's presence has flipped per line —

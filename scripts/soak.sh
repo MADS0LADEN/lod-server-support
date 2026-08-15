@@ -19,9 +19,9 @@ set -euo pipefail
 # SOAK_PLATFORM=paper runs the identical scenario against a real Paper server
 # (:paper:runSoakServer + PaperSoakScenarioDriver) with the UNCHANGED Fabric soak
 # client and checker. Paper keeps its own base-world snapshot (soak-worlds/base-paper);
-# on MC 26.1.2 Paper uses the vanilla unified layout (world/dimensions/minecraft/<dim>,
-# no split world_nether/world_the_end dirs), so the snapshot carries every dimension —
-# including the End — exactly like Fabric's.
+# the staging's world* glob is LINE-INVARIANT (R2-3): on unified-layout lines it
+# matches only world/; on split-layout lines (1.21.x Bukkit) it also carries
+# world_nether/world_the_end — every dimension, including the End, on every line.
 #
 # SOAK_PLATFORM=folia runs the Paper scenario set against a real Folia server
 # (:paper:runFolia downloads the jar; base world soak-worlds/base-folia). Same plugin,
@@ -337,11 +337,12 @@ mkdir -p "$RUN_RESULTS_DIR"
 
 # Step 5a: Stage world. Fresh-world scenarios start from nothing (generation paths);
 # only fresh-backfill SAVES its world as the reusable base afterwards (Step 13).
-# Both platforms keep all dimensions inside world/ (Paper on MC 26.1.2 uses the vanilla
-# unified world/dimensions/minecraft/<dim> layout, not the legacy split
-# world_nether/world_the_end dirs), so clearing/copying world/ covers the End too.
+# The world* glob + split-dir rm are LINE-INVARIANT (R2-3): a strict superset on
+# unified-layout lines (the glob matches only world/, the extra rms hit nothing)
+# and exactly the split-layout flavor on 1.21.x Bukkit — the per-line staging
+# flavor stops existing (it was lost once in a delta-port; review 2026-08-15).
 echo "[soak] Staging world for scenario: $SCENARIO"
-rm -rf "$SERVER_RUN_DIR/world"
+rm -rf "$SERVER_RUN_DIR"/world "$SERVER_RUN_DIR"/world_nether "$SERVER_RUN_DIR"/world_the_end
 if [[ -n "${SOAK_WORLD_FROM:-}" ]]; then
     # Multi-phase orchestrators (scripts/store_offline_edit.sh) carry a prior phase's
     # world forward instead of restaging the base. The dir must contain world/.
@@ -350,9 +351,9 @@ if [[ -n "${SOAK_WORLD_FROM:-}" ]]; then
         exit 1
     fi
     echo "[soak] Staging world from SOAK_WORLD_FROM=$SOAK_WORLD_FROM"
-    cp -r "$SOAK_WORLD_FROM/world" "$SERVER_RUN_DIR/world"
+    cp -r "$SOAK_WORLD_FROM"/world* "$SERVER_RUN_DIR"/
 elif [[ " $FRESH_WORLD_SCENARIOS " != *" $SCENARIO "* ]]; then
-    cp -r "$BASE_WORLD_DIR/world" "$SERVER_RUN_DIR/world"
+    cp -r "$BASE_WORLD_DIR"/world* "$SERVER_RUN_DIR"/
 fi
 
 # Step 5b: Stage client column cache. warm-rejoin clears too: its run 1 IS the
@@ -568,8 +569,8 @@ cp "$SCENARIO_JSON" "$RUN_RESULTS_DIR/"
 if [[ "$SCENARIO" == "fresh-backfill" && -d "$SERVER_RUN_DIR/world" ]]; then
     echo "[soak] Saving world to $BASE_WORLD_DIR/ for reuse"
     mkdir -p "$BASE_WORLD_DIR"
-    rm -rf "$BASE_WORLD_DIR/world"
-    cp -r "$SERVER_RUN_DIR/world" "$BASE_WORLD_DIR/world"
+    rm -rf "$BASE_WORLD_DIR"/world "$BASE_WORLD_DIR"/world_nether "$BASE_WORLD_DIR"/world_the_end
+    cp -r "$SERVER_RUN_DIR"/world* "$BASE_WORLD_DIR"/
     printf '%s' "$MC_LINE_VERSION" > "$WORLD_VERSION_MARKER"
     # Stage D: collect from whichever root the client actually used this run — a
     # fresh run dir writes .lss/cache while a legacy dir adopts config/lss/cache;
