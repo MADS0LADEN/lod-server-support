@@ -100,6 +100,27 @@ the rig should re-deploy from post-N main before the re-validation window:
   (2026-08-14) — the release pre-flight now REQUIRES `:neoforge:build` (the
   gate hard-fails without the neoforge LSS+VSS pair).
 
+## 4c. Post-#179 re-pin (2026-08-14 — join slow start; supersedes §4b's jar)
+
+Two pause-time merges landed after the stage-N re-arm: V-1 (PR #177 —
+jar-byte-identical, no re-pin needed, proven 1419/1419) and **join slow start
+(PR #179 — jar-AFFECTING, client half of the Fabric jar)**. Re-pinned package:
+
+- Jar: `fabric/build/libs/lod-server-support-fabric-0.11.0+26.2.jar` from the
+  post-#179 pre-flight (main @ 6aecd489, `CI=true`, `-Pmod_version=0.11.0`) —
+  sha256 `1128a60b3500af18950fb6043ae223db4b13940b1c7e5a664befbf92ff728509`,
+  7,916,654 B. Six-family `release_check.py --version 0.11.0` green on this
+  tree. Same deploy mechanics as §4b (panel Start is the user's).
+- The SERVER half is unchanged by #179 (the governor is client-side) — §4b's
+  server expectations carry over verbatim.
+- **Client-side receipts added to the checklist** (plan §6's obligation; the
+  same jar goes in the Prism instance): the Sodium screen shows "Slow Start
+  on Join" (default on); a rig join walks `governed=ramp@…` → `open` in
+  ~35 s on the fast path (`/lss diag`); elytra-from-join (the spawnkit case)
+  must NOT park the ramp — the 62 ms jitter-gated movement hold is the
+  specific check; a warm rejoin revalidates promptly (the byte-free answered
+  rung — not parked at 2 col/s).
+
 ## 5. Found-bug loop (from the plan — verbatim rules)
 
 A fix re-opens the owning stage's gates (its tier set + its soaks), redeploys,
