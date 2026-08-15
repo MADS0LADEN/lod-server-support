@@ -436,14 +436,16 @@ public class PaperRequestProcessingService {
             var maskFingerprints = new java.util.HashMap<String, String>();
             for (ServerLevel level : server.getAllLevels()) {
                 String dim = level.dimension().identifier().toString();
-                // Paper 26.x uses the vanilla UNIFIED world layout (one world dir,
-                // dimensions/minecraft/<dim>/region — verified on disk against a live
-                // 26.2 Paper server), so the server worldRoot is the correct
-                // getStorageFolder root, same as Fabric. BACKPORT CAVEAT: the 1.21.x
-                // lines use Bukkit's legacy SPLIT world dirs (world_nether/DIM-1,
-                // world_the_end/DIM1) — a backport must re-root per level (e.g. via
-                // getWorld().getWorldFolder()) or the sweep fail-safe-drops every
-                // non-overworld dim's rows at each boot.
+                // PER-LINE INVARIANT (surfaces row 17 — Bukkit world layout): Paper
+                // 26.x uses the vanilla UNIFIED layout, so the server worldRoot is the
+                // correct getStorageFolder root, same as Fabric. The 1.21.x lines use
+                // Bukkit's legacy SPLIT world dirs and re-root PER LEVEL via
+                // getWorld().getWorldFolder() — the two forms are NOT interchangeable:
+                // R2-9's live probe (2026-08-15) showed 26.2's getWorldFolder() returns
+                // the per-dimension SUBFOLDER (world/dimensions/minecraft/<dim>), so
+                // adopting the per-level form here would break this line's sweep the
+                // same way the unified form broke the 1.21.x port's. Walk row 17 on
+                // every port.
                 regionDirs.put(dim, net.minecraft.world.level.dimension.DimensionType
                         .getStorageFolder(level.dimension(), worldRoot)
                         .resolve("region").normalize());
