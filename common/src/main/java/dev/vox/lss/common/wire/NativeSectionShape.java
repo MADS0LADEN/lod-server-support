@@ -6,12 +6,16 @@ package dev.vox.lss.common.wire;
  * port edits THIS file instead of flavoring the cursor, both NBT serializers, and the
  * three relationship-pinning tests (the recorded ~134-line churn on the 1.21.11 port).
  *
- * <p>Three independent fields (the plan-review MAJOR said two; the V-2 execution
- * review added the cursor's line-level fold — one value cannot express the recorded
- * flavor):
+ * <p>Four independent fields (the plan-review MAJOR said two; the V-2 execution
+ * review added the cursor's line-level fold, and the 1.21.1 port found the long-array
+ * prefix axis — one value cannot express the recorded flavor):
  * <ul>
  *   <li>{@link #NATIVE_COUNT_SHORTS} — LINE-level, consumed by the cursor's parse+emit:
  *       how many count shorts the native section header carries after sectionY.</li>
+ *   <li>{@link #NATIVE_LONG_ARRAY_PREFIXED} — LINE-level, consumed by the cursor's
+ *       parse+emit: whether the native container long array carries a VarInt length
+ *       prefix (1.21.1's vanilla {@code writeLongArray}) or bare words (26.x,
+ *       1.21.11).</li>
  *   <li>{@link #foldedCountForNativeHeader} — LINE-level, the cursor emit's one-short
  *       value (client-side vanilla semantics; recorded 1.21.11: the sum).</li>
  *   <li>the family folds ({@link #foldedCountFabricFamily}/{@link #foldedCountPaperFamily})
@@ -37,6 +41,18 @@ public final class NativeSectionShape {
      * second short only when this is 2 (V20 always carries both — wire spec).
      */
     public static final int NATIVE_COUNT_SHORTS = 2;
+
+    /**
+     * Fourth LINE-level field (found at the 1.21.1 port, back-flowed per the T3 rule):
+     * whether the NATIVE container long array is VarInt-length-prefixed. 1.21.1's
+     * vanilla {@code PalettedContainer$Data.write} uses {@code writeLongArray} (prefix,
+     * empty array included — javap-verified there); 26.x and 1.21.11 write the words
+     * bare. V20 is prefix-free on every line (wire spec — never derive this there).
+     * Consumed by the cursor's NATIVE parse+emit; the branches are dead code while
+     * this is false, kept so a port flips the constant instead of re-flavoring the
+     * cursor.
+     */
+    public static final boolean NATIVE_LONG_ARRAY_PREFIXED = false;
 
     /**
      * The LINE-level fold the CURSOR's one-short NATIVE emit writes (V-2 review

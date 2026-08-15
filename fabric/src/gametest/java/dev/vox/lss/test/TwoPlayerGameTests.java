@@ -1,5 +1,9 @@
 package dev.vox.lss.test;
 
+import static dev.vox.lss.test.TestPositions.chunkAt;
+import static dev.vox.lss.test.TestPositions.holdChunk;
+import static dev.vox.lss.test.TestPositions.releaseChunk;
+
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.PositionUtil;
 import dev.vox.lss.common.SharedBandwidthLimiter;
@@ -66,18 +70,18 @@ public class TwoPlayerGameTests {
         var chunkSource = level.getChunkSource();
 
         var positions = new long[3];
-        var chunkPositions = new ChunkPos[3];
+        var chunkPositions = new TestPositions.ChunkAt[3];
         for (int i = 0; i < 3; i++) {
-            chunkPositions[i] = new ChunkPos(pcx - DEDUP_CHUNK_OFFSET, pcz + i);
+            chunkPositions[i] = chunkAt(pcx - DEDUP_CHUNK_OFFSET, pcz + i);
             positions[i] = PositionUtil.packPosition(chunkPositions[i].x(), chunkPositions[i].z());
-            chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPositions[i], 0);
+            holdChunk(chunkSource, chunkPositions[i]);
             level.getChunk(chunkPositions[i].x(), chunkPositions[i].z());
         }
         // Release after generation: the serves must come from DISK (a loaded chunk
         // probe-serves and never engages the dedup tracker).
         helper.runAfterDelay(4, () -> {
             for (var pos : chunkPositions) {
-                chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, pos, 0);
+                releaseChunk(chunkSource, pos);
             }
         });
 
@@ -267,10 +271,10 @@ public class TwoPlayerGameTests {
         var registered = placeMockServerPlayer(helper);
         int pcx = registered.getBlockX() >> 4;
         int pcz = registered.getBlockZ() >> 4;
-        var chunkPos = new ChunkPos(pcx - VANILLA_CHUNK_OFFSET, pcz + 6);
+        var chunkPos = chunkAt(pcx - VANILLA_CHUNK_OFFSET, pcz + 6);
         long packed = PositionUtil.packPosition(chunkPos.x(), chunkPos.z());
         var chunkSource = level.getChunkSource();
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+        holdChunk(chunkSource, chunkPos);
         level.getChunk(chunkPos.x(), chunkPos.z());
 
         var service = new RequestProcessingService(server);
@@ -299,7 +303,7 @@ public class TwoPlayerGameTests {
                             == state.getTotalBytesSent(),
                     "every LSS byte must be attributed to the registered player — there is no "
                             + "state through which the vanilla player could be sent anything");
-            chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+            releaseChunk(chunkSource, chunkPos);
             service.shutdown();
             playerList.remove(vanilla);
             playerList.remove(registered);
@@ -333,13 +337,13 @@ public class TwoPlayerGameTests {
         var mockB = placeMockServerPlayer(helper);
         int pcx = mockA.getBlockX() >> 4;
         int pcz = mockA.getBlockZ() >> 4;
-        var chunkPos = new ChunkPos(pcx - FANOUT_CHUNK_OFFSET, pcz + 4);
+        var chunkPos = chunkAt(pcx - FANOUT_CHUNK_OFFSET, pcz + 4);
         helper.assertTrue(FANOUT_CHUNK_OFFSET <= LSSServerConfig.CONFIG.lodDistanceChunks,
                 "premise: the column must be inside the broadcaster's RAW lodDistance range");
         long packed = PositionUtil.packPosition(chunkPos.x(), chunkPos.z());
         var dim = LSSConstants.DIM_STR_OVERWORLD;
         var chunkSource = level.getChunkSource();
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+        holdChunk(chunkSource, chunkPos);
         level.getChunk(chunkPos.x(), chunkPos.z());
         var editPos = new BlockPos(chunkPos.x() * 16 + 4, -61, chunkPos.z() * 16 + 4);
 
@@ -457,7 +461,7 @@ public class TwoPlayerGameTests {
                                     + "(an undelivered clear resolves the re-request up-to-date "
                                     + "off the stale done-bit): A=" + stateA.getTotalSectionsSent()
                                     + " B=" + stateB.getTotalSectionsSent());
-                    chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+                    releaseChunk(chunkSource, chunkPos);
                     service.shutdown();
                     playerList.remove(mockA);
                     playerList.remove(mockB);

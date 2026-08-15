@@ -1,5 +1,9 @@
 package dev.vox.lss.test;
 
+import static dev.vox.lss.test.TestPositions.chunkAt;
+import static dev.vox.lss.test.TestPositions.holdChunk;
+import static dev.vox.lss.test.TestPositions.releaseChunk;
+
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.PositionUtil;
 import dev.vox.lss.networking.server.RequestProcessingService;
@@ -85,12 +89,12 @@ public class RegionFaultGameTests {
 
         // Valid disk target: generated now, then unloaded + saved so its serve hits disk
         // through the same reader pool the corrupt read errors on.
-        var validPos = new ChunkPos(pcx - VALID_CHUNK_OFFSET, pcz + 2);
+        var validPos = chunkAt(pcx - VALID_CHUNK_OFFSET, pcz + 2);
         long validPacked = PositionUtil.packPosition(validPos.x(), validPos.z());
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, validPos, 0);
+        holdChunk(chunkSource, validPos);
         level.getChunk(validPos.x(), validPos.z());
         helper.runAfterDelay(4, () ->
-                chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, validPos, 0));
+                releaseChunk(chunkSource, validPos));
 
         var service = new RequestProcessingService(server);
         var state = service.registerPlayer(mock, LSSConstants.CAPABILITY_VOXEL_COLUMNS);

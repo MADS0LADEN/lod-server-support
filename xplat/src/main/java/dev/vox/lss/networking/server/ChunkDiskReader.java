@@ -4,15 +4,11 @@ import dev.vox.lss.common.Brand;
 import dev.vox.lss.common.LSSLogger;
 import dev.vox.lss.common.processing.AbstractChunkDiskReader;
 import dev.vox.lss.compat.MoonriseReadCompat;
-import dev.vox.lss.mixin.AccessorIOWorker;
 import dev.vox.lss.mixin.AccessorServerChunkCache;
-import dev.vox.lss.mixin.AccessorSimpleRegionStorage;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.util.thread.PriorityConsecutiveExecutor;
 import net.minecraft.world.level.ChunkPos;
-import net.minecraft.world.level.chunk.storage.RegionFileStorage;
 
 import java.lang.invoke.WrongMethodTypeException;
 import java.util.Optional;
@@ -27,18 +23,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public class ChunkDiskReader extends AbstractChunkDiskReader {
 
-    // IOWorker$Priority is package-private and cannot be named here, so the ordinal is
-    // pinned. Verified against the 26.2 jar: FOREGROUND(0), BACKGROUND(1), SHUTDOWN(2) — scheduleWithResult takes the
-    // priority as an int, which is how vanilla passes it too. The SerializerParityGameTests
-    // byte-parity test exercises this path end-to-end but does NOT pin the enum order (any
-    // in-range ordinal returns identical bytes); a vanilla reorder must be re-verified by hand.
-    //
-    // Where this lands us on the shared per-dimension executor: vanilla's chunk loads
-    // (loadAsync -> submitTask) run FOREGROUND, and vanilla's chunk saves (storePendingChunk) run
-    // BACKGROUND. So LOD reads at BACKGROUND sit strictly below the loads players wait on, and
-    // tie with saves — an improvement for both, since chunkMap.read used to put LOD reads at
-    // FOREGROUND, level with vanilla's loads and ahead of its saves.
-    private static final int IOWORKER_PRIORITY_BACKGROUND = 1;
+    // The IOWorker executor type, submit shape, priority ordinal, and accessor resolution
+    // live in BackgroundIoSubmit (the V-3/S4 seam) — a support port flavors that file,
+    // never this one's signatures.
 
     private final boolean useBackgroundReadPriority;
     // One-shot guard for the "background priority unavailable" warning (a chunk-IO-overhaul mod
@@ -202,29 +189,25 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
      * one-shot latch + throttle + warn (one latch site, no drift).
      */
     NbtSectionSerializer.ChunkRawRead rawBackgroundReaderOrNull(ChunkMap chunkMap) {
-        PriorityConsecutiveExecutor executor = null;
-        RegionFileStorage storage = null;
+        BackgroundIoSubmit.Handles handles = null;
         try {
-            var handles = resolveBackgroundHandles(chunkMap);
-            executor = handles.executor();
-            storage = handles.storage();
+            handles = resolveBackgroundHandles(chunkMap);
         } catch (Throwable t) {
             // fall through with nulls — the ChunkNbtRead ladder latches and warns
         }
-        if (backgroundReadUnavailable(executor, storage)) {
+        if (handles == null || backgroundReadUnavailable(handles.executor(), handles.storage())) {
             return null;
         }
-        return rawBackgroundRead(executor, storage);
+        return rawBackgroundRead(handles);
     }
 
-    private NbtSectionSerializer.ChunkRawRead rawBackgroundRead(PriorityConsecutiveExecutor executor,
-                                                                RegionFileStorage storage) {
+    private NbtSectionSerializer.ChunkRawRead rawBackgroundRead(BackgroundIoSubmit.Handles handles) {
         return (cx, cz) -> {
             var pos = new ChunkPos(cx, cz);
-            return executor.scheduleWithResult(IOWORKER_PRIORITY_BACKGROUND,
+            return BackgroundIoSubmit.schedule(handles,
                     (CompletableFuture<Optional<NbtSectionSerializer.RawChunkRecord>> f) -> {
                         try {
-                            var region = ((dev.vox.lss.mixin.AccessorRegionFileStorage) (Object) storage)
+                            var region = ((dev.vox.lss.mixin.AccessorRegionFileStorage) (Object) handles.storage())
                                     .lss$getRegionFile(pos);
                             var record = RegionFileRawRead.read(region, pos);
                             // Count only PRESENT records (pre-D3 review L2-2): a
@@ -325,33 +308,27 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
      */
     // Package-private (not private) so the fail-safe path is unit-testable via an injected resolver.
     NbtSectionSerializer.ChunkNbtRead backgroundReaderOrFallback(ChunkMap chunkMap) {
-        PriorityConsecutiveExecutor executor = null;
-        RegionFileStorage storage = null;
+        BackgroundIoSubmit.Handles handles = null;
         try {
-            var handles = resolveBackgroundHandles(chunkMap);
-            executor = handles.executor();
-            storage = handles.storage();
+            handles = resolveBackgroundHandles(chunkMap);
         } catch (Throwable t) {
             // Fall through with handles still null: a chunk-IO-overhaul mod changed vanilla's
             // internals so that even reading them fails. Treat exactly like a null handle.
         }
-        if (backgroundReadUnavailable(executor, storage)) {
+        if (handles == null || backgroundReadUnavailable(handles.executor(), handles.storage())) {
             onBackgroundIncompatible();
             return (cx, cz) -> chunkMap.read(new ChunkPos(cx, cz));
         }
-        return backgroundRead(executor, storage);
+        return backgroundRead(handles);
     }
 
     /** Resolve the IOWorker's [executor, storage] handles from the chunk map. Overridable
      *  (package-private) so a test can inject a resolver that returns nulls or throws — simulating a
-     *  chunk-IO-overhaul mod — without a live MC IOWorker, which no test environment can null out. */
-    Handles resolveBackgroundHandles(ChunkMap chunkMap) {
-        var worker = (AccessorIOWorker) ((AccessorSimpleRegionStorage) chunkMap).lss$getWorker();
-        return new Handles(worker.lss$getConsecutiveExecutor(), worker.lss$getStorage());
+     *  chunk-IO-overhaul mod — without a live MC IOWorker, which no test environment can null out.
+     *  Delegates to the S4 seam, which owns the per-line accessor facts. */
+    BackgroundIoSubmit.Handles resolveBackgroundHandles(ChunkMap chunkMap) {
+        return BackgroundIoSubmit.resolve(chunkMap);
     }
-
-    /** The IOWorker handles the background path needs; either may be null on an incompatible server. */
-    record Handles(PriorityConsecutiveExecutor executor, RegionFileStorage storage) {}
 
     /** Latch the server-wide incompatible flag, engage the adaptive throttle (Approach B), and warn
      *  exactly once. Idempotent + one-way: the latch stops later reads from re-attempting the
@@ -439,14 +416,13 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
      *  executor via {@code storage.read}. Since Phase 3 this is the
      *  {@code useBackgroundReadSplit=false} rollback shape only — the default path is
      *  {@link #rawBackgroundRead} (fetch-only on the executor, parse on the pool). */
-    private NbtSectionSerializer.ChunkNbtRead backgroundRead(PriorityConsecutiveExecutor executor,
-                                                             RegionFileStorage storage) {
+    private NbtSectionSerializer.ChunkNbtRead backgroundRead(BackgroundIoSubmit.Handles handles) {
         return (cx, cz) -> {
             var pos = new ChunkPos(cx, cz);
-            return executor.scheduleWithResult(IOWORKER_PRIORITY_BACKGROUND,
+            return BackgroundIoSubmit.schedule(handles,
                     (CompletableFuture<Optional<CompoundTag>> f) -> {
                         try {
-                            f.complete(Optional.ofNullable(storage.read(pos)));
+                            f.complete(Optional.ofNullable(handles.storage().read(pos)));
                         } catch (Exception e) {
                             // As broad as vanilla's own read task (submitThrowingTask catches
                             // Exception): a corrupt region can fail unchecked, and anything that

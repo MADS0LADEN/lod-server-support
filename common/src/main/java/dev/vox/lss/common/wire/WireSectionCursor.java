@@ -177,8 +177,17 @@ public final class WireSectionCursor {
         int bits = in.readUnsignedByte();
         checkWidth(bits, layout, isBlocks);
         if (bits == 0) {
-            return new WireContainer(0,
+            var single = new WireContainer(0,
                     new int[] { readPaletteValue(in, layout, isBlocks, dictSize) }, EMPTY_DATA);
+            if (layout == Layout.NATIVE && NativeSectionShape.NATIVE_LONG_ARRAY_PREFIXED) {
+                // Prefixed lines (1.21.1): vanilla's single-value container still writes
+                // its (empty) long array through writeLongArray — one VarInt 0 on the wire.
+                int len = in.readVarIntCount("longCount");
+                if (len != 0) {
+                    throw new WireFormatException("single-value container longCount " + len);
+                }
+            }
+            return single;
         }
         int[] palette = null;
         int paletteThreshold = isBlocks ? NATIVE_BLOCK_PALETTE_MAX_BITS : NATIVE_BIOME_PALETTE_MAX_BITS;
@@ -194,6 +203,15 @@ public final class WireSectionCursor {
         }
         int valuesPerLong = 64 / bits;
         int longCount = (entries + valuesPerLong - 1) / valuesPerLong;
+        if (layout == Layout.NATIVE && NativeSectionShape.NATIVE_LONG_ARRAY_PREFIXED) {
+            // Prefixed lines: the wire carries the VarInt long count; vanilla's
+            // readLongArray hard-fails a mismatch, and so does the cursor.
+            int claimed = in.readVarIntCount("longCount");
+            if (claimed != longCount) {
+                throw new WireFormatException("container longCount " + claimed
+                        + ", layout implies " + longCount);
+            }
+        }
         long[] data = new long[longCount];
         for (int i = 0; i < longCount; i++) {
             data[i] = in.readLong();
@@ -302,6 +320,9 @@ public final class WireSectionCursor {
                 throw new WireFormatException("malformed single-value container");
             }
             out.writeVarInt(checkPaletteValue(c.palette()[0], layout, isBlocks, dictSize));
+            if (layout == Layout.NATIVE && NativeSectionShape.NATIVE_LONG_ARRAY_PREFIXED) {
+                out.writeVarInt(0); // prefixed lines: the empty writeLongArray prefix
+            }
             return;
         }
         if (!c.isDirect()) {
@@ -323,6 +344,9 @@ public final class WireSectionCursor {
         if (c.data().length != expected) {
             throw new WireFormatException("container data has " + c.data().length
                     + " longs, layout implies " + expected);
+        }
+        if (layout == Layout.NATIVE && NativeSectionShape.NATIVE_LONG_ARRAY_PREFIXED) {
+            out.writeVarInt(expected); // prefixed lines: vanilla's writeLongArray prefix
         }
         for (long l : c.data()) {
             out.writeLong(l);

@@ -1,5 +1,9 @@
 package dev.vox.lss.test;
 
+import static dev.vox.lss.test.TestPositions.chunkAt;
+import static dev.vox.lss.test.TestPositions.holdChunk;
+import static dev.vox.lss.test.TestPositions.releaseChunk;
+
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.PositionUtil;
 import dev.vox.lss.common.SharedBandwidthLimiter;
@@ -109,20 +113,20 @@ public class SerializerParityGameTests {
     @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 1200)
     public void diskReadBytesMatchLiveBytesForDiskLoadedColumn(GameTestHelper helper) {
         ServerLevel level = helper.getLevel();
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int cx = origin.x() + PARITY_CHUNK_OFFSET;
         int cz = origin.z() + 7;
-        var chunkPos = new ChunkPos(cx, cz);
+        var chunkPos = chunkAt(cx, cz);
         var chunkSource = level.getChunkSource();
         // Superflat surface: bedrock -64, dirt -63/-62, grass -61; first air block is -60.
         var torchPos = new BlockPos(cx * 16 + 8, -60, cz * 16 + 8);
 
         // Hold the chunk loaded for the torch dance (plain getChunk tickets expire after 1 tick).
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+        holdChunk(chunkSource, chunkPos);
         level.getChunk(cx, cz);
         level.setBlock(torchPos, Blocks.TORCH.defaultBlockState(), 3);
         helper.runAfterDelay(4, () -> level.setBlock(torchPos, Blocks.AIR.defaultBlockState(), 3));
-        helper.runAfterDelay(8, () -> chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0));
+        helper.runAfterDelay(8, () -> releaseChunk(chunkSource, chunkPos));
 
         var reader = new ChunkDiskReader(1, false);
         var readerId = UUID.randomUUID();
@@ -195,10 +199,10 @@ public class SerializerParityGameTests {
     @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 1200)
     public void xrayMaskedDiskReadBytesMatchMaskedLiveBytes(GameTestHelper helper) {
         ServerLevel level = helper.getLevel();
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int cx = origin.x() + XRAY_PARITY_CHUNK_OFFSET;
         int cz = origin.z() + 7;
-        var chunkPos = new ChunkPos(cx, cz);
+        var chunkPos = chunkAt(cx, cz);
         var chunkSource = level.getChunkSource();
 
         var maskedConfig = new LSSServerConfig();
@@ -206,7 +210,7 @@ public class SerializerParityGameTests {
 
         // Ore cluster below the default cutoff (superflat surface sits at -60): diamond +
         // a lit redstone state, so the all-states rule is on the wire too.
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+        holdChunk(chunkSource, chunkPos);
         level.getChunk(cx, cz);
         for (int i = 0; i < 6; i++) {
             level.setBlock(new BlockPos(cx * 16 + 4 + i, -61, cz * 16 + 5),
@@ -214,7 +218,7 @@ public class SerializerParityGameTests {
         }
         level.setBlock(new BlockPos(cx * 16 + 4, -62, cz * 16 + 5),
                 Blocks.REDSTONE_ORE.defaultBlockState(), 3);
-        helper.runAfterDelay(8, () -> chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0));
+        helper.runAfterDelay(8, () -> releaseChunk(chunkSource, chunkPos));
 
         var reader = new ChunkDiskReader(1, false);
         var readerId = UUID.randomUUID();
@@ -296,15 +300,15 @@ public class SerializerParityGameTests {
     @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 1200)
     public void backgroundPriorityReadMatchesForegroundReadForDiskLoadedColumn(GameTestHelper helper) {
         ServerLevel level = helper.getLevel();
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int cx = origin.x() + BACKGROUND_READ_CHUNK_OFFSET;
         int cz = origin.z() + 5;
-        var chunkPos = new ChunkPos(cx, cz);
+        var chunkPos = chunkAt(cx, cz);
         var chunkSource = level.getChunkSource();
 
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+        holdChunk(chunkSource, chunkPos);
         level.getChunk(cx, cz);
-        helper.runAfterDelay(4, () -> chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0));
+        helper.runAfterDelay(4, () -> releaseChunk(chunkSource, chunkPos));
 
         var foreground = new ChunkDiskReader(1, false);
         var background = new ChunkDiskReader(1, true);
@@ -381,10 +385,10 @@ public class SerializerParityGameTests {
     @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 200)
     public void dirtyContentFilterSuppressesIdenticalResavesAndCatchesEdits(GameTestHelper helper) {
         ServerLevel level = helper.getLevel();
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int cx = origin.x() + DIRTY_FILTER_CHUNK_OFFSET;
         int cz = origin.z() + 13;
-        var chunkPos = new ChunkPos(cx, cz);
+        var chunkPos = chunkAt(cx, cz);
         var chunkSource = level.getChunkSource();
         var dim = LSSConstants.DIM_STR_OVERWORLD;
         var filter = new DirtyContentFilter();
@@ -394,7 +398,7 @@ public class SerializerParityGameTests {
         // Keep the chunk loaded across the ladder so every step hashes the same live chunk
         // (a getChunk ticket lasts 1 tick; an unload+reload between steps would re-palettize
         // the sections and fake a content change).
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+        holdChunk(chunkSource, chunkPos);
         level.getChunk(cx, cz);
 
         // Tick 2: generation-time light has settled; take the baseline and pin same-tick quiet.
@@ -423,7 +427,7 @@ public class SerializerParityGameTests {
                     "a real block edit must re-mark the column dirty");
             helper.assertTrue(!filter.contentChanged(level, chunk, dim),
                     "the save after the edit is absorbed must stay quiet again");
-            chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+            releaseChunk(chunkSource, chunkPos);
             helper.succeed();
         });
     }
@@ -443,7 +447,7 @@ public class SerializerParityGameTests {
         // chunk from the per-run random batch position (cx 28..43, cz -16..-9: inside the void
         // guarantee band, disjoint from the disk-read test's chunk) and scan down-z past any
         // column a previous run already built in.
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int salt = Math.floorMod(origin.x() * 31 + origin.z(), 256);
         int cx = 28 + (salt & 15);
         int baseCz = -16 + ((salt >> 4) & 7);
@@ -539,15 +543,15 @@ public class SerializerParityGameTests {
     @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 400)
     public void readAfterSaveWithoutUnloadSeesTheLatestBytes(GameTestHelper helper) {
         ServerLevel level = helper.getLevel();
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int cx = origin.x() + READ_AFTER_SAVE_CHUNK_OFFSET;
         int cz = origin.z() + 3;
-        var chunkPos = new ChunkPos(cx, cz);
+        var chunkPos = chunkAt(cx, cz);
         var chunkSource = level.getChunkSource();
         var editPos = new BlockPos(cx * 16 + 4, -61, cz * 16 + 4);
 
         // Held for the whole test: the read must hit disk state while the chunk is loaded.
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+        holdChunk(chunkSource, chunkPos);
         level.getChunk(cx, cz);
 
         var reader = new ChunkDiskReader(1, false);
@@ -591,7 +595,7 @@ public class SerializerParityGameTests {
                             "a read fired right after a forced save of a still-loaded chunk "
                                     + "must see the edit — byte-identical results mean the "
                                     + "read silently served stale pre-save state");
-                    chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+                    releaseChunk(chunkSource, chunkPos);
                 }
                 default -> helper.fail("unexpected read-after-save step " + step.get());
             }
@@ -612,18 +616,18 @@ public class SerializerParityGameTests {
         ServerLevel level = helper.getLevel();
         var server = level.getServer();
         var playerList = server.getPlayerList();
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int cx = origin.x() + DISK_SEED_CHUNK_OFFSET;
         int cz = origin.z() + 9;
-        var chunkPos = new ChunkPos(cx, cz);
+        var chunkPos = chunkAt(cx, cz);
         var chunkSource = level.getChunkSource();
         var dim = LSSConstants.DIM_STR_OVERWORLD;
         long packed = PositionUtil.packPosition(cx, cz);
 
         // Generate, then let the chunk unload so the serve must come from disk.
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+        holdChunk(chunkSource, chunkPos);
         level.getChunk(cx, cz);
-        helper.runAfterDelay(4, () -> chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0));
+        helper.runAfterDelay(4, () -> releaseChunk(chunkSource, chunkPos));
 
         var mock = placeMockServerPlayer(helper);
         var service = new RequestProcessingService(server);
@@ -651,7 +655,7 @@ public class SerializerParityGameTests {
                                     && service.getOffThreadProcessor().getDiagnostics().getTotalInMemory() == 0,
                             "premise: the serve must come from DISK, not the in-memory probe");
                     // Reload for the filter check; settle light before hashing.
-                    chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+                    holdChunk(chunkSource, chunkPos);
                     level.getChunk(cx, cz);
                     step.set(2);
                     helper.assertTrue(false, "chunk reloading for the filter probe");
@@ -667,7 +671,7 @@ public class SerializerParityGameTests {
                                     + "If seeding was added intentionally, flip this pin.");
                     helper.assertTrue(!filter.contentChanged(level, chunk, dim),
                             "control: the check above must have baselined the live filter");
-                    chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+                    releaseChunk(chunkSource, chunkPos);
                     service.shutdown();
                     playerList.remove(mock);
                 }
@@ -691,15 +695,15 @@ public class SerializerParityGameTests {
         ServerLevel level = helper.getLevel();
         var server = level.getServer();
         var playerList = server.getPlayerList();
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int cx = origin.x() + ALL_AIR_TRANSITION_CHUNK_OFFSET;
         int cz = origin.z() + 11;
-        var chunkPos = new ChunkPos(cx, cz);
+        var chunkPos = chunkAt(cx, cz);
         var chunkSource = level.getChunkSource();
         var dim = LSSConstants.DIM_STR_OVERWORLD;
         long packed = PositionUtil.packPosition(cx, cz);
 
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+        holdChunk(chunkSource, chunkPos);
         level.getChunk(cx, cz);
 
         var mock = placeMockServerPlayer(helper);
@@ -780,7 +784,7 @@ public class SerializerParityGameTests {
                     helper.assertTrue(proc.getDiagnostics().getTotalInMemory() == 2,
                             "premise: both requests must have taken the probe route, got "
                                     + proc.getDiagnostics().getTotalInMemory());
-                    chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+                    releaseChunk(chunkSource, chunkPos);
                     service.shutdown();
                     playerList.remove(mock);
                 }
@@ -826,20 +830,20 @@ public class SerializerParityGameTests {
     @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 1200)
     public void storeHitBytesMatchNbtServedBytesThroughTheReaderPath(GameTestHelper helper) {
         ServerLevel level = helper.getLevel();
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int cx = origin.x() + STORE_PARITY_CHUNK_OFFSET;
         int cz = origin.z() + 7;
-        var chunkPos = new ChunkPos(cx, cz);
+        var chunkPos = chunkAt(cx, cz);
         var chunkSource = level.getChunkSource();
         var torchPos = new BlockPos(cx * 16 + 8, -60, cz * 16 + 8);
         long packed = PositionUtil.packPosition(cx, cz);
         final long storedTs = 424_242L;
 
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+        holdChunk(chunkSource, chunkPos);
         level.getChunk(cx, cz);
         level.setBlock(torchPos, Blocks.TORCH.defaultBlockState(), 3);
         helper.runAfterDelay(4, () -> level.setBlock(torchPos, Blocks.AIR.defaultBlockState(), 3));
-        helper.runAfterDelay(8, () -> chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0));
+        helper.runAfterDelay(8, () -> releaseChunk(chunkSource, chunkPos));
 
         var server = level.getServer();
         var worldRoot = server.getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT)
