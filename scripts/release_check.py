@@ -302,6 +302,15 @@ def check_neoforge_jar(jar, problems):
     names = set(_names(jar))
     base = os.path.basename(jar)
     _scan_forbidden(jar, base, NEOFORGE_FORBIDDEN + COMMON_FORBIDDEN, problems)
+    # Round-3 review: the gametest smoke runs off classes dirs, never this jar — a
+    # careless shadowJar exclude of dev/vox/lss/neoforge/** would ship an
+    # entrypoint-less jar with every other check green. Pin the wiring classes.
+    for req in ("dev/vox/lss/neoforge/LSSNeoMod.class",
+                "dev/vox/lss/platform/NeoForgeLoaderServices.class",
+                "dev/vox/lss/platform/NeoForgeClientLoaderServices.class"):
+        if req not in names:
+            problems.append(f"{base}: missing {req} — the NeoForge entrypoint/seam "
+                            "wiring was excluded from the shadow jar")
     if "META-INF/neoforge.mods.toml" not in names:
         problems.append(f"{base}: missing META-INF/neoforge.mods.toml")
     else:
@@ -531,17 +540,25 @@ def check_vss_pair_fabric(lss_jar, vss_jar, problems):
     icon = vmeta.get("icon")
     if icon and icon not in _names(vss_jar):
         problems.append(f"{vbase}: fabric.mod.json icon {icon!r} is not an entry in the jar")
-    # Lang-value rebrand pin (review-wave V-M2): the vssJar rewrites en_us.json VALUES —
-    # a silent no-op ships VSS Sodium pages reading "LOD Server Support"/"LSS" mid-
-    # sentence (the exact defect the rewrite exists to fix). Skipped when the jar has no
-    # lang entry (synthetic selftest fixtures); the byte-copy loop cannot drop entries.
-    LANG = "assets/lss/lang/en_us.json"
-    if LANG in _names(lss_jar) and LANG not in _names(vss_jar):
-        # Structurally impossible via the byte-copy loop; a hit means the resource
-        # moved and the build's rewrite keys on the old literal path.
-        problems.append(f"{vbase}: {LANG} present in the LSS jar but missing from the"
-                        " VSS jar — the lang rewrite and this pin key on that path")
-    if LANG in _names(vss_jar):
+    # Lang-value rebrand pin (review-wave V-M2, generalized for the zh locales): the
+    # vssJar rewrites EVERY assets/lss/lang/*.json entry's VALUES — a silent no-op ships
+    # VSS Sodium pages reading "LOD Server Support"/"LSS" mid-sentence (the exact defect
+    # the rewrite exists to fix). Skipped when the jar has no lang entries (synthetic
+    # selftest fixtures); the byte-copy loop cannot drop entries. The LSS token match is
+    # explicit ASCII lookarounds, not \b: Python's \b treats CJK as word chars, so a
+    # CJK-adjacent "LSS" the Java rewrite WOULD rebrand would slip a \b-based checker.
+    def _lang_names(jar):
+        return {n for n in _names(jar)
+                if n.startswith("assets/lss/lang/") and n.endswith(".json")}
+    for LANG in sorted(_lang_names(lss_jar) | _lang_names(vss_jar)):
+        if LANG in _names(lss_jar) and LANG not in _names(vss_jar):
+            # Structurally impossible via the byte-copy loop; a hit means the resource
+            # moved and the build's rewrite keys on the old path prefix.
+            problems.append(f"{vbase}: {LANG} present in the LSS jar but missing from the"
+                            " VSS jar — the lang rewrite and this pin key on that path")
+            continue
+        if LANG not in _names(vss_jar):
+            continue
         try:
             vlang = json.loads(_read(vss_jar, LANG))
         except (KeyError, json.JSONDecodeError):
@@ -549,8 +566,9 @@ def check_vss_pair_fabric(lss_jar, vss_jar, problems):
             vlang = {}
         for k, v in vlang.items():
             sv = str(v)
-            if "LOD Server Support" in sv or re.search(r"\bLSS\b", sv):
-                problems.append(f"{vbase}: lang value {k!r} still carries LSS branding "
+            if "LOD Server Support" in sv or re.search(
+                    r"(?<![A-Za-z0-9_])LSS(?![A-Za-z0-9_])", sv):
+                problems.append(f"{vbase}: {LANG} value {k!r} still carries LSS branding "
                                 "— the vssJar lang rewrite no-opped or missed it")
 
 
@@ -1261,6 +1279,8 @@ def _selftest():
             "assets/lss/icon.png": "PNG",
             "assets/lss/lang/en_us.json": json.dumps(
                 {"lss.config.page": "LOD Server Support", "lss.x": "LSS toggles"}),
+            "assets/lss/lang/zh_cn.json": json.dumps(
+                {"lss.x": "\u4f7f\u7528 LSS \u5f00\u5173"}),
         })
         pair_ok_vfab = os.path.join(td, "pair-ok-vss-fabric.jar")
         _make_jar(pair_ok_vfab, {
@@ -1272,10 +1292,33 @@ def _selftest():
             "assets/lss/icon-vss.png": "PNG2",
             "assets/lss/lang/en_us.json": json.dumps(
                 {"lss.config.page": "Voxy Server Side", "lss.x": "VSS toggles"}),
+            "assets/lss/lang/zh_cn.json": json.dumps(
+                {"lss.x": "\u4f7f\u7528 VSS \u5f00\u5173"}),
         })
         p = []
         check_vss_pair_fabric(pair_lss_fab, pair_ok_vfab, p)
         check(p == [], f"clean fabric pair flagged: {p}")
+
+        # a vss jar whose NON-en_us locale kept LSS branding MUST fail (the zh
+        # generalization's catch side — the old pin keyed on the en_us literal and a
+        # clean en_us beside a missed zh_cn shipped LSS-branded Chinese pages)
+        pair_zh_vfab = os.path.join(td, "pair-zhlang-vss-fabric.jar")
+        _make_jar(pair_zh_vfab, {
+            "fabric.mod.json": json.dumps({
+                "id": "lss", "name": "Voxy Server Side", "description": "VSS.",
+                "version": "0.7.0", "entrypoints": {"main": ["dev.vox.lss.LSSMod"]},
+                "mixins": ["lss.mixins.json"], "icon": "assets/lss/icon-vss.png"}),
+            "assets/lss/icon.png": "PNG",
+            "assets/lss/icon-vss.png": "PNG2",
+            "assets/lss/lang/en_us.json": json.dumps(
+                {"lss.config.page": "Voxy Server Side", "lss.x": "VSS toggles"}),
+            "assets/lss/lang/zh_cn.json": json.dumps(
+                {"lss.x": "\u4f7f\u7528 LSS \u5f00\u5173"}),
+        })
+        p = []
+        check_vss_pair_fabric(pair_lss_fab, pair_zh_vfab, p)
+        check(any("zh_cn.json" in m and "still carries LSS branding" in m for m in p),
+              f"un-rebranded zh_cn lang values not caught: {p}")
 
         # a vss jar whose lang VALUES kept the LSS branding MUST fail (the V-M2 pin's
         # catch side — a silently no-opped lang rewrite ships LSS-branded Sodium pages)
@@ -1675,6 +1718,9 @@ def _selftest():
                 "lss-brand.properties": brand,
                 "dev/vox/lss/common/PositionUtil.class": "x",
                 "dev/vox/lss/networking/server/RequestProcessingService.class": shared_class,
+                "dev/vox/lss/neoforge/LSSNeoMod.class": "x",
+                "dev/vox/lss/platform/NeoForgeLoaderServices.class": "x",
+                "dev/vox/lss/platform/NeoForgeClientLoaderServices.class": "x",
                 "THIRD-PARTY-NOTICES": "sqlite-jdbc / zstd-jni notices " + "x" * 100,
             }
             entries.update(_store_paper_entries())
@@ -1690,6 +1736,17 @@ def _selftest():
         check(p == [] and len(fab_d) == len(pap_d) == len(vfab_d) == len(vpap_d)
               == len(neo_d) == len(vneo_d) == 1,
               f"clean synthetic tree flagged by discover: {p}")
+
+        # a neoforge jar whose entrypoint/seam classes were shaded OUT must fail
+        # (round-3 review NIT-3: the gametest smoke runs off classes dirs, never the
+        # jar, so a careless shadowJar exclude shipped an entrypoint-less jar green)
+        _write_tree_neoforge("lod-server-support-neoforge.jar", TOML_LSS, BRAND_LSS,
+                             drop=("dev/vox/lss/neoforge/LSSNeoMod.class",))
+        p = []
+        check_neoforge_jar(os.path.join(dneo, "lod-server-support-neoforge.jar"), p)
+        check(any("LSSNeoMod" in m and "excluded from the shadow jar" in m for m in p),
+              f"entrypoint-less neoforge jar not caught: {p}")
+        _write_tree_neoforge("lod-server-support-neoforge.jar", TOML_LSS, BRAND_LSS)
 
         # a missing vss family must fail the gate (silently unwired repackage task)
         os.remove(os.path.join(dfab, "voxy-server-side-fabric.jar"))

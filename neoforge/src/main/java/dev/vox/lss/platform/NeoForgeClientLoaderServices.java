@@ -26,7 +26,14 @@ public final class NeoForgeClientLoaderServices extends NeoForgeLoaderServices {
     @Override
     public void sendToServer(CustomPacketPayload payload) {
         var connection = Minecraft.getInstance().getConnection();
-        if (connection == null || !connection.hasChannel(payload.type())) {
+        if (connection == null) {
+            // Connection-level failure (round-3 review): Fabric's send throws here,
+            // and the manager's send-failure ladder (count-at-send, fast-cadence
+            // disarm) depends on the throw — a silent success kept the tracker armed
+            // through the disconnect race.
+            throw new IllegalStateException("no connection: client not in game");
+        }
+        if (!connection.hasChannel(payload.type())) {
             return; // silent no-op: the server would ignore (or refuse) the channel
         }
         try {

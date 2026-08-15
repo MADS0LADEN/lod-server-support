@@ -435,6 +435,19 @@ final class TransferRateGovernor {
                     ? this.sizeEwmaBytes : SLOW_START_SEED_COLUMN_BYTES;
             long offered = (long) (deltaDeclared * columnBytes * 1000.0
                     / Math.max(1L, elapsedMillis));
+            // Row 4 — under-offered (demand-limited) HOLDs, and it must PRECEDE the
+            // growth rungs (round-3 review MAJOR: with growth first, answered-all-
+            // asked doubles on a one-column dirty-edit trickle — offered at a
+            // fraction of desired — and ~17 sparse trivially-answered intervals walk
+            // a never-proven link to capless OPEN, non-qualifying gaps preserving
+            // both streaks along the way. The plan's row order makes under-offer the
+            // gate growth must pass; a converged client sits mid-ramp and resumes
+            // earning with demand. The warm rejoin is unaffected: its actuator-
+            // clamped declarations put offered ≈ desired through the seed
+            // conversion, so the byte-free rung still fires past this row.)
+            if (offered * 2L < this.desiredBytesPerSec) {
+                return;
+            }
             boolean keptUp = measured * 4L >= this.desiredBytesPerSec * 3L;
             boolean deliveredAllOffered = offered * 2L >= this.desiredBytesPerSec
                     && measured * 4L >= offered * 3L;
@@ -458,16 +471,19 @@ final class TransferRateGovernor {
                 }
                 return;
             }
-            // Row 4 — under-offered (demand-limited): a converged client sits
-            // mid-ramp and resumes earning with demand.
-            if (offered * 2L < this.desiredBytesPerSec) {
-                return;
-            }
             // Row 5 — plateau (offer-backed shortfall): the one-time overhang snap —
             // a bare HOLD leaves desired at up to 2x capacity, a permanent standing
             // offer; the snap bounds it at 25% and never raises. Also the containment
             // path for congestion BELOW the row-1 gate: excess intervals land here
-            // and desired tracks measured down.
+            // and desired tracks measured down. BYTE EVIDENCE REQUIRED (round-3
+            // review): a zero-byte answer-only interval reaches this row only via
+            // the answered-qualifying term with PARTIAL answers (growth failed) —
+            // measured is 0 because nothing needed bytes, not because the link is
+            // slow, and snapping would wipe the ramp to INITIAL on a server hiccup.
+            // Such an interval HOLDs.
+            if (measured <= 0) {
+                return;
+            }
             this.desiredBytesPerSec = Math.max(SLOW_START_INITIAL_BYTES_PER_SEC,
                     Math.min(this.desiredBytesPerSec, measured * 5L / 4L));
         } finally {

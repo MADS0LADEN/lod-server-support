@@ -391,9 +391,13 @@ public final class FarPlayerRenderer {
     private void latchSeatedFailure(FarPlayerClientTracker.TrackedFarPlayer tracked,
                                     Proxy proxy, Throwable t) {
         var wireVehicle = tracked.latest().vehicle();
+        // The fallback key must use the same minecraft:x identity format as every
+        // other latch site, or the entry can never suppress a future creation of
+        // the type (round-3 review NIT — EntityType#toString is a different shape).
         String type = wireVehicle != null ? wireVehicle.typeIdentity()
-                : String.valueOf(proxy.getVehicle() == null ? null
-                        : proxy.getVehicle().getType());
+                : proxy.getVehicle() == null ? "null"
+                        : BuiltInRegistries.ENTITY_TYPE.getKey(
+                                proxy.getVehicle().getType()).toString();
         mountLadder.latchRenderFailure(type, t);
         if (wireVehicle != null) vehicles.remove(wireVehicle.uuid());
         if (!stopRidingContained(proxy)) {

@@ -135,9 +135,18 @@ class NeoForgeModuleContractTest {
         assertTrue(at.contains("public net.minecraft.world.level.chunk.PalettedContainer data"),
                 "the PalettedContainer.data field widening");
         String aw = read("fabric/src/main/resources/lss.accesswidener");
-        long awLines = aw.lines().filter(l -> l.startsWith("accessible")).count();
-        assertEquals(2, awLines, "the fabric accesswidener grew — mirror the new lines"
-                + " into accesstransformer.cfg (this pin is the drift tripwire)");
+        // Count EVERY effective widener line (round-3 review: an 'accessible'-only
+        // filter let a future mutable/extendable line grow the widener without
+        // tripping the mirror — fabric works, the NeoForge twin IllegalAccessErrors).
+        var effective = aw.lines().map(String::strip)
+                .filter(l -> !l.isEmpty() && !l.startsWith("#")
+                        && !l.startsWith("accessWidener"))
+                .toList();
+        assertEquals(2, effective.size(), "the fabric accesswidener grew — mirror the"
+                + " new lines into accesstransformer.cfg (this pin is the drift tripwire)");
+        assertTrue(effective.stream().allMatch(l -> l.startsWith("accessible")),
+                "a non-'accessible' widener line needs a new AT mapping form "
+                        + "(mutable → public-f) — extend the mirror and this pin together");
     }
 
     // ---- the save-hook twin (the fabric SaveHookContractTest's sibling) ----

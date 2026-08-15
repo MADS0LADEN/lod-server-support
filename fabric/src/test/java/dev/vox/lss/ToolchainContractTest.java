@@ -99,16 +99,21 @@ class ToolchainContractTest {
 
     @Test
     void resolvedMinecraftArtifactMatchesTheDeclaredLine() {
-        // The P2 armor chain's third link: gradle.properties' minecraft_version (which CI
-        // jar naming, release_check --version matching, and the neoforge TOML expansion
-        // all consume) must be the version of the MC artifact ACTUALLY on this classpath.
-        // A human resolving a merge conflict "theirs" on both data files still reds here,
-        // because the resolved dependency is a fact of the tree, not a data row.
+        // The P2 armor chain's third link, HONESTLY SCOPED (round-3 review): fabric's
+        // MC dep resolves FROM gradle.properties, so this twin is tautological under a
+        // both-files clobber — it pins only that the classpath agrees with the data the
+        // build consumed. The GENUINE tree-fact anchor for the double-clobber is the
+        // PAPER twin (the dev bundle is a per-line literal in paper/build.gradle) plus
+        // FabricModJsonContractTest's per-line constants — recorded in the port
+        // runbook's gate-host note. The double-clobber's fabric-side backstop is the
+        // compile itself (wrong-MC source rarely compiles).
         String declared = gradleProps.getProperty("minecraft_version");
         assertEquals(declared, SharedConstants.getCurrentVersion().name(),
                 "gradle.properties minecraft_version must equal the resolved MC artifact's "
                         + "version — the line.env↔gradle.properties↔artifact chain's last link");
-        assertTrue(declared.startsWith(lineEnv.getProperty("LINE_MC_FABRIC")),
-                "line.env's LINE_MC_FABRIC must prefix the resolved MC version");
+        String line = lineEnv.getProperty("LINE_MC_FABRIC");
+        assertTrue(declared.equals(line) || declared.startsWith(line + "."),
+                "line.env's LINE_MC_FABRIC must equal or dot-prefix the resolved MC version "
+                        + "(bare prefix admits the 1.21.1↔1.21.11 trap)");
     }
 }

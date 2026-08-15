@@ -10,7 +10,7 @@ import java.util.Locale;
  * <p><b>There is no MEMORY constant anymore</b> — {@code "memory"} was retired as a
  * user-facing mode 2026-08-02 (normalizes to {@code off} like any unrecognized word),
  * and the in-memory degrade TIER itself was deleted 2026-08-13 (user decision): a
- * failed SQLite init now runs store-less, and the diag token reports {@code store=off}
+ * failed SQLite init now runs store-less, and the diag token reports {@code store=unavailable}
  * — what is actually running. Rationale for the retirement: at its 64 MB budget the
  * tier held ~6% of one player's disc under random eviction while zstd-compressing
  * every deposit, and the Phase 2 A/B had already deleted it from {@code full} mode for
