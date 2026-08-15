@@ -1,5 +1,9 @@
 package dev.vox.lss.test;
 
+import static dev.vox.lss.test.TestPositions.chunkAt;
+import static dev.vox.lss.test.TestPositions.holdChunk;
+import static dev.vox.lss.test.TestPositions.releaseChunk;
+
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.PositionUtil;
 import dev.vox.lss.common.SharedBandwidthLimiter;
@@ -384,7 +388,7 @@ public class ServiceLifecycleGameTests {
         int maxDist = LSSServerConfig.CONFIG.lodDistanceChunks + LSSConstants.LOD_DISTANCE_BUFFER;
         helper.assertTrue(PositionUtil.chebyshevDistance(cx, cz, pcx, pcz) <= maxDist,
                 "premise: the probe chunk must be inside the request distance guard");
-        var chunkPos = new ChunkPos(cx, cz);
+        var chunkPos = chunkAt(cx, cz);
         var chunkSource = level.getChunkSource();
         var dim = LSSConstants.DIM_STR_OVERWORLD;
         long packed = PositionUtil.packPosition(cx, cz);
@@ -392,7 +396,7 @@ public class ServiceLifecycleGameTests {
         var editPos = new BlockPos(cx * 16 + 4, -61, cz * 16 + 4);
 
         // Keep the chunk loaded for the whole test so the serve must come from the probe path.
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+        holdChunk(chunkSource, chunkPos);
         level.getChunk(cx, cz);
 
         var service = new RequestProcessingService(server);
@@ -459,7 +463,7 @@ public class ServiceLifecycleGameTests {
                     helper.assertTrue(containsPosition(dirty, packed),
                             "a save after a real edit must mark the column dirty end-to-end "
                                     + "(save hook -> content filter -> dirty tracker)");
-                    chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+                    releaseChunk(chunkSource, chunkPos);
                     service.shutdown();
                     server.getPlayerList().remove(mock);
                 }
@@ -665,8 +669,8 @@ public class ServiceLifecycleGameTests {
         helper.assertTrue(state.getCapabilities() == 0, "premise: capabilities updated in place");
 
         // Control player proves a routing cycle ran end-to-end while A was skipped.
-        var chunkPos = new ChunkPos(pcx - 152, pcz - 16);
-        level.getChunkSource().addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+        var chunkPos = chunkAt(pcx - 152, pcz - 16);
+        holdChunk(level.getChunkSource(), chunkPos);
         level.getChunk(chunkPos.x(), chunkPos.z());
         var stateB = service.registerPlayer(mockB, LSSConstants.CAPABILITY_VOXEL_COLUMNS);
         GameTestSeeding.seedRequest(stateB, PositionUtil.packPosition(chunkPos.x(), chunkPos.z()), -1L);
@@ -692,7 +696,7 @@ public class ServiceLifecycleGameTests {
                             && !fresh.hasPendingRequest(pcx - 148, pcz - 12),
                     "disconnect must be the boundary that releases the skipped player's pendings");
 
-            level.getChunkSource().removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+            releaseChunk(level.getChunkSource(), chunkPos);
             service.shutdown();
             playerList.remove(mockA);
             playerList.remove(mockB);
@@ -853,10 +857,10 @@ public class ServiceLifecycleGameTests {
         int pcz = mock.getBlockZ() >> 4;
         int cx = pcx - chunkOffset;
         int cz = pcz - chunkOffset;
-        var chunkPos = new ChunkPos(cx, cz);
+        var chunkPos = chunkAt(cx, cz);
         var chunkSource = level.getChunkSource();
         // Loaded for the whole test: the serve must come from the in-memory probe.
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+        holdChunk(chunkSource, chunkPos);
         level.getChunk(cx, cz);
         service.handleBatchRequest(mock, new BatchChunkRequestC2SPayload(
                 new long[]{PositionUtil.packPosition(cx, cz)}, new long[]{-1L}, 1));
@@ -871,7 +875,7 @@ public class ServiceLifecycleGameTests {
                             + "sends a section, so this wait times out on one");
             helper.assertTrue(state.hasDiskReadDone(cx, cz),
                     "the done-bit must SURVIVE the flush (no drop path fired)");
-            chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+            releaseChunk(chunkSource, chunkPos);
             service.shutdown();
             playerList.remove(mock);
         });
@@ -988,10 +992,10 @@ public class ServiceLifecycleGameTests {
         var uuid = mock.getUUID();
         int pcx = mock.getBlockX() >> 4;
         int pcz = mock.getBlockZ() >> 4;
-        var chunkPos = new ChunkPos(pcx - 140, pcz - 4);
+        var chunkPos = chunkAt(pcx - 140, pcz - 4);
         long packed = PositionUtil.packPosition(chunkPos.x(), chunkPos.z());
         var chunkSource = level.getChunkSource();
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+        holdChunk(chunkSource, chunkPos);
         level.getChunk(chunkPos.x(), chunkPos.z());
 
         var service = new RequestProcessingService(server);
@@ -1026,7 +1030,7 @@ public class ServiceLifecycleGameTests {
             helper.assertTrue(diag.getTotalInMemory() == 1,
                     "the frozen done-bit clear must apply BEFORE routing: the ts>0 re-request "
                             + "must probe-serve (a stale done-bit answers it up-to-date instead)");
-            chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+            releaseChunk(chunkSource, chunkPos);
             service.shutdown();
             playerList.remove(mock);
         });
@@ -1075,9 +1079,9 @@ public class ServiceLifecycleGameTests {
                 "pendings and done-bits must survive the reference swap");
 
         // A request must now resolve against the NEW reference end-to-end.
-        var chunkPos = new ChunkPos(pcx - 144, pcz - 10);
+        var chunkPos = chunkAt(pcx - 144, pcz - 10);
         var chunkSource = level.getChunkSource();
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+        holdChunk(chunkSource, chunkPos);
         level.getChunk(chunkPos.x(), chunkPos.z());
         GameTestSeeding.seedRequest(state, PositionUtil.packPosition(chunkPos.x(), chunkPos.z()), -1L);
 
@@ -1086,7 +1090,7 @@ public class ServiceLifecycleGameTests {
             helper.assertTrue(state.getTotalSectionsSent() >= 1,
                     "waiting for the post-respawn request to serve through the new player "
                             + "reference (probe + flush both read state.getPlayer())");
-            chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, chunkPos, 0);
+            releaseChunk(chunkSource, chunkPos);
             service.shutdown();
             var listed = playerList.getPlayer(uuid);
             if (listed != null) {
@@ -1112,10 +1116,10 @@ public class ServiceLifecycleGameTests {
         int pcx = mock.getBlockX() >> 4;
         int pcz = mock.getBlockZ() >> 4;
         var chunkSource = level.getChunkSource();
-        var posK1 = new ChunkPos(pcx - 156, pcz - 20);
-        var posK2 = new ChunkPos(pcx - 156, pcz - 21);
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, posK1, 0);
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, posK2, 0);
+        var posK1 = chunkAt(pcx - 156, pcz - 20);
+        var posK2 = chunkAt(pcx - 156, pcz - 21);
+        holdChunk(chunkSource, posK1);
+        holdChunk(chunkSource, posK2);
         level.getChunk(posK1.x(), posK1.z());
         level.getChunk(posK2.x(), posK2.z());
         // The pair must exist on disk: the budget routes them to the disk reader.
@@ -1158,8 +1162,8 @@ public class ServiceLifecycleGameTests {
                     "every request must be routed exactly once, got " + diag.getTotalRequestsRouted());
             helper.assertTrue(state.getHeldSyncSlots() == 0 && state.getHeldGenSlots() == 0,
                     "all slots must be free at rest");
-            chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, posK1, 0);
-            chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, posK2, 0);
+            releaseChunk(chunkSource, posK1);
+            releaseChunk(chunkSource, posK2);
             service.shutdown();
             playerList.remove(mock);
         });
@@ -1181,10 +1185,10 @@ public class ServiceLifecycleGameTests {
         int pcx = mock.getBlockX() >> 4;
         int pcz = mock.getBlockZ() >> 4;
         var chunkSource = level.getChunkSource();
-        var posC = new ChunkPos(pcx - 164, pcz - 24);
-        var posD = new ChunkPos(pcx - 164, pcz - 25);
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, posC, 0);
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, posD, 0);
+        var posC = chunkAt(pcx - 164, pcz - 24);
+        var posD = chunkAt(pcx - 164, pcz - 25);
+        holdChunk(chunkSource, posC);
+        holdChunk(chunkSource, posD);
         level.getChunk(posC.x(), posC.z());
         level.getChunk(posD.x(), posD.z());
 
@@ -1226,8 +1230,8 @@ public class ServiceLifecycleGameTests {
             helper.assertTrue(diskDiag.getSubmittedCount() == 0,
                     "nothing may reach the disk reader when the dedup guard holds, got "
                             + diskDiag.getSubmittedCount());
-            chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, posC, 0);
-            chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, posD, 0);
+            releaseChunk(chunkSource, posC);
+            releaseChunk(chunkSource, posD);
             service.shutdown();
             playerList.remove(mock);
         });
@@ -1249,14 +1253,14 @@ public class ServiceLifecycleGameTests {
         // Arm the P3 never-registered skip gate — the control assertion below needs the
         // live hook to hash (one-way latch; no Tier 2 test pins the skip).
         liveService.armSaveHookForTest();
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         var dim = LSSConstants.DIM_STR_OVERWORLD;
         var chunkSource = level.getChunkSource();
 
         // Control: a loaded LevelChunk with an edit must mark in the same save pass.
-        var controlPos = new ChunkPos(origin.x() - 172, origin.z() - 32);
+        var controlPos = chunkAt(origin.x() - 172, origin.z() - 32);
         long controlPacked = PositionUtil.packPosition(controlPos.x(), controlPos.z());
-        chunkSource.addTicketWithRadius(TicketType.PLAYER_LOADING, controlPos, 0);
+        holdChunk(chunkSource, controlPos);
         level.getChunk(controlPos.x(), controlPos.z());
         var editPos = new BlockPos(controlPos.x() * 16 + 4, -61, controlPos.z() * 16 + 4);
         var edit = level.getBlockState(editPos).is(Blocks.STONE) ? Blocks.COBBLESTONE : Blocks.STONE;
@@ -1282,7 +1286,7 @@ public class ServiceLifecycleGameTests {
         helper.assertTrue(!containsPosition(dirty, protoPacked),
                 "a ProtoChunk save must NOT mark dirty (ChunkSaveDataHook must exclude "
                         + "generation-stage saves — they have no LOD-servable content)");
-        chunkSource.removeTicketWithRadius(TicketType.PLAYER_LOADING, controlPos, 0);
+        releaseChunk(chunkSource, controlPos);
         helper.succeed();
     }
 

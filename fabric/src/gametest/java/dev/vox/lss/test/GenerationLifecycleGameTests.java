@@ -1,5 +1,7 @@
 package dev.vox.lss.test;
 
+import static dev.vox.lss.test.TestPositions.chunkAt;
+
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.PositionUtil;
 import dev.vox.lss.common.processing.TickSnapshot;
@@ -105,7 +107,7 @@ public class GenerationLifecycleGameTests {
      */
     private static int lssTicketCount(TicketStorage tickets, int cx, int cz) {
         int count = 0;
-        for (var ticket : tickets.getTickets(ChunkPos.pack(cx, cz))) {
+        for (var ticket : tickets.getTickets(TestPositions.mcChunkKey(cx, cz))) {
             if (ticket.getType().doesLoad() && !ticket.getType().hasTimeout()) count++;
         }
         return count;
@@ -116,7 +118,7 @@ public class GenerationLifecycleGameTests {
     @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 1200)
     public void piggybackedGenerationSharesOneTicketAndCompletesEveryCallback(GameTestHelper helper) {
         ServerLevel level = helper.getLevel();
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int cx = origin.x() + PIGGYBACK_CHUNK_OFFSET;
         int cz = origin.z() + 3;
         var tickets = ticketStorage(level);
@@ -205,7 +207,7 @@ public class GenerationLifecycleGameTests {
     @GameTest(structure = "fabric-gametest-api-v1:empty")
     public void generationCapBoundariesRejectExactlyAtCapWithoutLeakingTickets(GameTestHelper helper) {
         ServerLevel level = helper.getLevel();
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int bx = origin.x() + CAP_CHUNK_OFFSET;
         int z = origin.z() + 5;
         var tickets = ticketStorage(level);
@@ -265,7 +267,7 @@ public class GenerationLifecycleGameTests {
     @GameTest(structure = "fabric-gametest-api-v1:empty")
     public void removePlayerKeepsSharedEntriesAliveReleasesOrphanedTicketsAndBalancesBooks(GameTestHelper helper) {
         ServerLevel level = helper.getLevel();
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int bx = origin.x() + REMOVAL_CHUNK_OFFSET;
         int z = origin.z() + 9;
         var tickets = ticketStorage(level);
@@ -341,7 +343,7 @@ public class GenerationLifecycleGameTests {
     @GameTest(structure = "fabric-gametest-api-v1:empty")
     public void generationTimeoutFailsEveryCallbackAtExactBoundaryAndReleasesTicket(GameTestHelper helper) {
         ServerLevel level = helper.getLevel();
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int cx = origin.x() + TIMEOUT_CHUNK_OFFSET;
         int cz = origin.z() + 7;
         var tickets = ticketStorage(level);
@@ -413,7 +415,7 @@ public class GenerationLifecycleGameTests {
         var playerList = server.getPlayerList();
         ServerLevel endLevel = server.getLevel(Level.END);
         helper.assertTrue(endLevel != null, "the End dimension must exist on the gametest server");
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int gx = origin.x() + DIMENSION_CHUNK_OFFSET;
         int gz = origin.z() + 11;
         var overworldTickets = ticketStorage(level);
@@ -520,7 +522,7 @@ public class GenerationLifecycleGameTests {
         var server = level.getServer();
         ServerLevel endLevel = server.getLevel(Level.END);
         helper.assertTrue(endLevel != null, "the End dimension must exist on the gametest server");
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int cx = origin.x() + STALE_TICKET_CHUNK_OFFSET;
         // This chunk must not exist on disk (a found disk read never converts to generation).
         // No run ever generates it — the guard drops it pre-generation — and the per-run salt
@@ -600,7 +602,7 @@ public class GenerationLifecycleGameTests {
         ServerLevel level = helper.getLevel();
         var server = level.getServer();
         var playerList = server.getPlayerList();
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int cx = origin.x() + REMOVED_DRAIN_CHUNK_OFFSET;
         // Must not exist on disk (a found read never converts to a generation ticket), and
         // the failure feed means no run ever generates it — but salt anyway (world persists).
@@ -672,7 +674,7 @@ public class GenerationLifecycleGameTests {
         ServerLevel level = helper.getLevel();
         var server = level.getServer();
         var playerList = server.getPlayerList();
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int cx = origin.x() + GEN_REASK_CHUNK_OFFSET;
         int cz = origin.z() + (int) Math.floorMod(System.nanoTime(), 64L);
         long packed = PositionUtil.packPosition(cx, cz);
@@ -748,7 +750,7 @@ public class GenerationLifecycleGameTests {
         var dim = LSSConstants.DIM_STR_THE_END;
         // Void guarantee band (see SerializerParityGameTests): density contributes nothing
         // between the main island and the outer islands; salted, disjoint from other tests.
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int salt = Math.floorMod(origin.x() * 31 + origin.z(), 64);
         int cx = 48 + (salt & 7);
         int cz = 18 + ((salt >> 3) & 7);
@@ -803,7 +805,7 @@ public class GenerationLifecycleGameTests {
     @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 1200)
     public void serializationThrowableDuringCompletionReleasesTicketAndBalancesBooks(GameTestHelper helper) {
         ServerLevel level = helper.getLevel();
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int cx = origin.x() + SERIALIZER_FAULT_CHUNK_OFFSET;
         int cz = origin.z() + 5;
         var tickets = ticketStorage(level);
@@ -880,7 +882,7 @@ public class GenerationLifecycleGameTests {
         // Arm the P3 never-registered skip gate: the quiet-save assertion below must
         // observe the live hook actually hashing (a skipped hook would fake the quiet).
         liveService.armSaveHookForTest();
-        var origin = ChunkPos.containing(helper.absolutePos(BlockPos.ZERO));
+        var origin = chunkAt(helper.absolutePos(BlockPos.ZERO));
         int cx = origin.x() + SEED_SUPPRESS_CHUNK_OFFSET;
         int cz = origin.z() + (int) Math.floorMod(System.nanoTime(), 64L);
         long packed = PositionUtil.packPosition(cx, cz);

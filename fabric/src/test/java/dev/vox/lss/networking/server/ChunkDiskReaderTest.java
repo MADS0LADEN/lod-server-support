@@ -56,7 +56,7 @@ class ChunkDiskReaderTest {
         var warnCount = new AtomicInteger();
         var reader = new ChunkDiskReader(1, true) {
             @Override
-            ChunkDiskReader.Handles resolveBackgroundHandles(ChunkMap chunkMap) {
+            BackgroundIoSubmit.Handles resolveBackgroundHandles(ChunkMap chunkMap) {
                 throw new NoSuchMethodError("simulated chunk-IO-overhaul mod changed vanilla internals");
             }
             @Override
@@ -132,9 +132,9 @@ class ChunkDiskReaderTest {
         }
 
         @Override
-        Handles resolveBackgroundHandles(ChunkMap chunkMap) {
+        BackgroundIoSubmit.Handles resolveBackgroundHandles(ChunkMap chunkMap) {
             accessorConsults.incrementAndGet();
-            return new Handles(null, null); // a Moonrise-like server: nulled worker
+            return new BackgroundIoSubmit.Handles(null, null); // a Moonrise-like server: nulled worker
         }
 
         @Override

@@ -266,6 +266,14 @@ churn shapes it must absorb: `.containing(BlockPos)`→ctor (~20 sites),
 (review): `GenerationLifecycleGameTests` is 100% concentrable;
 `RegionFaultGameTests`' branch churn is behavioral (T3b's item), not positional.
 Value = conflict-surface deletion, not line-count.
+**Scope extension at execution (2026-08-15, decisions-log entry in
+v0.11.0-progress.md):** the record shape (`ChunkAt(x, z, pos)`) supersedes the planned
+bare-`ChunkPos` return — record accessors spell `x()`/`z()` identically on every line,
+so the "dominant" accessor churn goes to ZERO call sites instead of being rewritten —
+and the helper additionally absorbs the chunk-hold ticket calls
+(`holdChunk`/`releaseChunk`: 26.x `addTicketWithRadius(PLAYER_LOADING, pos, 0)` vs
+1.21.1 `addRegionTicket(PLAYER, pos, 0, pos)`, ~48 uniform sites — a per-line API
+delta the plan had not seen when written). `mcChunkKey` covers the pack→asLong site.
 
 **T3. Reverse-flow adoption (branch hardening → main).** (a) soak.sh's
 mc-version base-world marker guard (independently re-invented on four branches).
