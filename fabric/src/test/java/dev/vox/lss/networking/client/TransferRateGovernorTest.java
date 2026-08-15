@@ -26,7 +26,10 @@ class TransferRateGovernorTest {
      *  rate). Tests that pin the offer-backing term pass declared explicitly. */
     private static void tick(TransferRateGovernor g, long now, long bytes, long cols,
                              int awaiting, boolean halted, int ping) {
-        g.tick(now, bytes, cols, cols * 100, awaiting, halted, ping, true);
+        // declared rides cols x100 (generously offer-backed); answered rides cols x100
+        // as well so the pre-existing pins keep their byte-denominated semantics (an
+        // answered ratio of 1.0 — tests that pin the answered rung pass it explicitly).
+        g.tick(now, bytes, cols, cols * 100, cols * 100, awaiting, halted, ping, true);
     }
 
     /** Seeds a 50 ms ping baseline, then TWO consecutive congested slow intervals →
@@ -179,23 +182,23 @@ class TransferRateGovernorTest {
         var g = new TransferRateGovernor();
         long t = 0;
         long declared = 0;
-        g.tick(t, 0, 0, declared, 1, false, NORMAL_PING, true);
-        g.tick(t += INTERVAL, 800 * KB, 100, declared += 200, 1, false,
+        g.tick(t, 0, 0, declared, declared, 1, false, NORMAL_PING, true);
+        g.tick(t += INTERVAL, 800 * KB, 100, declared += 200, declared, 1, false,
                 CONGESTED_PING, true);
-        g.tick(t += INTERVAL, 1600 * KB, 200, declared += 200, 1, false,
+        g.tick(t += INTERVAL, 1600 * KB, 200, declared += 200, declared, 1, false,
                 CONGESTED_PING, true); // debounce
         long desired = g.getDesiredBytesPerSec(); // 272 KB/s; EWMA 8 KB → R = 34
         assertEquals(34, g.sustainedColumnsPerSecond());
         // A quarter-rate interval (68 KB/s) with almost nothing OFFERED (10 declared
         // vs the ~51 the ¾ term requires): frozen.
         long bytes = 1600 * KB + 68 * KB * 2;
-        g.tick(t += INTERVAL, bytes, 217, declared += 10, 1, false,
+        g.tick(t += INTERVAL, bytes, 217, declared += 10, declared, 1, false,
                 CONGESTED_PING, true);
         assertEquals(desired, g.getDesiredBytesPerSec(),
                 "an under-offered shortfall must freeze desired");
         // The SAME measured rate with a full offer is genuine link evidence: cut.
         bytes += 68 * KB * 2;
-        g.tick(t += INTERVAL, bytes, 334, declared += 200, 1, false,
+        g.tick(t += INTERVAL, bytes, 334, declared += 200, declared, 1, false,
                 CONGESTED_PING, true);
         assertEquals(TransferRateGovernor.MIN_RATE_BYTES_PER_SEC,
                 g.getDesiredBytesPerSec(),
@@ -375,9 +378,11 @@ class TransferRateGovernorTest {
         // latches + the injectable clock).
         var reseeded = java.util.Set.of(
                 "intervalSeeded", "intervalStartMillis", "intervalStartWireBytes",
-                "intervalStartColumns", "intervalStartDeclared", "awaitingAtStart",
-                "haltSeenThisInterval", "movementSeenThisInterval", "clock");
+                "intervalStartColumns", "intervalStartDeclared", "intervalStartAnswered",
+                "awaitingAtStart", "haltSeenThisInterval", "movementSeenThisInterval",
+                "awaitingSeenThisInterval", "clock");
         var src = new TransferRateGovernor();
+        var dstProbe = new TransferRateGovernor();
         int seed = 7;
         for (var f : TransferRateGovernor.class.getDeclaredFields()) {
             if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
@@ -388,6 +393,15 @@ class TransferRateGovernorTest {
             else if (ty == long.class) f.setLong(src, ++seed);
             else if (ty == boolean.class) f.setBoolean(src, true);
             else if (ty == double.class) f.setDouble(src, ++seed + 0.5);
+            else if (ty.isEnum()) {
+                // Deterministically DIFFERENT from a fresh instance's value (review:
+                // a counter-derived pick can land on the default and go vacuous when
+                // field order shifts).
+                Object fresh = f.get(dstProbe);
+                Object[] constants = ty.getEnumConstants();
+                Object pick = constants[0].equals(fresh) ? constants[1] : constants[0];
+                f.set(src, pick);
+            }
             else org.junit.jupiter.api.Assertions.fail("unhandled field type " + ty
                     + " for '" + f.getName() + "' — extend adoptFrom AND this pin");
         }
@@ -621,7 +635,7 @@ class TransferRateGovernorTest {
         long t = engageAt(g, 0, 300 * KB);
         assertTrue(g.isEngaged());
         // Kill switch / legacy session: active=false hard-resets — no stale cap.
-        g.tick(t + INTERVAL, 400 * KB, 40, 4_000, 1, false, CONGESTED_PING, false);
+        g.tick(t + INTERVAL, 400 * KB, 40, 4_000, 4_000, 1, false, CONGESTED_PING, false);
         assertFalse(g.isEngaged());
         assertEquals(0, g.sustainedColumnsPerSecond());
     }
@@ -757,5 +771,355 @@ class TransferRateGovernorTest {
                 * window / dev.vox.lss.common.LSSConstants.TICKS_PER_SECOND;
         assertTrue(floorBytesPerWindow >= quarterBatchBytes,
                 "the pace floor must clear a governed quarter-batch inside the fast-fire floor");
+    }
+
+    // ---- Join slow start (join-slow-start-plan.md v1.1) ----
+
+    private static final long SS_INITIAL = TransferRateGovernor.SLOW_START_INITIAL_BYTES_PER_SEC;
+    private static final long SS_CEILING = TransferRateGovernor.SLOW_START_CEILING_BYTES_PER_SEC;
+    private static final long ENGAGE_BELOW = TransferRateGovernor.ENGAGE_BELOW_BYTES_PER_SEC;
+
+    private static TransferRateGovernor armed() {
+        var g = new TransferRateGovernor();
+        g.setSlowStartEnabled(true);
+        return g;
+    }
+
+    @Test
+    void unarmedGovernorStartsOpenAndCapless() {
+        // The class-level default is OFF (plan §1.4 — every pre-existing pin in this
+        // suite constructs exactly this shape); production arming is the manager's.
+        var g = new TransferRateGovernor();
+        tick(g, 0, 0, 0, 1, false, NORMAL_PING);
+        assertEquals(TransferRateGovernor.Phase.OPEN, g.getPhase());
+        assertEquals(0, g.sustainedColumnsPerSecond());
+        assertEquals(0, g.getDesiredBytesPerSec());
+    }
+
+    @Test
+    void armedSessionStartsRampedAtInitialWithThePreSampleSeed() {
+        var g = armed();
+        tick(g, 0, 0, 0, 1, false, NORMAL_PING);
+        assertEquals(TransferRateGovernor.Phase.RAMP, g.getPhase());
+        assertEquals(SS_INITIAL, g.getDesiredBytesPerSec(),
+                "the ramp starts at MIN_RATE (plan review: STEP already saturates 1 Mbps)");
+        // No arrival sample yet: the conversion must still CAP (the whole point is the
+        // first walk), via the deliberately-high 32 KB seed — never uncapped garbage.
+        assertEquals(Math.max(1, (int) (SS_INITIAL
+                        / TransferRateGovernor.SLOW_START_SEED_COLUMN_BYTES)),
+                g.sustainedColumnsPerSecond());
+    }
+
+    @Test
+    void keptUpIntervalsDoubleToTheCeilingAndTenCreditedIntervalsOpen() {
+        var g = armed();
+        long t = 0;
+        long bytes = 0;
+        long cols = 0;
+        tick(g, t, 0, 0, 1, false, NORMAL_PING);
+        // Feed measured = desired each interval (>= the 3/4 proportional band) until
+        // the ceiling clamps, then ride the ceiling. Doublings: 64K -> 8M = 7.
+        for (int i = 0; i < 7; i++) {
+            long desired = g.getDesiredBytesPerSec();
+            t += INTERVAL;
+            bytes += desired * (INTERVAL / 1000);
+            cols += Math.max(1, desired / (16 * KB));
+            tick(g, t, bytes, cols, 1, false, NORMAL_PING);
+        }
+        assertEquals(SS_CEILING, g.getDesiredBytesPerSec(), "doubling clamps at the ceiling");
+        assertEquals(TransferRateGovernor.Phase.RAMP, g.getPhase());
+        // The 4M->8M doubling landed above the engage threshold and CREDITED once; the
+        // OPEN confirmation needs DISENGAGE_RATE_INTERVALS consecutive credits total.
+        for (int i = 0; i < TransferRateGovernor.DISENGAGE_RATE_INTERVALS - 2; i++) {
+            t += INTERVAL;
+            bytes += SS_CEILING * (INTERVAL / 1000);
+            cols += SS_CEILING / (16 * KB);
+            tick(g, t, bytes, cols, 1, false, NORMAL_PING);
+        }
+        assertEquals(TransferRateGovernor.Phase.RAMP, g.getPhase(),
+                "nine credited intervals are not ten — still confirming");
+        // A non-qualifying idle interval (no arrivals, no answers, no demand) is NO
+        // observation: it must not wipe the nine earned credits (impl review — a
+        // single idle blip otherwise restarts the whole OPEN confirmation).
+        t += INTERVAL;
+        tick(g, t, bytes, cols, 0, false, NORMAL_PING);
+        assertEquals(TransferRateGovernor.Phase.RAMP, g.getPhase());
+        t += INTERVAL;
+        bytes += SS_CEILING * (INTERVAL / 1000);
+        cols += SS_CEILING / (16 * KB);
+        tick(g, t, bytes, cols, 1, false, NORMAL_PING);
+        assertEquals(TransferRateGovernor.Phase.OPEN, g.getPhase(),
+                "the tenth credit completes the slow start (the streak survived the idle)");
+        assertEquals(0, g.sustainedColumnsPerSecond(), "OPEN is capless");
+    }
+
+    @Test
+    void rampEngageKeepsTheMeasuredBelowConjunctVerbatim() {
+        // Plan review (semantics MEDIUM): v1.0 dropped the measured-below term on the
+        // false premise that a ramp sits below it — the ceiling is 2x ABOVE it, and a
+        // 2-interval ping blip there would have engaged a fast link at an 8 MB/s
+        // anchor. Congested-but-fast intervals must NOT engage.
+        var g = armed();
+        long t = 0;
+        long bytes = 0;
+        long cols = 0;
+        tick(g, t, 0, 0, 1, false, NORMAL_PING);
+        for (int i = 0; i < 7; i++) {
+            long desired = g.getDesiredBytesPerSec();
+            t += INTERVAL;
+            bytes += desired * (INTERVAL / 1000);
+            cols += Math.max(1, desired / (16 * KB));
+            tick(g, t, bytes, cols, 1, false, NORMAL_PING);
+        }
+        assertEquals(SS_CEILING, g.getDesiredBytesPerSec());
+        for (int i = 0; i < 3; i++) {
+            t += INTERVAL;
+            bytes += 6 * 1024 * KB * (INTERVAL / 1000); // measured 6 MB/s >= ENGAGE_BELOW
+            cols += 400;
+            tick(g, t, bytes, cols, 1, false, CONGESTED_PING);
+        }
+        assertFalse(g.isEngaged(),
+                "congestion above the engage-rate threshold never engages (kept verbatim)");
+        // Now congested AND slow: first excess-slow interval HOLDS (streak 1), second engages.
+        long before = g.getDesiredBytesPerSec();
+        t += INTERVAL;
+        bytes += 300 * KB * (INTERVAL / 1000);
+        cols += 30;
+        tick(g, t, bytes, cols, 1, false, CONGESTED_PING);
+        assertFalse(g.isEngaged(), "streak 1 is a HOLD, not an engagement");
+        assertEquals(before, g.getDesiredBytesPerSec(),
+                "the first excess interval must not double into detected congestion");
+        t += INTERVAL;
+        bytes += 300 * KB * (INTERVAL / 1000);
+        cols += 30;
+        tick(g, t, bytes, cols, 1, false, CONGESTED_PING);
+        assertTrue(g.isEngaged(), "the debounced second slow-congested interval engages");
+        assertEquals(300 * KB - STEP / 2, g.getDesiredBytesPerSec(),
+                "engage anchors at measured - STEP/2, the existing rule");
+    }
+
+    @Test
+    void movementHoldsGrowthOnlyWithPositivePingExcess() {
+        // Plan review MAJOR (both lenses): an unconditional movement hold pins every
+        // join-then-travel session at INITIAL forever (the rig hands out elytra at
+        // spawn). Clean-ping movement grows — that is today's uncapped behavior.
+        var g = armed();
+        tick(g, 0, 0, 0, 1, false, NORMAL_PING);
+        g.noteMovement();
+        long desired = g.getDesiredBytesPerSec();
+        tick(g, INTERVAL, desired * 2, 8, 1, false, NORMAL_PING);
+        assertEquals(2 * desired, g.getDesiredBytesPerSec(),
+                "movement with ping at/below baseline must not hold the ramp");
+        // Movement WITH positive excess holds (baseline ~50 drifted; ping 150 => +~100,
+        // under the engage threshold so only the movement row can act).
+        g.noteMovement();
+        desired = g.getDesiredBytesPerSec();
+        tick(g, 2 * INTERVAL, desired * 4, 16, 1, false, 150);
+        assertEquals(desired, g.getDesiredBytesPerSec(),
+                "movement with positive excess holds the climb (vanilla's burst window)");
+        // Sub-threshold jitter (impl review MAJOR: "> 0" against a rolling-MIN
+        // baseline is a jitter detector — ordinary WAN jitter sits above the session
+        // floor most intervals, so join-then-fly would freeze the climb for the whole
+        // flight). Excess ~+20-25 ms < RAMP_MOVEMENT_HOLD_EXCESS_MS (62): grows.
+        g.noteMovement();
+        tick(g, 3 * INTERVAL, 512 * KB + desired * 2, 24, 1, false, 75);
+        assertEquals(2 * desired, g.getDesiredBytesPerSec(),
+                "sub-threshold jitter never holds a moving climb");
+    }
+
+    @Test
+    void highRttDeliveredAllOfferedStillGrows() {
+        // Plan review HIGH (the RTT park): the stop-and-wait window caps offered at
+        // ~0.6-0.7x desired on >=250 ms links, so the kept-up band alone is
+        // unreachable and v1.0 parked clean fast links at INITIAL forever. A link
+        // that delivered >=3/4 of a >=half-desired offer grows.
+        var g = armed();
+        // Establish EWMA 16 KB: 128 KB over 8 columns, declared 8 (offered == desired).
+        g.tick(0, 0, 0, 0, 0, 1, false, NORMAL_PING, true);
+        g.tick(INTERVAL, 128 * KB, 8, 8, 8, 1, false, NORMAL_PING, true);
+        assertEquals(2 * SS_INITIAL, g.getDesiredBytesPerSec()); // 128K after one doubling
+        // desired 128K: offer 10 cols x 16K / 2s = 80 KB/s (0.63x desired), measured
+        // 80 KB/s (delivered everything) -> grows despite failing the kept-up band.
+        g.tick(2 * INTERVAL, 128 * KB + 160 * KB, 18, 18, 15, 1, false, NORMAL_PING, true);
+        assertEquals(4 * SS_INITIAL, g.getDesiredBytesPerSec(),
+                "delivered-all-offered is growth evidence (the high-RTT rule)");
+    }
+
+    @Test
+    void underOfferedIntervalHoldsAndPlateauSnapsWithoutRaising() {
+        var g = armed();
+        g.tick(0, 0, 0, 0, 0, 1, false, NORMAL_PING, true);
+        g.tick(INTERVAL, 128 * KB, 8, 8, 8, 1, false, NORMAL_PING, true);   // EWMA 16K, desired 128K
+        g.tick(2 * INTERVAL, 256 * KB, 16, 16, 16, 1, false, NORMAL_PING, true); // desired 256K
+        long desired = g.getDesiredBytesPerSec();
+        assertEquals(4 * SS_INITIAL, desired);
+        // Demand-limited: 2 columns declared -> offered 16 KB/s < desired/2, and the
+        // answers lag (answered delta 0 — the byte-free rung must not fire) -> HOLD.
+        g.tick(3 * INTERVAL, 256 * KB + 32 * KB, 18, 18, 16, 1, false, NORMAL_PING, true);
+        assertEquals(desired, g.getDesiredBytesPerSec(),
+                "a converged client sits mid-ramp; no growth, no snap");
+        // Plateau: offered 20 x 16K / 2s = 160 KB/s (>= desired/2), measured 100 KB/s
+        // (< 3/4 of both) -> snap to measured x 5/4 = 125 KB/s, never a raise.
+        g.tick(4 * INTERVAL, 256 * KB + 32 * KB + 200 * KB, 38, 38, 26, 1, false, NORMAL_PING, true);
+        assertEquals(100 * KB * 5 / 4, g.getDesiredBytesPerSec(),
+                "the plateau snap bounds the standing offer overhang at 25%");
+    }
+
+    @Test
+    void vanillaBehindHoldsTheRamp() {
+        var g = armed();
+        tick(g, 0, 0, 0, 1, false, NORMAL_PING);
+        g.noteMissingVanilla(20);   // session floor
+        g.noteMissingVanilla(20 + TransferRateGovernor.MISSING_VANILLA_CUT_EXCESS);
+        long desired = g.getDesiredBytesPerSec();
+        tick(g, INTERVAL, desired * 2, 8, 1, false, NORMAL_PING);
+        assertEquals(desired, g.getDesiredBytesPerSec(),
+                "vanilla-behind HOLDs the ramp (the cut stays engaged-only)");
+    }
+
+    @Test
+    void dimensionChangeReRampsAtHalfTheProvenRate() {
+        // ENGAGED prior: ssthresh memory, not a fresh INITIAL ramp and not today's
+        // uncapped re-engage gap. Engage first (unarmed — the row-1 gate refuses
+        // engagement from a low ramp by design), then arm: the toggle-table's
+        // on-mid-ENGAGED row is a no-op, and the dimension change re-ramps.
+        var g = new TransferRateGovernor();
+        long t = engageAt(g, 0, 800 * KB);
+        g.setSlowStartEnabled(true);
+        long desired = g.getDesiredBytesPerSec();
+        g.onDimensionChange();
+        tick(g, t + INTERVAL, 0, 0, 1, false, NORMAL_PING);
+        assertEquals(TransferRateGovernor.Phase.RAMP, g.getPhase());
+        assertEquals(Math.clamp(desired / 2, SS_INITIAL, SS_CEILING),
+                g.getDesiredBytesPerSec(), "re-ramp at half the proven rate");
+        // OPEN prior: the session proved >= the engage threshold to open.
+        var g2 = armed();
+        long t2 = 0;
+        long bytes = 0;
+        long cols = 0;
+        tick(g2, t2, 0, 0, 1, false, NORMAL_PING);
+        for (int i = 0; i < 7 + TransferRateGovernor.DISENGAGE_RATE_INTERVALS - 1; i++) {
+            long d = Math.max(g2.getDesiredBytesPerSec(), SS_CEILING);
+            t2 += INTERVAL;
+            bytes += d * (INTERVAL / 1000);
+            cols += Math.max(1, d / (16 * KB));
+            tick(g2, t2, bytes, cols, 1, false, NORMAL_PING);
+        }
+        assertEquals(TransferRateGovernor.Phase.OPEN, g2.getPhase());
+        g2.onDimensionChange();
+        tick(g2, t2 + INTERVAL, bytes, cols, 1, false, NORMAL_PING);
+        assertEquals(ENGAGE_BELOW, g2.getDesiredBytesPerSec(),
+                "an OPEN session re-ramps from the engage threshold");
+    }
+
+    @Test
+    void toggleOffDemotesRampOnlyAndNeverTouchesEngaged() {
+        // Plan review (both lenses): v1.0's hard-reset-on-toggle would have un-capped
+        // an engaged congested link — the round-5 runaway shape.
+        var g = armed();
+        tick(g, 0, 0, 0, 1, false, NORMAL_PING);
+        assertEquals(TransferRateGovernor.Phase.RAMP, g.getPhase());
+        g.setSlowStartEnabled(false);
+        assertEquals(TransferRateGovernor.Phase.OPEN, g.getPhase());
+        assertEquals(0, g.sustainedColumnsPerSecond());
+
+        var g2 = new TransferRateGovernor();
+        long t = engageAt(g2, 0, 800 * KB);
+        g2.setSlowStartEnabled(true);  // toggle ON mid-ENGAGED: no phase change
+        assertTrue(g2.isEngaged(), "toggle-on never demotes a live session");
+        g2.setSlowStartEnabled(false);
+        assertTrue(g2.isEngaged(), "ENGAGED earned its state on evidence — the toggle never touches it");
+        assertTrue(g2.getDesiredBytesPerSec() > 0);
+        tick(g2, t + INTERVAL, 2 * 800 * KB, 200, 1, false, CONGESTED_PING);
+        assertTrue(g2.isEngaged(), "still governed on the congested link after the flip");
+    }
+
+    @Test
+    void hintSurvivesHardResetButDiesInReset() {
+        var g = new TransferRateGovernor();
+        long t = engageAt(g, 0, 800 * KB);       // engage unarmed (the row-1 gate)
+        g.setSlowStartEnabled(true);
+        long desired = g.getDesiredBytesPerSec();
+        g.onDimensionChange();                    // hint = desired/2, phase DISABLED
+        g.tick(t + INTERVAL, 0, 0, 0, 0, 1, false, NORMAL_PING, false); // inactive: stays DISABLED
+        tick(g, t + 2 * INTERVAL, 0, 0, 1, false, NORMAL_PING);
+        assertEquals(Math.clamp(desired / 2, SS_INITIAL, SS_CEILING),
+                g.getDesiredBytesPerSec(), "the hint survives the inactive hard-reset");
+        g.reset();
+        tick(g, t + 3 * INTERVAL, 0, 0, 1, false, NORMAL_PING);
+        assertEquals(SS_INITIAL, g.getDesiredBytesPerSec(),
+                "session teardown clears the hint — the next session ramps from INITIAL");
+    }
+
+    @Test
+    void warmRejoinByteFreeAnsweredIntervalsGrow() {
+        // Impl review MAJOR (all three lenses — the byte-vs-position denomination):
+        // a warm rejoin's answers are up_to_date frames, so the whole revalidation
+        // moves ZERO wire bytes; a byte-denominated ramp parks it at 2 col/s for
+        // minutes. An interval whose declared positions were ANSWERED is the position
+        // window saturated with timely service — growth that costs the link nothing.
+        var g = armed();
+        long declared = 0;
+        g.tick(0, 0, 0, 0, 0, 1, false, NORMAL_PING, true);
+        long desired = g.getDesiredBytesPerSec();
+        g.tick(INTERVAL, 0, 0, declared += 200, declared, 1, false, NORMAL_PING, true);
+        assertEquals(2 * desired, g.getDesiredBytesPerSec(),
+                "answered-all-asked is growth evidence with zero wire bytes");
+        desired = g.getDesiredBytesPerSec();
+        g.tick(2 * INTERVAL, 0, 0, declared += 200, declared, 1, false, NORMAL_PING, true);
+        assertEquals(2 * desired, g.getDesiredBytesPerSec(),
+                "the byte-free rung keeps earning across intervals");
+    }
+
+    @Test
+    void awaitingLatchQualifiesMidIntervalDemandAndItsAbsenceDisqualifies() {
+        // Impl review MAJOR: awaiting sampled at the two boundary INSTANTS is bimodal
+        // at ramp-sized batches (the 2 s interval is 0 mod the 5-tick fire cycle), so
+        // a session whose boundary phase lands in the answered window would be
+        // PERMANENTLY non-qualifying. Any mid-interval tick with a non-empty awaiting
+        // set latches the interval as qualifying.
+        var g = armed();
+        g.tick(0, 0, 0, 0, 0, 0, false, NORMAL_PING, true);   // boundary: awaiting EMPTY
+        long desired = g.getDesiredBytesPerSec();
+        g.tick(500, 0, 0, 0, 0, 3, false, NORMAL_PING, true); // mid-interval demand
+        g.tick(INTERVAL, desired * 2, 8, 8, 8, 0, false, NORMAL_PING, true); // empty again
+        assertEquals(2 * desired, g.getDesiredBytesPerSec(),
+                "mid-interval awaiting latches the interval as qualifying");
+        // Negative arm: an interval that never saw demand is no observation — even
+        // with kept-up bytes on the wire (a background drain), no growth.
+        desired = g.getDesiredBytesPerSec();
+        g.tick(2 * INTERVAL, desired * 2 + desired * 4, 16, 16, 16, 0,
+                false, NORMAL_PING, true);
+        assertEquals(desired, g.getDesiredBytesPerSec(),
+                "no demand anywhere in the interval: non-qualifying, the ramp holds");
+    }
+
+    @Test
+    void congestionBelowTheEngageGateContainsViaThePlateauSnapNotEngagement() {
+        // Impl review MAJOR (the nullified discriminator): below RAMP_ENGAGE_MIN_DESIRED
+        // the verbatim measured-below engage term is TRIVIALLY true — the ramp itself
+        // caps measured — so vanilla's own join-burst ping would engage a fast link at
+        // a MIN-rate anchor (~70-90 s recovery). Below the gate, congested intervals
+        // must fall to the plateau snap, which tracks desired down toward measured
+        // and floors at INITIAL — containment without a false engagement.
+        var g = armed();
+        g.tick(0, 0, 0, 0, 0, 1, false, NORMAL_PING, true);
+        g.tick(INTERVAL, 128 * KB, 8, 8, 8, 1, false, NORMAL_PING, true); // EWMA 16K → 128K
+        assertEquals(2 * SS_INITIAL, g.getDesiredBytesPerSec());
+        assertTrue(2 * SS_INITIAL < TransferRateGovernor.RAMP_ENGAGE_MIN_DESIRED_BYTES_PER_SEC,
+                "premise: the fixture sits below the engage gate");
+        // Congested + slow, repeatedly: offered 8 cols × 16K / 2 s = 64 KB/s
+        // (≥ desired/2 — past the under-offer row), measured 20 KB/s, answers lag so
+        // the byte-free rung stays out.
+        long bytes = 128 * KB;
+        long declared = 8;
+        for (int i = 0; i < 4; i++) {
+            bytes += 40 * KB;
+            declared += 8;
+            g.tick((2 + i) * INTERVAL, bytes, 8, declared, 8, 1, false, CONGESTED_PING, true);
+            assertFalse(g.isEngaged(), "congestion below the gate must never engage");
+        }
+        assertEquals(SS_INITIAL, g.getDesiredBytesPerSec(),
+                "the snap tracked desired down to the INITIAL floor, not an engage anchor");
     }
 }

@@ -84,9 +84,18 @@ public class LSSClientConfig extends JsonConfig {
     // ping rising >250 ms over its session baseline while LOD delivery measures under
     // 4 MB/s — an AIMD loop paces LOD downloads BELOW link capacity through the same
     // machinery as lodColumnsPerSecondLimit (min-composes with it; the manual knob
-    // stays a hard bound). Fast links never engage; a governed session logs one INFO.
+    // stays a hard bound). Fast links never reach the congestion AIMD (they ramp
+    // open in ~35 s under join slow start below); a governed session logs one INFO.
     // Kill switch: false = manual-knob-only, exactly the pre-governor shape.
     public boolean enableAdaptiveTransferRate = true;
+    // Join slow start (join-slow-start-plan.md, user decision 2026-08-14 — join
+    // latency beats LOD fill speed): sessions START in the governor's RAMP phase
+    // (64 KB/s, doubling per proven 2 s interval, open in ~35 s on a fast link)
+    // instead of uncapped-until-congestion-evidence. Under the
+    // enableAdaptiveTransferRate umbrella: governor off => no ramp either. Also a
+    // Sodium toggle ("Slow Start on Join"). false = sessions start uncapped, the
+    // pre-slow-start shape.
+    public boolean enableJoinSlowStart = true;
 
     // ---- Far players (v0.11.0, FARP §3.3 — ARMED since E2 via the client
     // ---- capability bit; these keys exist so upgrading users can pre-configure).

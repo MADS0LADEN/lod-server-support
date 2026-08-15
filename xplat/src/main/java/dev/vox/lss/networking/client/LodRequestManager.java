@@ -136,6 +136,12 @@ public class LodRequestManager {
     /** Config kill switch seam (the adaptiveCadenceEnabled pattern). */
     java.util.function.BooleanSupplier transferGovernorEnabled =
             () -> LSSClientConfig.CONFIG.enableAdaptiveTransferRate;
+    /** Join slow start (join-slow-start-plan.md): sessions START in the governed
+     *  RAMP and earn their rate. Manager tests that pin uncapped first walks
+     *  override this to false (the frontier-damping test pattern);
+     *  productionDefaultEnablesSlowStart pins the real wiring. */
+    java.util.function.BooleanSupplier joinSlowStartEnabled =
+            () -> LSSClientConfig.CONFIG.enableJoinSlowStart;
 
     private static int readOwnPing() {
         var mc = Minecraft.getInstance(); // null under fabric-loader-junit (headless)
@@ -336,10 +342,19 @@ public class LodRequestManager {
                 this.governor.noteMissingVanilla(missingVanilla.getAsInt());
             }
         }
+        // Slow-start arming is re-asserted every tick (wiring, not session state):
+        // a mid-session OFF demotes RAMP->OPEN inside the setter; ON applies at the
+        // next session entry (join-slow-start-plan.md toggle table).
+        this.governor.setSlowStartEnabled(this.joinSlowStartEnabled.getAsBoolean());
         this.governor.tick(this.governor.clock.getAsLong(),
                 this.wireBytesReceivedSupplier.getAsLong(),
                 this.columnsReceivedSupplier.getAsLong(),
                 this.declaredColumnsCumulative,
+                // Answered positions of ANY response type (impl review MAJOR — the
+                // ramp's byte-free growth evidence: a warm rejoin's answers are
+                // up_to_date frames that move zero wire bytes).
+                this.metrics.getTotalColumnsReceived() + this.metrics.getTotalUpToDate()
+                        + this.metrics.getTotalNotGenerated(),
                 this.tracker.size(), halted,
                 governorActive ? this.ownPingSupplier.getAsInt() : -1,
                 governorActive);
@@ -944,12 +959,18 @@ public class LodRequestManager {
     public long getRateGated() { return this.scanner.getRateGated(); }
 
     /** Governor receipt for /lss diag (review n14: rate_gated conflates manual and
-     *  governed refusals — this label disambiguates): "<cols>/s (<KB>/s)" while
-     *  engaged, "off" otherwise. */
+     *  governed refusals — this label disambiguates). Four shapes since the slow
+     *  start: ENGAGED keeps the pre-phase "<cols>/s (<KB>/s)" (the live-round
+     *  receipt format), RAMP renders "ramp@<KB>/s (<cols>/s)", plus "open"/"off". */
     public String getGovernedRateLabel() {
-        if (!this.governor.isEngaged()) return "off";
-        return this.governor.sustainedColumnsPerSecond() + "/s ("
-                + (this.governor.getDesiredBytesPerSec() / 1024) + " KB/s)";
+        return switch (this.governor.getPhase()) {
+            case ENGAGED -> this.governor.sustainedColumnsPerSecond() + "/s ("
+                    + (this.governor.getDesiredBytesPerSec() / 1024) + " KB/s)";
+            case RAMP -> "ramp@" + (this.governor.getDesiredBytesPerSec() / 1024)
+                    + " KB/s (" + this.governor.sustainedColumnsPerSecond() + "/s)";
+            case OPEN -> "open";
+            case DISABLED -> "off";
+        };
     }
 
     // Response counters

@@ -93,6 +93,45 @@ final class TransferRateGovernor {
      *  permanent nonzero baseline — ~20 on the rig). Unengaged sessions never
      *  evaluate this: fast links are untouched. */
     static final int MISSING_VANILLA_CUT_EXCESS = 8;
+    /** Join slow start (join-slow-start-plan.md v1.1): the RAMP's starting rate.
+     *  MIN_RATE, not STEP (plan review, both lenses): 256 KB/s ≈ 2.1 Mbps already
+     *  saturates a 1 Mbps link 2× from the first interval — reproducing the
+     *  baseline-pollution defect instead of fixing it. 64 KB/s = 512 kbps sits under
+     *  the links the ramp can actually serve; the fast-link cost is two extra
+     *  doublings (4 s). Sub-512 kbps links are Mechanism B + transport yield's
+     *  territory, never the ramp's. */
+    static final long SLOW_START_INITIAL_BYTES_PER_SEC = MIN_RATE_BYTES_PER_SEC;
+    /** RAMP growth ceiling — bounds the OPEN-confirmation stretch (2× the engage
+     *  threshold; parking AT the ceiling is harmless: 8 MB/s wire ≈ 16-24 MB/s raw ≈
+     *  the default per-player bandwidth cap). */
+    static final long SLOW_START_CEILING_BYTES_PER_SEC = 2 * ENGAGE_BELOW_BYTES_PER_SEC;
+    /** RAMP may hand off to ENGAGED only once desired has reached this rate (impl
+     *  review MAJOR: below it the kept-verbatim {@code measured < ENGAGE_BELOW}
+     *  discriminator is TRIVIALLY true — the ramp itself suppresses measured — so
+     *  vanilla's own spawn-burst ping could engage a 100 Mbps join at a MIN_RATE
+     *  anchor with a ~70-90 s recovery. Below this rung a congested interval falls
+     *  through to the plateau snap instead, which tracks desired DOWN toward
+     *  measured — the ramp contains slow links itself (the 1.25×/2.5× sawtooth is
+     *  the documented operating mode there; Mechanism B backstops real bloat). */
+    static final long RAMP_ENGAGE_MIN_DESIRED_BYTES_PER_SEC = ENGAGE_BELOW_BYTES_PER_SEC / 2;
+    /** The RAMP movement hold's ping-excess threshold (impl review MAJOR: {@code > 0}
+     *  against a rolling-MIN baseline is a jitter detector — ordinary WAN jitter sits
+     *  above the session floor most intervals, and join-then-fly would hold nearly
+     *  always. A quarter of the engage threshold is above jitter, far below
+     *  congestion). */
+    static final int RAMP_MOVEMENT_HOLD_EXCESS_MS = ENGAGE_PING_EXCESS_MS / 4;
+    /** Pre-sample conversion seed, RAMP only: until the first arrival sample the
+     *  byte budget converts through this instead of supplying NO cap (the whole
+     *  point is capping the first walk). Deliberately HIGH — the safe join direction
+     *  is fewer columns than the byte budget intends; the fast-up EWMA's first real
+     *  sample REPLACES it. */
+    static final double SLOW_START_SEED_COLUMN_BYTES = 32.0 * 1024;
+
+    /** The governor's lifecycle phase (join-slow-start-plan.md §1.1): DISABLED =
+     *  capless + inert (the !active posture AND the pre-first-active-tick state);
+     *  RAMP = the slow-start climb; OPEN = today's unengaged capless state;
+     *  ENGAGED = the congestion AIMD (byte-for-byte the pre-phase behavior). */
+    enum Phase { DISABLED, RAMP, OPEN, ENGAGED }
 
     /** Injectable MONOTONIC clock in millis (impl review m2: interval math on the
      *  wall clock misreads an NTP step or VM resume as a rate collapse — a spurious
@@ -105,7 +144,16 @@ final class TransferRateGovernor {
     private long intervalStartWireBytes;
     private long intervalStartColumns;
     private long intervalStartDeclared;
+    private long intervalStartAnswered;
     private boolean awaitingAtStart;
+    /** Latched on ANY tick of the interval with a non-empty awaiting set (impl
+     *  review MAJOR: sampling awaiting at the two boundary INSTANTS is bimodal at
+     *  small ramp batches — the 2 s interval is 0 mod the 5-tick fire cycle, so a
+     *  session whose boundary phase lands in the answered window is permanently
+     *  non-qualifying. RAMP consumes the latch; ENGAGED keeps the instant pair —
+     *  its same-shaped MIN-rate latent predates this change and is recorded as a
+     *  follow-up, not silently re-scoped here). */
+    private boolean awaitingSeenThisInterval;
     private boolean haltSeenThisInterval;
     private boolean movementSeenThisInterval;
     private int lastMissingVanilla = -1;   // newest sample (<0 = none yet)
@@ -117,11 +165,25 @@ final class TransferRateGovernor {
     private int lastPingMs = -1;
 
     // ---- AIMD ----
-    private boolean engaged;
+    private Phase phase = Phase.DISABLED;
     private long desiredBytesPerSec;
     private int keptUpStreak;
     private int rateDisengageStreak;
     private int engagePendingStreak;
+    // ---- Slow start (join-slow-start-plan.md) ----
+    /** Wiring, not session state: the manager re-asserts it every tick from config.
+     *  A true→false flip mid-RAMP demotes to OPEN (the toggle × phase table);
+     *  ENGAGED is NEVER touched by the toggle — it earned its state on congestion
+     *  evidence independent of the ramp (plan review: hard-resetting there re-opens
+     *  the round-5 runaway). */
+    private boolean slowStartEnabled;
+    /** RAMP restart rate (0 = INITIAL). Survives hardReset (the DISABLED→RAMP
+     *  re-entry and dimension-change paths depend on it); dies only in reset(). */
+    private long restartHintBytesPerSec;
+    /** Consecutive CREDITED ramp intervals above the engage threshold — the
+     *  RAMP→OPEN confirmation (reuses DISENGAGE_RATE_INTERVALS as the constant,
+     *  not the code path). Any non-credited interval resets it. */
+    private int rampOpenStreak;
 
     // ---- Size estimator (runs from session start, pre-engagement) ----
     private double sizeEwmaBytes = -1;     // -1 = no sample yet (division guarded)
@@ -129,6 +191,7 @@ final class TransferRateGovernor {
     // ---- Session-scoped receipts ----
     private boolean engageNoted;
     private boolean disengageNoted;
+    private boolean slowStartNoted;
 
     static boolean harnessJvm() { // package-private: the manager's probe gate shares it
         return Boolean.getBoolean("lss.soak") || Boolean.getBoolean("lss.benchmark");
@@ -152,35 +215,45 @@ final class TransferRateGovernor {
      * hard-resets so a mid-session toggle leaves no stale cap behind.
      */
     void tick(long nowMillis, long wireBytesCumulative, long columnsCumulative,
-              long declaredCumulative, int awaitingSize, boolean halted, int pingMs,
-              boolean active) {
+              long declaredCumulative, long answeredCumulative, int awaitingSize,
+              boolean halted, int pingMs, boolean active) {
         if (!active || harnessJvm()) {
-            if (this.engaged || this.intervalSeeded) hardReset();
+            if (this.phase != Phase.DISABLED || this.intervalSeeded) hardReset();
             return;
+        }
+        // The single phase entry point (plan §1.2): the first ACTIVE tick leaves
+        // DISABLED for RAMP (slow start armed) or OPEN. This precedes the scan phase
+        // in the manager's tick order, so the session's very first walk is already
+        // clamped — the whole point.
+        if (this.phase == Phase.DISABLED) {
+            enterFromDisabled();
         }
         updatePingBaseline(nowMillis, pingMs);
         if (!this.intervalSeeded) {
             seedInterval(nowMillis, wireBytesCumulative, columnsCumulative,
-                    declaredCumulative, awaitingSize);
+                    declaredCumulative, answeredCumulative, awaitingSize);
             return;
         }
         if (halted) this.haltSeenThisInterval = true;
+        if (awaitingSize > 0) this.awaitingSeenThisInterval = true;
         // movementSeenThisInterval is latched by noteMovement() (the manager's
         // chunk-crossing hook) and cleared at each interval seed.
         long elapsed = nowMillis - this.intervalStartMillis;
         if (elapsed < INTERVAL_MILLIS) return;
 
         evaluateInterval(nowMillis, wireBytesCumulative, columnsCumulative,
-                declaredCumulative, awaitingSize, elapsed);
+                declaredCumulative, answeredCumulative, awaitingSize, elapsed);
         seedInterval(nowMillis, wireBytesCumulative, columnsCumulative,
-                declaredCumulative, awaitingSize);
+                declaredCumulative, answeredCumulative, awaitingSize);
     }
 
     private void evaluateInterval(long nowMillis, long wireBytes, long columns,
-                                  long declared, int awaitingSize, long elapsedMillis) {
+                                  long declared, long answered, int awaitingSize,
+                                  long elapsedMillis) {
         long deltaBytes = wireBytes - this.intervalStartWireBytes;
         long deltaColumns = columns - this.intervalStartColumns;
         long deltaDeclared = declared - this.intervalStartDeclared;
+        long deltaAnswered = answered - this.intervalStartAnswered;
         // A reset zeroed the gate counters mid-interval (review m3): non-qualifying, and
         // the estimator takes no sample from garbage.
         boolean invalid = deltaBytes < 0 || deltaColumns < 0;
@@ -197,7 +270,7 @@ final class TransferRateGovernor {
         int pingExcess = (this.pingBaselineMs >= 0 && this.lastPingMs > 0)
                 ? this.lastPingMs - this.pingBaselineMs : Integer.MIN_VALUE;
 
-        if (this.engaged) {
+        if (this.phase == Phase.ENGAGED) {
             if (qualifying) {
                 // Offer-backing (impl review MAJOR-1): the interval must have OFFERED
                 // ≥ ¾ of the governed rate for a downward step to be link evidence.
@@ -207,6 +280,18 @@ final class TransferRateGovernor {
                         && deltaDeclared * 4L >= expectedDeclared * 3L;
                 stepEngaged(measured, offerBacked);
             }
+        } else if (this.phase == Phase.RAMP) {
+            // RAMP's qualifying differs from ENGAGED's (impl review MAJOR — the
+            // byte/position denomination split): an up_to_date-dominated interval
+            // moves ZERO wire bytes but is real, answered demand (a warm rejoin is
+            // the whole session in that shape), and the awaiting LATCH replaces the
+            // bimodal boundary-instant pair.
+            boolean rampQualifying = !invalid
+                    && (deltaBytes > 0 || deltaAnswered > 0)
+                    && this.awaitingSeenThisInterval
+                    && !this.haltSeenThisInterval;
+            stepRamp(measured, deltaDeclared, deltaAnswered, elapsedMillis,
+                    pingExcess, rampQualifying);
         } else if (qualifying
                 && pingExcess != Integer.MIN_VALUE
                 && pingExcess > ENGAGE_PING_EXCESS_MS
@@ -296,8 +381,146 @@ final class TransferRateGovernor {
         }
     }
 
+    /** The RAMP evaluation ladder (join-slow-start-plan.md §1.2 — row order is the
+     *  spec). Growth is EARNED: double only on kept-up (¾·desired proportional band —
+     *  the absolute STEP/4 band degenerates to ≥0 at INITIAL) or delivered-all-offered
+     *  (the high-RTT rule: the stop-and-wait window caps offered at ~0.6-0.7×desired
+     *  on ≥250 ms links, so a link that delivered ≥¾ of a ≥half-desired offer IS
+     *  growth evidence — doubling widens the window, which is how a windowed protocol
+     *  discovers capacity; ping + Mechanism B bound the overshoot). */
+    private void stepRamp(long measured, long deltaDeclared, long deltaAnswered,
+                          long elapsedMillis, int pingExcess, boolean qualifying) {
+        // Streak semantics (impl review): a NON-QUALIFYING interval is no observation
+        // — it neither credits nor resets the OPEN confirmation (a single idle blip
+        // must not wipe 9 earned intervals). Only a qualifying-but-not-credited
+        // interval resets.
+        if (!qualifying) {
+            this.engagePendingStreak = 0;
+            return;
+        }
+        boolean credited = false;
+        try {
+            // Row 1 — the engage conjunct, kept VERBATIM incl. the measured-below term,
+            // and GATED on the ramp having reached the regime that term describes
+            // (RAMP_ENGAGE_MIN_DESIRED — see the constant: below it every session
+            // trivially satisfies measured < ENGAGE_BELOW because the ramp itself caps
+            // measured, and the join burst's ping would engage fast links at a MIN
+            // anchor). Below the gate a congested interval falls through to the
+            // plateau snap, which tracks desired DOWN toward measured — containment
+            // without a false engagement. Streak 1 is a HOLD.
+            if (pingExcess != Integer.MIN_VALUE
+                    && pingExcess > ENGAGE_PING_EXCESS_MS
+                    && measured < ENGAGE_BELOW_BYTES_PER_SEC
+                    && this.desiredBytesPerSec >= RAMP_ENGAGE_MIN_DESIRED_BYTES_PER_SEC) {
+                if (++this.engagePendingStreak >= ENGAGE_CONSECUTIVE_INTERVALS) {
+                    engage(measured, pingExcess);
+                }
+                return;
+            }
+            this.engagePendingStreak = 0;
+            // Row 2 — vanilla-behind HOLDs (never cuts here: the floor is freshly
+            // learned at join and ramp rates are low — the HOLD half of vanilla-first).
+            if (vanillaBehind()) {
+                return;
+            }
+            // Row 3 — movement holds only above the JITTER threshold (impl review:
+            // "> 0" against a rolling-MIN baseline holds on ordinary WAN jitter, and
+            // join-then-fly would freeze the climb for the whole flight).
+            boolean meaningfulExcess = pingExcess != Integer.MIN_VALUE
+                    && pingExcess > RAMP_MOVEMENT_HOLD_EXCESS_MS;
+            if (this.movementSeenThisInterval && meaningfulExcess) {
+                return;
+            }
+            double columnBytes = this.sizeEwmaBytes > 0
+                    ? this.sizeEwmaBytes : SLOW_START_SEED_COLUMN_BYTES;
+            long offered = (long) (deltaDeclared * columnBytes * 1000.0
+                    / Math.max(1L, elapsedMillis));
+            boolean keptUp = measured * 4L >= this.desiredBytesPerSec * 3L;
+            boolean deliveredAllOffered = offered * 2L >= this.desiredBytesPerSec
+                    && measured * 4L >= offered * 3L;
+            // The byte-free rung (impl review MAJOR, all three lenses): an interval
+            // whose declared positions were ANSWERED (any response type — a warm
+            // rejoin's answers are up_to_date frames that move zero wire bytes) is
+            // the actuator's position window saturated with timely service. That is
+            // cap-bound, not link-bound: growth is safe by construction there (the
+            // answers that carried no bytes cost the link nothing), and it is the
+            // only signal a revalidation-dominated session ever produces.
+            boolean answeredAllAsked = deltaDeclared > 0
+                    && deltaAnswered * 4L >= deltaDeclared * 3L;
+            if (keptUp || deliveredAllOffered || answeredAllAsked) {
+                this.desiredBytesPerSec = Math.min(this.desiredBytesPerSec * 2,
+                        SLOW_START_CEILING_BYTES_PER_SEC);
+                if (this.desiredBytesPerSec > ENGAGE_BELOW_BYTES_PER_SEC) {
+                    credited = true;
+                    if (++this.rampOpenStreak >= DISENGAGE_RATE_INTERVALS) {
+                        openFromRamp();
+                    }
+                }
+                return;
+            }
+            // Row 4 — under-offered (demand-limited): a converged client sits
+            // mid-ramp and resumes earning with demand.
+            if (offered * 2L < this.desiredBytesPerSec) {
+                return;
+            }
+            // Row 5 — plateau (offer-backed shortfall): the one-time overhang snap —
+            // a bare HOLD leaves desired at up to 2x capacity, a permanent standing
+            // offer; the snap bounds it at 25% and never raises. Also the containment
+            // path for congestion BELOW the row-1 gate: excess intervals land here
+            // and desired tracks measured down.
+            this.desiredBytesPerSec = Math.max(SLOW_START_INITIAL_BYTES_PER_SEC,
+                    Math.min(this.desiredBytesPerSec, measured * 5L / 4L));
+        } finally {
+            if (qualifying && !credited) this.rampOpenStreak = 0;
+        }
+    }
+
+    /** The single phase entry point — see tick(). */
+    private void enterFromDisabled() {
+        if (this.slowStartEnabled) {
+            this.phase = Phase.RAMP;
+            this.desiredBytesPerSec = this.restartHintBytesPerSec > 0
+                    ? Math.clamp(this.restartHintBytesPerSec,
+                            SLOW_START_INITIAL_BYTES_PER_SEC, SLOW_START_CEILING_BYTES_PER_SEC)
+                    : SLOW_START_INITIAL_BYTES_PER_SEC;
+        } else {
+            this.phase = Phase.OPEN;
+            this.desiredBytesPerSec = 0;
+        }
+        this.rampOpenStreak = 0;
+        this.keptUpStreak = 0;
+        this.rateDisengageStreak = 0;
+        this.engagePendingStreak = 0;
+    }
+
+    private void openFromRamp() {
+        this.phase = Phase.OPEN;
+        this.desiredBytesPerSec = 0;
+        this.rampOpenStreak = 0;
+        if (!this.slowStartNoted) {
+            this.slowStartNoted = true;
+            LSSLogger.info("LOD slow start complete — the connection kept up through the"
+                    + " ramp; LOD downloads now run uncapped (logged once per session)");
+        }
+    }
+
+    /** The manager re-asserts this every tick from config (wiring, not session
+     *  state). The toggle × phase table (plan §1.2): OFF demotes RAMP→OPEN only —
+     *  ENGAGED is untouched (un-capping a congested link here is the round-5
+     *  runaway); ON takes effect at the next DISABLED→active entry, never by
+     *  re-clamping a live session. */
+    void setSlowStartEnabled(boolean enabled) {
+        if (this.slowStartEnabled && !enabled && this.phase == Phase.RAMP) {
+            this.phase = Phase.OPEN;
+            this.desiredBytesPerSec = 0;
+            this.rampOpenStreak = 0;
+            this.engagePendingStreak = 0;
+        }
+        this.slowStartEnabled = enabled;
+    }
+
     private void engage(long measured, int pingExcess) {
-        this.engaged = true;
+        this.phase = Phase.ENGAGED;
         this.engagePendingStreak = 0;
         this.desiredBytesPerSec =
                 Math.max(measured - STEP_BYTES_PER_SEC / 2, MIN_RATE_BYTES_PER_SEC);
@@ -313,7 +536,7 @@ final class TransferRateGovernor {
     }
 
     private void disengage(String reason) {
-        this.engaged = false;
+        this.phase = Phase.OPEN;
         this.desiredBytesPerSec = 0;
         this.keptUpStreak = 0;
         this.rateDisengageStreak = 0;
@@ -357,19 +580,24 @@ final class TransferRateGovernor {
     }
 
     private void seedInterval(long nowMillis, long wireBytes, long columns,
-                              long declared, int awaitingSize) {
+                              long declared, long answered, int awaitingSize) {
         this.intervalSeeded = true;
         this.intervalStartMillis = nowMillis;
         this.intervalStartWireBytes = wireBytes;
         this.intervalStartColumns = columns;
         this.intervalStartDeclared = declared;
+        this.intervalStartAnswered = answered;
         this.awaitingAtStart = awaitingSize > 0;
         this.haltSeenThisInterval = false;
         this.movementSeenThisInterval = false;
+        this.awaitingSeenThisInterval = awaitingSize > 0;
     }
 
     private void hardReset() {
-        this.engaged = false;
+        this.phase = Phase.DISABLED;
+        this.rampOpenStreak = 0;
+        // restartHintBytesPerSec deliberately SURVIVES (the DISABLED→RAMP re-entry
+        // and dimension-change paths depend on it); it dies only in reset().
         this.desiredBytesPerSec = 0;
         this.keptUpStreak = 0;
         this.rateDisengageStreak = 0;
@@ -378,6 +606,7 @@ final class TransferRateGovernor {
         this.intervalStartMillis = 0;
         this.haltSeenThisInterval = false;
         this.movementSeenThisInterval = false;
+        this.awaitingSeenThisInterval = false;
         // The size estimator and ping baseline survive a config-toggle reset (they are
         // measurements, not control state) but die with the session in reset().
     }
@@ -427,19 +656,37 @@ final class TransferRateGovernor {
         this.sizeEwmaBytes = other.sizeEwmaBytes;
         this.lastMissingVanilla = other.lastMissingVanilla;
         this.minMissingVanilla = other.minMissingVanilla;
-        this.engaged = other.engaged;
+        this.phase = other.phase;
         this.desiredBytesPerSec = other.desiredBytesPerSec;
         this.keptUpStreak = other.keptUpStreak;
         this.rateDisengageStreak = other.rateDisengageStreak;
         this.engagePendingStreak = other.engagePendingStreak;
+        this.slowStartEnabled = other.slowStartEnabled;
+        this.restartHintBytesPerSec = other.restartHintBytesPerSec;
+        this.rampOpenStreak = other.rampOpenStreak;
         this.engageNoted = other.engageNoted;
         this.disengageNoted = other.disengageNoted;
+        this.slowStartNoted = other.slowStartNoted;
         this.intervalSeeded = false;
         this.haltSeenThisInterval = false;
         this.movementSeenThisInterval = false;
+        this.awaitingSeenThisInterval = false;
     }
 
     void onDimensionChange() {
+        // ssthresh memory (plan §1.2): the link didn't change, the view did — re-ramp
+        // from half the proven rate instead of INITIAL. Read the RAW field BEFORE the
+        // reset (the accessor returns 0 outside ENGAGED/RAMP); an OPEN session proved
+        // >= the engage threshold to open. Honesty note: for a proven-fast OPEN
+        // session this is a mild regression vs today's stays-uncapped hop (~20-30 s
+        // of re-confirmation), accepted under the join-latency-first priority; for a
+        // governed link it is strictly SAFER than today's uncapped re-engage gap.
+        if (this.phase == Phase.OPEN) {
+            this.restartHintBytesPerSec = ENGAGE_BELOW_BYTES_PER_SEC;
+        } else if (this.phase == Phase.RAMP || this.phase == Phase.ENGAGED) {
+            this.restartHintBytesPerSec = Math.clamp(this.desiredBytesPerSec / 2,
+                    SLOW_START_INITIAL_BYTES_PER_SEC, SLOW_START_CEILING_BYTES_PER_SEC);
+        }
         hardReset();
         // A new dimension is a new view — the missing floor re-learns (the edge ring
         // differs per dimension; a stale low floor would read the whole fresh view
@@ -451,6 +698,8 @@ final class TransferRateGovernor {
     /** Session teardown (the reset family): everything dies with the session. */
     void reset() {
         hardReset();
+        this.restartHintBytesPerSec = 0;
+        this.slowStartNoted = false;
         this.lastMissingVanilla = -1;
         this.minMissingVanilla = -1;
         this.sizeEwmaBytes = -1;
@@ -461,13 +710,20 @@ final class TransferRateGovernor {
         this.disengageNoted = false;
     }
 
-    boolean isEngaged() { return this.engaged; }
+    /** Production-dead since the phase machine (every live caller reads
+     *  {@link #getPhase()}); kept as the test suite's accessor. */
+    boolean isEngaged() { return this.phase == Phase.ENGAGED; }
+
+    Phase getPhase() { return this.phase; }
 
     /** Test accessor: the asymmetric size estimator's current value (-1 = no sample). */
     double getSizeEstimateForTest() { return this.sizeEwmaBytes; }
 
-    /** Desired rate in bytes/s while engaged, 0 while not — diag only. */
-    long getDesiredBytesPerSec() { return this.engaged ? this.desiredBytesPerSec : 0; }
+    /** Desired rate in bytes/s while ENGAGED or RAMP, 0 otherwise — diag only. */
+    long getDesiredBytesPerSec() {
+        return (this.phase == Phase.ENGAGED || this.phase == Phase.RAMP)
+                ? this.desiredBytesPerSec : 0;
+    }
 
     /**
      * The SUSTAINED-rate cap in columns/s for the scanner's spacing-gate site, or 0 =
@@ -477,7 +733,15 @@ final class TransferRateGovernor {
      * engaged-with-no-size-sample supplies no cap rather than garbage.
      */
     int sustainedColumnsPerSecond() {
-        if (!this.engaged || this.sizeEwmaBytes <= 0) return 0;
+        if (this.phase == Phase.RAMP) {
+            // Pre-sample conversion seeds HIGH (fewer columns than the byte budget
+            // intends — the safe join direction); the first real sample replaces it.
+            double columnBytes = this.sizeEwmaBytes > 0
+                    ? this.sizeEwmaBytes : SLOW_START_SEED_COLUMN_BYTES;
+            return Math.max(1, (int) Math.min(Integer.MAX_VALUE,
+                    (long) (this.desiredBytesPerSec / columnBytes)));
+        }
+        if (this.phase != Phase.ENGAGED || this.sizeEwmaBytes <= 0) return 0;
         return Math.max(1, (int) Math.min(Integer.MAX_VALUE,
                 (long) (this.desiredBytesPerSec / this.sizeEwmaBytes)));
     }

@@ -92,6 +92,22 @@ public class LSSConfigMenu implements ConfigEntryPoint {
         rateOption.setStorageHandler(save);
         rateOption.setEnabledProvider(s -> s.readBooleanOption(enabledDep[0]), enabledDep);
         rateGroup.addOption(rateOption);
+
+        // Slow Start on Join (join-slow-start-plan.md, user direction: toggle in the
+        // menu, default enabled). Inert while the enableAdaptiveTransferRate umbrella
+        // is off (config-file-only key) — the tooltip says so when that is the case
+        // at menu build (the SeeU conditional-tooltip precedent).
+        var slowStartOption = builder.createBooleanOption(Identifier.parse("lss:join_slow_start"));
+        slowStartOption.setName(Component.translatable("lss.config.join_slow_start"));
+        slowStartOption.setTooltip(Component.translatable(cfg.enableAdaptiveTransferRate
+                ? "lss.config.join_slow_start.tooltip"
+                : "lss.config.join_slow_start.tooltip.governor_off"));
+        slowStartOption.setImpact(OptionImpact.LOW);
+        slowStartOption.setDefaultValue(true);
+        slowStartOption.setBinding(v -> cfg.enableJoinSlowStart = v, () -> cfg.enableJoinSlowStart);
+        slowStartOption.setStorageHandler(save);
+        slowStartOption.setEnabledProvider(s -> s.readBooleanOption(enabledDep[0]), enabledDep);
+        rateGroup.addOption(slowStartOption);
         page.addOptionGroup(rateGroup);
 
         // ---- Far players (E2, FARP §3.3): its own page — a distinct feature with

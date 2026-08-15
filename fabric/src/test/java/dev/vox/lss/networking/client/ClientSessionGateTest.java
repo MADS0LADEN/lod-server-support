@@ -84,11 +84,11 @@ class ClientSessionGateTest {
         gate.onSessionConfig(config(V, true), true, true);
         var first = gate.getRequestManager();
         // Engage the first manager's governor with a known shape (the manager-test rig).
-        first.governor.tick(1, 0, 0, 0, 1, false, 50, true);
+        first.governor.tick(1, 0, 0, 0, 0, 1, false, 50, true);
         first.governor.tick(1 + TransferRateGovernor.INTERVAL_MILLIS,
-                800 * 1024, 100, 20_000, 1, false, 2_000, true);
+                800 * 1024, 100, 20_000, 20_000, 1, false, 2_000, true);
         first.governor.tick(1 + 2 * TransferRateGovernor.INTERVAL_MILLIS,
-                1600 * 1024, 200, 40_000, 1, false, 2_000, true);
+                1600 * 1024, 200, 40_000, 40_000, 1, false, 2_000, true);
         org.junit.jupiter.api.Assertions.assertTrue(first.governor.isEngaged(), "rig engagement");
         long desired = first.governor.getDesiredBytesPerSec();
 

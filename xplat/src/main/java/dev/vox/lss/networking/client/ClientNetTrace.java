@@ -112,7 +112,9 @@ final class ClientNetTrace {
                 + ",\"inflight\":" + inFlight
                 + ",\"spd\":" + String.format(java.util.Locale.ROOT, "%.2f", speedPerTick * 20.0)
                 // The transfer governor's state in the same timeline (live round 3's
-                // instrument): gov=0 means unengaged; rtt_* is LSS's own
+                // instrument): gov=0 means capless (OPEN/DISABLED); nonzero is the
+                // governed rate in EITHER RAMP or ENGAGED since join slow start —
+                // read the diag label for the phase; rtt_* is LSS's own
                 // declaration->first-answer RTT (1-4 Hz sampled — the highest-frequency
                 // latency probe on a warm store, where server processing is ~20 us).
                 + ",\"gov\":" + governedBps
