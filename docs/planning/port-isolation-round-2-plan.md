@@ -1,6 +1,13 @@
 # Port-isolation round 2 — hindsight hardening after the v0.11.0 ports
 
-**Status: EXECUTING (v1.2, 2026-08-15 — the post-release re-review: every item
+**Status: EXECUTED (v1.2 complete, 2026-08-15 — all ten items landed on main:
+R2-1/2/3/5/6/7 via PR #198, R2-4/8/10 via PR #199, the fan-out timing fix the
+round surfaced via PR #197. R2-9 resolved on the NOT-EQUAL arm: the live 26.2
+probe showed `getWorldFolder()` returns the per-dimension SUBFOLDER on unified
+layouts, so the per-level form was NOT adopted (it would break the 26.x sweep
+the same way the unified form broke the 1.21.x port's) — surfaces row 17 records
+the axis. Gates: T1/T2/paper/selftest green; every M3 byte-diff clean; the R2-3
+Paper fresh-backfill smoke PASSED. Original header: v1.2, 2026-08-15 — the post-release re-review: every item
 re-validated against the changes landed after v1.1 (the LINE_SHIP_NEOFORGE ship
 gate, the jarJar sqlite fix + its release_check hardening, the NeoForge metadata
 parity fix, the LINE_NEOFORGE_NAME flip, the README replacement, and the v0.11.0
