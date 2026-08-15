@@ -351,6 +351,16 @@ public class TwoPlayerGameTests {
         var stateA = service.registerPlayer(mockA, LSSConstants.CAPABILITY_VOXEL_COLUMNS);
         var stateB = service.registerPlayer(mockB, LSSConstants.CAPABILITY_VOXEL_COLUMNS);
         var step = new AtomicInteger();
+        // Wall-clock gate for step 1's re-ask (the 2026-08-15 flake diagnosis): the
+        // duplicate-serve grace (LSSConstants.SEND_DEPARTURE_GRACE_MILLIS) and the
+        // probe-suppress TTL (AbstractPlayerRequestState.PROBE_SUPPRESS_TTL_NANOS,
+        // 1500 ms, package-private) are WALL-denominated while this test's timeout is
+        // TICK-denominated — an unthrottled gametest server can burn all 1200 ticks
+        // inside the grace window, where every ts<=0 re-ask is silently grace-absorbed
+        // (the product's designed crossing-re-ask behavior) and the test wedges. Wait
+        // out both windows so the re-ask exercises the honest PROBE re-resolution the
+        // step exists to pin.
+        var reaskWallDeadline = new AtomicLong();
 
         helper.succeedWhen(() -> {
             helper.assertTrue(helper.getTick() >= 2, "waiting for generation light to settle");
@@ -375,6 +385,8 @@ public class TwoPlayerGameTests {
                     var edit = level.getBlockState(editPos).is(Blocks.STONE)
                             ? Blocks.COBBLESTONE : Blocks.STONE;
                     level.setBlock(editPos, edit.defaultBlockState(), 3);
+                    reaskWallDeadline.set(System.currentTimeMillis()
+                            + LSSConstants.SEND_DEPARTURE_GRACE_MILLIS + 1_500L + 200L);
                     step.set(1);
                     helper.assertTrue(false, "edit placed, awaiting A's post-edit probe re-serve");
                 }
@@ -386,6 +398,20 @@ public class TwoPlayerGameTests {
                     // Keep the chunk resident and re-issue until the re-serve lands — but only
                     // when no re-ask is in flight, so A re-serves EXACTLY once (step 2 asserts A==3).
                     level.getChunk(chunkPos.x(), chunkPos.z());
+                    if (System.currentTimeMillis() < reaskWallDeadline.get()) {
+                        // Ticks are wall-decoupled on an unthrottled gametest server
+                        // (~0.2-0.4 ms/tick measured), so a bare wall-deadline assert
+                        // races the tick ceiling. Sleeping converts each waiting tick
+                        // into >=50 ms of wall time: the ~2.2 s wait costs <=46 ticks
+                        // at ANY tick rate, well inside the standard 1200 ceiling.
+                        try {
+                            Thread.sleep(50L);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                        helper.assertTrue(false, "waiting out the departure-grace + "
+                                + "probe-suppress wall-clock windows");
+                    }
                     if (stateA.getTotalSectionsSent() < 2
                             && GameTestSeeding.noDeclarationOutstanding(stateA)
                             && !stateA.hasEnqueuedColumn(packed)
@@ -395,7 +421,11 @@ public class TwoPlayerGameTests {
                     service.tick();
                     helper.assertTrue(stateA.getTotalSectionsSent() == 2,
                             "waiting for A's post-edit re-serve (a ts<=0 re-ask of a flushed "
-                                    + "position re-resolves)");
+                                    + "position re-resolves) [DIAG sent=" + stateA.getTotalSectionsSent()
+                                    + " reqs=" + stateA.getTotalRequestsReceived()
+                                    + " outstanding=" + !GameTestSeeding.noDeclarationOutstanding(stateA)
+                                    + " enq=" + stateA.hasEnqueuedColumn(packed)
+                                    + " pend=" + stateA.hasPendingRequest(chunkPos.x(), chunkPos.z()) + "]");
                     // A second toggle staged INSIDE this atomic drain-save-drain callback:
                     // a concurrent test's level.save may already have absorbed the first
                     // edit into the live filter, but this fresh edit differs from every
