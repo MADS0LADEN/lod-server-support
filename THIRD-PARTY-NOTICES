@@ -5,7 +5,8 @@ The release jars redistribute the following third-party libraries in binary form
 (including their bundled native libraries). Their license texts are reproduced
 below as required for binary redistribution. sqlite-jdbc (Apache License 2.0)
 additionally ships its own license text inside the jar at
-META-INF/maven/org.xerial/sqlite-jdbc/LICENSE.
+META-INF/maven/org.xerial/sqlite-jdbc/LICENSE (for the Fabric and NeoForge jars,
+that path lives inside their nested sqlite-jdbc jar).
 
 ---------------------------------------------------------------------------
 zstd-jni — https://github.com/luben/zstd-jni

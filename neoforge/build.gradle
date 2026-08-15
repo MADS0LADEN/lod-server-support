@@ -153,6 +153,9 @@ def storeNativeKeep = [
     'linux/amd64/', 'linux/aarch64/', 'win/amd64/', 'win/aarch64/',
     'darwin/x86_64/', 'darwin/aarch64/',
 ]
+// org/sqlite/native/ stays listed with NO keep rows on purpose: flat sqlite must
+// not exist at all now, and if a shade regression brings it back, stripping its
+// natives makes the regression louder (release_check's flat-entry rule is the gate).
 def storeNativeRoots = ['org/sqlite/native/', 'linux/', 'win/', 'darwin/', 'freebsd/', 'aix/']
 def storeNativeStrip = { el ->
     def p = el.relativePath.pathString
@@ -163,15 +166,25 @@ def storeNativeStrip = { el ->
 // generated from the RESOLVED artifact so a version bump cannot desync it. Range
 // [<version>,<major+1>.0.0.0) — a future-major copy nested by another mod then
 // fails as a hard jarjar version conflict at boot instead of silently winning
-// selection under our compiled-against API.
+// selection under our compiled-against API. This is LSS's OWN task — MDG also
+// registers an (inert, jar-task-wired) :jarJar task whose output dir
+// build/generated/jarJar it recursively DELETES each run; ours must not live
+// there (case-insensitive filesystems collapse the two), hence lss-jarjar.
 def generateJarJarMetadata = tasks.register('generateJarJarMetadata') {
+    group = 'build'
+    description = 'Generates the jarJar metadata.json for the nested stock sqlite.'
     def cfg = configurations.jarJarStore
-    def outFile = layout.buildDirectory.file('generated/jarjar/metadata.json')
+    def outFile = layout.buildDirectory.file('generated/lss-jarjar/metadata.json')
     inputs.files(cfg)
     outputs.file(outFile)
     doLast {
         def artifact = cfg.singleFile
-        def version = (artifact.name =~ /^sqlite-jdbc-(.+)\.jar$/)[0][1]
+        def m = (artifact.name =~ /^sqlite-jdbc-(.+)\.jar$/)
+        if (!m) {
+            throw new GradleException("jarJarStore resolved unexpected artifact " +
+                    "'${artifact.name}' — expected sqlite-jdbc-<version>.jar")
+        }
+        def version = m[0][1]
         def nextMajor = (version.tokenize('.')[0] as int) + 1
         outFile.get().asFile.text = """\
 {
