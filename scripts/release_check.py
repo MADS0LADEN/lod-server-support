@@ -452,6 +452,14 @@ def check_neoforge_jar(jar, problems):
         if 'config="lss.neoforge.mixins.json"' not in toml:
             problems.append(f"{base}: neoforge.mods.toml lost the mixin config declaration "
                             "(accessors + save hook would silently never apply)")
+        import re as _re
+        logo = _re.search(r'(?m)^logoFile="([^"]+)"$', toml)
+        if not logo:
+            problems.append(f"{base}: neoforge.mods.toml has no logoFile — the mods "
+                            "screen shows a blank icon (must match the fabric jar)")
+        elif logo.group(1) not in names:
+            problems.append(f"{base}: logoFile points at {logo.group(1)!r} but that "
+                            "entry is not in the jar")
     for required, why in (("lss.neoforge.mixins.json", "mixin config"),
                           ("META-INF/accesstransformer.cfg", "access transformer"),
                           ("META-INF/services/dev.vox.lss.platform.LoaderServices",
@@ -556,7 +564,8 @@ def check_wire_identity_neoforge(lss_jar, vss_jar, problems):
                         "jar — the repackage must be a byte-copy rebrand (wire identity)")
 
 
-VSS_NEOFORGE_REBRAND_KEYS = ("displayName=", "authors=", "description=", "issueTrackerURL=")
+VSS_NEOFORGE_REBRAND_KEYS = ("displayName=", "authors=", "description=",
+                             "issueTrackerURL=", "logoFile=")
 
 
 def check_vss_pair_neoforge(lss_jar, vss_jar, problems):
@@ -1885,11 +1894,14 @@ def _selftest():
 
         TOML_LSS = ('modLoader="javafml"\nloaderVersion="[4,)"\nlicense="MIT"\n\n[[mods]]\n'
                     'modId="lss"\nversion="0.7.0"\ndisplayName="LOD Server Support"\n'
-                    'authors="VoX"\ndescription=\'\'\'LSS.\'\'\'\n\n'
+                    'authors="VoX"\nlogoFile="assets/lss/icon.png"\n'
+                    'description=\'\'\'LSS.\'\'\'\n\n'
                     '[[mixins]]\nconfig="lss.neoforge.mixins.json"\n')
         TOML_VSS = (TOML_LSS
                     .replace('displayName="LOD Server Support"', 'displayName="Voxy Server Side"')
-                    .replace('authors="VoX"', 'authors="Xantha, VoX"'))
+                    .replace('authors="VoX"', 'authors="Xantha, VoX"')
+                    .replace('logoFile="assets/lss/icon.png"',
+                             'logoFile="assets/lss/icon-vss.png"'))
 
         def _write_tree_neoforge(name, toml, brand, shared_class="x", extra=None, drop=(),
                                   store_entries=None):
@@ -1907,10 +1919,13 @@ def _selftest():
                 "dev/vox/lss/platform/NeoForgeClientLoaderServices.class": "x",
                 "dev/vox/lss/common/store/SqliteLodStore.class":
                     "ref org/sqlite/SQLiteDataSource ok",
+                "assets/lss/icon.png": "PNG",
                 "THIRD-PARTY-NOTICES": "sqlite-jdbc / zstd-jni notices " + "x" * 100,
             }
             entries.update(_store_neoforge_entries() if store_entries is None
                            else store_entries)
+            if brand == BRAND_VSS:
+                entries["assets/lss/icon-vss.png"] = "PNG"
             entries.update(extra or {})
             for d in drop:
                 entries.pop(d, None)
@@ -1933,6 +1948,16 @@ def _selftest():
         check_neoforge_jar(os.path.join(dneo, "lod-server-support-neoforge.jar"), p)
         check(any("LSSNeoMod" in m and "excluded from the shadow jar" in m for m in p),
               f"entrypoint-less neoforge jar not caught: {p}")
+        _write_tree_neoforge("lod-server-support-neoforge.jar", TOML_LSS, BRAND_LSS)
+
+        # a logoFile pointing at a missing icon entry must red (the mods-screen
+        # icon parity fix — fabric/neoforge lists must match)
+        _write_tree_neoforge("lod-server-support-neoforge.jar", TOML_LSS, BRAND_LSS,
+                             drop=("assets/lss/icon.png",))
+        p = []
+        check_neoforge_jar(os.path.join(dneo, "lod-server-support-neoforge.jar"), p)
+        check(any("logoFile points at" in m for m in p),
+              f"logoFile referencing a missing icon not caught: {p}")
         _write_tree_neoforge("lod-server-support-neoforge.jar", TOML_LSS, BRAND_LSS)
 
         # jarjar-shape negatives (neoforge-jarjar-sqlite-plan.md §4): metadata

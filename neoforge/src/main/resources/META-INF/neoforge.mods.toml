@@ -8,7 +8,8 @@ modId="lss"
 version="${mod_version}"
 displayName="LOD Server Support"
 authors="VoX"
-description='''Distributes LOD chunk data from servers to clients for LOD rendering mods (Voxy API surface). Server-side works with any LSS/VSS client; the client half needs a community Voxy build for NeoForge.'''
+logoFile="assets/lss/icon.png"
+description='''Voxy multiplayer support (unofficial). Enables players with Voxy to see fully rendered terrain out to hundreds of chunks on multiplayer servers without needing to explore the world first. Server-side works with any LSS/VSS client; the client half needs a community Voxy build for NeoForge.'''
 
 [[mixins]]
 config="lss.neoforge.mixins.json"

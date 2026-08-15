@@ -144,6 +144,11 @@ processResources {
     filesMatching('META-INF/neoforge.mods.toml') {
         expand props
     }
+    // The mods-screen icon (logoFile in the TOML): derived from the fabric module's
+    // copy so git keeps a single source — the fabric/neoforge mod lists match.
+    from(rootProject.file('fabric/src/main/resources/assets/lss/icon.png')) {
+        into 'assets/lss'
+    }
 }
 
 // Native strip lists — zstd-jni only on this module (sqlite rides NESTED with all
@@ -259,11 +264,13 @@ tasks.register('vssJar') {
     description = 'Repackages the LSS NeoForge jar under the Voxy Server Side branding.'
     dependsOn 'shadowJar'
     def srcJar = tasks.named('shadowJar').flatMap { it.archiveFile }
+    def iconFile = rootProject.file('branding/vss/icon.png')
     def outName = providers.environmentVariable('CI').map { it == 'true' }.getOrElse(false)
             ? "voxy-server-side-neoforge-${project.mod_version}+${project.minecraft_version}.jar"
             : 'voxy-server-side-neoforge.jar'
     def outFile = layout.buildDirectory.file("libs/${outName}")
     inputs.file(srcJar)
+    inputs.file(iconFile)
     outputs.file(outFile)
     doLast {
         def src = srcJar.get().asFile
@@ -282,6 +289,8 @@ tasks.register('vssJar') {
                                 .replaceFirst(/(?m)^displayName=.*$/,
                                         'displayName="Voxy Server Side"')
                                 .replaceFirst(/(?m)^authors=.*$/, 'authors="Xantha, VoX"')
+                                .replaceFirst(/(?m)^logoFile=.*$/,
+                                        'logoFile="assets/lss/icon-vss.png"')
                                 .replaceFirst(/(?m)^issueTrackerURL=.*$/,
                                         'issueTrackerURL="https://modrinth.com/plugin/voxy-server-side"')
                                 .replaceFirst(/(?m)^description=.*$/,
@@ -307,6 +316,12 @@ tasks.register('vssJar') {
                         zos.closeEntry()
                     }
                 }
+                // The dedicated VSS icon rides as a NEW entry beside the LSS icon
+                // (the rewritten logoFile above points at it) — the fabric vssJar's
+                // exact pattern; nothing else in the jar changes.
+                zos.putNextEntry(new ZipEntry('assets/lss/icon-vss.png'))
+                zos.write(iconFile.bytes)
+                zos.closeEntry()
             }
         } finally {
             zf.close()
