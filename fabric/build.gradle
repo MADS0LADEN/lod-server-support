@@ -220,9 +220,13 @@ afterEvaluate {
 
 processResources {
     inputs.property "version", project.version
+    inputs.property "minecraft_dependency", project.minecraft_dependency
 
     filesMatching("fabric.mod.json") {
-        expand "version": inputs.properties.version
+        // V-1/P3: the MC depends range is per-line DATA (gradle.properties
+        // minecraft_dependency) — a support cut edits the data, never this resource.
+        expand "version": inputs.properties.version,
+               "minecraft_dependency": inputs.properties.minecraft_dependency
     }
 }
 

@@ -55,10 +55,17 @@ class FabricModJsonContractTest {
 
     @Test
     void dependsMinecraftPinsThisLineBothWays() {
-        assertEquals(EXPECTED_MINECRAFT_DEPENDS,
+        // V-1/P3: the SOURCE resource carries the template token — the actual range is
+        // per-line DATA in gradle.properties (minecraft_dependency), pinned by FORM here
+        // because it is NOT derivable (a copied range template on an exact-pin line ships
+        // a jar that loads on wire-incompatible MC).
+        assertEquals("${minecraft_dependency}",
                 modJson.getAsJsonObject("depends").get("minecraft").getAsString(),
-                "fabric.mod.json must pin the line's Minecraft range exactly — the upper "
-                        + "bound is what keeps this jar off incompatible newer lines");
+                "fabric.mod.json's minecraft depends must stay templated from the data key");
+        assertEquals(EXPECTED_MINECRAFT_DEPENDS,
+                gradleProps.getProperty("minecraft_dependency", ""),
+                "gradle.properties minecraft_dependency must pin the line's range exactly — "
+                        + "the upper bound is what keeps this jar off incompatible newer lines");
     }
 
     @Test
