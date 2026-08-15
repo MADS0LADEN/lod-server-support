@@ -8,14 +8,16 @@ https://github.com/user-attachments/assets/721fb344-890e-4e03-ab36-539444427f7b
 
 ## Compatibility
 
-Clients use the Fabric mod on every version. Supported servers:
+Clients use the Fabric mod on every version; on 1.21.1 a NeoForge client works as well. Supported servers:
 
 | Minecraft | Fabric | Paper / Purpur | Folia | NeoForge |
 |---|---|---|---|---|
 | 26.2 | ✅ | ✅ | ✅ (experimental) | - |
 | 26.1 | ✅ | ✅ | ✅ (experimental) | - |
 | 1.21.11 | ✅ | ✅ | ✅ (experimental) | - |
-| 1.21.1 | ✅ | ✅ | - | ✅ (server) |
+| 1.21.1 | ✅ | ✅ | - | ✅ |
+
+On NeoForge (1.21.1) the recommended client path is the community [Voxy NeoForge port](https://github.com/j-shelfwood/voxy-neoforge) with [Forgified Fabric API](https://modrinth.com/mod/forgified-fabric-api) in place of Fabric API. Tested working with Forgified Fabric API 0.116.15, Sodium 0.6.13, and Voxy NeoForge port 0.2.9-alpha.
 
 Compatible with [AntiXray](https://modrinth.com/mod/anti-xray), [Moonrise](https://modrinth.com/mod/moonrise-opt), [C2ME](https://modrinth.com/mod/c2me-fabric), [ViaVersion](https://modrinth.com/plugin/viaversion)/[ViaBackwards](https://modrinth.com/plugin/viabackwards), and most other mods. Can be run alongside Distant Horizons on the same server to support DH clients and Voxy clients simultaneously. 
 
