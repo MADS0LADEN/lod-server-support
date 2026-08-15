@@ -65,6 +65,10 @@ class ReleaseWorkflowContractTest {
                             + line + "'");
             lineEnv.put(s.substring(0, eq), s.substring(eq + 1));
         }
+        assertFalse(Files.readString(locate(".github/line.env")).contains("\r"),
+                "line.env carries CR bytes (a CRLF conversion) — readAllLines hides them "
+                        + "but the workflow's grep passes them into $GITHUB_ENV, and the "
+                        + "guard then refuses this line's own tags (round-3 review MINOR)");
         minecraftVersion = Files.readAllLines(locate("gradle.properties")).stream()
                 .filter(l -> l.startsWith("minecraft_version="))
                 .map(l -> l.substring("minecraft_version=".length()).strip())
@@ -109,10 +113,15 @@ class ReleaseWorkflowContractTest {
         // names, the neoforge TOML expansion, release_check's --version matching). A
         // forward merge clobbering line.env alone reds here; clobbering both reds
         // ToolchainContractTest's artifact anchor and the build itself.
-        assertTrue(minecraftVersion.startsWith(env("LINE_MC_FABRIC")),
-                "LINE_MC_FABRIC (" + env("LINE_MC_FABRIC") + ") must be a prefix of "
+        // Refinement is equals-or-dot-anchored (round-3 review MINOR): a bare prefix
+        // admits the 1.21.1↔1.21.11 confusion — a PLANNED line pair at stage G — so a
+        // forward merge clobbering line.env back to the sibling line's shape stayed
+        // green and surfaced only as a tag-time guard refusal (the FabricModJson
+        // contract already carries this rule; adopted here).
+        assertTrue(refines(minecraftVersion, env("LINE_MC_FABRIC")),
+                "LINE_MC_FABRIC (" + env("LINE_MC_FABRIC") + ") must equal or dot-prefix "
                         + "gradle.properties minecraft_version (" + minecraftVersion + ")");
-        assertTrue(env("LINE_MC_PAPER").startsWith(env("LINE_MC_FABRIC")),
+        assertTrue(refines(env("LINE_MC_PAPER"), env("LINE_MC_FABRIC")),
                 "the Paper MC token refines the line token (e.g. 26.1.2 vs 26.1), never "
                         + "a different line");
         // The tag suffix must embed the fabric token (or be empty on main): the guard's
@@ -123,12 +132,15 @@ class ReleaseWorkflowContractTest {
         // V-1 review MINOR: single-row drift armor — whole-file clobbers red above, but a
         // typo'd NeoForge token alone would publish into another line's Modrinth id
         // namespace (labrinth rejects nothing). Every publish-feeding row ties back.
-        assertTrue(env("LINE_MC_NEOFORGE").startsWith(env("LINE_MC_FABRIC")),
+        assertTrue(refines(env("LINE_MC_NEOFORGE"), env("LINE_MC_FABRIC")),
                 "LINE_MC_NEOFORGE must refine the line token, never another line's");
         for (String loader : new String[]{"FABRIC", "PAPER", "NEOFORGE"}) {
-            assertTrue(env("LINE_GAME_VERSIONS_" + loader).contains(env("LINE_MC_" + loader)),
+            // Whole-token membership, not substring (round-3 review: "26.11" contains
+            // "26.1" — the same 1.21.1x confusion in list form).
+            assertTrue(java.util.Arrays.asList(env("LINE_GAME_VERSIONS_" + loader).split(" "))
+                            .contains(env("LINE_MC_" + loader)),
                     "LINE_GAME_VERSIONS_" + loader + " must contain its own LINE_MC_" + loader
-                            + " token");
+                            + " token as a whole list entry");
         }
         if (isMainline) {
             assertEquals("true", env("LINE_MAKE_LATEST"),
@@ -201,7 +213,8 @@ class ReleaseWorkflowContractTest {
         for (String step : new String[]{"- uses: softprops/action-gh-release",
                 "- name: Upload Fabric to Modrinth", "- name: Upload Paper to Modrinth",
                 "- name: Upload NeoForge to Modrinth"}) {
-            assertTrue(stepBlock(step).contains("if: github.event_name == 'push'"),
+            assertTrue(stepBlock(step).contains(
+                            "if: github.event_name == 'push' && github.ref_type == 'tag'"),
                     step + " must be push-gated so a dispatch rehearsal can never publish");
         }
     }
@@ -323,5 +336,12 @@ class ReleaseWorkflowContractTest {
         assertEquals(2, hits,
                 "build.yml must keep branches: [main, 'support/**']"
                         + " on push AND pull_request");
+    }
+
+    /** Equals-or-dot-anchored version refinement: "26.1.2" refines "26.1"; "26.11"
+     *  does NOT (the bare-prefix 1.21.1↔1.21.11 trap — FabricModJsonContractTest's
+     *  rule, adopted at round 3). */
+    private static boolean refines(String version, String line) {
+        return version.equals(line) || version.startsWith(line + ".");
     }
 }

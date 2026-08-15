@@ -23,6 +23,8 @@ LEGACY_DIR="$SCRIPT_DIR/test-server/fabric-legacy"
 # The port runbook's step 8 edits exactly this block (MC versions, CDN URLs, the
 # legacy LSS pin below) — nothing else in this script is per-line.
 # --- Fabric versions ---
+# NOTE: the Java-version gate below (JAVA_MAJOR check) is ALSO per-line data —
+#       a Java-21 line port must retarget it (round-3 review NIT).
 FABRIC_MC_VERSION="26.2"
 FABRIC_LOADER_VERSION="0.19.3"
 FABRIC_INSTALLER_VERSION="1.1.1"
@@ -640,11 +642,11 @@ setup_neoforge() {
     # installed marker (one-time, downloads the vanilla server jar + NeoForge libraries).
     local args_file="libraries/net/neoforged/neoforge/${NEOFORGE_VERSION}/unix_args.txt"
     if [ ! -f "$NEOFORGE_DIR/$args_file" ]; then
-        download "$NEOFORGE_INSTALLER_URL" "$NEOFORGE_DIR/neoforge-installer.jar"
+        download "$NEOFORGE_INSTALLER_URL" "$NEOFORGE_DIR/neoforge-installer-${NEOFORGE_VERSION}.jar"
         echo "  Running the NeoForge server installer (one-time, downloads libraries)..."
         # Flag spelling differs across installer generations — try both.
-        (cd "$NEOFORGE_DIR" && java -jar neoforge-installer.jar --install-server . > installer.log 2>&1) \
-            || (cd "$NEOFORGE_DIR" && java -jar neoforge-installer.jar --installServer . >> installer.log 2>&1) \
+        (cd "$NEOFORGE_DIR" && java -jar neoforge-installer-${NEOFORGE_VERSION}.jar --install-server . > installer.log 2>&1) \
+            || (cd "$NEOFORGE_DIR" && java -jar neoforge-installer-${NEOFORGE_VERSION}.jar --installServer . >> installer.log 2>&1) \
             || { echo "ERROR: NeoForge installer failed — see $NEOFORGE_DIR/installer.log" >&2; return 1; }
         if [ ! -f "$NEOFORGE_DIR/$args_file" ]; then
             echo "ERROR: installer ran but $args_file is missing — see $NEOFORGE_DIR/installer.log" >&2

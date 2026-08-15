@@ -74,7 +74,14 @@ jobs:
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             V="${GITHUB_REF_NAME#v}"
-            echo "MOD_VERSION=${V%%+*}" >> "$GITHUB_ENV"
+            MV="${V%%+*}"
+            # Round-3 review: any v-prefixed non-release tag (vsmoke) used to derive
+            # a garbage MOD_VERSION and publish under it. Releases start with a digit.
+            case "$MV" in
+              [0-9]*) ;;
+              *) echo "::error::tag '${GITHUB_REF_NAME}' does not derive a numeric mod version ('$MV') — refusing to publish"; exit 1 ;;
+            esac
+            echo "MOD_VERSION=$MV" >> "$GITHUB_ENV"
           else
             echo "MOD_VERSION=0.0.0-dryrun" >> "$GITHUB_ENV"
           fi
@@ -173,7 +180,7 @@ jobs:
         run: python3 scripts/release_check.py --version "${MOD_VERSION}"
 
       - uses: softprops/action-gh-release@v2
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         with:
           body: ${{ steps.release_notes.outputs.notes }}
           # Without this, a glob matching nothing publishes an empty release silently;
@@ -190,7 +197,7 @@ jobs:
             neoforge/build/libs/lod-server-support-neoforge-*.jar
 
       - name: Upload Fabric to Modrinth
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         uses: Kir-Antipov/mc-publish@v3.3
         with:
           modrinth-id: lKiXKLvv
@@ -204,7 +211,7 @@ jobs:
           changelog: ${{ steps.release_notes.outputs.notes }}
 
       - name: Upload Paper to Modrinth
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         uses: Kir-Antipov/mc-publish@v3.3
         with:
           modrinth-id: lKiXKLvv
@@ -229,7 +236,7 @@ jobs:
       # best-effort-tier failure strands only the best-effort artifact, never
       # Fabric/Paper (the full tier).
       - name: Upload NeoForge to Modrinth
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         uses: Kir-Antipov/mc-publish@v3.3
         with:
           modrinth-id: lKiXKLvv

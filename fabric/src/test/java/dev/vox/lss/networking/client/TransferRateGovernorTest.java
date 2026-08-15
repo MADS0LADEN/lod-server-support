@@ -1122,4 +1122,46 @@ class TransferRateGovernorTest {
         assertEquals(SS_INITIAL, g.getDesiredBytesPerSec(),
                 "the snap tracked desired down to the INITIAL floor, not an engage anchor");
     }
+
+    @Test
+    void answeredTrickleUnderTheOfferFloorNeverRamps() {
+        // Round-3 review MAJOR: the under-offer hold must gate the growth rungs.
+        // With growth evaluated first, a converged client's occasional one-column
+        // dirty-edit intervals (offered a fraction of desired, trivially answered)
+        // satisfied answered-all-asked and ~17 sparse intervals walked a
+        // never-proven link to capless OPEN — non-qualifying gaps preserve both
+        // streaks, so the doublings accumulate across a whole session.
+        var g = armed();
+        long declared = 0;
+        g.tick(0, 0, 0, 0, 0, 1, false, NORMAL_PING, true);
+        for (int i = 1; i <= 8; i++) {
+            g.tick(i * INTERVAL, 0, 0, declared += 1, declared, 1,
+                    false, NORMAL_PING, true);
+            assertEquals(SS_INITIAL, g.getDesiredBytesPerSec(),
+                    "an under-offered answered trickle is demand-limited: HOLD, "
+                            + "never growth (interval " + i + ")");
+        }
+        assertEquals(TransferRateGovernor.Phase.RAMP, g.getPhase());
+    }
+
+    @Test
+    void partiallyAnsweredByteFreeIntervalHoldsInsteadOfSnapping() {
+        // Round-3 review MINOR: a zero-byte answer-only interval with PARTIAL
+        // answers (a server hiccup mid-revalidation) fails every growth rung and
+        // used to fall to the plateau snap with measured = 0 — wiping the earned
+        // ramp to INITIAL on no rate evidence. It must HOLD.
+        var g = armed();
+        long declared = 0;
+        g.tick(0, 0, 0, 0, 0, 1, false, NORMAL_PING, true);
+        g.tick(INTERVAL, 0, 0, declared += 200, declared, 1, false, NORMAL_PING, true);
+        g.tick(2 * INTERVAL, 0, 0, declared += 200, declared, 1, false, NORMAL_PING, true);
+        long desired = g.getDesiredBytesPerSec();
+        assertEquals(4 * SS_INITIAL, desired, "premise: two byte-free doublings earned");
+        // 50% answered, zero bytes: offered ≈ 3.2 MB/s via the seed (past the
+        // under-offer row), growth fails (100×4 < 200×3), plateau reached.
+        g.tick(3 * INTERVAL, 0, 0, declared += 200, declared - 100, 1,
+                false, NORMAL_PING, true);
+        assertEquals(desired, g.getDesiredBytesPerSec(),
+                "zero bytes moved is not link evidence — hold, never a snap to INITIAL");
+    }
 }

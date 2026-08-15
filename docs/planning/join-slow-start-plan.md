@@ -1,9 +1,8 @@
 # Join slow start for the client transfer governor — implementation plan
 
-**v1.2 — 2026-08-14. Status: IMPLEMENTED (feat/join-slow-start); the 3-Opus
-implementation review round is folded (§8 records both rounds). User decisions: join
-latency beats LOD fill speed; toggle in client config AND the Sodium menu, default
-enabled.**
+**v1.3 — 2026-08-14. Status: MERGED (PR #179) + the round-3 post-merge review
+fold (§8 records all three rounds). User decisions: join latency beats LOD fill
+speed; toggle in client config AND the Sodium menu, default enabled.**
 
 Normative context: adaptive-transfer-rate-plan.md (Mechanism A — the governor this
 amends), `TransferRateGovernor` (xplat) + `LodRequestManager`/`ClientSessionGate`
@@ -92,11 +91,11 @@ bottom-rung interval would double vacuously). Rows in order:
 | ping excess > 250 ms **and** `measured < ENGAGE_BELOW` (the conjunct kept VERBATIM — review: "a ramp is below it by construction" was false at the 8 MB/s ceiling, and dropping it let a 2-interval ping blip engage a fast link at an 8 MB/s anchor) **and** `desired ≥ RAMP_ENGAGE_MIN_DESIRED` (impl review MAJOR: below that rung the measured-below term is TRIVIALLY true — the ramp itself caps measured — so vanilla's own join-burst ping would engage a 100 Mbps join at a MIN-rate anchor with a ~70-90 s recovery; below the gate a congested interval falls through to the plateau snap, which tracks desired down toward measured — containment without a false engagement) | streak++; at ≥2 → ENGAGED via existing `engage(measured, excess)`. **Streak 1 is a HOLD** (review: the first excess interval must not fall through and double into detected-but-undebounced congestion). Non-excess intervals reset the pending streak (the existing `else` rule). | no |
 | `vanillaBehind()` | HOLD (no cut — floor freshly learned at join, ramp rates low; the HOLD half of vanilla-first) | no |
 | movement seen **and ping excess > RAMP_MOVEMENT_HOLD_EXCESS_MS (62)** (plan review MAJOR, both lenses: an UNCONDITIONAL movement hold pins every join-then-travel session at INITIAL forever — the elytra wall reborn, on a rig that hands out elytra at spawn; impl review MAJOR: `> 0` against a rolling-MIN baseline is a JITTER detector — ordinary WAN jitter sits above the session floor most intervals, so join-then-fly would still freeze the whole flight. A quarter of the engage threshold is above jitter, far below congestion) | HOLD | no |
-| under-offered (`offered < ½·desired`) | HOLD — demand-limited; a converged client sits mid-ramp and resumes with demand | no |
+| under-offered (`offered < ½·desired`) | HOLD — demand-limited; a converged client sits mid-ramp and resumes with demand. ROW ORDER IS LOAD-BEARING (round-3 MAJOR): this row must precede the growth rungs — evaluated after them, answered-all-asked doubled on one-column dirty-edit trickles (offered at a fraction of desired, trivially answered) and ~17 sparse intervals walked a never-proven link to capless OPEN, non-qualifying gaps preserving both streaks along the way (pinned) | no |
 | **delivered-all-offered** (`offered ≥ ½·desired` and `measured ≥ ¾·offered`, while `measured < ¾·desired`) — the high-RTT rule (review HIGH: the stop-and-wait window caps offered at ~0.6-0.7×desired on ≥250 ms RTT links, so the classic band is unreachable and the session parks at INITIAL on a clean fast link; the link delivering everything asked of it IS growth evidence — doubling widens the window, which is exactly how a windowed protocol discovers capacity, and the ping conjunct + Mechanism B bound the overshoot) | `desired = min(desired × 2, CEILING)` | yes |
 | kept-up (`measured ≥ ¾·desired`) | `desired = min(desired × 2, CEILING)` | yes |
 | **answered-all-asked** (`deltaDeclared > 0` and `deltaAnswered ≥ ¾·deltaDeclared` — impl review MAJOR, all three lenses: a warm rejoin is answered entirely with up_to_date frames, ZERO wire bytes, and every byte-denominated rung fails structurally — the session parks at 2 col/s for the whole revalidation. Positions answered in the interval = the actuator's stop-and-wait window saturated with timely service; the answers that carried no bytes cost the link nothing, so growth is safe by construction, and it is the ONLY signal a revalidation-dominated session ever produces) | `desired = min(desired × 2, CEILING)` | yes |
-| plateau (offer-backed shortfall) | `desired = clamp(5·measured/4, INITIAL, desired)` — the ONE-TIME overhang snap (review: a bare HOLD leaves desired at up to 2× capacity, a permanent standing offer; the snap bounds the overhang at 25% and never raises). Also the CONTAINMENT path for congestion below the row-1 gate: excess intervals land here and desired tracks measured down to the INITIAL floor (pinned). The never-raises min-guard is structurally redundant given the ¾ band (`measured < ¾·desired ⇒ 5·measured/4 < 15/16·desired`) — kept as defense-in-depth against band retuning | no |
+| plateau (offer-backed shortfall) | `desired = clamp(5·measured/4, INITIAL, desired)` — the ONE-TIME overhang snap (review: a bare HOLD leaves desired at up to 2× capacity, a permanent standing offer; the snap bounds the overhang at 25% and never raises). Also the CONTAINMENT path for congestion below the row-1 gate: excess intervals land here and desired tracks measured down to the INITIAL floor (pinned). BYTE EVIDENCE REQUIRED (round 3): a zero-byte answer-only interval reaching this row (partial answers — growth failed) HOLDs instead of snapping — measured 0 means nothing needed bytes, and the snap wiped an earned ramp to INITIAL on a server hiccup (pinned). The never-raises min-guard is structurally redundant given the ¾ band (`measured < ¾·desired ⇒ 5·measured/4 < 15/16·desired`) — kept as defense-in-depth against band retuning | no |
 
 **RAMP → OPEN**: `desired > ENGAGE_BELOW` on 10 consecutive CREDITED intervals
 (the table's credit column — holds and plateaus don't credit; the reuse of
@@ -251,6 +250,12 @@ merge gate.
   there as a MIN-rate latent (an engaged session whose boundary instants land
   answered can starve qualifying intervals). Pre-existing, NOT re-scoped here —
   recorded as a follow-up; RAMP consumes the latch, ENGAGED is untouched.
+- **Answered-count inflation (round-3 PLAUSIBLE, accepted)**: `recordUpToDate`
+  also counts answers for positions the tracker no longer tracks, so a server
+  draining a superseded backlog can inflate deltaAnswered past the interval's own
+  asks and earn a doubling the current asks didn't — direction-up, bounded by the
+  engage/plateau containment and the under-offer gate; the plan's "any response
+  type" language accepts it.
 - **High-RTT offered inflation**: `offered` converts deltaDeclared through the size
   EWMA, so when the EWMA lags a regime change toward small columns the
   delivered-all-offered rung can overstate the offer and grow on a marginal link —
@@ -267,6 +272,24 @@ merge gate.
   property gate is unchanged and pinned).
 
 ## 8. Review round records
+
+### Round 3 — post-merge full-feature review (2026-08-14, Fable reviewer, part of the
+### v0.11.0 changes-since-#158 wave)
+
+One MAJOR: the implementation evaluated the growth rungs BEFORE the under-offer
+hold, inverting the §1.2 row order — the fold's answered-all-asked rung then
+doubled on one-column dirty-edit trickle intervals and ~17 sparse trivially-
+answered intervals walked a never-proven link to capless OPEN (simulated; the
+warm rejoin never needed the inverted order — its actuator-clamped declarations
+put offered ≈ desired). FIXED by reordering to the spec + a trickle pin. One
+MINOR, fold-exposed: a PARTIALLY answered zero-byte interval (server hiccup
+mid-revalidation) fell to the plateau snap with measured = 0 and wiped the ramp
+to INITIAL — FIXED with the plateau's byte-evidence guard (measured ≤ 0 HOLDs)
++ pin. Recorded-not-fixed: the answered-count inflation PLAUSIBLE (§7). Also in
+the round's scope, verified clean: streak/engage lifecycles, the transition
+matrix incl. adoptFrom completeness, negative-delta impossibility
+(RequestMetrics totals are manager-lifetime monotonic), label/locale, the
+build-time tooltip resolution (no menu row can flip the governor mid-session).
 
 ### Implementation review (v1.1 → v1.2, 2026-08-14, 3 Opus reviewers — all MERGE WITH FIXES)
 

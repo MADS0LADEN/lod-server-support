@@ -399,10 +399,12 @@ tasks.register('vssJar') {
                         zos.putNextEntry(ne)
                         zos.write(props.getBytes('UTF-8'))
                         zos.closeEntry()
-                    } else if (e.name == 'assets/lss/lang/en_us.json') {
-                        // Display-string rebrand in the lang file VALUES only (keys stay
+                    } else if (e.name.startsWith('assets/lss/lang/') && e.name.endsWith('.json')) {
+                        // Display-string rebrand in EVERY lang file's VALUES only (keys stay
                         // lss.* — they are addressed by the untouched mod id). Without this
-                        // the VSS Sodium pages read "LOD Server Support"/"LSS" mid-sentence.
+                        // the VSS Sodium pages read "LOD Server Support"/"LSS" mid-sentence
+                        // (path-prefix match, not the en_us literal, so added locales —
+                        // zh_cn/zh_tw — rebrand too; Java's ASCII \b is CJK-safe here).
                         def lang = new groovy.json.JsonSlurper().parse(zf.getInputStream(e))
                         def rebranded = lang.collectEntries { k, v ->
                             [k, v.toString()

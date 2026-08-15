@@ -102,8 +102,10 @@ Mechanism decisions (review MAJORs, decided here, not left to the implementer):
   `true`**, `if:`-gating the gh-release + Modrinth steps. Every branch can then
   exercise the fully-resolved env end-to-end. P2 pins the default.
 - `release_check.py`'s `FORBIDDEN_LINE_TOKENS` goes vacuous once release.yml
-  carries no MC tokens — it moves to validating the data file, and its list is
-  itself per-line (grows to four entries at G).
+  carries no MC tokens. AS BUILT (round-3 review reconciliation): the data-file
+  validation landed in `ReleaseWorkflowContractTest` (which runs via `:paper:test`
+  before every publish), NOT in release_check — nothing is unguarded; revisit a
+  release_check data-file arm at G when the token list grows to four entries.
 
 **P2. ReleaseWorkflowContractTest reads the same data** (+110/+91 of duplicated
 constants deleted), with an `IS_MAINLINE` switch for mainline-only pins (VSS

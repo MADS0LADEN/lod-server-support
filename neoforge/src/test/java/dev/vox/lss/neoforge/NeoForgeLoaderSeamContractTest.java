@@ -93,8 +93,12 @@ class NeoForgeLoaderSeamContractTest {
         // connection or an un-negotiated channel must be a silent no-op.
         String client = read(
                 "neoforge/src/main/java/dev/vox/lss/platform/NeoForgeClientLoaderServices.java");
-        assertTrue(client.contains("connection == null || !connection.hasChannel(payload.type())"),
+        assertTrue(client.contains("connection == null")
+                        && client.contains("!connection.hasChannel(payload.type())"),
                 "sendToServer must pre-check the connection + channel (the unannounced-channel crash class)");
+        assertTrue(client.contains("throw new IllegalStateException(\"no connection"),
+                "a null connection must THROW (Fabric parity — the manager's send-failure"
+                        + " ladder depends on it; round-3 review)");
         assertTrue(client.contains("catch (UnsupportedOperationException"),
                 "the client send's race window needs the throw contained too");
     }
