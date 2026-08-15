@@ -136,6 +136,12 @@ public class LodRequestManager {
     /** Config kill switch seam (the adaptiveCadenceEnabled pattern). */
     java.util.function.BooleanSupplier transferGovernorEnabled =
             () -> LSSClientConfig.CONFIG.enableAdaptiveTransferRate;
+    /** Join slow start (join-slow-start-plan.md): sessions START in the governed
+     *  RAMP and earn their rate. Manager tests that pin uncapped first walks
+     *  override this to false (the frontier-damping test pattern);
+     *  productionDefaultEnablesSlowStart pins the real wiring. */
+    java.util.function.BooleanSupplier joinSlowStartEnabled =
+            () -> LSSClientConfig.CONFIG.enableJoinSlowStart;
 
     private static int readOwnPing() {
         var mc = Minecraft.getInstance(); // null under fabric-loader-junit (headless)
@@ -336,6 +342,10 @@ public class LodRequestManager {
                 this.governor.noteMissingVanilla(missingVanilla.getAsInt());
             }
         }
+        // Slow-start arming is re-asserted every tick (wiring, not session state):
+        // a mid-session OFF demotes RAMP->OPEN inside the setter; ON applies at the
+        // next session entry (join-slow-start-plan.md toggle table).
+        this.governor.setSlowStartEnabled(this.joinSlowStartEnabled.getAsBoolean());
         this.governor.tick(this.governor.clock.getAsLong(),
                 this.wireBytesReceivedSupplier.getAsLong(),
                 this.columnsReceivedSupplier.getAsLong(),
@@ -947,9 +957,14 @@ public class LodRequestManager {
      *  governed refusals — this label disambiguates): "<cols>/s (<KB>/s)" while
      *  engaged, "off" otherwise. */
     public String getGovernedRateLabel() {
-        if (!this.governor.isEngaged()) return "off";
-        return this.governor.sustainedColumnsPerSecond() + "/s ("
-                + (this.governor.getDesiredBytesPerSec() / 1024) + " KB/s)";
+        return switch (this.governor.getPhase()) {
+            case ENGAGED -> this.governor.sustainedColumnsPerSecond() + "/s ("
+                    + (this.governor.getDesiredBytesPerSec() / 1024) + " KB/s)";
+            case RAMP -> "ramp@" + (this.governor.getDesiredBytesPerSec() / 1024)
+                    + " KB/s (" + this.governor.sustainedColumnsPerSecond() + "/s)";
+            case OPEN -> "open";
+            case DISABLED -> "off";
+        };
     }
 
     // Response counters

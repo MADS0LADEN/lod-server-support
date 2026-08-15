@@ -78,6 +78,9 @@ class ConfigValidationTest {
                 "send pacing must ship enabled (a burst shaper, never a rate governor)");
         assertTrue(clientConfig().enableAdaptiveTransferRate,
                 "the client transfer governor must ship enabled");
+        assertTrue(clientConfig().enableJoinSlowStart,
+                "join slow start must ship enabled (join-slow-start-plan.md — join "
+                        + "latency beats LOD fill speed, user decision 2026-08-14)");
     }
 
     @Test
