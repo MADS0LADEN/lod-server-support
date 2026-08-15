@@ -127,20 +127,34 @@ class PluginYmlContractTest {
     }
 
     @Test
-    void foliaSupportedIsDeclaredNowThatFolia262Exists() {
-        // Third flip. Absent 2026-07-19..2026-08-01 because Folia had no MC 26.2 build at
-        // all, so declaring it would have auto-loaded release jars onto a platform that did
-        // not exist yet. Folia published 26.2-1 (channel BETA) on 2026-07-28, so the flag is
-        // back — putting this line on the same experimental footing as 1.21.8/1.21.11/26.1.x
-        // rather than ahead of them. FoliaWiringContractTest still pins the wiring
-        // (no legacy scheduler, lifecycle through the mailbox).
-        assertTrue(yml.contains("folia-supported"),
-                "folia-supported must be declared now that Folia ships a 26.2 build — the"
-                        + " single jar serves Paper and Folia");
-        assertTrue(yml.getBoolean("folia-supported"),
-                "...and it must be true; a false/absent flag makes Folia refuse the jar");
-        assertTrue(rawText.contains("folia-supported: true"),
-                "release_check.py greps the RAW line, so the source must carry that exact form");
+    void foliaSupportedDerivesFromLineEnv() throws Exception {
+        // R2-5: the flag's direction is line.env's judgment (folia membership in
+        // LINE_PAPER_LOADERS) — the source carries the placeholder, processResources
+        // expands it, and this pin asserts BOTH polarities agree with the datum. The
+        // pre-R2-5 history (three hand flips, one shipped wrong by inheritance) is
+        // exactly what the derivation ends. FoliaWiringContractTest still pins the
+        // wiring (no legacy scheduler, lifecycle through the mailbox).
+        assertTrue(rawText.contains("folia-supported: ${folia_supported}"),
+                "the SOURCE plugin.yml must carry the processResources placeholder");
+        boolean expected = java.util.Arrays.asList(
+                lineEnv("LINE_PAPER_LOADERS").split("\\s+")).contains("folia");
+        String expanded;
+        try (var in = LSSPaperPlugin.class.getResourceAsStream("/plugin.yml")) {
+            assertNotNull(in, "expanded plugin.yml must be on the test classpath");
+            expanded = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+        assertTrue(expanded.contains("folia-supported: " + expected),
+                "the EXPANDED plugin.yml must agree with line.env LINE_PAPER_LOADERS ("
+                        + expected + ") — the wrong polarity either refuses Folia or "
+                        + "auto-loads onto a platform this line does not publish for");
+    }
+
+    private static String lineEnv(String key) throws java.io.IOException {
+        for (String line : Files.readAllLines(locate(".github/line.env"))) {
+            String t = line.trim();
+            if (t.startsWith(key + "=")) return t.substring(key.length() + 1);
+        }
+        throw new IllegalStateException(key + " not found in .github/line.env");
     }
 
     @Test

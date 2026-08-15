@@ -16,10 +16,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Line identity comes from .github/line.env (R2-2 — build.yml used to hardcode
+      # the Java version and went red-by-construction on the Java-21 line).
+      - name: Source line env
+        run: grep -vE '^\s*(#|$)' .github/line.env >> "$GITHUB_ENV"
+
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: 25
+          java-version: ${{ env.LINE_JAVA_VERSION }}
 
       - uses: gradle/actions/setup-gradle@v5
 
@@ -145,10 +150,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Line identity comes from .github/line.env (R2-2 — build.yml used to hardcode
+      # the Java version and went red-by-construction on the Java-21 line).
+      - name: Source line env
+        run: grep -vE '^\s*(#|$)' .github/line.env >> "$GITHUB_ENV"
+
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: 25
+          java-version: ${{ env.LINE_JAVA_VERSION }}
 
       - uses: gradle/actions/setup-gradle@v5
 

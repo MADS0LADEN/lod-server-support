@@ -58,7 +58,27 @@ COMMON_FORBIDDEN = ("dev/vox/lss/common/soak/", "dev/vox/lss/common/benchmark/")
 # gets the full jar checks below; only the SHIPPING requirements (family presence,
 # version pin, release globs) are gated. Mirrors .github/line.env
 # LINE_SHIP_NEOFORGE; flip BOTH together.
-SHIP_NEOFORGE = False
+def _line_env():
+    """Parse .github/line.env (the single per-line data source, R2-5) — release_check
+    stops carrying hand-mirrored copies of line data; the contract tests pin the
+    line.env VALUES per line, and everything here derives."""
+    out = {}
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "..", ".github", "line.env")) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                out[k] = v
+    return out
+
+
+_LINE_ENV = _line_env()
+# Derived (R2-5, retiring the v1.1 hand mirror + its drift vector): NeoForge family
+# requirements follow the line's shipping decision directly.
+SHIP_NEOFORGE = _LINE_ENV.get("LINE_SHIP_NEOFORGE") == "true"
+# Derived: does this line declare folia support? (plugin.yml expands the same datum.)
+FOLIA_SUPPORTED = "folia" in _LINE_ENV.get("LINE_PAPER_LOADERS", "").split()
 RELEASE_GLOBS = ("lod-server-support-fabric-*.jar", "lod-server-support-paper-*.jar",
                  "voxy-server-side-fabric-*.jar", "voxy-server-side-paper-*.jar") + ((
                  "lod-server-support-neoforge-*.jar",
@@ -68,7 +88,7 @@ CI_NAME_SUFFIX = "0.4.0+26.1.2.jar"  # a representative CI filename for glob rou
 # jars; 1.21.x fabric-loom-remap ships intermediary. A forward merge swapping the loom
 # plugin produces a right-named, gate-green jar in the WRONG namespace — unloadable on any
 # real server of this line — so the manifest attribute is pinned like Paper's namespace.
-FABRIC_MAPPING_NAMESPACE = "official"
+FABRIC_MAPPING_NAMESPACE = _LINE_ENV.get("LINE_FABRIC_MAPPING_NAMESPACE", "official")
 SOAK_JAR_PREFIX = "lss-paper-soak"
 
 
@@ -193,9 +213,12 @@ def check_paper_jar(jar, problems):
         # LOSES the flag silently stops loading on Folia servers, which is the failure this
         # now guards (the previous inversion guarded the opposite risk, when no 26.2 Folia
         # existed to load onto).
-        if not re.search(r"^folia-supported:\s*true\s*$", ymltext, re.MULTILINE):
-            problems.append(f"{base}: plugin.yml lost folia-supported: true — Folia servers "
-                            "will refuse this jar")
+        want_folia = "true" if FOLIA_SUPPORTED else "false"
+        if not re.search(r"^folia-supported:\s*" + want_folia + r"\s*$", ymltext, re.MULTILINE):
+            problems.append(f"{base}: plugin.yml folia-supported must be {want_folia} "
+                            "(derived from line.env LINE_PAPER_LOADERS) — the wrong "
+                            "polarity either refuses Folia or auto-loads onto a "
+                            "platform this line does not publish for")
     if not any(n.startswith("dev/vox/lss/common/") and n.endswith(".class") for n in names):
         problems.append(f"{base}: shaded jar missing the shared common/ classes")
     if "paperweight-mappings-namespace: mojang" not in _manifest(jar):

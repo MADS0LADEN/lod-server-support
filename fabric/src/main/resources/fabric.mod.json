@@ -46,8 +46,8 @@
     "fabric-api": "${fabric_api_dependency}"
   },
   "suggests": {
-    "sodium": ">=0.9.0",
+    "sodium": "${suggests_sodium}",
     "modmenu": "*",
-    "voxy": ">=0.2.17-alpha"
+    "voxy": "${suggests_voxy}"
   }
 }

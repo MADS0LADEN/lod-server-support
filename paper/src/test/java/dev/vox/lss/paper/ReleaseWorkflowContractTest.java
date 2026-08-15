@@ -76,6 +76,37 @@ class ReleaseWorkflowContractTest {
         isMainline = env("LINE_TAG_SUFFIX").isEmpty();
     }
 
+    @org.junit.jupiter.api.Test
+    void buildYmlDerivesJavaVersionFromLineEnv() throws java.io.IOException {
+        // R2-2 (port-isolation round 2): build.yml hardcoded java-version went red by
+        // construction on the Java-21 line, twice. Both jobs must source line.env and
+        // derive; a literal value is the regression.
+        String buildYml = Files.readString(locate(".github/workflows/build.yml"));
+        assertFalse(buildYml.matches("(?s).*java-version:\\s*\\d.*"),
+                "build.yml must not hardcode java-version — derive from LINE_JAVA_VERSION");
+        assertEquals(2, count(buildYml, "java-version: ${{ env.LINE_JAVA_VERSION }}"),
+                "both build.yml jobs must derive java-version from line.env");
+        assertEquals(2, count(buildYml, "grep -vE '^\\s*(#|$)' .github/line.env >> \"$GITHUB_ENV\""),
+                "both build.yml jobs must source line.env before setup-java");
+    }
+
+    @org.junit.jupiter.api.Test
+    void releaseYmlDerivesPaperDisplayProse() throws java.io.IOException {
+        // R2-7: the Paper Modrinth display name composes from LINE_PAPER_LOADERS —
+        // a hardcoded "Paper/Purpur..." literal is the last per-line name token class.
+        String releaseYml = Files.readString(locate(".github/workflows/release.yml"));
+        assertFalse(releaseYml.contains("Paper/Purpur"),
+                "release.yml must not hardcode loader display prose (LINE_PAPER_DISPLAY derives it)");
+        assertTrue(releaseYml.contains("${{ env.LINE_PAPER_DISPLAY }}"),
+                "the Paper Modrinth name must compose from LINE_PAPER_DISPLAY");
+    }
+
+    private static int count(String haystack, String needle) {
+        int n = 0;
+        for (int i = haystack.indexOf(needle); i >= 0; i = haystack.indexOf(needle, i + 1)) n++;
+        return n;
+    }
+
     private static String env(String key) {
         assertTrue(lineEnv.containsKey(key), "line.env must define " + key);
         return lineEnv.get(key);
@@ -287,17 +318,14 @@ class ReleaseWorkflowContractTest {
         assertTrue(stepBlock("- name: Upload NeoForge to Modrinth")
                         .contains("env.LINE_SHIP_NEOFORGE == 'true'"),
                 "the NeoForge Modrinth step must be flag-gated");
-        // The two-file coupling the message above promises (review MAJOR M1): the
-        // release_check.py mirror has no other automated pin, and the drift vector is
-        // the recurring main->support forward merge on a file already hand-resolved
-        // per line — a desync toward False silently un-gates the shipping line's
-        // family requirements.
+        // R2-5 retired the hand mirror: release_check.py DERIVES SHIP_NEOFORGE from
+        // line.env, so the forward-merge drift vector is gone by construction. Pin the
+        // derivation itself so a revert to a hand constant reds here.
         try {
             String rc = Files.readString(locate("scripts/release_check.py"));
-            assertTrue(rc.contains("\nSHIP_NEOFORGE = "
-                            + (env("LINE_SHIP_NEOFORGE").equals("true") ? "True" : "False") + "\n"),
-                    "release_check.py SHIP_NEOFORGE must mirror line.env LINE_SHIP_NEOFORGE"
-                            + " — flip both together, consciously");
+            assertTrue(rc.contains("SHIP_NEOFORGE = _LINE_ENV.get(\"LINE_SHIP_NEOFORGE\") == \"true\""),
+                    "release_check.py must DERIVE SHIP_NEOFORGE from line.env (R2-5) — "
+                            + "a hand constant re-opens the forward-merge drift vector");
         } catch (java.io.IOException e) {
             throw new java.io.UncheckedIOException(e);
         }

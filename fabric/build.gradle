@@ -61,8 +61,8 @@ dependencies {
     storeDeps "com.github.luben:zstd-jni:1.5.7-3"
     localRuntime "org.xerial:sqlite-jdbc:3.49.1.0"
     localRuntime "com.github.luben:zstd-jni:1.5.7-3"
-    compileOnly "maven.modrinth:sodium:mc26.2-0.9.1-beta.3-fabric"
-    compileOnly "maven.modrinth:modmenu:20.0.0-beta.4"
+    compileOnly "maven.modrinth:sodium:${sodium_version}"
+    compileOnly "maven.modrinth:modmenu:${modmenu_version}"
     // Compat validation arm: -Pbenchmark.moonrise=true puts Moonrise on the dev runtime
     // (the same Modrinth version issue #69 was reported against), so the soak harness can
     // drive the full dirty pipeline — the SerializableChunkData.copyOf hook, broadcast,
@@ -70,7 +70,7 @@ dependencies {
     // (SOAK_EXTRA_GRADLE_ARGS="-Pbenchmark.moonrise=true" ./scripts/soak.sh dirty-broadcast).
     // Runtime-only: release jars and normal builds are unaffected.
     if ((findProperty('benchmark.moonrise') ?: 'false').toString() == 'true') {
-        localRuntime "maven.modrinth:moonrise-opt:W0HImEBl"
+        localRuntime "maven.modrinth:moonrise-opt:${moonrise_modrinth_version}"
     }
     // Same arm for C2ME (the Modrinth version test-server.sh installs), doing double duty:
     // the disk-read profile measures the chunk-IO-overhaul fallback path (adaptive read
@@ -78,7 +78,7 @@ dependencies {
     // hook is validated through C2ME's rewritten save paths — the old ChunkMap.save hook
     // silently never fired there. Runtime-only: release jars and normal builds are unaffected.
     if ((findProperty('benchmark.c2me') ?: 'false').toString() == 'true') {
-        localRuntime "maven.modrinth:c2me-fabric:nvOkOiyi"
+        localRuntime "maven.modrinth:c2me-fabric:${c2me_modrinth_version}"
     }
 }
 
@@ -113,13 +113,49 @@ sourceSets {
     }
 }
 
+// LINE DATA (port-isolation-round-2-plan.md R2-1): Tier 3 (client gametests) per
+// line — true on 26.x/1.21.11, false on 1.21.1 (no fabric-client-gametest-api in
+// that line's fabric-api; pre-authorized-cuts.md). This boolean is the ONLY build
+// edit a Tier-3 cut needs: it flips the loom wiring, registers a poison-pill
+// runClientGameTest stub (so every `-x runClientGameTest` across the machinery
+// stays line-invariant and a direct invocation reds with an explanation), excludes
+// the client gametest class from compilation, and filters its entrypoint out of
+// the gametest fabric.mod.json (a compile-exclude without the resource edit breaks
+// Tier 2 at entrypoint resolution). The source tree and source fabric.mod.json
+// stay IDENTICAL across lines — GameTestEntrypointContractTest compares source to
+// source, so it is line-neutral by construction.
+def tier3 = true
+
 fabricApi {
     configureTests {
         createSourceSet = true
         modId = "lss-test"
         enableGameTests = true
-        enableClientGameTests = true
+        enableClientGameTests = tier3
         eula = true
+    }
+}
+
+if (!tier3) {
+    tasks.register('runClientGameTest') {
+        group = 'verification'
+        description = 'Poison pill: Tier 3 is cut on this line (pre-authorized-cuts.md).'
+        doFirst {
+            throw new GradleException('Tier 3 (client gametests) is CUT on this line — '
+                    + 'see docs/planning/pre-authorized-cuts.md. -x runClientGameTest is '
+                    + 'a no-op here by design; do not invoke the task directly.')
+        }
+    }
+    afterEvaluate {
+        sourceSets.gametest.java.exclude 'dev/vox/lss/test/LSSClientGameTests.java'
+        tasks.named('processGametestResources') {
+            doLast {
+                def f = new File(it.destinationDir, 'fabric.mod.json')
+                def json = new groovy.json.JsonSlurper().parse(f)
+                json.entrypoints.remove('fabric-client-gametest')
+                f.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(json))
+            }
+        }
     }
 }
 
@@ -222,6 +258,8 @@ processResources {
     inputs.property "version", project.version
     inputs.property "minecraft_dependency", project.minecraft_dependency
     inputs.property "fabric_api_dependency", project.fabric_api_dependency
+    inputs.property "suggests_sodium", project.suggests_sodium
+    inputs.property "suggests_voxy", project.suggests_voxy
 
     filesMatching("fabric.mod.json") {
         // V-1/P3 (+ the G back-flow): the MC and fabric-api depends ranges are
@@ -229,7 +267,9 @@ processResources {
         // this resource.
         expand "version": inputs.properties.version,
                "minecraft_dependency": inputs.properties.minecraft_dependency,
-               "fabric_api_dependency": inputs.properties.fabric_api_dependency
+               "fabric_api_dependency": inputs.properties.fabric_api_dependency,
+               "suggests_sodium": inputs.properties.suggests_sodium,
+               "suggests_voxy": inputs.properties.suggests_voxy
     }
 }
 
