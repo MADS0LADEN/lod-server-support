@@ -66,6 +66,14 @@ class FabricModJsonContractTest {
                 gradleProps.getProperty("minecraft_dependency", ""),
                 "gradle.properties minecraft_dependency must pin the line's range exactly — "
                         + "the upper bound is what keeps this jar off incompatible newer lines");
+        // The G back-flow's sibling key: the fabric-api floor is per-line data too
+        // (the 26.1 port found the literal floor naming a 26.2-family version no
+        // 26.1 install can satisfy — silently unresolvable at mod load).
+        assertEquals("${fabric_api_dependency}",
+                modJson.getAsJsonObject("depends").get("fabric-api").getAsString(),
+                "fabric.mod.json's fabric-api depends must stay templated from the data key");
+        assertTrue(!gradleProps.getProperty("fabric_api_dependency", "").isEmpty(),
+                "gradle.properties must carry the line's fabric_api_dependency floor");
     }
 
     @Test

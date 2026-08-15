@@ -43,7 +43,7 @@
   "depends": {
     "minecraft": "${minecraft_dependency}",
     "fabricloader": ">=0.18.4",
-    "fabric-api": ">=0.152.1"
+    "fabric-api": "${fabric_api_dependency}"
   },
   "suggests": {
     "sodium": ">=0.9.0",

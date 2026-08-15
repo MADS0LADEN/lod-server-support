@@ -522,7 +522,17 @@ class NativeToV20TranslatorTest {
         var dict = new IdentityDictionary();
         var sections = new java.util.ArrayList<WireSection>();
         for (var s : shapes) {
-            sections.add(new WireSection(s.sectionY(), s.nonEmptyBlockCount(), s.fluidCount(),
+            // Derived (the emitV20Direct rule — the fourth relationship site, found at
+            // the 1.21.11 port): the translate side reads CURSOR-emitted native bytes,
+            // whose one-short line header carries the line fold — so the direct side
+            // must assemble (fold, 0) there to stay byte-identical (two-short lines,
+            // like this one, pass through — the ternary constant-folds).
+            int nonEmpty = NativeSectionShape.NATIVE_COUNT_SHORTS == 2
+                    ? s.nonEmptyBlockCount()
+                    : NativeSectionShape.foldedCountForNativeHeader(
+                            s.nonEmptyBlockCount(), s.fluidCount());
+            int fluid = NativeSectionShape.NATIVE_COUNT_SHORTS == 2 ? s.fluidCount() : 0;
+            sections.add(new WireSection(s.sectionY(), nonEmpty, fluid,
                     NativeToV20Translator.convertIndexed(s.blocks().bits(), s.blocks().palette(),
                             s.blocks().data(), true, dict, BLOCKS),
                     NativeToV20Translator.convertIndexed(s.biomes().bits(), s.biomes().palette(),
