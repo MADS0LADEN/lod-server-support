@@ -705,6 +705,9 @@ public final class FarPlayerRenderer {
     public static void initRenderer() {
         var renderer = new FarPlayerRenderer();
         FarPlayerRenderer.install(renderer);
+        // PER-LINE INVARIANT (surfaces row 15): the event must fire BEFORE this
+        // line's submit-storage drain — verify against LevelRenderer bytecode on a
+        // port; the event NAME is not the invariant and flips meaning across lines.
         net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents
                 .COLLECT_SUBMITS.register(renderer::render);
         net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientEntityEvents

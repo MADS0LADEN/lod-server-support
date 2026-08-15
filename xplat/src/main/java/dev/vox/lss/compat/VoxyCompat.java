@@ -469,6 +469,9 @@ class VoxyCompat {
     private static Class<?> rendererHolderInterface;
     private static MethodHandle rendererHolderShutdown;
     // Rung 1 only: IVoxyRenderSystemHolder.getNullableHolder() — the 26.2 Voxy build's
+    // LINE-FACT(26.2): the holder ladder below is verified against THIS line's Voxy
+    // build — re-derive on a port (the 26.2 render-extract rework moved the rebuild
+    // call; other lines' Voxy builds differ again).
     // own reload obtains the holder through this static (bytecode-verified 2026-08-13),
     // which abstracts away WHICH vanilla class carries the mixin. Null on rung 2.
     private static MethodHandle rendererHolderStaticGet;

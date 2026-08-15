@@ -64,14 +64,20 @@ docs/planning/per-version-surfaces.md; this doc is the ORDER and the rules.
    the line's own MC artifact; contract-test flavors re-derived; hand rows recorded
    in the port PR description.
 8. **Harness retarget**: test-server.sh's LINE DATA block (MC/CDN URLs, legacy LSS
-   pin, the Java gate) AND the CI workflows (build.yml/release.yml carry per-line
-   java-version + task-set deltas — the 1.21.1 cut missed both and CI was red by
-   construction, review 2026-08-15); fabric/build.gradle's localRuntime compat-arm
-   Modrinth IDs are per-line too. soak.sh: the BASE-WORLD GUARD needs nothing
-   (V-1/T3a — the mc-version marker is data-driven), but the WORLD-STAGING LAYOUT
-   is per-line forever: 1.21.x Bukkit uses split world_nether/world_the_end dirs
-   and needs the world* glob flavor at all four staging sites (the v0.11 delta-port
-   read "needs NOTHING" as covering this and lost the v0.10 flavor — same review).
+   pin, the Java gate); fabric/build.gradle's localRuntime compat-arm Modrinth IDs
+   are per-line too. A Tier-3 cut is ONE build edit: flip `tier3 = false` in
+   fabric/build.gradle (R2-1 — the boolean flips the loom wiring, registers the
+   poison-pill runClientGameTest stub, compile-excludes the client gametest class,
+   and filters its entrypoint; every `-x runClientGameTest` across the machinery is
+   line-invariant, and the build.yml Tier-3 JOB deletion stays a one-hunk hand
+   edit). build.yml/release.yml java-version now derives from line.env (R2-2) —
+   no per-line workflow token edits remain for it. soak.sh needs NOTHING: the base-world
+   guard is data-driven (V-1/T3a) and the world staging is line-invariant since
+   R2-3 (the world* glob + split-dir rm are a strict superset on unified layouts).
+8.5. **Provenance sweep (R2-8)**: on the branch,
+   `git grep -nE '\b26\.2\b|LINE-FACT' -- '*.java' '*.sh' '*.gradle'` — every hit
+   is re-derived against the line's own artifacts, re-worded line-neutral, or
+   recorded in the port PR (15-54 stale line-fact comments shipped per v0.11 port).
 9. **Validation**: Tier 1+2 local, `CI=true` release build + `release_check
    --version`, CI green incl. Tier 3 where the line has it, per-line soak smokes.
    **Rehearse the release pipeline** with the workflow_dispatch dry-run on the
@@ -81,11 +87,21 @@ docs/planning/per-version-surfaces.md; this doc is the ORDER and the rules.
     publish-killing bugs every large round: the `*+` tag-filter trap, the
     mapping-namespace gate, three constructed workflow false-greens).
 11. **Docs**: the branch CLAUDE.md banner is a POINTER to per-version-surfaces.md
-    plus a line-status column — never a second live copy.
+    plus a line-status column — never a second live copy. The banner's cut list is
+    the TAKEN set, cross-checked against build.gradle toggles (`tier3`, …) — a
+    mislabeled cut shipped once (review MAJOR 5). README support-matrix row per
+    line: verify the line's row against what it actually ships.
 12. **Release** (simultaneous rounds): per-line annotated tags `--cleanup=verbatim`,
     annotation verified via `git for-each-ref` BEFORE push, support lines
     `make_latest=false` (from line.env), watch every run, never re-run a partial
-    publish, verify rendered notes on GitHub + Modrinth after.
+    publish, verify rendered notes on GitHub + Modrinth after. Diff every
+    release-notes claim against the line's shipped `ServerConfigBase` defaults
+    (the 512-vs-300 ghost class).
+12a. **Patch flow (post-round-2)**: the derivation files (build.yml,
+    test-server.sh, fabric/build.gradle's configureTests block, soak.sh staging,
+    release.yml) CONFLICT textually at the first merge into each branch — resolve
+    TAKE-MAIN; the branch's flavor value already lives in the data file the main
+    side reads. Never keep-ours a derivation away.
 13. **Back-flow**: hardening invented on a branch during the round is PR'd back to
     main in the same round (the T3 rule — the soak marker guard was re-invented four
     times because this step didn't exist).
