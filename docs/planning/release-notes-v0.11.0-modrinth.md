@@ -1,21 +1,15 @@
-# v0.11.0 — Modrinth changelog (short variant, hand-paste if CI misfires)
+# v0.11.0 release notes (tag annotation + Modrinth changelog)
 
-**Far players**: see other players far beyond render distance as player models in
-your LOD terrain — poses, equipment, name tags, smooth motion, and mounts (horses,
-boats, minecarts; unknown modded mounts degrade safely). On by default with full
-privacy controls: server modes (`on`/`opt-in`/`off`), exclude list, a Paper
-permission + vanish-plugin awareness, and a client "Share My Position" opt-out.
-Credit: SeeU (MIT) as prior art. Folia remains experimental.
+Short by design (user decision 2026-08-15): one bullet per headline feature,
+user/operator-facing only. Per-line tags may append line-specific caveats at
+G-4 (the 1.21.1 NeoForge tier/cut rule).
 
-**Also new**: `/lss reset` (client — wipe and re-stream this server's LODs),
-`/lsslod set` runtime settings + `/lsslod help`, backfill remaining estimate,
-`maxConcurrentDiskReads` (bounds disk CPU independently of bandwidth, auto),
-`dirtyBroadcastIntervalSeconds: 0` = broadcasts off, `lodDistanceChunks` default
-now 300, LOD yields to vanilla transport by default
-(`lodYieldsToVanillaTransport: true`), adaptive slow-connection pacing (a client
-transfer governor + a server ping backstop keep gameplay responsive while LODs
-stream; both default on), client cache in `.lss/` for fresh installs.
+---
 
-**Fixed**: a "Packet was larger than I expected" disconnect right after joining
-on slow connections (a protocol-discovery race with the server's legacy-client
-support; the client also waits longer before trying legacy protocols now).
+### Highlights
+
+- **Minecraft 1.21.1 and NeoForge support** - Adds the MC 1.21.1 line, including a NeoForge server build (1.21.1 only, best-effort tier).
+- **Far Players** - See other players far beyond render distance as player models in the LOD terrain, with privacy controls on both server and client.
+- **Much better on slow connections** - LOD streaming now paces itself to the connection and lets vanilla traffic go first, so slow links stay smooth and playable while LODs load.
+- **Full backwards compatibility** - All servers and clients from v0.4.0 onward keep working with v0.11.0.
+- **New commands** - `/lsslod set` changes server settings live without a restart; `/lss reset` on the client wipes this server's LODs and re-streams them fresh.
