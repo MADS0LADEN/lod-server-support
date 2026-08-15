@@ -52,10 +52,17 @@ COMMON_FORBIDDEN = ("dev/vox/lss/common/soak/", "dev/vox/lss/common/benchmark/")
 # (Modrinth voxy-server-side). The VSS jars are branded byte-copies of the LSS jars — same
 # classes, mod id `lss` / plugin name LodServerSupport, so they get the IDENTICAL safety
 # gate plus an identity guardrail (check_vss_*_identity). See docs/planning/ci-dual-publish.md.
+# v0.11.0 release scope (user decision 2026-08-15): NeoForge SHIPS only on the
+# 1.21.1 line. On this line the neoforge families are NOT release artifacts — the
+# module still builds/tests in CI, and any neoforge jar FOUND in build/libs still
+# gets the full jar checks below; only the SHIPPING requirements (family presence,
+# version pin, release globs) are gated. Mirrors .github/line.env
+# LINE_SHIP_NEOFORGE; flip BOTH together.
+SHIP_NEOFORGE = False
 RELEASE_GLOBS = ("lod-server-support-fabric-*.jar", "lod-server-support-paper-*.jar",
+                 "voxy-server-side-fabric-*.jar", "voxy-server-side-paper-*.jar") + ((
                  "lod-server-support-neoforge-*.jar",
-                 "voxy-server-side-fabric-*.jar", "voxy-server-side-paper-*.jar",
-                 "voxy-server-side-neoforge-*.jar")
+                 "voxy-server-side-neoforge-*.jar") if SHIP_NEOFORGE else ())
 CI_NAME_SUFFIX = "0.4.0+26.1.2.jar"  # a representative CI filename for glob round-tripping
 # The Fabric jar's mapping namespace for THIS line: 26.x fabric-loom ships official-mapped
 # jars; 1.21.x fabric-loom-remap ships intermediary. A forward merge swapping the loom
@@ -742,10 +749,11 @@ def check_glob_hygiene(problems, soak_jars):
                 problems.append(f"{base}: dev soak jar MATCHES release glob {glob} — would be published")
     # Round-trip every CI artifact name format against the globs (HD-043). Each of the six
     # shipped prefixes must match one release glob; the soak jar must match none.
-    for prefix in ("lod-server-support-fabric", "lod-server-support-paper",
-                   "lod-server-support-neoforge",
-                   "voxy-server-side-fabric", "voxy-server-side-paper",
-                   "voxy-server-side-neoforge"):
+    shipped_prefixes = ("lod-server-support-fabric", "lod-server-support-paper",
+                        "voxy-server-side-fabric", "voxy-server-side-paper") + ((
+                        "lod-server-support-neoforge",
+                        "voxy-server-side-neoforge") if SHIP_NEOFORGE else ())
+    for prefix in shipped_prefixes:
         ci_name = f"{prefix}-{CI_NAME_SUFFIX}"
         if not any(fnmatch.fnmatch(ci_name, g) for g in RELEASE_GLOBS):
             problems.append(f"CI name {ci_name} matches no release glob")
@@ -768,12 +776,14 @@ def discover(problems, expected_version=None, root=ROOT):
     soak = _jars_in(pap_libs, SOAK_JAR_PREFIX)
     # All six families must be present — a release ships all six, and a missing family
     # (e.g. the vssJar finalizer silently unwired) must fail the gate, not shrink it.
-    for jars, what, hint in ((fab, "lod-server-support-fabric", "run :fabric:build"),
-                             (pap, "lod-server-support-paper", "run :paper:shadowJar"),
-                             (vfab, "voxy-server-side-fabric", "the fabric vssJar task did not run"),
-                             (vpap, "voxy-server-side-paper", "the paper vssJar finalizer did not run"),
-                             (neo, "lod-server-support-neoforge", "run :neoforge:build"),
-                             (vneo, "voxy-server-side-neoforge", "the neoforge vssJar task did not run")):
+    required = [(fab, "lod-server-support-fabric", "run :fabric:build"),
+                (pap, "lod-server-support-paper", "run :paper:shadowJar"),
+                (vfab, "voxy-server-side-fabric", "the fabric vssJar task did not run"),
+                (vpap, "voxy-server-side-paper", "the paper vssJar finalizer did not run")]
+    if SHIP_NEOFORGE:
+        required += [(neo, "lod-server-support-neoforge", "run :neoforge:build"),
+                     (vneo, "voxy-server-side-neoforge", "the neoforge vssJar task did not run")]
+    for jars, what, hint in required:
         if not jars:
             problems.append(f"no {what} jar found in build/libs — {hint}")
     if expected_version:
@@ -791,17 +801,20 @@ def discover(problems, expected_version=None, root=ROOT):
         pap = _require_version(pap, "lod-server-support-paper", expected_version, problems, mc=mc)
         vfab = _require_version(vfab, "voxy-server-side-fabric", expected_version, problems, mc=mc)
         vpap = _require_version(vpap, "voxy-server-side-paper", expected_version, problems, mc=mc)
-        neo = _require_version(neo, "lod-server-support-neoforge", expected_version, problems, mc=mc)
-        vneo = _require_version(vneo, "voxy-server-side-neoforge", expected_version, problems, mc=mc)
+        if SHIP_NEOFORGE:
+            neo = _require_version(neo, "lod-server-support-neoforge", expected_version, problems, mc=mc)
+            vneo = _require_version(vneo, "voxy-server-side-neoforge", expected_version, problems, mc=mc)
         # With --version the ambiguity guard is off, but release.yml's upload globs are
         # greedy: any OTHER versioned jar sitting beside the selected one would be attached
         # to the release too. Flag them (the suffixless local dev names stay tolerated).
-        for sel, allj, prefix in ((fab, _jars_in(fab_libs, "lod-server-support-fabric"), "lod-server-support-fabric"),
-                                  (pap, _jars_in(pap_libs, "lod-server-support-paper"), "lod-server-support-paper"),
-                                  (vfab, _jars_in(fab_libs, "voxy-server-side-fabric"), "voxy-server-side-fabric"),
-                                  (vpap, _jars_in(pap_libs, "voxy-server-side-paper"), "voxy-server-side-paper"),
-                                  (neo, _jars_in(neo_libs, "lod-server-support-neoforge"), "lod-server-support-neoforge"),
-                                  (vneo, _jars_in(neo_libs, "voxy-server-side-neoforge"), "voxy-server-side-neoforge")):
+        greedy = [(fab, _jars_in(fab_libs, "lod-server-support-fabric"), "lod-server-support-fabric"),
+                  (pap, _jars_in(pap_libs, "lod-server-support-paper"), "lod-server-support-paper"),
+                  (vfab, _jars_in(fab_libs, "voxy-server-side-fabric"), "voxy-server-side-fabric"),
+                  (vpap, _jars_in(pap_libs, "voxy-server-side-paper"), "voxy-server-side-paper")]
+        if SHIP_NEOFORGE:
+            greedy += [(neo, _jars_in(neo_libs, "lod-server-support-neoforge"), "lod-server-support-neoforge"),
+                       (vneo, _jars_in(neo_libs, "voxy-server-side-neoforge"), "voxy-server-side-neoforge")]
+        for sel, allj, prefix in greedy:
             stale = [os.path.basename(j) for j in allj
                      if j not in sel and os.path.basename(j) != f"{prefix}.jar"]
             if sel and stale:
@@ -812,8 +825,9 @@ def discover(problems, expected_version=None, root=ROOT):
         _flag_ambiguous(pap, "lod-server-support-paper", problems)
         _flag_ambiguous(vfab, "voxy-server-side-fabric", problems)
         _flag_ambiguous(vpap, "voxy-server-side-paper", problems)
-        _flag_ambiguous(neo, "lod-server-support-neoforge", problems)
-        _flag_ambiguous(vneo, "voxy-server-side-neoforge", problems)
+        if SHIP_NEOFORGE:
+            _flag_ambiguous(neo, "lod-server-support-neoforge", problems)
+            _flag_ambiguous(vneo, "voxy-server-side-neoforge", problems)
     for jar in fab:
         check_fabric_jar(jar, problems)
         check_store_natives_fabric(jar, problems)
@@ -1772,12 +1786,18 @@ def _selftest():
                            BRAND_VSS,
                            extra={"assets/lss/icon-vss.png": "PNG"})
 
-        # a missing neoforge family must fail the gate (N-4: the family is a release blocker)
+        # the missing-family polarity follows SHIP_NEOFORGE (v0.11.0 scope): on a
+        # shipping line an absent family is a release blocker (N-4); on a
+        # non-shipping line it must be TOLERATED (release.yml never builds it there)
         os.remove(os.path.join(dneo, "lod-server-support-neoforge.jar"))
         p = []
         discover(p, root=droot)
-        check(any("no lod-server-support-neoforge jar" in m for m in p),
-              f"missing neoforge family not caught: {p}")
+        if SHIP_NEOFORGE:
+            check(any("no lod-server-support-neoforge jar" in m for m in p),
+                  f"missing neoforge family not caught: {p}")
+        else:
+            check(not any("no lod-server-support-neoforge jar" in m for m in p),
+                  f"non-shipping line must tolerate a missing neoforge family: {p}")
         _write_tree_neoforge("lod-server-support-neoforge.jar", TOML_LSS, BRAND_LSS)
 
         # a VSS neoforge jar with drifted class bytes must fail wire identity

@@ -101,6 +101,17 @@ jobs:
           expand GV_PAPER "${LINE_GAME_VERSIONS_PAPER}"
           expand GV_NEOFORGE "${LINE_GAME_VERSIONS_NEOFORGE}"
           expand PAPER_LOADERS "${LINE_PAPER_LOADERS}"
+          # Release-asset list is line data: NeoForge ships only where
+          # LINE_SHIP_NEOFORGE=true (v0.11.0 scope, user decision 2026-08-15).
+          {
+            echo "RELEASE_FILES<<LINE_LIST_EOF"
+            echo "fabric/build/libs/lod-server-support-fabric-*.jar"
+            echo "paper/build/libs/lod-server-support-paper-*.jar"
+            if [ "${LINE_SHIP_NEOFORGE}" = "true" ]; then
+              echo "neoforge/build/libs/lod-server-support-neoforge-*.jar"
+            fi
+            echo "LINE_LIST_EOF"
+          } >> "$GITHUB_ENV"
 
       - name: Extract release notes from tag
         if: github.ref_type == 'tag'
@@ -170,7 +181,11 @@ jobs:
 
       # Stage N (best-effort tier): :neoforge:build = xplat compile under MDG (the
       # twin-contract enforcement) + the contract suite + shadowJar + the VSS repackage.
+      # Gated on LINE_SHIP_NEOFORGE (v0.11.0 scope): a line that does not ship the
+      # family does not build it in the RELEASE pipeline — build.yml still builds it
+      # on every commit, so the port stays maintained.
       - name: Build NeoForge + contract tests
+        if: env.LINE_SHIP_NEOFORGE == 'true'
         run: ./gradlew :neoforge:build -Pmod_version=${MOD_VERSION}
 
       # Gate the tag-versioned artifacts that actually ship (build.yml gates only the default-version
@@ -191,10 +206,10 @@ jobs:
           # The LSS trio only. VSS publishing is disabled as of v0.8.0 (the vssJar tasks
           # still BUILD the branded byte-copies and release_check still gates the pair —
           # only distribution is off, matching the support branches).
-          files: |
-            fabric/build/libs/lod-server-support-fabric-*.jar
-            paper/build/libs/lod-server-support-paper-*.jar
-            neoforge/build/libs/lod-server-support-neoforge-*.jar
+          # Composed in the line.env step: fabric+paper always, neoforge only on
+          # LINE_SHIP_NEOFORGE=true lines (fail_on_unmatched_files makes a static
+          # neoforge glob a hard failure on lines that skip its build).
+          files: ${{ env.RELEASE_FILES }}
 
       - name: Upload Fabric to Modrinth
         if: github.event_name == 'push' && github.ref_type == 'tag'
@@ -236,7 +251,7 @@ jobs:
       # best-effort-tier failure strands only the best-effort artifact, never
       # Fabric/Paper (the full tier).
       - name: Upload NeoForge to Modrinth
-        if: github.event_name == 'push' && github.ref_type == 'tag'
+        if: github.event_name == 'push' && github.ref_type == 'tag' && env.LINE_SHIP_NEOFORGE == 'true'
         uses: Kir-Antipov/mc-publish@v3.3
         with:
           modrinth-id: lKiXKLvv

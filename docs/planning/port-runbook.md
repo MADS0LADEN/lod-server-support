@@ -31,7 +31,9 @@ docs/planning/per-version-surfaces.md; this doc is the ORDER and the rules.
 2. **Cut.** Delta-port onto the current support branch where one exists (cheaper —
    the v0.11.0 G row's decision); fresh cut from main only for new lines, with the
    cost stated. Same-commit rule (above) across siblings.
-3. **Line identity commit**: `.github/line.env` (~10 values: tag suffix, three MC
+3. **Line identity commit**: `.github/line.env` (~11 values incl. `LINE_SHIP_NEOFORGE`
+   — flip `release_check.py`'s `SHIP_NEOFORGE` WITH it, the contract test cross-pins
+   the pair: tag suffix, three MC
    tokens, three game-version lists, paper loaders, NeoForge name prose ≤64 chars
    resolved, make_latest=false, Java version) + `gradle.properties`
    (`minecraft_version`, `minecraft_dependency`, `fabric_api_dependency`,
