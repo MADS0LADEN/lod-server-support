@@ -34,8 +34,14 @@ docs/planning/per-version-surfaces.md; this doc is the ORDER and the rules.
 3. **Line identity commit**: `.github/line.env` (~10 values: tag suffix, three MC
    tokens, three game-version lists, paper loaders, NeoForge name prose ≤64 chars
    resolved, make_latest=false, Java version) + `gradle.properties`
-   (`minecraft_version`, `minecraft_dependency`, dep pins) + per-line build.gradle
-   pins. `ReleaseWorkflowContractTest` + `ToolchainContractTest` follow the data
+   (`minecraft_version`, `minecraft_dependency`, `fabric_api_dependency`,
+   `neoforge_version`, dep pins) + per-line build.gradle pins. NeoForge module
+   line rows (found at the v0.11 ports): `java.toolchain.languageVersion`, the
+   `lss.neoforge.mixins.json` compatibilityLevel, and the toml loader
+   versionRange (LINE DATA marker). **Merge trap, hit twice**: a file main
+   DELETED then RESTORED byte-identically (branding/vss/icon.png) nets to
+   no-change on main's side, so a branch that also deleted it silently keeps the
+   delete — `ls branding/vss/` after every delta-port merge. `ReleaseWorkflowContractTest` + `ToolchainContractTest` follow the data
    automatically; `FabricModJsonContractTest`/`PluginYmlContractTest` keep small
    per-line FORM constants.
 4. **Toolchain retarget**: loom(-remap) plugin, mappings namespace

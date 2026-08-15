@@ -47,3 +47,6 @@ benchmark-compare-results/
 # Store gate harness output (JFR profiles are huge)
 store-gate-results/
 CLAUDE.local.md
+
+# Tier-3/gametest client cache droppings (the .lss gameDir convention)
+fabric/.lss/
