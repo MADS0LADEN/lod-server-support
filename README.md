@@ -17,7 +17,10 @@ Clients use the Fabric mod on every version; on 1.21.1 a NeoForge client works a
 | 1.21.11 | ✅ | ✅ | ✅ (experimental) | - |
 | 1.21.1 | ✅ | ✅ | - | ✅ |
 
-On NeoForge (1.21.1) the recommended client path is the community [Voxy NeoForge port](https://github.com/j-shelfwood/voxy-neoforge) with [Forgified Fabric API](https://modrinth.com/mod/forgified-fabric-api) in place of Fabric API. Tested working with Forgified Fabric API 0.116.15, Sodium 0.6.13, and Voxy NeoForge port 0.2.9-alpha.
+On NeoForge (1.21.1) there are two tested client paths, depending on your Sodium version:
+
+- **Sodium 0.6.13**: the community [Voxy NeoForge port](https://github.com/j-shelfwood/voxy-neoforge) with [Forgified Fabric API](https://modrinth.com/mod/forgified-fabric-api) in place of Fabric API. Tested working with Forgified Fabric API 0.116.15 and Voxy NeoForge port 0.2.9-alpha.
+- **Sodium 0.8.12** (required by current Create Aeronautics / Sable packs): the Fabric [Voxy 1.21.1 branch for Sodium 0.8.12](https://github.com/m3t4f1v3/voxy/tree/mc_1211-sodium0.8.12) (0.2.15-beta, built from source) loaded through [Sinytra Connector](https://modrinth.com/mod/connector) with Forgified Fabric API. Tested working inside a large Create pack with Connector 2.0.0-beta.14, Forgified Fabric API 0.116.15, and Sodium 0.8.12-beta.1.
 
 Compatible with [AntiXray](https://modrinth.com/mod/anti-xray), [Moonrise](https://modrinth.com/mod/moonrise-opt), [C2ME](https://modrinth.com/mod/c2me-fabric), [ViaVersion](https://modrinth.com/plugin/viaversion)/[ViaBackwards](https://modrinth.com/plugin/viabackwards), and most other mods. Can be run alongside Distant Horizons on the same server to support DH clients and Voxy clients simultaneously. 
 
