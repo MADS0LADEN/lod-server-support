@@ -1247,6 +1247,7 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
         LSSLogger.info("[lss-adm] c=" + cx + "," + cz
                 + " r=" + state.ringFromPlayerForTrace(cx, cz)
                 + " f=" + state.liveFrontierRingForTrace()
+                + " fsrc=" + state.frontierStampSourceForTrace()
                 + " sync=" + near[0] + " gen=" + near[1]
                 + " via=" + via + " v=" + verdict);
     }
