@@ -49,6 +49,13 @@ From the 26 s flight trace (`lss-trace-20260801-190539.jsonl`) and the live serv
 
 ### 2.1 What is actually wrong
 
+> **2026-08-18 amendment:** the next paragraph's "correct and must stay" is superseded —
+> scan prefix retention (scanner-reopened-rings-plan.md) now decrements the prefix and
+> reopens the trailing crescent as a ring bitset instead of zeroing, precisely because
+> the from-zero re-walk was the measured render-thread hitch. The crescent geometry this
+> paragraph identifies is exactly what the retention plan's Euclidean band covers, and
+> the CADENCE analysis below (the walk-cost gate) shipped unchanged.
+
 `SpiralScanner.recenter()` sets `confirmedRing = 0` on every chunk-boundary crossing. This
 is **correct and must stay**: the confirmed prefix was derived for the old center, and the
 trailing view-edge crescents (positions leaving vanilla's view circle) become LOD-needing

@@ -686,6 +686,10 @@ public class LodRequestManager {
                     + ",\"first\":[" + PositionUtil.unpackX(dirtyPositions[0]) + ","
                     + PositionUtil.unpackZ(dirtyPositions[0]) + "]");
         }
+        // Hoisted once per batch (since-release review M1): the per-call form re-reads
+        // the effective lod, and a wire-cap dirty frame would bump the Voxy distance
+        // cache ~51 times inside one network drain.
+        int reopenLod = this.scanner.currentReopenLod();
         for (long packed : dirtyPositions) {
             if (this.columns.markDirtyIfKnown(packed)) {
                 // Cadence-NEUTRAL: only re-open the position's OWN ring so it (which may
@@ -701,7 +705,7 @@ public class LodRequestManager {
                 // movement debounce).
                 this.scanner.reopenRing(Math.max(
                         Math.abs(PositionUtil.unpackX(packed) - this.lastChunkX),
-                        Math.abs(PositionUtil.unpackZ(packed) - this.lastChunkZ)));
+                        Math.abs(PositionUtil.unpackZ(packed) - this.lastChunkZ)), reopenLod);
             }
             // Record a crossing REGARDLESS of markDirtyIfKnown's result: a dirty crossing an
             // in-flight request survives onReceived's dirty-clear only via staleInFlight. This

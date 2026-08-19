@@ -200,7 +200,11 @@ and is the **only** place a batch is ever offered:
   inside the session lock so a slower concurrent build can never publish stale
   membership over a newer one. The sort is load-bearing, not cosmetic: the router
   stamps the live frontier from the *first not-yet-satisfied entry in declaration
-  order* (`stampLiveFrontier`), and the spread gate, the probe's per-tick examination
+  order* (`stampLiveFrontier`; since 2026-08-18 refined to the first unsatisfied
+  ts<=0 ACQUISITION entry, with a pure-revalidation pass stamping its first ts>0
+  entry at end of pass — gen-frontier-acquisition-anchor-plan.md; the shim's
+  synthetic want-set carries the client-declared timestamps, so v16 sessions get
+  the identical split), and the spread gate, the probe's per-tick examination
   cap, and drain order all assume closest-first. An insertion-ordered set breaks that
   after movement — a stale-far head stamps a huge frontier ring and *neuters* the
   far-before-near gate while up to 800 stale entries starve the player's new near wants

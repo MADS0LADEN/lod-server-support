@@ -61,8 +61,9 @@ class SpiralScanner {
      * Fast fires require the NEXT walk to be cheap: at most this many ring positions
      * examined (see {@link #predictedWalkCost()}). Replaces the original
      * {@code confirmedRing > 0} term, which was a PROXY for walk cost and — because
-     * {@link #recenter()} zeroes the prefix on every chunk-boundary crossing while nothing
-     * re-derives it until the next walk — measured movement instead. At 33 blocks/s
+     * {@link #recenter(int)} then ZEROED the prefix on every chunk-boundary crossing
+     * (the pre-retention semantics, now the kill-switch-off arm) while nothing
+     * re-derived it until the next walk — measured movement instead. At 33 blocks/s
      * crossings run 2.76 Hz against 1 Hz scans, so the proxy was structurally inert for the
      * whole of any sustained flight: the elytra trace of 2026-08-01 measured 2–3 Hz standing
      * still and exactly 1.000 s gaps for 23 consecutive seconds of flight
@@ -300,10 +301,20 @@ class SpiralScanner {
                 ? LSSConstants.MAX_LOD_DISTANCE : getEffectiveLodDistance());
     }
 
-    /** The hoisted-lod core: recenter's band loop and the scan-time retry collect pass
-     *  the bound once instead of re-reading the effective distance per call (each read
-     *  bumps the Voxy view-distance cache's invocation counter — see its comment). */
-    private void reopenRing(int ring, int lod) {
+    /** The current set-time lod bound for a caller about to issue a BURST of reopens
+     *  (the manager's dirty batch loop) — hoisted once so a WorldEdit-scale broadcast
+     *  does not bump the Voxy view-distance cache's invocation counter per position
+     *  (since-release review M1). */
+    int currentReopenLod() {
+        return this.sessionConfig == null
+                ? LSSConstants.MAX_LOD_DISTANCE : getEffectiveLodDistance();
+    }
+
+    /** The hoisted-lod core: recenter's band loop, the scan-time retry collect, and the
+     *  manager's dirty batch pass the bound once instead of re-reading the effective
+     *  distance per call (each read bumps the Voxy view-distance cache's invocation
+     *  counter — see its comment). */
+    void reopenRing(int ring, int lod) {
         if (!this.prefixRetentionEnabled.getAsBoolean()) {
             this.confirmedRing = 0;
             return;
