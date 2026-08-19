@@ -2055,4 +2055,73 @@ class OffThreadProcessorDiskResultTest {
             rig.proc.shutdown();
         }
     }
+
+    // ---- The acquisition-frontier rule at the PIPELINE level (2026-08-18,
+    // gen-frontier-acquisition-anchor-plan.md — the trace scenario's generation
+    // ADMISSION, one inference past the router-level frontier-value pins) ----
+
+    @Test
+    void outerEscalationAdmitsUnderAnInnerDirtyHead() throws Exception {
+        // The measured 40%-of-backfill stall, as a generation-admission outcome: an inner
+        // dirty revalidation (ts>0) leading the declaration must not gate the outer
+        // acquisition entry's escalation. Old anchor: frontier = ring 2, escalation at
+        // ring 20 -> 20 > 2+2 -> hold_spread (gen_order_gated ticks, no slot). New anchor:
+        // frontier = ring 20 (the acquisition head), escalation admits. The inner read is
+        // COMPLETED first — while it pends, the nearer-in-flight hold fires regardless of
+        // the frontier (deliberate; the router pins cover the frontier value itself).
+        var rig = new Rig(true);
+        try {
+            rig.state.updatePlayerChunk(0, 0);
+            declare(rig, rig.state,
+                    new IncomingRequest(2, 0, 5_000L),  // dirty re-ask (reval) leads
+                    new IncomingRequest(20, 0, -1));    // outer acquisition follows
+            waitFor(() -> rig.proc.diskSubmits.size() == 2, "both disk reads in flight");
+
+            // The inner read resolves (served) — its SYNC slot frees, isolating the
+            // spread gate from the nearer-in-flight hold.
+            rig.inject(dataResult(rig.uuid, 2, 0, DIM, new byte[]{1}, 5_000L, 1L));
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+            waitFor(() -> rig.proc.enqueuedColumns.size() == 1, "inner dirty head served");
+
+            long gatedBefore = rig.proc.getDiagnostics().getTotalGenOrderGated();
+            rig.inject(ChunkReadResult.notFoundAuthoritative(rig.uuid, 20, 0, DIM, 2L));
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+            waitFor(() -> rig.state.getHeldGenSlots() == 1,
+                    "the outer miss escalates — the acquisition frontier keys the window");
+            assertEquals(gatedBefore, rig.proc.getDiagnostics().getTotalGenOrderGated(),
+                    "gen_order_gated must not tick (the plan's trace-scenario claim)");
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
+    @Test
+    void innerMissEscalatesUnderAnOuterAcquisitionFrontier() throws Exception {
+        // The plan's inner-regeneration-not-starved claim, at admission level: a ts>0 ask
+        // whose region was deleted server-side (authoritative miss) escalates even while
+        // the frontier stands at an OUTER acquisition ring — the spread gate is one-sided
+        // outward and the cohort rule only tightens against the nearest outstanding
+        // ticket. (The router-level one-sidedness assert is arithmetically vacuous —
+        // candidate > frontier + spread can never fire inward — so the pipeline outcome
+        // is the real pin.)
+        var rig = new Rig(true);
+        try {
+            rig.state.updatePlayerChunk(0, 0);
+            declare(rig, rig.state,
+                    new IncomingRequest(5, 0, 5_000L),  // inner reval that will MISS disk
+                    new IncomingRequest(20, 0, -1));    // outer acquisition (stamps the frontier)
+            waitFor(() -> rig.proc.diskSubmits.size() == 2, "both disk reads in flight");
+
+            long gatedBefore = rig.proc.getDiagnostics().getTotalGenOrderGated();
+            rig.inject(ChunkReadResult.notFoundAuthoritative(rig.uuid, 5, 0, DIM, 1L));
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+            waitFor(() -> rig.state.getHeldGenSlots() == 1,
+                    "the inner ts>0 miss escalates despite the outer frontier");
+            assertEquals(gatedBefore, rig.proc.getDiagnostics().getTotalGenOrderGated(),
+                    "no order-gating for an inner candidate (one-sided window)");
+            assertTrue(rig.state.hasPendingRequest(5, 0), "the escalation owns its gen slot");
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
 }
