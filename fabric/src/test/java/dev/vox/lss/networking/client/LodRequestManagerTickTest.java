@@ -898,4 +898,28 @@ class LodRequestManagerTickTest {
             LSSClientConfig.CONFIG.enableJoinSlowStart = old;
         }
     }
+
+    @Test
+    void chunkCrossingHandsTheScannerTheRealCrossingDelta() {
+        // The one line that supplies recenter(d) its delta (review round MAJOR: computing
+        // it AFTER the anchor update makes every crossing recenter(0) — the prefix never
+        // decrements, the crescent band never reopens, and every position exiting
+        // vanilla's view behind a moving player becomes a permanent LOD hole while the
+        // walk looks perfectly healthy; the entire scanner suite calls recenter(d)
+        // directly and could not see it).
+        var overworld = dim("overworld");
+        setupManager(config(8, true));
+
+        manager.tickWithContext(0, 0, overworld, 16, 0, 0L, -1, () -> 0);
+        assertEquals(9, manager.getConfirmedRing(),
+                "premise: the whole lod-8 disc is inside vd 16, so the primed walk confirms past it");
+
+        manager.tickWithContext(1, 0, overworld, 16, 0, 0L, -1, () -> 0);
+        assertEquals(8, manager.getConfirmedRing(),
+                "a d=1 crossing decrements the prefix by exactly 1");
+
+        manager.tickWithContext(4, 0, overworld, 16, 0, 0L, -1, () -> 0);
+        assertEquals(5, manager.getConfirmedRing(),
+                "a d=3 crossing decrements by 3 — the REAL delta reaches the scanner");
+    }
 }

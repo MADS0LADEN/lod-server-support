@@ -805,7 +805,7 @@ public class LodRequestManager {
         // below the ring to re-reach, and during a gen-disabled backfill the answer stream
         // would force a full re-walk per answer for nothing. The one path that CAN park a
         // re-requestable position below a confirmed ring — a dirty crossing the in-flight
-        // answer — is consumeStaleCrossing above, which does its own confirmed-ring reset.
+        // answer — is consumeStaleCrossing above, which reopens the position's own ring.
         this.metrics.recordNotGenerated();
     }
 

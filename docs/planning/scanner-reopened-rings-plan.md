@@ -1,7 +1,29 @@
 # Plan: reopened-ring scanning — the client scan walk stops costing O(disc) on every reset
 
 **Status:** IMPLEMENTED 2026-08-18 (fix/scanner-reopened-rings; plan v1.1 — 2-Fable
-reviewed, both SOUND-WITH-CHANGES, all findings folded) · client-side only, no wire change · 26.2/main first, backport
+reviewed, both SOUND-WITH-CHANGES, all findings folded) · **v1.2 post-implementation
+review round (3 Opus: geometry / semantics / mutation-coverage — all SHIP-WITH-FIXES,
+folded same day):** the crescent band + decrement transfer + bit shift were verified
+sound by proof AND exhaustive simulation (R∈[0,40], d∈[1,7], all directions — 0
+violations; band low edge has ≥2 rings of slack, the R+d high edge is TIGHT, do not
+narrow). Fixes folded: (1) the **lod-shrink rung** — a shrunk effective distance
+full-resets the prefix once (the F1 exclusion rung's twin); without it a prefix parked
+above the new distance walked nothing forever and a prune+grow-back left a stationary
+player a permanently blank annulus (`clearReopenedAbove` is deleted — the rung + the
+set-time clamp + the below-prefix sweep make above-lod bits structurally impossible);
+(2) the **walk-cost guard** `scanRing >= confirmedRing` — a budget break landing on the
+frontier's first ring right after a reopened ring left the frontier interval unpriced
+(measured 1038x under-price admitting an 83k-probe walk at the fast floor); (3) the
+**kill-switch scan-head flush** — a mid-session flip to OFF drops retained bits AND
+collapses the prefix when bits stood (they represent below-prefix work), so the off arm
+is a true control arm; (4) the lod bound is hoisted out of the crescent/collect loops
+(Voxy-cache invocation churn); (5) mutation pins for the previously-unkilled shift,
+below-prefix invariant sweep, movement-window prediction divergence (vd 64 rig), and
+the manager→scanner crossing-delta wiring; diagonal crossings added to the chaos +
+hitch pins; the bit-population and classify-count ceilings tightened (24 / 12k).
+Known accepted looseness: the band's −1 margin ring is unpinned (slack, not
+correctness); §5.2's "exhaustive oracle" is delivered as the seeded movement-chaos
+property plus the four mutation pins, not a from-zero comparison walk. · client-side only, no wire change · 26.2/main first, backport
 after live confirmation · companion to `gen-frontier-acquisition-anchor-plan.md`
 (the server-side twin of the same design flaw: "a reset costs O(disc)")
 
@@ -227,6 +249,11 @@ dropping from ~550 ms/18 s to noise, and no felt stutters at chunk crossings on 
 warm disc.
 
 ## 9. Pin & doc-debt audit (MAJOR-4 — every test/comment that changes subject)
+
+NOTE (v1.2): the §4 claim that every full-reset path clears "the bitset and both
+flags" is amended — the shrink rungs clear the bitset only; `recenteredSinceLastFire`
+is owned by maybeScan (cleared on fire) and `truncatedBelowPrefix` is rewritten at the
+end of every walk, so clearing them at the rungs would be dead stores.
 
 Tests UPDATED with dated rationale (not deleted): 
 - `movementRecenterZeroesConfirmedRingKeepsCadenceAndMarks` — now asserts

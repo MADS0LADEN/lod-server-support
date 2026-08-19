@@ -95,6 +95,10 @@ class SpiralScanner {
      * are skipped without breaking confirmation.
      */
     private int lastExclusionRadius = -1;
+    /** The effective LOD distance the last walk ran with, -1 = no walk yet — the shrink
+     *  rung's memory (see the scan-head comment; the F1 field above is its exclusion
+     *  twin). */
+    private int lastLodDistance = -1;
     /**
      * Did the last walk stop early because the budget filled? Decides which end
      * {@link #predictedWalkCost()} measures to: a truncated walk stops at {@link #scanRing},
@@ -209,10 +213,6 @@ class SpiralScanner {
 
     // --- Reopened-ring bit helpers (main client thread only) ---
 
-    private boolean reopenedGet(int ring) {
-        return (this.reopenedRings[ring >> 6] & (1L << (ring & 63))) != 0;
-    }
-
     private void reopenedSetBit(int ring) {
         this.reopenedRings[ring >> 6] |= (1L << (ring & 63));
     }
@@ -248,21 +248,14 @@ class SpiralScanner {
         return nextReopenedBit(0);
     }
 
-    /** Clear every bit above {@code lodDistance} — the effective distance is dynamic
-     *  (server value, client override, Voxy's), and a bit above it would never be walked,
-     *  never cleared, and would pollute the overflow valve forever. Also converts the
-     *  shrunk-lodDistance retry flavor from "full walk each scan" to "no walk, mark
-     *  unconsumable" — declared in the plan (strictly better; the mark heals when the
-     *  distance grows back or the mark prunes). */
-    private void clearReopenedAbove(int lodDistance) {
-        for (int r = nextReopenedBit(lodDistance + 1); r >= 0; r = nextReopenedBit(r + 1)) {
-            reopenedClearBit(r);
-        }
-    }
-
     /** Union of the bitset shifted by every offset in [-d, d] — a reopened ring r around
      *  the old center spans rings [r-d, r+d] around the new one. */
     private void shiftReopenedBits(int d) {
+        // orShifted's word math is only valid for 1 <= |k| <= 63 (Java shifts are mod-64,
+        // so a >= 64 shift would silently corrupt the union). RECENTER_FULL_RESET_DELTA
+        // bounds every caller; the constants pin in SpiralScannerTest enforces the bound
+        // at build time, this assert at test time.
+        assert d > 0 && d < 64 : d;
         long[] src = this.reopenedRings.clone();
         clearAllReopened();
         for (int k = -d; k <= d; k++) {
@@ -296,17 +289,26 @@ class SpiralScanner {
     /**
      * Reopen one ring for re-walking (the manager's dirty sites, the crescent band, the
      * actionable-retry collect). No-ops above the current effective LOD distance
-     * (set-time clamp) and at/above the prefix (the frontier walk covers those). With
-     * retention off, delegates to today's semantics: the prefix drops to 0.
+     * (set-time clamp — the only guard keeping bits inside the lod range: the below-prefix
+     * invariant sweep bounds shifted bits, and a lod SHRINK full-resets via the scan-head
+     * rung, so no other above-lod source exists) and at/above the prefix (the frontier
+     * walk covers those). With retention off, delegates to today's semantics: the prefix
+     * drops to 0.
      */
     void reopenRing(int ring) {
+        reopenRing(ring, this.sessionConfig == null
+                ? LSSConstants.MAX_LOD_DISTANCE : getEffectiveLodDistance());
+    }
+
+    /** The hoisted-lod core: recenter's band loop and the scan-time retry collect pass
+     *  the bound once instead of re-reading the effective distance per call (each read
+     *  bumps the Voxy view-distance cache's invocation counter — see its comment). */
+    private void reopenRing(int ring, int lod) {
         if (!this.prefixRetentionEnabled.getAsBoolean()) {
             this.confirmedRing = 0;
             return;
         }
         if (ring < 0) return;
-        int lod = this.sessionConfig == null
-                ? LSSConstants.MAX_LOD_DISTANCE : getEffectiveLodDistance();
         if (ring > lod) return;
         if (ring >= this.confirmedRing) return;
         reopenedSetBit(ring);
@@ -560,8 +562,15 @@ class SpiralScanner {
         // three orders of magnitude and admits exactly the walk this gate exists to refuse.
         // A walk that budget-broke INSIDE the reopened interval left scanRing at the low
         // reopened ring, blind to the frontier interval the next walk also iterates —
-        // predict the full span instead (fail closed; plan v1.1 MAJOR-2).
-        int s = (this.lastWalkTruncated && !this.truncatedBelowPrefix)
+        // predict the full span instead (fail closed; plan v1.1 MAJOR-2). The
+        // scanRing >= confirmedRing guard closes the second flavor (3-Opus review
+        // MAJOR, 2026-08-18): a break landing on the frontier's FIRST ring right after a
+        // reopened ring — the budget filled at the reopened ring's LAST index, so the
+        // break's ring is not below the prefix and the flag does not fire — leaves
+        // scanRing at the reopened ring while the whole frontier interval is unpriced
+        // (measured 1038x under-price admitting an 83k-probe walk at the fast floor).
+        int s = (this.lastWalkTruncated && !this.truncatedBelowPrefix
+                && this.scanRing >= this.confirmedRing)
                 ? this.scanRing : getEffectiveLodDistance();
         int c;
         if (this.recenteredSinceLastFire) {
@@ -620,9 +629,20 @@ class SpiralScanner {
         boolean truncated = false;
         boolean truncatedBelow = false;
 
-        // The effective distance is dynamic — drop reopened bits the walk can never reach
-        // (they would otherwise never clear and pollute the overflow valve forever).
-        clearReopenedAbove(lodDistance);
+        // A SHRUNK effective LOD distance resets the prefix once (the lodDistance twin of
+        // the F1 exclusion rung below — 3-Opus review MAJOR, 2026-08-18): a prefix parked
+        // ABOVE the new distance would make nextWalkRing walk nothing forever, while a
+        // movement prune at the shrunk radius deletes the outer annulus's state and the
+        // set-time lod clamp drops its dirty reopens — a permanently blank annulus for a
+        // stationary player once the distance grows back (retention deleted the
+        // incidental crossing-collapse that used to heal this in one second). The rung
+        // also makes any above-lod bit structurally impossible, which is what lets
+        // reopenRing's set-time clamp be the ONLY above-lod guard.
+        if (this.lastLodDistance >= 0 && lodDistance < this.lastLodDistance) {
+            this.confirmedRing = 0;
+            clearAllReopened();
+        }
+        this.lastLodDistance = lodDistance;
 
         // A SHRUNK exclusion radius (render distance lowered) resets the prefix once: the
         // rings between the new and old radius confirmed while vanilla rendered them and
@@ -635,6 +655,17 @@ class SpiralScanner {
         }
         this.lastExclusionRadius = exclusionRadius;
 
+        // Kill-switch A/B hygiene: bits set while retention was ON must not survive a
+        // mid-session flip to OFF — the off arm is the field CONTROL arm, so it must walk
+        // (and price the cadence gate) exactly like legacy, not "legacy plus leftovers".
+        // A standing bit represents BELOW-PREFIX work (a dirty/retry ring not yet
+        // re-walked); dropping it without collapsing the prefix would strand that work,
+        // so the flush converts it into the legacy full re-walk.
+        if (!this.prefixRetentionEnabled.getAsBoolean()) {
+            if (lowestReopenedBit() >= 0) this.confirmedRing = 0;
+            clearAllReopened();
+        }
+
         // Only an ACTIONABLE retry mark (outside the vanilla-view exclusion) can force
         // below-prefix re-walking. A mark whose position slipped INSIDE the exclusion
         // after it was set is unconsumable — an excluded position is never declared, so no
@@ -642,9 +673,11 @@ class SpiralScanner {
         // full-distance re-walk EVERY scan for as long as the player lingered. With
         // retention on, each actionable mark reopens exactly ITS ring (the collect visitor
         // applies the same actionability ladder as hasActionableRetries — the two must not
-        // drift); with the kill switch off, the legacy prefix-to-0 reset applies.
+        // drift; the lod bound is hoisted so the collect costs no Voxy-cache invocations);
+        // with the kill switch off, the legacy prefix-to-0 reset applies.
         if (this.prefixRetentionEnabled.getAsBoolean()) {
-            columns.collectActionableRetryRings(playerCx, playerCz, exclusionRadius, this::reopenRing);
+            columns.collectActionableRetryRings(playerCx, playerCz, exclusionRadius,
+                    ring -> reopenRing(ring, lodDistance));
         } else if (columns.hasActionableRetries(playerCx, playerCz, exclusionRadius)) {
             this.confirmedRing = 0;
         }
@@ -779,6 +812,7 @@ class SpiralScanner {
         this.confirmedRing = 0;
         this.scanRing = 0;
         this.lastExclusionRadius = -1; // next session re-anchors; no spurious shrink reset
+        this.lastLodDistance = -1;     // ...same for the lod-shrink rung
         this.lastWalkTruncated = false; // fresh session predicts the full disc — fail closed
         this.scanTickCounter = LSSConstants.TICKS_PER_SECOND - 1;
         this.missingVanillaChunks = Integer.MAX_VALUE;
@@ -804,6 +838,7 @@ class SpiralScanner {
         clearAllReopened();
         this.recenteredSinceLastFire = false;
         this.truncatedBelowPrefix = false;
+        this.lastLodDistance = -1;
     }
 
     /** Movement re-center: adjust the scan state for a Chebyshev crossing of {@code d}
@@ -856,12 +891,15 @@ class SpiralScanner {
         for (int r = nextReopenedBit(this.confirmedRing); r >= 0; r = nextReopenedBit(r + 1)) {
             reopenedClearBit(r);
         }
-        // The view-exclusion crescent band (Euclidean low edge — see javadoc).
+        // The view-exclusion crescent band (Euclidean low edge — see javadoc). The lod
+        // bound is hoisted out of the loop (one Voxy-cache invocation, not ~14).
         int viewR = this.lastExclusionRadius;
         int low = Math.max(0, (int) Math.floor((viewR - d) / Math.sqrt(2.0)) - 1);
         int high = viewR + d;
+        int lod = this.sessionConfig == null
+                ? LSSConstants.MAX_LOD_DISTANCE : getEffectiveLodDistance();
         for (int r = low; r <= high; r++) {
-            reopenRing(r); // set-time lod clamp + ≥prefix skip + overflow valve inside
+            reopenRing(r, lod); // ≥prefix skip + overflow valve inside
         }
     }
 
