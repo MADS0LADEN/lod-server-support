@@ -271,8 +271,10 @@ Tests UPDATED with dated rationale (not deleted):
 Tests passing UNMODIFIED (the §3 mechanism exists for them):
 `walkCostCalibration…`, `actionableRetryMarksHoldFastFires…`,
 `chunkBoundaryCrossingFasterThanTheCadenceDoesNotStarveScans`, the F1
-exclusion-shrink pair, CL-014's `notGeneratedPositionStaysParked…`, the
-adaptive-cadence disarm-ladder pins.
+exclusion-shrink pair, the adaptive-cadence disarm-ladder pins. (CL-014's
+`notGeneratedPositionStaysParked…` was predicted unmodified but in fact renamed to
+`…ThroughARingReopen` with the staging updated — dated in the test, noted here for
+plan-vs-implementation honesty.)
 Comment/doc debt: recenter()/predictedWalkCost() javadocs (the coverage-limit
 block's "decoupling the prefix from recenter … throughput consequence" sentence is
 amended — this plan IS that decoupling, deliberately WITHOUT the consequence),
@@ -292,8 +294,12 @@ ColumnStateMap's parked-mark comment (:495), CLAUDE.md's cadence bullet
 - **R3 — cadence regressions.** The fast gate is deliberately unchanged
   (movement-conservative prediction); pins run unmodified.
 - **R4 — diag drift.** `confirmed=` in the client diag now legitimately survives
-  movement; the soak checker does not read it (client rows carry no confirmed
-  field), so no harness impact.
+  movement. CORRECTED (since-release review, 2026-08-18): the soak checker DOES read
+  `client.scan.confirmed` — fresh-backfill's named check requires it and asserts
+  `confirmed > 24` (check_soak.py ~:1189/:1205). No harness impact survives by a
+  different argument: that scenario's client is stationary and retention can only
+  preserve or RAISE `confirmed`, so the floor gets easier, never harder. Do not
+  remove `scan.confirmed` on the strength of the original (wrong) sentence.
 
 ## 7. Rollout
 

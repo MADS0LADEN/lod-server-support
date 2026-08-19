@@ -1,5 +1,15 @@
 # Adaptive Scan Cadence — completion-triggered want-set re-declaration
 
+> **2026-08-18 amendment (scanner-reopened-rings-plan.md — scan prefix retention):**
+> the RESET MECHANISM this doc describes is retired: `resetConfirmedRing()` no longer
+> exists, and `recenter(d)` DECREMENTS the confirmed prefix and reopens a ring bitset
+> instead of zeroing it (kill switch `enableScanPrefixRetention=false` restores the
+> semantics described here). The CADENCE CONCLUSIONS all still hold: the walk-cost gate
+> replaced the `confirmedRing > 0` proxy, `predictedWalkCost` prices the movement window
+> at the bare from-zero cost (so the flight regime and the ring-127 cliff are unchanged),
+> and the retry half rides the verbatim `hasActionableRetries` rung. Read the mechanism
+> prose below as historical.
+
 **Status:** reviewed plan v2 (3-agent Opus review folded — §13), branch `feat/adaptive-scan-cadence` (off main)
 **Date:** 2026-08-01
 **Scope:** client-only (Fabric `SpiralScanner` / `LodRequestManager`). No wire change, no

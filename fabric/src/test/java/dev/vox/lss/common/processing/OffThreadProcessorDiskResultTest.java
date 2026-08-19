@@ -2096,6 +2096,49 @@ class OffThreadProcessorDiskResultTest {
     }
 
     @Test
+    void nearerTsPositivePendingReadHoldsAFartherEscalation() throws Exception {
+        // The RELOCATED anti-starvation invariant's carrier, pinned (since-release
+        // review MINOR-6, 2026-08-18): a ts>0 in-flight entry no longer stamps the
+        // frontier — its protection is that it sits in pendingByPosition and
+        // generationOvertakesNearerInFlight holds every farther gen candidate against
+        // it. That hold must stay TS-AGNOSTIC: filtering it to ts<=0 pending entries
+        // would starve exactly the population the acquisition-frontier rule stopped
+        // stamping (see the liveFrontierRing field comment's "do not fix" clause).
+        // Geometry isolates rule 1: the ts<=0 entry stamps the frontier at ring 4, so
+        // the spread gate admits ring 4 trivially; only the nearer-pending-SYNC hold
+        // can refuse.
+        var rig = new Rig(true, 4, 2, 30);
+        try {
+            rig.state.updatePlayerChunk(0, 0);
+            declare(rig, rig.state,
+                    new IncomingRequest(2, 0, 5_000L),  // ts>0 revalidation, will stay pending
+                    new IncomingRequest(4, 0, -1));     // ts<=0 acquisition (stamps frontier 4)
+            waitFor(() -> rig.proc.diskSubmits.size() == 2, "both disk reads in flight");
+
+            // Ring 4's miss arrives FIRST — ring 2's ts>0 read is still out on disk.
+            long gatedBefore = rig.proc.getDiagnostics().getTotalGenOrderGated();
+            rig.inject(ChunkReadResult.notFoundAuthoritative(rig.uuid, 4, 0, DIM, 2L));
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+            waitFor(() -> rig.proc.getDiagnostics().getTotalGenOrderGated() > gatedBefore,
+                    "the far miss is held behind the nearer ts>0 in-flight read");
+            assertEquals(0, rig.state.getHeldGenSlots(),
+                    "no ticket while the ts>0 read waits on disk — the pending-map hold"
+                            + " is ts-agnostic");
+
+            // The nearer ts>0 read resolves (served); the re-declaration escalates
+            // ring 4 from its memo — the hold releases with the pending entry.
+            rig.inject(dataResult(rig.uuid, 2, 0, DIM, new byte[]{1}, 5_000L, 1L));
+            rig.proc.postSnapshot(snapshot(DIM, rig.uuid), List.of());
+            waitFor(() -> rig.proc.enqueuedColumns.size() == 1, "ring 2 served");
+            declare(rig, rig.state, new IncomingRequest(4, 0, -1));
+            waitFor(() -> rig.state.getHeldGenSlots() == 1,
+                    "with the ts>0 read resolved, the held miss escalates");
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
+    @Test
     void innerMissEscalatesUnderAnOuterAcquisitionFrontier() throws Exception {
         // The plan's inner-regeneration-not-starved claim, at admission level: a ts>0 ask
         // whose region was deleted server-side (authoritative miss) escalates even while
