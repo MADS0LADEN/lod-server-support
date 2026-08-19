@@ -76,6 +76,8 @@ class QuadtreeWalkDifferentialTest {
                     this.quadArm.recenteredSinceLastFireForTest(), "movement window " + at);
             assertEquals(this.legacyArm.truncatedBelowPrefixForTest(),
                     this.quadArm.truncatedBelowPrefixForTest(), "truncatedBelowPrefix " + at);
+            assertEquals(this.legacyArm.lastWalkTruncatedForTest(),
+                    this.quadArm.lastWalkTruncatedForTest(), "lastWalkTruncated " + at);
             assertEquals(this.legacyArm.getValveTrips(), this.quadArm.getValveTrips(),
                     "valveTrips " + at);
         }
@@ -282,6 +284,82 @@ class QuadtreeWalkDifferentialTest {
             assertEquals(alwaysOff.getReopenedRingCount(), flipping.getReopenedRingCount(),
                     "reopened at step " + step);
         }
+    }
+
+    @Test
+    void armedFastCadenceFireDecisionsMatch() {
+        // Review round 2 MINOR-3: the other scenarios never arm the adaptive cadence, so
+        // every fire is the 20-tick fallback. Here both arms are armed identically
+        // (noteDeclared + a shared outstanding supplier), so the FAST-fire ladder —
+        // predictedWalkCost over confirmedRing/scanRing/truncation/reopened state — makes
+        // real decisions that must agree tick by tick.
+        var rig = new Rig(24, LSSConstants.MAX_BATCH_CHUNK_REQUESTS);
+        int[] outstanding = {0};
+        rig.quadArm.setOutstandingSupplier(() -> outstanding[0]);
+        rig.legacyArm.setOutstandingSupplier(() -> outstanding[0]);
+        int cx = 0, cz = 0;
+        var rng = new Random(11L);
+        for (int step = 0; step < 900; step++) {
+            if (rng.nextInt(25) == 0) {
+                cx += 1;
+                rig.recenter(1);
+            }
+            if (rng.nextInt(40) == 0) {
+                long p = PositionUtil.packPosition(cx + rng.nextInt(31) - 15,
+                        cz + rng.nextInt(31) - 15);
+                rig.dirty(p, cx, cz);
+            }
+            int n = rig.tick(cx, cz, VD, "armed step " + step);
+            if (n >= 0) {
+                rig.quadArm.noteDeclared(n);
+                rig.legacyArm.noteDeclared(n);
+                outstanding[0] = n;
+                // Answer most of the batch promptly (>=95% completion arms the fast
+                // trigger), leaving an occasional straggler.
+                int answered = n - (n > 20 && rng.nextInt(4) == 0 ? 1 : 0);
+                for (int i = 0; i < answered; i++) {
+                    rig.columns.onReceived(rig.qPos[i], 100L + step);
+                    outstanding[0]--;
+                }
+            }
+        }
+        assertEquals(rig.legacyArm.getFastScans(), rig.quadArm.getFastScans(),
+                "fast-fire counts must match");
+        assertTrue(rig.quadArm.getFastScans() > 0,
+                "premise: the armed cadence actually produced fast fires");
+    }
+
+    @Test
+    void retentionOffQuadOnMatchesLegacy() {
+        // Review round 2 MINOR-4: the 2×2 seam quadrant retention-OFF × quad-ON was never
+        // compared arm-vs-arm. Both arms run retention OFF (every reset collapses the
+        // prefix); the quad arm's fast path must still match the legacy walk exactly —
+        // post-collapse recovery walks are precisely where it engages hardest.
+        var rig = new Rig(28, LSSConstants.MAX_BATCH_CHUNK_REQUESTS);
+        rig.quadArm.prefixRetentionEnabled = () -> false;
+        rig.legacyArm.prefixRetentionEnabled = () -> false;
+        int cx = 0, cz = 0;
+        for (int w = 0; w < 80; w++) {
+            int n = rig.fire(cx, cz, VD, "retention-off warmup " + w);
+            if (n == 0) break;
+            rig.answerAll(n, 400L + w);
+        }
+        // Crossings now collapse the prefix every time — the legacy-hitch regime.
+        for (int mv = 0; mv < 5; mv++) {
+            cx += 1;
+            rig.recenter(1);
+            int n = rig.fire(cx, cz, VD, "retention-off crossing " + mv);
+            rig.answerAll(Math.max(n, 0), 800L + mv);
+        }
+        // A dirty mark (known position) — retention off routes it through the
+        // prefix-collapse arm of reopenRing on both scanners.
+        long p = PositionUtil.packPosition(cx + 9, cz);
+        rig.columns.onReceived(p, 1_000L);
+        rig.dirty(p, cx, cz);
+        int n = rig.fire(cx, cz, VD, "retention-off post-dirty");
+        rig.answerAll(Math.max(n, 0), 1_200L);
+        assertTrue(rig.quadArm.getQuadRingSkips() > 0,
+                "premise: the fast path engaged on the collapse-recovery walks");
     }
 
     @Test

@@ -564,9 +564,12 @@ So instead of §3.2's parallel band-merge engine plus §3.3's cadence shadow:
   leaves preserves the old backing's out-of-window semantics verbatim (no window
   lifecycle, no growth realloc, no eviction callback), and the prune stays explicit
   with §3.4's position-granular boundary-leaf masking. No summary hierarchy in v1 —
-  leaf-flag checks alone hit the cost target (a full-disc reset walk drops from ~1M
-  classify probes / 30–90 ms to ~65k leaf lookups / ~1–3 ms; steady-state walks are
-  unchanged µs-class because the prefix already skips them).
+  leaf-flag checks alone hit the cost target (a full-disc SATISFIED reset walk drops
+  from ~1M classify probes / 30–90 ms to ~131k map lookups (~67k loop iterations —
+  review round 2 corrected the count; both `||` sides evaluate on clean leaves) /
+  ~1.5–3 ms; steady-state walks are unchanged µs-class because the prefix already
+  skips them; the post-cache-load first walk is NOT a fast-path case — adopted stamps
+  are revalidation needs — its hitch is A1's off-thread build fix).
 - **Cache lifecycle**: A1 = `ColumnCacheStore.loadStateAsync` builds `LoadedState`
   leaves on the IO thread; the gate adopts in O(leaves). A2 = `detachForSave()`
   ownership transfer (destructive by documented contract; both production callers
@@ -598,3 +601,47 @@ So instead of §3.2's parallel band-merge engine plus §3.3's cadence shadow:
   client-config pinning of the new key (soak clients run shipped defaults; the
   differential guarantees make default-on the tested configuration), support-line
   backports (after live validation, retention backports first per §5.1.6).
+
+## 13. Review round 2 (2026-08-19, 3 Fable reviewers on the implementation) — folded
+
+Lenses: store rewrite vs the reference / scanner fast path + equivalence claim /
+lifecycle + threading + integration. **Zero MAJORs on all three** — the equivalence
+claims held under adversarial reading (ringNeedsFree leaf-coverage proof, the tsPut
+transition matrix, every destructive-saveCache caller chain incl. the soak client's
+disconnect row, which re-emits the last LIVE snapshot by pre-existing design). All
+actionable MINORs folded:
+
+- **Store MINOR-1 / lifecycle MINOR-2 (the one production fix):** explicit `-1` file
+  rows (persistable by a v0.11.1 client's inert clamped entries) now join
+  `clampedToAbsent` so the file-wins overwrite deletes a live stamp exactly as the
+  reference's `put(-1)` did. The fuzz's loadFrom domain now generates exactly `-1`
+  (it was the one value missing — would have caught this instantly).
+- **Scanner MINOR-1:** the two `CountingColumnStateMap` retention pins (warm-disc
+  hitch bound, steady-state zero-visit) now pin `quadtreeScanEnabled = false` — with
+  the fast path on, a collapsed prefix would fast-skip uncounted and the classify
+  count could no longer detect a retention regression (the pins are the retention
+  arm's unit-level control).
+- **Both reviewers' vacuous-probe finding:** the fuzz gained a converge-leaf bulk op
+  + a per-seed assertion that the ringNeedsFree soundness probe's TRUE branch fired,
+  plus a deterministic engagement/disengagement pin (converged 3×3-leaf block; dirty/
+  retry/unstamp/absent/unvalidated flavors each disengage — including the
+  adopted-stamps-never-skip property).
+- **Scanner MINOR-3/4:** `lastWalkTruncated` got a test accessor + arm-parity assert;
+  a new armed-cadence differential scenario compares FAST-fire decisions (fastScans
+  parity + engagement premise); a new retention-OFF × quad-ON scenario covers the
+  fourth seam quadrant (collapse-recovery walks, where the fast path engages hardest).
+- **Fuzz domain widenings (store MINOR-3):** occasional `onReceived(ts=0)` (wire-legal
+  hostile input), independent noteStale/resolveStale ops (staleInFlight bits now
+  survive into prunes/clears).
+- **Doc corrections:** ~65k → ~131k map lookups (~67k iterations) for the reset-walk
+  cost (time claim unchanged, it fit the corrected count); the post-cache-load hitch
+  re-attributed to A1's off-thread build (adopted stamps are revalidation needs and
+  never fast-skip); `persistentRemovalsForSave`'s "not drained at save" reworded (the
+  production path drains by ownership transfer — same failed-save exposure as the old
+  copy-then-clear callers); `mergeSaveDetachedAsync`'s "no caller-thread copy" →
+  "no per-entry copy" (the detach's O(leaves) shell copy is sub-ms).
+- **Noted, deliberately not changed:** `hasActionableRetries`/`collect…` O(leaves)
+  while a retry exists (documented, sub-ms, retryCount==0 short-circuits the common
+  case); sub- -1 file garbage persists as file cruft until distance eviction
+  (observationally harmless); ringNeedsFree corner leaves double-checked (constant-
+  factor, correctness-neutral).

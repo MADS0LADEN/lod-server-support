@@ -686,10 +686,12 @@ class ColumnStateMap {
      */
     static final class LoadedState {
         final Long2ObjectOpenHashMap<Leaf> leaves;
-        /** Positions whose file value was CORRUPT (below -1) and clamped to absent. The
-         *  clamp must still OVERWRITE any live stamp at adopt time — file-wins is the
-         *  loadFrom contract, and the old backing's put(-1) deleted the live claim. A
-         *  dropped entry would silently keep it (the fuzz caught exactly this). */
+        /** Positions whose file value carried no data claim — an explicit -1 row (a
+         *  v0.11.1 client could persist the old backing's inert clamped entries) or
+         *  CORRUPT (below -1, clamped). Either must still OVERWRITE any live stamp at
+         *  adopt time — file-wins is the loadFrom contract, and the old backing's
+         *  put(-1) deleted the live claim. A dropped entry would silently keep it (the
+         *  fuzz caught the corrupt flavor; review round 2 caught the exact--1 flavor). */
         final it.unimi.dsi.fastutil.longs.LongArrayList clampedToAbsent;
 
         private LoadedState(Long2ObjectOpenHashMap<Leaf> leaves,
@@ -714,9 +716,9 @@ class ColumnStateMap {
             var entry = iter.next();
             long ts = entry.getLongValue();
             if (ts <= -1L) {
-                // Clamp-to-absent — but the clamp is still a file-wins WRITE (see
-                // LoadedState.clampedToAbsent).
-                if (ts < -1L) clamped.add(entry.getLongKey());
+                // Claim-free row (explicit -1 or corrupt-below): still a file-wins
+                // WRITE against any live stamp (see LoadedState.clampedToAbsent).
+                clamped.add(entry.getLongKey());
                 continue;
             }
             long packed = entry.getLongKey();
@@ -866,9 +868,12 @@ class ColumnStateMap {
     /**
      * The session's deliberate stamp deletions, for the merge-save's removal pass (applied
      * to the FILE before the in-memory overlay, so a position re-received after its removal
-     * survives via the overlay). Deliberately not drained at save: a failed save must not
-     * lose them, and over-deletion of a file entry re-served since a prior save costs one
-     * honest re-request on the next visit — the safe direction.
+     * survives via the overlay). This TEST-FACING accessor does not drain; the PRODUCTION
+     * save path drains by ownership transfer ({@link #detachForSave}), so a failed IO-thread
+     * write loses the detached removals — the same exposure the old copy-then-clear callers
+     * had (both cleared the live set right after the async copy), and the same safe-direction
+     * outcome: over-deletion of a file entry re-served since a prior save costs one honest
+     * re-request on the next visit.
      */
     LongOpenHashSet persistentRemovalsForSave() {
         return this.persistentRemovals;

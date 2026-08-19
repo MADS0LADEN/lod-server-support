@@ -69,9 +69,10 @@ public class LSSClientConfig extends JsonConfig {
     // per-column state lives in dense 8×8-chunk section leaves carrying a derived
     // needs-mask, and the ring walk confirms a fully-satisfied ring by checking the
     // leaves it crosses (O(perimeter/8) flag reads) instead of classifying its positions
-    // one by one. Turns the residual full-disc walks — teleports, LOD-distance changes,
-    // dirty-valve overflows, the post-cache-load first walk — from a 30-90 ms render
-    // hitch into ~1-3 ms. Emission, ordering, and cadence are bit-identical to the
+    // one by one. Turns the residual full-disc walks over SATISFIED terrain — teleports,
+    // LOD-distance changes, dirty-valve overflows — from a 30-90 ms render hitch into
+    // ~1.5-3 ms. (The post-cache-load hitch is fixed separately by the off-thread leaf
+    // build — adopted stamps are revalidation NEEDS and never fast-skip.) Emission, ordering, and cadence are bit-identical to the
     // per-position walk by construction (differential-test pinned). Kill switch: false
     // restores the per-position walk verbatim — the field A/B lever. NOTE this gates the
     // WALK only; the section-backed state store itself is not switchable. Orthogonal to

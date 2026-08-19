@@ -1895,6 +1895,11 @@ class SpiralScannerTest {
         var columns = new CountingColumnStateMap();
         seedNonExcludedSquare(columns, CX, CZ, lod, vd);
         var s = scanner(lod);
+        // Quad fast path OFF: this pin isolates RETENTION's walk-cost bound by classify
+        // COUNT — with the ring fast path on, a collapsed prefix would fast-skip the
+        // satisfied rings uncounted and the count could no longer detect the collapse
+        // (review round 2 MINOR-1: the pin must stay the retention arm's control).
+        s.quadtreeScanEnabled = () -> false;
         var queue = new Sink();
         assertEquals(0, fireScan(s, vd, columns, queue), "premise: converged warm disc");
         assertEquals(lod + 1, s.getConfirmedRing());
@@ -1962,6 +1967,9 @@ class SpiralScannerTest {
         var columns = new CountingColumnStateMap();
         seedNonExcludedSquare(columns, CX, CZ, 32, 4);
         var s = scanner(32);
+        // Quad OFF for the same reason as the warm-disc pin above: the zero-visit
+        // assertion must measure the legacy walk (retention's own steady state).
+        s.quadtreeScanEnabled = () -> false;
         var queue = new Sink();
         assertEquals(0, fireScan(s, 4, columns, queue));
         assertEquals(33, s.getConfirmedRing());

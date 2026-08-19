@@ -1007,6 +1007,9 @@ class SpiralScanner {
     // Test accessors for the retention flags (the reset-path pins assert they clear).
     boolean recenteredSinceLastFireForTest() { return this.recenteredSinceLastFire; }
     boolean truncatedBelowPrefixForTest() { return this.truncatedBelowPrefix; }
+    /** predictedWalkCost's truncation input — the walk differential asserts arm parity
+     *  on it directly (review round 2 MINOR: only count trajectories implied it). */
+    boolean lastWalkTruncatedForTest() { return this.lastWalkTruncated; }
     int getScanRing() { return this.scanRing; }
     int getMissingVanillaChunks() { return this.missingVanillaChunks; }
     int getLastBudget() { return this.lastBudget; }

@@ -230,9 +230,10 @@ public class ColumnCacheStore {
 
     /**
      * The ownership-transfer save (the A2 fix, quadtree-client-state-plan.md §3.4):
-     * consumes a {@link ColumnStateMap#detachForSave() detached} state — no caller-thread
-     * copy at all, where {@link #mergeSaveAsync} pays a 1-2M-entry map copy on the render
-     * thread (est. 50-150 ms at every dimension change). The overlay map is synthesized
+     * consumes a {@link ColumnStateMap#detachForSave() detached} state — no PER-ENTRY
+     * caller-thread copy (the detach's O(leaves) map-shell copy is ~16-31k reference
+     * puts, sub-ms), where {@link #mergeSaveAsync} pays a 1-2M-entry map copy on the
+     * render thread (est. 50-150 ms at every dimension change). The overlay map is synthesized
      * from the leaves ON THE IO THREAD and then flows through the unchanged
      * {@link #mergeSave} body (file merge → removals → overlay → evict → write).
      */

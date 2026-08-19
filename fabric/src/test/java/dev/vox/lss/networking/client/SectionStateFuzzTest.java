@@ -60,59 +60,79 @@ class SectionStateFuzzTest {
         var ref = new ReferenceColumnStateMap();
         long[] pool = positionPool();
 
+        boolean probeFired = false;
         for (int op = 0; op < 4_000; op++) {
             long p = pool[rng.nextInt(pool.length)];
             int kind = rng.nextInt(100);
-            if (kind < 30) {
-                long ts = 1 + rng.nextInt(5_000);
+            if (kind < 28) {
+                // Mostly real stamps; occasionally the wire-legal ts=0 (a hostile/buggy
+                // server — onColumnReceived applies it unchecked; review round 2).
+                long ts = rng.nextInt(20) == 0 ? 0L : 1 + rng.nextInt(5_000);
                 impl.onReceived(p, ts);
                 ref.onReceived(p, ts);
-            } else if (kind < 45) {
+            } else if (kind < 43) {
                 impl.onUpToDate(p);
                 ref.onUpToDate(p);
-            } else if (kind < 52) {
+            } else if (kind < 50) {
                 impl.onNotGenerated(p);
                 ref.onNotGenerated(p);
-            } else if (kind < 62) {
+            } else if (kind < 60) {
                 impl.onIngestFailed(p);
                 ref.onIngestFailed(p);
-            } else if (kind < 72) {
+            } else if (kind < 70) {
                 assertEquals(ref.markDirtyIfKnown(p), impl.markDirtyIfKnown(p),
                         "markDirtyIfKnown divergence at op " + op + " seed " + seed);
-            } else if (kind < 76) {
+            } else if (kind < 74) {
                 impl.markSessionSatisfied(p);
                 ref.markSessionSatisfied(p);
-            } else if (kind < 80) {
+            } else if (kind < 78) {
                 impl.markRetry(p);
                 ref.markRetry(p);
-            } else if (kind < 84) {
+            } else if (kind < 81) {
+                // Note WITHOUT an immediate resolve (review round 2: paired note/resolve
+                // meant a staleInFlight bit never survived into a prune/clear).
                 boolean inFlight = rng.nextBoolean();
                 impl.noteStaleIfInFlight(p, inFlight);
                 ref.noteStaleIfInFlight(p, inFlight);
+            } else if (kind < 84) {
                 assertEquals(ref.resolveStale(p), impl.resolveStale(p),
                         "resolveStale divergence at op " + op + " seed " + seed);
-            } else if (kind < 88) {
+            } else if (kind < 87) {
                 long pre = rng.nextInt(3) - 1 + rng.nextInt(2000); // sometimes <=0 (no-op branch)
                 impl.markAuthoritativeClear(p, pre);
                 ref.markAuthoritativeClear(p, pre);
-            } else if (kind < 92) {
-                // The legacy 0-stamp artifact + sub- -1 garbage arrive via loadFrom (the
-                // clamp path). The reference keeps clamped -1s as inert entries; the new
-                // backing drops them — the sanctioned divergence, normalized in
-                // assertParity's map comparison.
+            } else if (kind < 91) {
+                // File rows: real stamps, the legacy 0 artifact, EXPLICIT -1 (a v0.11.1
+                // client could persist the old backing's inert clamped entries — the
+                // file-wins overwrite must still delete a live claim; review round 2),
+                // and sub- -1 garbage (clamps, same overwrite).
                 var loaded = new Long2LongOpenHashMap();
                 loaded.defaultReturnValue(-1L);
                 for (int i = 0, n = 1 + rng.nextInt(6); i < n; i++) {
                     long lp = pool[rng.nextInt(pool.length)];
-                    long lts = switch (rng.nextInt(4)) {
+                    long lts = switch (rng.nextInt(5)) {
                         case 0 -> 0L;                       // legacy artifact
-                        case 1 -> -2L - rng.nextInt(100);   // corrupt garbage (clamps)
+                        case 1 -> -1L;                      // explicit claim-free row
+                        case 2 -> -2L - rng.nextInt(100);   // corrupt garbage (clamps)
                         default -> 1L + rng.nextInt(5_000);
                     };
                     loaded.put(lp, lts);
                 }
                 impl.loadFrom(loaded);
                 ref.loadFrom(loaded);
+            } else if (kind < 94) {
+                // Bulk-converge p's whole leaf so the ringNeedsFree probe below has real
+                // needs-free territory to fire on (review round 2: without this the
+                // TRUE branch was probabilistically unreachable).
+                int baseX = (dev.vox.lss.common.PositionUtil.unpackX(p) >> 3) << 3;
+                int baseZ = (dev.vox.lss.common.PositionUtil.unpackZ(p) >> 3) << 3;
+                for (int dx = 0; dx < 8; dx++) {
+                    for (int dz = 0; dz < 8; dz++) {
+                        long lp = PositionUtil.packPosition(baseX + dx, baseZ + dz);
+                        impl.onReceived(lp, 9_000L);
+                        ref.onReceived(lp, 9_000L);
+                    }
+                }
             } else if (kind < 97) {
                 int px = rng.nextInt(41) - 20, pz = rng.nextInt(41) - 20;
                 int dist = 8 + rng.nextInt(80);
@@ -125,8 +145,31 @@ class SectionStateFuzzTest {
                 // ringNeedsFree soundness probe on the CURRENT state: needs-free ⇒ every
                 // ring position classifies SATISFIED. Conservative false is always legal.
                 int px = rng.nextInt(31) - 15, pz = rng.nextInt(31) - 15;
-                int r = 1 + rng.nextInt(12);
+                int r;
+                if (rng.nextBoolean()) {
+                    // Self-arranged flavor: converge the 3×3 leaf block around the probe
+                    // center first (mirrored into both maps), then probe a ring contained
+                    // in it — the TRUE branch fires deterministically (an opportunistic
+                    // probe alone almost never finds fully-clean crossed leaves under
+                    // this op churn; review round 2). Also pins COMPLETENESS: a fully
+                    // converged neighborhood MUST report needs-free.
+                    int baseX = ((px >> 3) - 1) << 3, baseZ = ((pz >> 3) - 1) << 3;
+                    for (int dx = 0; dx < 24; dx++) {
+                        for (int dz = 0; dz < 24; dz++) {
+                            long lp = PositionUtil.packPosition(baseX + dx, baseZ + dz);
+                            impl.onReceived(lp, 8_500L);
+                            ref.onReceived(lp, 8_500L);
+                        }
+                    }
+                    r = 1 + rng.nextInt(4); // extent ±4 stays inside the converged block
+                    assertTrue(impl.ringNeedsFree(px, pz, r),
+                            "a fully converged neighborhood must be needs-free (seed "
+                                    + seed + ", op " + op + ")");
+                } else {
+                    r = 1 + rng.nextInt(12); // opportunistic: whatever state stands
+                }
                 if (impl.ringNeedsFree(px, pz, r)) {
+                    probeFired = true;
                     int[] c = new int[2];
                     for (int i = 0; i < 8 * r; i++) {
                         SpiralScanner.ringIndexToCoord(r, i, px, pz, c);
@@ -146,6 +189,55 @@ class SectionStateFuzzTest {
             if (op % 23 == 0) assertParity(ref, impl, pool, rng, seed, op);
         }
         assertParity(ref, impl, pool, rng, seed, -1);
+        assertTrue(probeFired, "the ringNeedsFree soundness probe's TRUE branch must fire"
+                + " at least once per seed (the converge-leaf op guarantees territory;"
+                + " a never-firing probe pins nothing — review round 2)");
+    }
+
+    @Test
+    void ringNeedsFreeEngagesOnConvergedLeavesAndDisengagesPerNeedsFlavor() {
+        // Deterministic engagement + disengagement (review round 2: the fuzz probe alone
+        // was probabilistically weak). A fully received 3×3-leaf block (chunks [0..23]²)
+        // is needs-free for every contained ring; each needs-producing state flips it.
+        var store = new ColumnStateMap();
+        for (int cx = 0; cx < 24; cx++) {
+            for (int cz = 0; cz < 24; cz++) {
+                store.onReceived(PositionUtil.packPosition(cx, cz), 1_000L);
+            }
+        }
+        assertTrue(store.ringNeedsFree(12, 12, 3), "single-leaf ring on a converged leaf");
+        assertTrue(store.ringNeedsFree(12, 12, 8), "multi-leaf ring across all nine leaves");
+        assertFalse(store.ringNeedsFree(12, 12, 12),
+                "a ring crossing ABSENT leaves (outside the block) is never needs-free");
+
+        long probe = PositionUtil.packPosition(10, 10); // on ring 3's crossed leaf
+        // dirty
+        assertTrue(store.markDirtyIfKnown(probe));
+        assertFalse(store.ringNeedsFree(12, 12, 3), "a dirty mark disengages the ring");
+        store.onUpToDate(probe); // heals: clears dirty, >0 stamp revalidates
+        assertTrue(store.ringNeedsFree(12, 12, 3));
+        // retry
+        store.markRetry(probe);
+        assertFalse(store.ringNeedsFree(12, 12, 3), "a retry mark disengages the ring");
+        store.onReceived(probe, 1_100L); // consumes the retry
+        assertTrue(store.ringNeedsFree(12, 12, 3));
+        // unstamp (ingest failure)
+        store.onIngestFailed(probe);
+        assertFalse(store.ringNeedsFree(12, 12, 3), "an ingest unstamp disengages the ring");
+        store.onReceived(probe, 1_200L);
+        assertTrue(store.ringNeedsFree(12, 12, 3));
+        // unvalidated stamp (a fresh session's cached-not-yet-revalidated shape)
+        var loadedShape = new ColumnStateMap();
+        var file = new Long2LongOpenHashMap();
+        file.defaultReturnValue(-1L);
+        for (int cx = 8; cx < 16; cx++) {
+            for (int cz = 8; cz < 16; cz++) {
+                file.put(PositionUtil.packPosition(cx, cz), 500L);
+            }
+        }
+        loadedShape.adoptLoaded(ColumnStateMap.buildLoaded(file));
+        assertFalse(loadedShape.ringNeedsFree(12, 12, 3),
+                "adopted-but-unvalidated stamps are revalidation NEEDS — never fast-skipped");
     }
 
     private void assertParity(ReferenceColumnStateMap ref, ColumnStateMap impl,
