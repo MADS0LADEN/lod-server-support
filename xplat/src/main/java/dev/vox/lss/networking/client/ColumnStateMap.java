@@ -3,6 +3,7 @@ package dev.vox.lss.networking.client;
 import dev.vox.lss.common.PositionUtil;
 import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 
 /**
@@ -11,45 +12,91 @@ import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
  * {@link #classify} is the one request-need ladder consulted by the scanner when it builds
  * each want-set.
  *
+ * <p><b>Backing (2026-08-19, docs/planning/quadtree-client-state-plan.md):</b> state is
+ * stored in dense 8×8-chunk section LEAVES — one {@code long} bitmask per boolean state
+ * plus a {@code long[64]} timestamp array — keyed by packed section coordinates, instead
+ * of the former eight parallel hash structures (whose worst case at the shipped distance
+ * 512 was ~60–100 MB plus rehash storms on bulk loads; the leaves cap out around
+ * ~10–12 MB). Each leaf carries a derived {@code needs} mask
+ * ({@code bit set ⇔ classify(position) != SATISFIED}) maintained on every state
+ * transition, which is what lets {@link SpiralScanner}'s ring walk skip fully-satisfied
+ * rings in O(leaves-on-ring) instead of O(positions-on-ring) (the
+ * {@code enableQuadtreeScan} fast path — see {@link #ringNeedsFree}). Semantics are
+ * unchanged from the hash backing (pinned by ColumnStateMapTest and the
+ * SectionStateFuzzTest differential against the retained reference implementation), with
+ * ONE deliberate normalization: a stored timestamp below -1 (hostile/corrupt input; the
+ * old backing kept it as an inert map entry) is clamped to -1 = absent everywhere, not
+ * just in {@link #loadFrom} — strictly the safe direction (the position re-requests).
+ *
  * <p>Timestamp semantics: absent (-1) = never seen; &gt;0 = received/validated at that
  * epoch-second. A stored 0 is a LEGACY value only (pre-server-owned-generation caches
  * persisted 0 for not-generated answers) and classifies as "no data" — the client never
  * writes one anymore: a NOT_GENERATED answer is a permanent session-satisfy instead.
  *
- * <p><b>Thread safety:</b> Not thread-safe. Main client thread only.
+ * <p><b>Thread safety:</b> Not thread-safe. Main client thread only — EXCEPT the static
+ * {@link #buildLoaded} factory (pure function over its input, used by the cache IO
+ * thread) and a {@link #detachForSave() detached} state's leaves, which are owned by the
+ * IO thread once handed over.
  */
 class ColumnStateMap {
 
     /** Sentinel returned by {@link #classify} when the position needs no request. */
     static final long SATISFIED = Long.MIN_VALUE;
 
-    private final Long2LongOpenHashMap timestamps = new Long2LongOpenHashMap();
-    {
-        timestamps.defaultReturnValue(-1L);
+    /**
+     * An 8×8-chunk section of per-column state. Bit index within a leaf is
+     * {@code ((cz & 7) << 3) | (cx & 7)} (row-major by z). {@code ts[i] == -1} means
+     * absent; {@code positiveTs}/{@code zeroTs} mirror the array ({@code ts[i] > 0} /
+     * {@code ts[i] == 0}) so {@link #recomputeNeeds} is pure mask math. An all-clear leaf
+     * is equivalent to an absent one (needs = all-ones both ways — an untouched position
+     * classifies as a -1 first ask, which IS a need).
+     */
+    static final class Leaf {
+        final long[] ts = new long[64];
+        long positiveTs;
+        long zeroTs;
+        long dirty;
+        long retry;
+        long validated;
+        long sessionSatisfied;
+        long staleInFlight;
+        /** Derived: bit set ⇔ classify(position) would return non-SATISFIED. */
+        long needs;
+
+        Leaf() {
+            java.util.Arrays.fill(this.ts, -1L);
+            recomputeNeeds(); // all-ones: every untouched position is a -1 first ask
+        }
+
+        boolean isClear() {
+            return (this.positiveTs | this.zeroTs | this.dirty | this.retry
+                    | this.validated | this.sessionSatisfied | this.staleInFlight) == 0;
+        }
+
+        /**
+         * The classify ladder as mask algebra — MUST mirror {@link #classify} exactly
+         * (the needs-invariant fuzz pins the equivalence bit-for-bit):
+         * dirty always needs; else sessionSatisfied never needs; else no positive ts,
+         * a retry mark, or a not-yet-validated stamp all need.
+         */
+        void recomputeNeeds() {
+            this.needs = this.dirty
+                    | (~this.sessionSatisfied & (~this.positiveTs | this.retry | ~this.validated));
+        }
     }
 
-    // Positions flagged by the server's dirty broadcast that need re-requesting.
-    private final LongOpenHashSet dirty = new LongOpenHashSet();
-    // Positions whose delivery was lost after being stamped (ingest failure) and that must be
-    // re-reachable by a later scan. The name is historical: through v16 the rate-limit bounce
-    // was the other writer, but v17 retired the bounce, so onIngestFailed is now the only one.
-    // The mark's live job is collectActionableRetryRings() -> the scanner reopening the
-    // mark's ring (2026-08-18, scanner-reopened-rings-plan.md; formerly a full confirmed-ring
-    // reset), without which an unstamped position inside an already-confirmed ring is never
-    // rescanned (marks under the vanilla-view exclusion are parked — see hasActionableRetries).
-    private final LongOpenHashSet retry = new LongOpenHashSet();
-    // Positions confirmed current (data or up-to-date) in this session; cleared on
-    // reconnect/dimension change so cached-but-stale positions get revalidated.
-    private final LongOpenHashSet validated = new LongOpenHashSet();
-    // Positions resolved for THIS session that hold no server data — all-air up-to-date and
-    // ingest-parked columns. Stops the within-session re-request loop WITHOUT fabricating a
-    // client-clock timestamp (which would persist and lie next session). Never persisted;
-    // cleared on reconnect/dimension change and pruned by distance.
-    private final LongOpenHashSet sessionSatisfied = new LongOpenHashSet();
-    // Positions dirtied WHILE their first serve was in flight (stored == -1, so
-    // markDirtyIfKnown could not record them). Resolved when that in-flight request reaches
-    // any terminal outcome, forcing a re-request because the arriving column predates the edit.
-    private final LongOpenHashSet staleInFlight = new LongOpenHashSet();
+    /** Leaves keyed by {@code packPosition(cx >> 3, cz >> 3)}. */
+    private final Long2ObjectOpenHashMap<Leaf> leaves = new Long2ObjectOpenHashMap<>();
+
+    // One-entry leaf memo: ring walks touch the same leaf for up to 8 consecutive
+    // positions, so this turns most per-position lookups into a long compare. Must be
+    // invalidated by every structural change (prune/clear/adopt/detach).
+    private Leaf memoLeaf;
+    private long memoKey;
+
+    // Per-position side state that is genuinely sparse (bounded by failures/clears, never
+    // by the disc) stays in plain maps — see the field comments below.
+
     // Per-position ingest-failure counts; bounds the reject -> re-serve loop a permanently
     // failing consumer would otherwise drive forever (see onIngestFailed).
     private final Long2IntOpenHashMap ingestFailures = new Long2IntOpenHashMap();
@@ -69,11 +116,113 @@ class ColumnStateMap {
     // entry per visited position — memory-growth-only, saves are teardown-frequency.
     // NOT pruned by distance — pruning it would resurrect any removal whose position the
     // player walked away from before the next save.
-    private final LongOpenHashSet persistentRemovals = new LongOpenHashSet();
+    private LongOpenHashSet persistentRemovals = new LongOpenHashSet();
 
-    // Derived counts, maintained on every timestamp transition.
+    // Derived counts, maintained on every transition (the old backing's receivedCount/
+    // emptyCount plus the set sizes the hash sets used to answer for free).
     private int receivedCount;
     private int emptyCount;
+    private int entryCount;   // positions with a stored (non-absent) timestamp
+    private int dirtyCount;
+    private int retryCount;
+    private int sessionSatisfiedCount;
+
+    // --- leaf addressing ---
+
+    private static long leafKeyFor(long packed) {
+        return PositionUtil.packPosition(PositionUtil.unpackX(packed) >> 3,
+                PositionUtil.unpackZ(packed) >> 3);
+    }
+
+    private static int bitIndexFor(long packed) {
+        return ((PositionUtil.unpackZ(packed) & 7) << 3) | (PositionUtil.unpackX(packed) & 7);
+    }
+
+    private static long positionFor(long leafKey, int bit) {
+        int cx = (PositionUtil.unpackX(leafKey) << 3) | (bit & 7);
+        int cz = (PositionUtil.unpackZ(leafKey) << 3) | (bit >> 3);
+        return PositionUtil.packPosition(cx, cz);
+    }
+
+    private Leaf leafFor(long packed) {
+        long key = leafKeyFor(packed);
+        if (this.memoLeaf != null && this.memoKey == key) return this.memoLeaf;
+        Leaf leaf = this.leaves.get(key);
+        if (leaf != null) {
+            this.memoLeaf = leaf;
+            this.memoKey = key;
+        }
+        return leaf;
+    }
+
+    private Leaf leafForCreate(long packed) {
+        long key = leafKeyFor(packed);
+        if (this.memoLeaf != null && this.memoKey == key) return this.memoLeaf;
+        Leaf leaf = this.leaves.get(key);
+        if (leaf == null) {
+            leaf = new Leaf();
+            this.leaves.put(key, leaf);
+        }
+        this.memoLeaf = leaf;
+        this.memoKey = key;
+        return leaf;
+    }
+
+    private void invalidateMemo() {
+        this.memoLeaf = null;
+    }
+
+    /**
+     * Store a timestamp (the old backing's {@code put}), keeping the mirror masks and the
+     * derived counts in step. {@code -1} = remove; values below -1 clamp to -1 (see the
+     * class javadoc's normalization note).
+     */
+    private void tsPut(Leaf leaf, int bit, long value) {
+        long old = leaf.ts[bit];
+        long m = 1L << bit;
+        if (old > 0) this.receivedCount--;
+        else if (old == 0) this.emptyCount--;
+        if (old != -1L) this.entryCount--;
+        if (value < -1L) value = -1L;
+        leaf.ts[bit] = value;
+        leaf.positiveTs &= ~m;
+        leaf.zeroTs &= ~m;
+        if (value > 0) {
+            leaf.positiveTs |= m;
+            this.receivedCount++;
+            this.entryCount++;
+        } else if (value == 0) {
+            leaf.zeroTs |= m;
+            this.emptyCount++;
+            this.entryCount++;
+        }
+    }
+
+    // Mask mutation helpers — each keeps its derived count exact.
+
+    private void setDirty(Leaf leaf, long m) {
+        if ((leaf.dirty & m) == 0) { leaf.dirty |= m; this.dirtyCount++; }
+    }
+
+    private void clearDirty(Leaf leaf, long m) {
+        if ((leaf.dirty & m) != 0) { leaf.dirty &= ~m; this.dirtyCount--; }
+    }
+
+    private void setRetry(Leaf leaf, long m) {
+        if ((leaf.retry & m) == 0) { leaf.retry |= m; this.retryCount++; }
+    }
+
+    private void clearRetry(Leaf leaf, long m) {
+        if ((leaf.retry & m) != 0) { leaf.retry &= ~m; this.retryCount--; }
+    }
+
+    private void setSessionSatisfied(Leaf leaf, long m) {
+        if ((leaf.sessionSatisfied & m) == 0) { leaf.sessionSatisfied |= m; this.sessionSatisfiedCount++; }
+    }
+
+    private void clearSessionSatisfied(Leaf leaf, long m) {
+        if ((leaf.sessionSatisfied & m) != 0) { leaf.sessionSatisfied &= ~m; this.sessionSatisfiedCount--; }
+    }
 
     /**
      * Decide whether a position needs a request and which clientTimestamp to send.
@@ -85,16 +234,20 @@ class ColumnStateMap {
      *         or {@link #SATISFIED} when nothing should be sent
      */
     long classify(long packed) {
+        Leaf leaf = leafFor(packed);
+        if (leaf == null) return -1L; // untouched: no marks, no data — a -1 first ask
+        int bit = bitIndexFor(packed);
+        long m = 1L << bit;
         // Dirty outranks EVERYTHING (incl. sessionSatisfied): a server-pushed change must
         // re-request even a settled all-air/parked position, or an air->content edit becomes a
         // permanent hole. An unknown-but-dirty position re-asks as a first serve (-1); a legacy
         // 0-stamp (pre-server-owned-generation cache) normalizes to -1 the same way.
-        if (this.dirty.contains(packed)) {
-            long dirtyStored = this.timestamps.get(packed);
+        if ((leaf.dirty & m) != 0) {
+            long dirtyStored = leaf.ts[bit];
             return dirtyStored <= 0L ? -1L : dirtyStored;
         }
-        if (this.sessionSatisfied.contains(packed)) return SATISFIED; // resolved this session, no server data
-        long stored = this.timestamps.get(packed);
+        if ((leaf.sessionSatisfied & m) != 0) return SATISFIED; // resolved this session, no server data
+        long stored = leaf.ts[bit];
         // No data: absent (-1) or a LEGACY not-generated 0-stamp loaded from a released
         // client's cache — both declare -1 ("I have nothing"); the client never emits 0.
         if (stored <= 0L) return -1L;
@@ -102,16 +255,51 @@ class ColumnStateMap {
         // alongside the mark, so the revalidation rung below would return the same stored
         // value — this rung keeps the request flowing even if a future path ever leaves a
         // retry-marked position validated.
-        if (this.retry.contains(packed)) return stored;
-        if (!this.validated.contains(packed)) return stored; // Cached but not validated this session
+        if ((leaf.retry & m) != 0) return stored;
+        if ((leaf.validated & m) == 0) return stored; // Cached but not validated this session
         return SATISFIED;
     }
 
-    void markSessionSatisfied(long packed) { this.sessionSatisfied.add(packed); }
+    /**
+     * The {@code enableQuadtreeScan} fast path's ring test: true when every leaf the
+     * Chebyshev ring {@code r} around ({@code px},{@code pz}) crosses has an all-clear
+     * {@code needs} mask — i.e. every position on the ring classifies SATISFIED, so the
+     * scanner may confirm the ring without touching its positions. Conservative by leaf:
+     * any needs bit anywhere in a crossed leaf (even off-ring) returns false and the ring
+     * walks per-position exactly as before. An ABSENT leaf is all-needs (untouched
+     * positions are -1 first asks) and returns false. O(ring-perimeter / 8) map lookups.
+     */
+    boolean ringNeedsFree(int px, int pz, int r) {
+        int xl0 = (px - r) >> 3, xl1 = (px + r) >> 3;
+        int zTop = (pz - r) >> 3, zBot = (pz + r) >> 3;
+        for (int sx = xl0; sx <= xl1; sx++) {
+            if (leafHasNeeds(sx, zTop) || leafHasNeeds(sx, zBot)) return false;
+        }
+        int zl0 = zTop, zl1 = zBot;
+        int xLeft = xl0, xRight = xl1;
+        for (int sz = zl0; sz <= zl1; sz++) {
+            if (leafHasNeeds(xLeft, sz) || leafHasNeeds(xRight, sz)) return false;
+        }
+        return true;
+    }
 
-    boolean isSessionSatisfied(long packed) { return this.sessionSatisfied.contains(packed); }
+    private boolean leafHasNeeds(int sx, int sz) {
+        Leaf leaf = this.leaves.get(PositionUtil.packPosition(sx, sz));
+        return leaf == null || leaf.needs != 0;
+    }
 
-    int sessionSatisfiedCount() { return this.sessionSatisfied.size(); }
+    void markSessionSatisfied(long packed) {
+        Leaf leaf = leafForCreate(packed);
+        setSessionSatisfied(leaf, 1L << bitIndexFor(packed));
+        leaf.recomputeNeeds();
+    }
+
+    boolean isSessionSatisfied(long packed) {
+        Leaf leaf = leafFor(packed);
+        return leaf != null && (leaf.sessionSatisfied & (1L << bitIndexFor(packed))) != 0;
+    }
+
+    int sessionSatisfiedCount() { return this.sessionSatisfiedCount; }
 
     /**
      * Record that a dirty broadcast crossed a position while its FIRST serve was in flight
@@ -120,12 +308,21 @@ class ColumnStateMap {
      * the edit. A no-op when the position is not in flight (the dirty is handled normally).
      */
     void noteStaleIfInFlight(long packed, boolean inFlight) {
-        if (inFlight) this.staleInFlight.add(packed);
+        if (inFlight) {
+            Leaf leaf = leafForCreate(packed);
+            leaf.staleInFlight |= 1L << bitIndexFor(packed);
+            // staleInFlight is not a classify input — needs is unchanged.
+        }
     }
 
     /** True (and clears) if this position was dirtied mid-first-serve. */
     boolean resolveStale(long packed) {
-        return this.staleInFlight.remove(packed);
+        Leaf leaf = leafFor(packed);
+        if (leaf == null) return false;
+        long m = 1L << bitIndexFor(packed);
+        if ((leaf.staleInFlight & m) == 0) return false;
+        leaf.staleInFlight &= ~m;
+        return true;
     }
 
     /**
@@ -137,16 +334,6 @@ class ColumnStateMap {
      */
     void markAuthoritativeClear(long packed, long preClearStamp) {
         if (preClearStamp > 0) this.clearedResync.put(packed, preClearStamp);
-    }
-
-    private void put(long packed, long timestamp) {
-        long old = this.timestamps.put(packed, timestamp);
-        if (old >= 0) {
-            if (old > 0) this.receivedCount--;
-            else this.emptyCount--;
-        }
-        if (timestamp > 0) this.receivedCount++;
-        else if (timestamp == 0) this.emptyCount++;
     }
 
     /**
@@ -168,12 +355,14 @@ class ColumnStateMap {
         // sessionSatisfied (and dirty outranking it in classify) lets the position re-request.
         // Truly-unknown -1 positions (not session-satisfied) stay unmarked — the scan ladder
         // requests those anyway, and marking them would add retry marks nothing can consume.
-        if (this.timestamps.get(packed) != -1L || this.sessionSatisfied.contains(packed)) {
-            this.sessionSatisfied.remove(packed);
-            this.dirty.add(packed);
-            return true;
-        }
-        return false;
+        Leaf leaf = leafFor(packed);
+        if (leaf == null) return false;
+        long m = 1L << bitIndexFor(packed);
+        if (((leaf.positiveTs | leaf.zeroTs | leaf.sessionSatisfied) & m) == 0) return false;
+        clearSessionSatisfied(leaf, m);
+        setDirty(leaf, m);
+        leaf.recomputeNeeds();
+        return true;
     }
 
     /**
@@ -184,13 +373,18 @@ class ColumnStateMap {
      * accompanying stamp change. Not called from production; do not add a production caller.
      */
     void markRetry(long packed) {
-        this.retry.add(packed);
+        Leaf leaf = leafForCreate(packed);
+        setRetry(leaf, 1L << bitIndexFor(packed));
+        leaf.recomputeNeeds();
     }
 
     /** Column data arrived (authoritative for the position, even if no longer tracked). */
     void onReceived(long packed, long columnTimestamp) {
-        this.dirty.remove(packed);
-        this.sessionSatisfied.remove(packed); // real data supersedes any session-satisfied mark
+        Leaf leaf = leafForCreate(packed);
+        int bit = bitIndexFor(packed);
+        long m = 1L << bit;
+        clearDirty(leaf, m);
+        clearSessionSatisfied(leaf, m); // real data supersedes any session-satisfied mark
         // Content supersedes a pending clear flag. A 0-section clear delivery also lands here, so
         // the networking layer re-flags it via markAuthoritativeClear AFTER this call; a content
         // delivery (>=1 section) does not, so the flag stays cleared and a rejection re-asks ts=-1.
@@ -200,42 +394,46 @@ class ColumnStateMap {
         // stub) and the live writer is now onIngestFailed, whose position CAN still have a
         // column in flight when the mark lands. Leaving the mark would re-request every such
         // late-delivered column once and keep confirmedRing pinned at 0 for an extra scan.
-        this.retry.remove(packed);
-        put(packed, columnTimestamp);
-        this.validated.add(packed);
+        clearRetry(leaf, m);
+        tsPut(leaf, bit, columnTimestamp);
+        leaf.validated |= m;
+        leaf.recomputeNeeds();
     }
 
     /** Server confirmed the column is current. */
     void onUpToDate(long packed) {
-        this.retry.remove(packed); // an up-to-date answer supersedes a pending retry (see onReceived)
+        Leaf leaf = leafForCreate(packed);
+        int bit = bitIndexFor(packed);
+        long m = 1L << bit;
+        clearRetry(leaf, m); // an up-to-date answer supersedes a pending retry (see onReceived)
         // Answer-time mark consumption: under want-set re-declaration marks are no longer consumed
         // at send (markSent is gone) — the terminal answer is their only consumer. A mark consumed
         // at send would classify SATISFIED while the answer was still in flight, so a server-side
         // supersession would lose the edit until the next session. The dirty-crossed-an-in-flight-
         // serve race stays covered by staleInFlight, which re-marks dirty at the terminal outcome.
-        this.dirty.remove(packed);
+        clearDirty(leaf, m);
         // Up-to-date must satisfy BOTH unsatisfied states, or classify re-requests forever:
         // -1 (all-air columns never get a VoxelColumn response) and 0 (a not-generated stamp
         // whose chunk resolved as all-air on the server) — in the End this looped ~50 req/s
         // and starved the outer disc. For those the client holds NO server data, so mark it
         // session-satisfied instead of fabricating a client-clock stamp (which persists and
         // reads as a false up_to_date next session). A real >0 position validates as before.
-        long stored = this.timestamps.get(packed);
+        long stored = leaf.ts[bit];
         if (stored == -1L || stored == 0L) {
-            this.sessionSatisfied.add(packed);
+            setSessionSatisfied(leaf, m);
             if (stored == 0L) {
                 // Purge the legacy 0-stamp at park time: v17 clients never write 0 (asks are
                 // >0 resync or -1 no-data), so a stored 0 is a pre-v17 cache artifact — and
                 // left in place it persists to the cache file and resurrects every session,
                 // immortal. Removing it converts the position to -1/unknown, which asks the
                 // SAME thing on the wire (<=0 = "I hold nothing") but finally lets it die.
-                this.timestamps.remove(packed);
+                tsPut(leaf, bit, -1L);
                 this.persistentRemovals.add(packed); // deliberate delete — must reach the file
-                this.emptyCount--;
             }
         } else {
-            this.validated.add(packed);
+            leaf.validated |= m;
         }
+        leaf.recomputeNeeds();
     }
 
     /**
@@ -248,18 +446,21 @@ class ColumnStateMap {
      * no-data handling; no fabricated or zeroed stamps).
      */
     void onNotGenerated(long packed) {
-        this.dirty.remove(packed);  // answer-time consumption — see onUpToDate
-        this.retry.remove(packed);
-        this.sessionSatisfied.add(packed);
+        Leaf leaf = leafForCreate(packed);
+        int bit = bitIndexFor(packed);
+        long m = 1L << bit;
+        clearDirty(leaf, m);  // answer-time consumption — see onUpToDate
+        clearRetry(leaf, m);
+        setSessionSatisfied(leaf, m);
         // Park-time purge of a legacy pre-v17 0-stamp, mirroring onUpToDate: retained, it
         // persists to the cache and resurrects every session (on a gen-disabled server this
         // was the immortal path — onUpToDate never fires for these). A real >0 stamp stays
         // untouched as documented above.
-        if (this.timestamps.get(packed) == 0L) {
-            this.timestamps.remove(packed);
+        if (leaf.ts[bit] == 0L) {
+            tsPut(leaf, bit, -1L);
             this.persistentRemovals.add(packed); // deliberate delete — must reach the file
-            this.emptyCount--;
         }
+        leaf.recomputeNeeds();
     }
 
     /** Re-serve attempts allowed per position per session before parking it. */
@@ -268,7 +469,7 @@ class ColumnStateMap {
     /**
      * A column that was stamped received never actually reached a consumer (decode error,
      * consumer rejection, undispatched at disconnect) — forget the stamp so the position
-     * re-requests with ts=-1, and mark retry so the scanner's confirmed-ring reset makes
+     * re-requests with ts=-1, and mark retry so the scanner's ring reopen makes
      * it reachable again (an unmarked unstamp inside a confirmed ring is never rescanned).
      *
      * <p>Ignores positions with no recorded disposition: every legitimate report path
@@ -282,8 +483,11 @@ class ColumnStateMap {
      * A parked position heals like any stale stamp (dirty broadcast or next session).
      */
     void onIngestFailed(long packed) {
-        long old = this.timestamps.get(packed);
+        Leaf leaf = leafFor(packed);
+        long old = leaf == null ? -1L : leaf.ts[bitIndexFor(packed)];
         if (old == -1L) return;
+        int bit = bitIndexFor(packed);
+        long m = 1L << bit;
 
         // CAP-parked: any further report is a sibling consumer's echo of the capping
         // delivery (a parked position is never re-declared this session; revival via
@@ -299,7 +503,7 @@ class ColumnStateMap {
         // cache file), and onUpToDate's all-air park is already absorbed by the old == -1
         // guard above. The failure counter survives the park (the cap branch clears the
         // marks, never the count), so a genuine post-park echo reads > MAX here.
-        if (this.sessionSatisfied.contains(packed)
+        if ((leaf.sessionSatisfied & m) != 0
                 && this.ingestFailures.get(packed) > MAX_INGEST_FAILURES) return;
 
         long clearPreStamp = this.clearedResync.getOrDefault(packed, -1L);
@@ -315,7 +519,7 @@ class ColumnStateMap {
         // after delivery N+1's onReceived counts against N+1 and then absorbs N+1's own
         // first report — a one-strike under-count that only delays the park; safe
         // direction, narrow window.)
-        if (clearPreStamp > 0 && old == clearPreStamp && this.retry.contains(packed)) return;
+        if (clearPreStamp > 0 && old == clearPreStamp && (leaf.retry & m) != 0) return;
 
         int priorFailures = this.ingestFailures.addTo(packed, 1);
         if (priorFailures + 1 > MAX_INGEST_FAILURES) {
@@ -329,24 +533,23 @@ class ColumnStateMap {
                 // stamp: it is a real server-issued value < the cached clear stamp, so next
                 // session's re-ask draws the clearing column again and a recovered consumer
                 // heals. Counts net zero: put swaps one >0 stamp for another.
-                put(packed, parkPreStamp);
+                tsPut(leaf, bit, parkPreStamp);
             } else {
                 // Park WITHOUT a fabricated or retained >0 stamp: the consumer never stored the
                 // data, so claiming ts>0 next session would be the same lie that causes a
                 // permanent hole. Drop the timestamp to -1 (honest "I hold nothing"). Next
                 // session it re-asks -1; a transient failure (storage briefly down) heals, a
                 // permanent one (incompatible consumer) costs one re-attempt per session.
-                this.timestamps.remove(packed);
+                tsPut(leaf, bit, -1L);
                 this.persistentRemovals.add(packed); // deliberate delete — must reach the file
-                if (old > 0) this.receivedCount--;
-                else if (old == 0) this.emptyCount--;
             }
             // Either way: session-satisfied so it stops re-downloading THIS session.
-            this.sessionSatisfied.add(packed);
-            this.validated.remove(packed);
-            this.retry.remove(packed);
-            this.dirty.remove(packed);
+            setSessionSatisfied(leaf, m);
+            leaf.validated &= ~m;
+            clearRetry(leaf, m);
+            clearDirty(leaf, m);
             this.clearedResync.remove(packed);
+            leaf.recomputeNeeds();
             return;
         }
 
@@ -358,45 +561,73 @@ class ColumnStateMap {
             // all-air up_to_date (a clear is only sent for claimsData/ts>0), stranding ghost
             // terrain for the session. Restoring the stamp, not fabricating one, keeps delivery
             // honest. Counts net zero: put swaps one >0 stamp (T_clear) for another (T_content).
-            put(packed, clearPreStamp);
-            this.validated.remove(packed);
-            this.dirty.remove(packed);
-            this.retry.add(packed);
+            tsPut(leaf, bit, clearPreStamp);
+            leaf.validated &= ~m;
+            clearDirty(leaf, m);
+            setRetry(leaf, m);
+            leaf.recomputeNeeds();
             return;
         }
 
         // Lost CONTENT: forget the stamp (honest "I hold nothing") so the server re-serves on ts=-1.
-        this.timestamps.remove(packed);
+        tsPut(leaf, bit, -1L);
         this.persistentRemovals.add(packed); // deliberate delete — must reach the file
-        if (old > 0) this.receivedCount--;
-        else if (old == 0) this.emptyCount--;
-        this.validated.remove(packed);
-        this.dirty.remove(packed);
-        this.retry.add(packed);
+        leaf.validated &= ~m;
+        clearDirty(leaf, m);
+        setRetry(leaf, m);
+        leaf.recomputeNeeds();
     }
 
     void pruneOutOfRange(int playerCx, int playerCz, int pruneDistance) {
-        int removed = 0;
-        // fastIterator throughout (three-lens review): the entry-allocating iterator cost
-        // ~330k MapEntry allocations per pass on the timestamps map alone at distance 256.
-        // Safe here — key/value are read immediately, remove() is supported (the
-        // RequestMetrics sibling prune already used it).
-        var iter = this.timestamps.long2LongEntrySet().fastIterator();
+        int removedEntries = 0;
+        var iter = this.leaves.long2ObjectEntrySet().fastIterator();
         while (iter.hasNext()) {
             var entry = iter.next();
-            if (PositionUtil.isOutOfRange(entry.getLongKey(), playerCx, playerCz, pruneDistance)) {
-                long ts = entry.getLongValue();
-                if (ts > 0) this.receivedCount--;
-                else if (ts == 0) this.emptyCount--;
+            long key = entry.getLongKey();
+            Leaf leaf = entry.getValue();
+            // Leaf bounds in chunk coords (long math — chebyshevDistance's own
+            // widen-to-long discipline for extreme coordinates).
+            long lx0 = (long) PositionUtil.unpackX(key) << 3, lx1 = lx0 + 7;
+            long lz0 = (long) PositionUtil.unpackZ(key) << 3, lz1 = lz0 + 7;
+            long adxMin = playerCx < lx0 ? lx0 - playerCx : (playerCx > lx1 ? playerCx - lx1 : 0);
+            long adzMin = playerCz < lz0 ? lz0 - playerCz : (playerCz > lz1 ? playerCz - lz1 : 0);
+            long minCheb = Math.max(adxMin, adzMin);
+            if (minCheb > pruneDistance) {
+                // Wholly out of range: identical outcome to the old per-position prune.
+                removedEntries += Long.bitCount(leaf.positiveTs | leaf.zeroTs);
+                dropLeafCounts(leaf);
                 iter.remove();
-                removed++;
+                continue;
+            }
+            long adxMax = Math.max(Math.abs(lx0 - playerCx), Math.abs(lx1 - playerCx));
+            long adzMax = Math.max(Math.abs(lz0 - playerCz), Math.abs(lz1 - playerCz));
+            if (Math.max(adxMax, adzMax) <= pruneDistance) continue; // wholly in range
+            // Boundary leaf: position-granular, matching PositionUtil.isOutOfRange exactly
+            // (plan v1.1 C-MAJOR-3 — the eviction boundary must be bit-identical to the old
+            // backing or the ts>0/ts<=0 declaration mix drifts server-visibly).
+            long touched = leaf.positiveTs | leaf.zeroTs | leaf.dirty | leaf.retry
+                    | leaf.validated | leaf.sessionSatisfied | leaf.staleInFlight;
+            boolean changed = false;
+            for (long bits = touched; bits != 0; bits &= bits - 1) {
+                int bit = Long.numberOfTrailingZeros(bits);
+                long pos = positionFor(key, bit);
+                if (!PositionUtil.isOutOfRange(pos, playerCx, playerCz, pruneDistance)) continue;
+                long m = 1L << bit;
+                if (leaf.ts[bit] != -1L) removedEntries++;
+                tsPut(leaf, bit, -1L);
+                clearDirty(leaf, m);
+                clearRetry(leaf, m);
+                clearSessionSatisfied(leaf, m);
+                leaf.validated &= ~m;
+                leaf.staleInFlight &= ~m;
+                changed = true;
+            }
+            if (changed) {
+                if (leaf.isClear()) iter.remove();
+                else leaf.recomputeNeeds();
             }
         }
-        pruneSet(this.dirty, playerCx, playerCz, pruneDistance);
-        pruneSet(this.retry, playerCx, playerCz, pruneDistance);
-        pruneSet(this.validated, playerCx, playerCz, pruneDistance);
-        pruneSet(this.sessionSatisfied, playerCx, playerCz, pruneDistance);
-        pruneSet(this.staleInFlight, playerCx, playerCz, pruneDistance);
+        invalidateMemo();
         var failIter = this.ingestFailures.long2IntEntrySet().fastIterator();
         while (failIter.hasNext()) {
             if (PositionUtil.isOutOfRange(failIter.next().getLongKey(), playerCx, playerCz, pruneDistance)) {
@@ -411,60 +642,225 @@ class ColumnStateMap {
         }
         // persistentRemovals is deliberately NOT pruned — a deliberate delete must reach the
         // next merge-save even after the player walks away from the position (see the field).
-        // Removal alone reclaims nothing: fastutil open-hash structures never shrink their
-        // backing arrays, so a big cache-file load pruned down to the local disc would keep
-        // its peak-size array resident all session (the client twin of the M3 served-set
-        // sweep). Rebuild when the prune removed more than what remains.
-        if (removed > this.timestamps.size()) {
-            this.timestamps.trim();
-            this.dirty.trim();
-            this.retry.trim();
-            this.validated.trim();
-            this.sessionSatisfied.trim();
-            this.staleInFlight.trim();
+        // The old backing trimmed its hash arrays here when a prune removed more than what
+        // remained (a big cache-file load pruned down to the local disc kept its peak-size
+        // array resident all session). Leaves make that ~automatic — dropping a leaf frees
+        // its 600-byte block — so only the leaf MAP and the side maps still want the trim.
+        if (removedEntries > this.entryCount) {
+            this.leaves.trim();
             this.ingestFailures.trim();
             this.clearedResync.trim();
         }
     }
 
-    private static void pruneSet(LongOpenHashSet set, int playerCx, int playerCz, int pruneDistance) {
-        var iter = set.iterator();
-        while (iter.hasNext()) {
-            if (PositionUtil.isOutOfRange(iter.nextLong(), playerCx, playerCz, pruneDistance)) {
-                iter.remove();
-            }
-        }
+    private void dropLeafCounts(Leaf leaf) {
+        this.receivedCount -= Long.bitCount(leaf.positiveTs);
+        this.emptyCount -= Long.bitCount(leaf.zeroTs);
+        this.entryCount -= Long.bitCount(leaf.positiveTs | leaf.zeroTs);
+        this.dirtyCount -= Long.bitCount(leaf.dirty);
+        this.retryCount -= Long.bitCount(leaf.retry);
+        this.sessionSatisfiedCount -= Long.bitCount(leaf.sessionSatisfied);
     }
 
     void clear() {
-        this.timestamps.clear();
-        this.dirty.clear();
-        this.retry.clear();
-        this.validated.clear();
-        this.sessionSatisfied.clear();
-        this.staleInFlight.clear();
+        this.leaves.clear();
         this.ingestFailures.clear();
         this.clearedResync.clear();
         this.persistentRemovals.clear();
         this.receivedCount = 0;
         this.emptyCount = 0;
+        this.entryCount = 0;
+        this.dirtyCount = 0;
+        this.retryCount = 0;
+        this.sessionSatisfiedCount = 0;
+        invalidateMemo();
     }
 
-    /** Bulk-load cached timestamps (resync across sessions). */
-    void loadFrom(Long2LongOpenHashMap loaded) {
-        for (var entry : loaded.long2LongEntrySet()) {
-            long ts = entry.getLongValue();
-            // Clamp a corrupt/garbage stamp below the -1 "unknown" sentinel (a truncated cache
-            // file, or negative v2-migration sign-extension) to -1: it matches no classify rung
-            // and would otherwise park the position SATISFIED for the whole session. As -1 it
-            // re-requests, and the next save rewrites it clean.
-            put(entry.getLongKey(), ts < -1L ? -1L : ts);
+    // --- bulk load / save (the cache lifecycle; docs/planning/quadtree-client-state-plan.md §3.4) ---
+
+    /**
+     * The off-thread-buildable half of a cache load: timestamps already in leaf shape.
+     * Built by {@link #buildLoaded} on the cache IO thread (A1 — the old per-entry
+     * {@code put()} apply cost 100-300 ms of render thread at the 2M-entry cap), adopted
+     * wholesale by {@link #adoptLoaded} on the main thread in O(leaves).
+     */
+    static final class LoadedState {
+        final Long2ObjectOpenHashMap<Leaf> leaves;
+        /** Positions whose file value was CORRUPT (below -1) and clamped to absent. The
+         *  clamp must still OVERWRITE any live stamp at adopt time — file-wins is the
+         *  loadFrom contract, and the old backing's put(-1) deleted the live claim. A
+         *  dropped entry would silently keep it (the fuzz caught exactly this). */
+        final it.unimi.dsi.fastutil.longs.LongArrayList clampedToAbsent;
+
+        private LoadedState(Long2ObjectOpenHashMap<Leaf> leaves,
+                            it.unimi.dsi.fastutil.longs.LongArrayList clampedToAbsent) {
+            this.leaves = leaves;
+            this.clampedToAbsent = clampedToAbsent;
         }
     }
 
-    /** The raw timestamp map, for {@link ColumnCacheStore} persistence. */
+    /**
+     * Build a {@link LoadedState} from a raw cache-file map. Pure function — safe on the
+     * IO thread. Applies the load clamp: a corrupt/garbage stamp below the -1 "unknown"
+     * sentinel (a truncated cache file, or negative v2-migration sign-extension) is
+     * DROPPED (the old backing stored it as an inert -1 entry): it matches no classify
+     * rung either way and the position re-requests as -1.
+     */
+    static LoadedState buildLoaded(Long2LongOpenHashMap loaded) {
+        var built = new Long2ObjectOpenHashMap<Leaf>(Math.max(16, loaded.size() / 32));
+        var clamped = new it.unimi.dsi.fastutil.longs.LongArrayList();
+        var iter = loaded.long2LongEntrySet().fastIterator();
+        while (iter.hasNext()) {
+            var entry = iter.next();
+            long ts = entry.getLongValue();
+            if (ts <= -1L) {
+                // Clamp-to-absent — but the clamp is still a file-wins WRITE (see
+                // LoadedState.clampedToAbsent).
+                if (ts < -1L) clamped.add(entry.getLongKey());
+                continue;
+            }
+            long packed = entry.getLongKey();
+            long key = leafKeyFor(packed);
+            Leaf leaf = built.get(key);
+            if (leaf == null) {
+                leaf = new Leaf();
+                built.put(key, leaf);
+            }
+            int bit = bitIndexFor(packed);
+            leaf.ts[bit] = ts;
+            long m = 1L << bit;
+            if (ts > 0) leaf.positiveTs |= m;
+            else leaf.zeroTs |= m;
+        }
+        for (Leaf leaf : built.values()) {
+            leaf.recomputeNeeds();
+        }
+        return new LoadedState(built, clamped);
+    }
+
+    /**
+     * Adopt an off-thread-built cache load. A leaf with no live twin transfers wholesale
+     * (O(1)); a live twin (rare — the cache gate defers scanning until this ran, so live
+     * state is at most a few dirty marks from early broadcasts) merges per position with
+     * the same file-stamp-wins semantics as the old {@code loadFrom} (which only ever
+     * touched timestamps, never marks).
+     */
+    void adoptLoaded(LoadedState loaded) {
+        var iter = loaded.leaves.long2ObjectEntrySet().fastIterator();
+        while (iter.hasNext()) {
+            var entry = iter.next();
+            Leaf incoming = entry.getValue();
+            Leaf live = this.leaves.get(entry.getLongKey());
+            if (live == null) {
+                this.leaves.put(entry.getLongKey(), incoming);
+                this.receivedCount += Long.bitCount(incoming.positiveTs);
+                this.emptyCount += Long.bitCount(incoming.zeroTs);
+                this.entryCount += Long.bitCount(incoming.positiveTs | incoming.zeroTs);
+                continue;
+            }
+            for (long bits = incoming.positiveTs | incoming.zeroTs; bits != 0; bits &= bits - 1) {
+                int bit = Long.numberOfTrailingZeros(bits);
+                tsPut(live, bit, incoming.ts[bit]);
+            }
+            live.recomputeNeeds();
+        }
+        // Corrupt-clamped file entries still overwrite (delete) any live stamp — the
+        // file-wins contract (see LoadedState.clampedToAbsent). Absent leaves need
+        // nothing: there is no live claim to delete.
+        for (int i = 0; i < loaded.clampedToAbsent.size(); i++) {
+            long packed = loaded.clampedToAbsent.getLong(i);
+            Leaf live = this.leaves.get(leafKeyFor(packed));
+            if (live != null) {
+                tsPut(live, bitIndexFor(packed), -1L);
+                live.recomputeNeeds();
+            }
+        }
+        invalidateMemo();
+    }
+
+    /** Bulk-load cached timestamps (resync across sessions). Test/compat form of
+     *  {@link #adoptLoaded} — production loads build off-thread via {@link #buildLoaded}. */
+    void loadFrom(Long2LongOpenHashMap loaded) {
+        adoptLoaded(buildLoaded(loaded));
+    }
+
+    /**
+     * The state a merge-save consumes, detached from the live map: the leaves (timestamp
+     * source) and the session's deliberate stamp deletions. Owned by the IO thread after
+     * {@link #detachForSave}.
+     */
+    static final class DetachedState {
+        final Long2ObjectOpenHashMap<Leaf> leaves;
+        final LongOpenHashSet removals;
+        final int entries;
+
+        private DetachedState(Long2ObjectOpenHashMap<Leaf> leaves, LongOpenHashSet removals, int entries) {
+            this.leaves = leaves;
+            this.removals = removals;
+            this.entries = entries;
+        }
+
+        boolean isEmpty() { return this.entries == 0 && this.removals.isEmpty(); }
+
+        /** Primitive visitor — a 2M-entry save must not box its way through the overlay. */
+        interface TsVisitor {
+            void accept(long packed, long ts);
+        }
+
+        /** Visit every stored (non-absent) timestamp. IO-thread use. */
+        void forEachPresent(TsVisitor visitor) {
+            var iter = this.leaves.long2ObjectEntrySet().fastIterator();
+            while (iter.hasNext()) {
+                var entry = iter.next();
+                Leaf leaf = entry.getValue();
+                for (long bits = leaf.positiveTs | leaf.zeroTs; bits != 0; bits &= bits - 1) {
+                    int bit = Long.numberOfTrailingZeros(bits);
+                    visitor.accept(positionFor(entry.getLongKey(), bit), leaf.ts[bit]);
+                }
+            }
+        }
+    }
+
+    /**
+     * Hand the whole per-column state (leaves + persistent removals) to a save and start
+     * fresh — the A2 fix: the old path copied a 1–2M-entry map on the render thread at
+     * every dimension change/disconnect (50–150 ms). DESTRUCTIVE by contract: both
+     * production callers ({@code onDimensionChange}, the session-gate teardown) clear or
+     * drop this map immediately after saving, so the ownership transfer replaces a copy
+     * they were about to discard anyway. Side maps (ingestFailures/clearedResync) are
+     * untouched — the caller's follow-up {@code clear()} owns those, exactly as before.
+     */
+    DetachedState detachForSave() {
+        var detachedLeaves = new Long2ObjectOpenHashMap<>(this.leaves);
+        var detachedRemovals = this.persistentRemovals;
+        int entries = this.entryCount;
+        this.leaves.clear();
+        this.persistentRemovals = new LongOpenHashSet();
+        this.receivedCount = 0;
+        this.emptyCount = 0;
+        this.entryCount = 0;
+        this.dirtyCount = 0;
+        this.retryCount = 0;
+        this.sessionSatisfiedCount = 0;
+        invalidateMemo();
+        return new DetachedState(detachedLeaves, detachedRemovals, entries);
+    }
+
+    /** The stored timestamps as a fresh map — test-facing (production saves detach; see
+     *  {@link #detachForSave}). */
     Long2LongOpenHashMap mapForSave() {
-        return this.timestamps;
+        var map = new Long2LongOpenHashMap(Math.max(16, this.entryCount));
+        map.defaultReturnValue(-1L);
+        var iter = this.leaves.long2ObjectEntrySet().fastIterator();
+        while (iter.hasNext()) {
+            var entry = iter.next();
+            Leaf leaf = entry.getValue();
+            for (long bits = leaf.positiveTs | leaf.zeroTs; bits != 0; bits &= bits - 1) {
+                int bit = Long.numberOfTrailingZeros(bits);
+                map.put(positionFor(entry.getLongKey(), bit), leaf.ts[bit]);
+            }
+        }
+        return map;
     }
 
     /**
@@ -482,10 +878,13 @@ class ColumnStateMap {
 
     /** Raw stored timestamp for one position: -1 absent, 0 a legacy pre-v17 cache artifact
      *  (never written by v17 clients; purged at park — see onUpToDate), &gt;0 received. */
-    long timestampFor(long packed) { return this.timestamps.get(packed); }
+    long timestampFor(long packed) {
+        Leaf leaf = leafFor(packed);
+        return leaf == null ? -1L : leaf.ts[bitIndexFor(packed)];
+    }
 
-    boolean isEmptyMap() { return this.timestamps.isEmpty(); }
-    boolean hasRetries() { return !this.retry.isEmpty(); }
+    boolean isEmptyMap() { return this.entryCount == 0; }
+    boolean hasRetries() { return this.retryCount > 0; }
 
     /**
      * True when some retry mark lies OUTSIDE the vanilla-view exclusion — a mark the
@@ -496,17 +895,22 @@ class ColumnStateMap {
      * {@link SpiralScanner#scan}). A parked mark heals via the per-scan
      * {@link #collectActionableRetryRings} recomputation: the moment the exclusion moves
      * off its position it collects as actionable and its ring reopens (2026-08-18 —
-     * movement no longer recenters the walk from ring 0). O(|retry|); the retry set is
-     * small.
+     * movement no longer recenters the walk from ring 0). O(leaves) worst case, O(1)
+     * when no retry marks exist (the common case — the count short-circuits).
      */
     boolean hasActionableRetries(int playerCx, int playerCz, int exclusionRadius) {
-        if (this.retry.isEmpty()) return false;
-        var iter = this.retry.iterator();
+        if (this.retryCount == 0) return false;
+        var iter = this.leaves.long2ObjectEntrySet().fastIterator();
         while (iter.hasNext()) {
-            long packed = iter.nextLong();
-            if (!SpiralScanner.isVanillaRendered(PositionUtil.unpackX(packed),
-                    PositionUtil.unpackZ(packed), playerCx, playerCz, exclusionRadius)) {
-                return true;
+            var entry = iter.next();
+            Leaf leaf = entry.getValue();
+            for (long bits = leaf.retry; bits != 0; bits &= bits - 1) {
+                int bit = Long.numberOfTrailingZeros(bits);
+                long packed = positionFor(entry.getLongKey(), bit);
+                if (!SpiralScanner.isVanillaRendered(PositionUtil.unpackX(packed),
+                        PositionUtil.unpackZ(packed), playerCx, playerCz, exclusionRadius)) {
+                    return true;
+                }
             }
         }
         return false;
@@ -520,23 +924,29 @@ class ColumnStateMap {
      * boolean form — a mark inside the vanilla-view exclusion stays parked (unreachable,
      * unconsumable) and is not visited; the two methods must not drift. Marks at/beyond
      * the confirmed prefix are handed over too — the scanner's {@code reopenRing} skips
-     * them for free (the frontier walk covers those rings). O(|retry|) per scan, same as
-     * the boolean form; the retry set is small.
+     * them for free (the frontier walk covers those rings). Same cost shape as the
+     * boolean form; the retry population is small.
      */
     void collectActionableRetryRings(int playerCx, int playerCz, int exclusionRadius,
                                      java.util.function.IntConsumer ringVisitor) {
-        if (this.retry.isEmpty()) return;
-        var iter = this.retry.iterator();
+        if (this.retryCount == 0) return;
+        var iter = this.leaves.long2ObjectEntrySet().fastIterator();
         while (iter.hasNext()) {
-            long packed = iter.nextLong();
-            int cx = PositionUtil.unpackX(packed);
-            int cz = PositionUtil.unpackZ(packed);
-            if (!SpiralScanner.isVanillaRendered(cx, cz, playerCx, playerCz, exclusionRadius)) {
-                ringVisitor.accept(Math.max(Math.abs(cx - playerCx), Math.abs(cz - playerCz)));
+            var entry = iter.next();
+            Leaf leaf = entry.getValue();
+            for (long bits = leaf.retry; bits != 0; bits &= bits - 1) {
+                int bit = Long.numberOfTrailingZeros(bits);
+                long packed = positionFor(entry.getLongKey(), bit);
+                int cx = PositionUtil.unpackX(packed);
+                int cz = PositionUtil.unpackZ(packed);
+                if (!SpiralScanner.isVanillaRendered(cx, cz, playerCx, playerCz, exclusionRadius)) {
+                    ringVisitor.accept(Math.max(Math.abs(cx - playerCx), Math.abs(cz - playerCz)));
+                }
             }
         }
     }
+
     int receivedCount() { return this.receivedCount; }
     int emptyCount() { return this.emptyCount; }
-    int dirtyCount() { return this.dirty.size(); }
+    int dirtyCount() { return this.dirtyCount; }
 }

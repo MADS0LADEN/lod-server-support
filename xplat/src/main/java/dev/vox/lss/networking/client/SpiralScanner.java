@@ -143,6 +143,26 @@ class SpiralScanner {
      *  can see. */
     BooleanSupplier prefixRetentionEnabled =
             () -> LSSClientConfig.CONFIG.enableScanPrefixRetention;
+    /** Kill switch seam for the section-store ring fast path
+     *  (docs/planning/quadtree-client-state-plan.md; {@code enableQuadtreeScan}, default
+     *  true). ON: a ring whose crossed leaves all have clear needs-masks confirms in
+     *  O(leaves-on-ring) without touching its positions ({@link ColumnStateMap#ringNeedsFree})
+     *  — emission, confirmation, truncation, and cadence state are bit-identical to the
+     *  legacy per-position walk by construction (the needs mask is derived from the same
+     *  classify ladder; QuadtreeWalkDifferentialTest pins the equivalence). OFF: the
+     *  per-position walk runs verbatim — the field A/B lever. NOTE the switch gates the
+     *  WALK only; the section-backed state store is not switchable (jar rollback is the
+     *  store's lever). */
+    BooleanSupplier quadtreeScanEnabled =
+            () -> LSSClientConfig.CONFIG.enableQuadtreeScan;
+    /** Rings the fast path confirmed without a position walk — session diagnostic
+     *  (diag {@code ring_skips=}, exporter {@code scan.quad_ring_skips}). */
+    private long quadRingSkips;
+    /** REOPENED_RING_VALVE overflow firings — session diagnostic (plan §6 phase 0: the
+     *  B1 "is the valve pathological-only?" measurement; diag {@code valve=}, exporter
+     *  {@code scan.valve_trips}). Counted in BOTH walk modes — the reopen bookkeeping
+     *  runs identically either way. */
+    private long valveTrips;
 
     // --- Adaptive-cadence state (see fastRescanDue) ---
     /**
@@ -325,6 +345,7 @@ class SpiralScanner {
         reopenedSetBit(ring);
         if (reopenedRingCount() > REOPENED_RING_VALVE) {
             // Overflow valve: conservative fallback to today's full reset.
+            this.valveTrips++;
             this.confirmedRing = 0;
             clearAllReopened();
         }
@@ -694,6 +715,7 @@ class SpiralScanner {
         }
 
         int localConfirmedRing = this.confirmedRing;
+        boolean quad = this.quadtreeScanEnabled.getAsBoolean();
 
         // Two-interval walk (retention plan §4): the reopened rings below the prefix
         // (ascending), then the frontier interval [confirmedRing, lodDistance]. All
@@ -703,15 +725,41 @@ class SpiralScanner {
         outer:
         while ((r = nextWalkRing(r, localConfirmedRing, lodDistance)) >= 0) {
             boolean reopenedBelowPrefix = r < localConfirmedRing;
-            boolean ringFullySatisfied = true;
             int ringSize = 8 * r;
+            // The budget break, hoisted from the loop's first iteration (identical
+            // outcome — i=0 always ran it): it must precede the fast path so a
+            // budget-exhausted walk terminates at the next nonzero ring exactly as
+            // before, fast path or not.
+            if (ringSize > 0 && count >= budget) {
+                truncated = true;
+                // A budget break INSIDE the reopened interval leaves scanRing blind to
+                // the frontier interval the next walk also iterates — predictedWalkCost
+                // must fail closed off the full span (plan v1.1 MAJOR-2).
+                truncatedBelow = reopenedBelowPrefix;
+                break;
+            }
+            // Section-store fast path (quadtree-client-state-plan.md): when every leaf
+            // this ring crosses has a clear needs-mask, every ring position classifies
+            // SATISFIED — apply the ring's confirmation bookkeeping without touching its
+            // positions. Any needs bit in any crossed leaf (even off-ring) falls through
+            // to the per-position walk below, so emission order, budget accounting, and
+            // confirmation stay bit-identical to the legacy walk (the differential pin).
+            if (quad && ringSize > 0 && columns.ringNeedsFree(playerCx, playerCz, r)) {
+                this.quadRingSkips++;
+                if (reopenedBelowPrefix) {
+                    reopenedClearBit(r);
+                } else if (localConfirmedRing == r) {
+                    localConfirmedRing = r + 1;
+                }
+                continue;
+            }
+            boolean ringFullySatisfied = true;
             for (int i = 0; i < ringSize; i++) {
                 if (count >= budget) {
                     ringFullySatisfied = false;
                     truncated = true;
-                    // A budget break INSIDE the reopened interval leaves scanRing blind to
-                    // the frontier interval the next walk also iterates — predictedWalkCost
-                    // must fail closed off the full span (plan v1.1 MAJOR-2).
+                    // (See the hoisted break above — this inner form handles the
+                    // mid-ring case.)
                     truncatedBelow = reopenedBelowPrefix;
                     break outer;
                 }
@@ -833,6 +881,8 @@ class SpiralScanner {
         this.lastScanWasFast = false;
         this.fastScans = 0;
         this.rateGated = 0;
+        this.quadRingSkips = 0;
+        this.valveTrips = 0;
         clearAllReopened();
         this.recenteredSinceLastFire = false;
         this.truncatedBelowPrefix = false;
@@ -964,4 +1014,8 @@ class SpiralScanner {
     boolean wasLastScanFast() { return this.lastScanWasFast; }
     long getFastScans() { return this.fastScans; }
     long getRateGated() { return this.rateGated; }
+    /** Rings the section-store fast path confirmed without a position walk (session). */
+    long getQuadRingSkips() { return this.quadRingSkips; }
+    /** REOPENED_RING_VALVE overflow firings (session) — the B1 field measurement. */
+    long getValveTrips() { return this.valveTrips; }
 }

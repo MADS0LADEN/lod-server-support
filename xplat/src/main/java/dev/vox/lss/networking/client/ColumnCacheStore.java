@@ -141,6 +141,19 @@ public class ColumnCacheStore {
         return CompletableFuture.supplyAsync(() -> load(serverAddress, dimension), IO_EXECUTOR);
     }
 
+    /**
+     * Load AND build the section-leaf state on the IO thread in one task (the A1 fix,
+     * quadtree-client-state-plan.md §3.4): the old flow returned the raw map and the
+     * render thread paid the whole per-entry apply — up to 2M un-presized hash inserts
+     * in ONE tick (est. 100-300 ms) at every join and dimension re-entry. The main
+     * thread now adopts pre-built leaves in O(leaves).
+     */
+    static CompletableFuture<ColumnStateMap.LoadedState> loadStateAsync(
+            String serverAddress, ResourceKey<Level> dimension) {
+        return CompletableFuture.supplyAsync(
+                () -> ColumnStateMap.buildLoaded(load(serverAddress, dimension)), IO_EXECUTOR);
+    }
+
     /** Test-only queue-a-plain-save helper (FIFO/flush ordering tests). NOT for production:
      *  a plain overwrite discards every file entry the movement prune dropped from memory —
      *  the sliding-disc truncation F2 removed. Production saves go through
@@ -213,6 +226,31 @@ public class ColumnCacheStore {
         var removalsCopy = removals == null ? new LongOpenHashSet() : new LongOpenHashSet(removals);
         IO_EXECUTOR.execute(() -> mergeSave(serverAddress, dimension, mapCopy, removalsCopy,
                 centerCx, centerCz));
+    }
+
+    /**
+     * The ownership-transfer save (the A2 fix, quadtree-client-state-plan.md §3.4):
+     * consumes a {@link ColumnStateMap#detachForSave() detached} state — no caller-thread
+     * copy at all, where {@link #mergeSaveAsync} pays a 1-2M-entry map copy on the render
+     * thread (est. 50-150 ms at every dimension change). The overlay map is synthesized
+     * from the leaves ON THE IO THREAD and then flows through the unchanged
+     * {@link #mergeSave} body (file merge → removals → overlay → evict → write).
+     */
+    public static void mergeSaveDetachedAsync(String serverAddress, ResourceKey<Level> dimension,
+                                              ColumnStateMap.DetachedState state,
+                                              int centerCx, int centerCz) {
+        if (state.isEmpty()) return;
+        IO_EXECUTOR.execute(() -> mergeSaveDetached(serverAddress, dimension, state, centerCx, centerCz));
+    }
+
+    /** IO-thread body of {@link #mergeSaveDetachedAsync}; package-visible for inline tests. */
+    static void mergeSaveDetached(String serverAddress, ResourceKey<Level> dimension,
+                                  ColumnStateMap.DetachedState state,
+                                  int centerCx, int centerCz) {
+        var overlay = new Long2LongOpenHashMap(Math.max(16, state.entries));
+        overlay.defaultReturnValue(-1L);
+        state.forEachPresent(overlay::put);
+        mergeSave(serverAddress, dimension, overlay, state.removals, centerCx, centerCz);
     }
 
     /** IO-thread body of {@link #mergeSaveAsync}; package-visible so tests can run it inline. */
