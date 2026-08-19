@@ -443,12 +443,36 @@ public abstract class AbstractPlayerRequestState<T> {
         this.frontierClock = clock;
     }
 
-    /** Router drain stamp: the first not-actually-satisfied entry of this pass defines the
-     *  live frontier (outward-damped — see the field comment above). No-op without a
-     *  stamped player chunk. */
+    // Stamp-source tag for the admission trace ("acq" = ts<=0 acquisition entry, "reval"
+    // = the end-of-pass ts>0 fallback, "-" = never stamped). Diagnostic only — the gates
+    // never read it. Processing thread only, like the frontier itself.
+    private boolean lastFrontierStampAcquisition;
+    private boolean frontierEverStamped;
+
+    String frontierStampSourceForTrace() {
+        if (!this.frontierEverStamped) return "-";
+        return this.lastFrontierStampAcquisition ? "acq" : "reval";
+    }
+
+    /** Two-arg form: rigs and legacy call sites stamp as acquisition (the pre-split
+     *  semantics — every stamp was equally authoritative). */
     public void stampLiveFrontier(int cx, int cz) {
+        stampLiveFrontier(cx, cz, true);
+    }
+
+    /** Router drain stamp: the first not-actually-satisfied ACQUISITION entry (ts<=0) of
+     *  this pass defines the live frontier; when a pass holds only unsatisfied
+     *  REVALIDATION entries (ts>0 — dirty re-asks, resync), the first of those stamps at
+     *  end of pass instead (the acquisition-frontier rule,
+     *  docs/planning/gen-frontier-acquisition-anchor-plan.md: an inner revalidation —
+     *  data both sides already have, generation can never serve it — must not collapse
+     *  the generation admission window). Outward-damped — see the field comment above.
+     *  No-op without a stamped player chunk. */
+    public void stampLiveFrontier(int cx, int cz, boolean acquisition) {
         long player = this.playerChunkPacked;
         if (player == NO_PLAYER_CHUNK) return;
+        this.lastFrontierStampAcquisition = acquisition;
+        this.frontierEverStamped = true;
         int observed = PositionUtil.chebyshevDistance(cx, cz,
                 PositionUtil.unpackX(player), PositionUtil.unpackZ(player));
         int current = this.liveFrontierRing;

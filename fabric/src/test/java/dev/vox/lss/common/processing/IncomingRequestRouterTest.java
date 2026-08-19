@@ -1368,4 +1368,148 @@ class IncomingRequestRouterTest {
             reader.shutdown();
         }
     }
+
+    // ---- The acquisition-frontier rule (gen-frontier-acquisition-anchor-plan.md):
+    // the live frontier prefers the first unsatisfied ts<=0 (ACQUISITION) entry of the
+    // drain pass; unsatisfied ts>0 (REVALIDATION — dirty re-asks/resync) entries stamp
+    // only at end of pass when no acquisition entry existed. An inner dirty head must
+    // not collapse the generation admission window (the measured ~40% backfill stall:
+    // dirty at ring ~4 → window at 4+2 → ~5 s of 333 ms/ring outward re-walk). ----
+
+    /** Reader whose pool never has headroom: the first admission attempt retains the
+     *  entry and stops the pass (the deferral-under-early-stop shape). */
+    private static final class NoHeadroomDiskReader extends AbstractChunkDiskReader {
+        NoHeadroomDiskReader() { super(1); }
+        @Override public boolean hasHeadroom() { return false; }
+    }
+
+    @Test
+    void innerDirtyRevalidationDoesNotCollapseTheAcquisitionFrontier() throws Exception {
+        var players = new ConcurrentHashMap<UUID, TestState>();
+        var p1 = addPlayer(players, 8, 4);
+        p1.updatePlayerChunk(0, 0);
+        var proc = new TestProcessor(players, new StubDiskReader(), false, null);
+        try {
+            proc.start();
+            // Declaration order is the wire's closest-first: the dirty re-ask (ts>0,
+            // ring 2) leads, the acquisition ask (ts<=0, ring 20) follows.
+            offer(p1, new IncomingRequest(2, 0, TS_BASE + 100), new IncomingRequest(20, 0, -1));
+            proc.postSnapshot(snapshot(p1), List.of());
+            waitFor(() -> proc.submits.size() == 2, "both entries admitted to reads");
+
+            // Delivery order is untouched: the dirty head is still served first.
+            assertEquals(List.of(packed(2, 0), packed(20, 0)), submitPositions(proc),
+                    "declaration order drains first-to-last — the rule changes only the stamp");
+
+            waitFor(() -> p1.liveFrontierRingForTrace() == 20,
+                    "the ACQUISITION entry (ring 20) stamps the frontier, not the dirty head");
+            assertEquals("acq", p1.frontierStampSourceForTrace());
+            // The generation admission window keys on ring 20 — and stays one-sided
+            // outward, so the inner dirty position itself is never gated (the plan's
+            // inner-regeneration-not-starved claim).
+            assertFalse(p1.generationOrderSpreadExceeded(22, 0, 2), "frontier+2 admits");
+            assertTrue(p1.generationOrderSpreadExceeded(23, 0, 2), "frontier+3 gates");
+            assertFalse(p1.generationOrderSpreadExceeded(2, 0, 2),
+                    "an inner candidate is never gated by an outer frontier (one-sided)");
+        } finally {
+            proc.shutdown();
+        }
+    }
+
+    @Test
+    void pureRevalidationPassStampsItsHeadAtEndOfPass() throws Exception {
+        var players = new ConcurrentHashMap<UUID, TestState>();
+        var p1 = addPlayer(players, 8, 4);
+        p1.updatePlayerChunk(0, 0);
+        var proc = new TestProcessor(players, new StubDiskReader(), false, null);
+        try {
+            proc.start();
+            // Cold-restart resync shape: every entry ts>0, none satisfiable from the
+            // (empty) timestamp cache. The pre-split behavior stamped the first
+            // unsatisfied entry; the fallback must reproduce that VALUE exactly.
+            offer(p1, new IncomingRequest(3, 0, TS_BASE + 100), new IncomingRequest(8, 0, TS_BASE + 100));
+            proc.postSnapshot(snapshot(p1), List.of());
+            waitFor(() -> proc.submits.size() == 2, "both revalidations admitted");
+            waitFor(() -> p1.liveFrontierRingForTrace() == 3,
+                    "no acquisition entry in the pass → the first reval entry stamps");
+            assertEquals("reval", p1.frontierStampSourceForTrace());
+        } finally {
+            proc.shutdown();
+        }
+    }
+
+    @Test
+    void revalidationHeadStampsAtEndOfPassUnderAnEarlyStop() throws Exception {
+        var players = new ConcurrentHashMap<UUID, TestState>();
+        var p1 = addPlayer(players, 8, 4);
+        p1.updatePlayerChunk(0, 0);
+        var reader = new NoHeadroomDiskReader();
+        var proc = new TestProcessor(players, reader, false, null);
+        try {
+            proc.start();
+            // The reval head reaches admission, hits NO_DISK_HEADROOM, is retained, and
+            // the pass STOPS — the deferred stamp must still apply at end of pass
+            // (today's conservative retained-head under-estimate, preserved).
+            offer(p1, new IncomingRequest(5, 0, TS_BASE + 100), new IncomingRequest(9, 0, -1));
+            proc.postSnapshot(snapshot(p1), List.of());
+            waitFor(() -> p1.liveFrontierRingForTrace() == 5,
+                    "stopped pass with no acquisition entry → retained reval head stamps");
+            assertEquals("reval", p1.frontierStampSourceForTrace());
+            assertEquals(0, proc.submits.size(), "nothing was admitted (no headroom)");
+            // The acquisition entry behind the stop was never scanned this pass — the
+            // conservative under-estimate is deliberate (safe direction: over-gating
+            // while the reader pool is already saturated).
+        } finally {
+            proc.shutdown();
+        }
+    }
+
+    @Test
+    void acquisitionEntryOutranksAnEarlierRevalidationEntry() throws Exception {
+        var players = new ConcurrentHashMap<UUID, TestState>();
+        var p1 = addPlayer(players, 8, 4);
+        p1.updatePlayerChunk(0, 0);
+        var proc = new TestProcessor(players, new StubDiskReader(), false, null);
+        try {
+            proc.start();
+            // Interleaving: reval first (ring 6), acquisition second (ring 15). The
+            // recorded reval candidate must be DISCARDED once the acquisition stamps —
+            // the frontier lands at 15, not 6.
+            offer(p1, new IncomingRequest(6, 0, TS_BASE + 100), new IncomingRequest(15, 0, -1));
+            proc.postSnapshot(snapshot(p1), List.of());
+            waitFor(() -> proc.submits.size() == 2, "both admitted");
+            waitFor(() -> p1.liveFrontierRingForTrace() == 15, "acquisition outranks");
+            assertEquals("acq", p1.frontierStampSourceForTrace());
+        } finally {
+            proc.shutdown();
+        }
+    }
+
+    @Test
+    void inFlightRevalidationDuplicateDefersWhileAcquisitionStampsInstantly() throws Exception {
+        var players = new ConcurrentHashMap<UUID, TestState>();
+        var p1 = addPlayer(players, 8, 4);
+        p1.updatePlayerChunk(0, 0);
+        var proc = new TestProcessor(players, new StubDiskReader(), false, null);
+        try {
+            proc.start();
+            // Cycle 1: a ts>0 entry admits and stays pending (the stub never completes).
+            offer(p1, new IncomingRequest(4, 0, TS_BASE + 100));
+            proc.postSnapshot(snapshot(p1), List.of());
+            waitFor(() -> proc.submits.size() == 1, "first admission");
+            waitFor(() -> p1.liveFrontierRingForTrace() == 4, "sole reval entry stamps");
+
+            // Cycle 2: the same ts>0 entry is now an IN_FLIGHT duplicate (site 1 of the
+            // split) alongside a new acquisition entry — the duplicate defers, the
+            // acquisition stamps, and the frontier moves OUT (damping is off in this rig).
+            offer(p1, new IncomingRequest(4, 0, TS_BASE + 100), new IncomingRequest(12, 0, -1));
+            proc.postSnapshot(snapshot(p1), List.of());
+            waitFor(() -> proc.submits.size() == 2, "acquisition admitted");
+            waitFor(() -> p1.liveFrontierRingForTrace() == 12,
+                    "the in-flight reval duplicate records only the fallback; acq wins");
+            assertEquals("acq", p1.frontierStampSourceForTrace());
+        } finally {
+            proc.shutdown();
+        }
+    }
 }

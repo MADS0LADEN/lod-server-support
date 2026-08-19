@@ -123,7 +123,16 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
         boolean stopPass = false;
 
         IncomingRequest req;
-        boolean frontierStamped = false;
+        // The acquisition-frontier rule (gen-frontier-acquisition-anchor-plan.md): the
+        // live frontier prefers the first unsatisfied ts<=0 entry (ACQUISITION — the
+        // client has nothing there; generation may be needed). Unsatisfied ts>0 entries
+        // (REVALIDATION — dirty re-asks/resync; generation can never serve them) only
+        // stamp at end of pass, and only when the pass held no acquisition entry at all —
+        // which keeps pure-resync sessions stamping exactly as before, while an inner
+        // dirty head no longer collapses the generation admission window for ~5 s of
+        // outward damping (the measured 40%-of-backfill stall).
+        boolean acquisitionStamped = false;
+        long deferredRevalStamp = Long.MIN_VALUE;
         while (!stopPass && (req = state.pollBacklog()) != null) {
             long packed = PositionUtil.packPosition(req.cx(), req.cz());
             var duplicate = resolvedAsDuplicate(state, playerUuid, req, packed);
@@ -136,9 +145,13 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
                 // through them at drain speed (20 Hz), and stamping a satisfied ring
                 // would over-gate the true frontier and tick gen_order_gated on
                 // FIFO-clean servers, diluting that counter's runaway meaning.
-                if (duplicate == Duplicate.IN_FLIGHT && !frontierStamped) {
-                    state.stampLiveFrontier(req.cx(), req.cz());
-                    frontierStamped = true;
+                if (duplicate == Duplicate.IN_FLIGHT && !acquisitionStamped) {
+                    if (req.clientTimestamp() <= 0) {
+                        state.stampLiveFrontier(req.cx(), req.cz(), true);
+                        acquisitionStamped = true;
+                    } else if (deferredRevalStamp == Long.MIN_VALUE) {
+                        deferredRevalStamp = packed;
+                    }
                 }
                 this.ctx.diagnostics().incrementRequestRouted();
                 continue;
@@ -149,9 +162,13 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
                 // timestamp ladder yet, so this can under-estimate the frontier — the
                 // safe direction (transient over-gating while the send queue is already
                 // saturating delivery), unlike leaving a stale higher stamp in place.
-                if (!frontierStamped) {
-                    state.stampLiveFrontier(req.cx(), req.cz());
-                    frontierStamped = true;
+                if (!acquisitionStamped) {
+                    if (req.clientTimestamp() <= 0) {
+                        state.stampLiveFrontier(req.cx(), req.cz(), true);
+                        acquisitionStamped = true;
+                    } else if (deferredRevalStamp == Long.MIN_VALUE) {
+                        deferredRevalStamp = packed;
+                    }
                 }
                 // Retain (no disposition): the entry stays queued for the next cycle or is
                 // superseded by the next replace. queue_full stays a pure event counter,
@@ -173,9 +190,13 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
 
             // First entry needing real work this pass: the live frontier (see the
             // duplicate branch above — in-flight entries stamp it too).
-            if (!frontierStamped) {
-                state.stampLiveFrontier(req.cx(), req.cz());
-                frontierStamped = true;
+            if (!acquisitionStamped) {
+                if (req.clientTimestamp() <= 0) {
+                    state.stampLiveFrontier(req.cx(), req.cz(), true);
+                    acquisitionStamped = true;
+                } else if (deferredRevalStamp == Long.MIN_VALUE) {
+                    deferredRevalStamp = packed;
+                }
             }
             // Every request routes the same way — the client no longer classifies sync vs
             // generation (server-owned generation: the disk miss is the generation trigger,
@@ -213,6 +234,16 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
                     this.processor.recordGateStop();
                 }
             }
+        }
+
+        // End-of-pass revalidation fallback: no unsatisfied acquisition entry was seen,
+        // so the first unsatisfied ts>0 entry stamps — identical VALUE to the pre-split
+        // behavior for pure-revalidation passes (cold-restart resync, converged players
+        // under dirty pushes); the within-pass deferral is immaterial against the
+        // 333 ms/ring outward damping.
+        if (!acquisitionStamped && deferredRevalStamp != Long.MIN_VALUE) {
+            state.stampLiveFrontier(PositionUtil.unpackX(deferredRevalStamp),
+                    PositionUtil.unpackZ(deferredRevalStamp), false);
         }
 
         if (retained != null) state.restoreBacklog(retained);
