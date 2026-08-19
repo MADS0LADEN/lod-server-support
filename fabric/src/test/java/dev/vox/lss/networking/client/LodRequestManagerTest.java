@@ -231,8 +231,12 @@ class LodRequestManagerTest {
                 "a dirty that crossed the in-flight answer must outlive the permanent park");
         assertFalse(manager.columnsForTest().isSessionSatisfied(POS),
                 "the crossing un-parks the position — the edit is not lost for the session");
-        assertEquals(0, manager.getConfirmedRing(),
-                "the stale-crossing path does its own confirmed-ring reset to re-reach the position");
+        // 2026-08-18 (scanner-reopened-rings-plan.md): consumeStaleCrossing now reopens the
+        // position's OWN ring instead of collapsing the prefix. No scan ever ran here, so the
+        // prefix is 0 and the reopen no-ops (bits live only below the prefix) — the position
+        // is reachable by the frontier walk from ring 0 either way.
+        assertEquals(0, manager.getConfirmedRing());
+        assertEquals(0, manager.getReopenedRingCount());
     }
 
     @Test
@@ -846,21 +850,25 @@ class LodRequestManagerTest {
     }
 
     @Test
-    void dirtyBroadcastWithKnownPositionResetsConfirmedRingWithoutTouchingTheCadence() {
+    void dirtyBroadcastWithKnownPositionReopensItsRingWithoutTouchingTheCadence() {
         // The dirty path is cadence-NEUTRAL (the old resetScanCounter debounce here was the
         // last survivor of the movement-starvation class: at the legal 1 s broadcast-interval
         // floor a sustained edit stream could phase-lock scans off entirely, starving
-        // re-declaration — the want-set's only self-heal). The ring re-opens; the imminent
-        // scan still fires on schedule.
+        // re-declaration — the want-set's only self-heal). The position's OWN ring re-opens
+        // (2026-08-18, scanner-reopened-rings-plan.md: the full prefix collapse per broadcast
+        // was the render-thread-hitch shape); the imminent scan still fires on schedule.
         manager.onColumnReceived(POS, 5000L, dim("overworld")); // lastDimension null -> applies
         advanceToOneCallBeforeScanFire();
-        assertTrue(manager.getConfirmedRing() > 0);
+        int confirmedBefore = manager.getConfirmedRing();
+        assertTrue(confirmedBefore > 0);
 
         manager.onDirtyColumns(new long[]{POS});
 
         assertEquals(1, manager.getDirtyColumnCount());
-        assertEquals(0, manager.getConfirmedRing(),
-                "a known dirty mark must reset ring confirmation so the position is rescanned");
+        assertEquals(confirmedBefore, manager.getConfirmedRing(),
+                "the confirmed prefix survives a dirty broadcast — only the mark's ring reopens");
+        assertEquals(1, manager.getReopenedRingCount(),
+                "the known dirty mark reopens exactly its own ring (cheb 10 for POS)");
         assertTrue(maybeScanOnce() >= 0,
                 "the imminent scan fires ON SCHEDULE — a broadcast must never defer the "
                         + "cadence (re-declaration is the only self-heal it could starve)");
@@ -904,12 +912,16 @@ class LodRequestManagerTest {
         for (int i = 3; i < frame.length; i++) {
             frame[i] = PositionUtil.packPosition(100_000 + i, 200_000); // unknown filler
         }
+        int confirmedBefore = manager.getConfirmedRing();
         manager.onDirtyColumns(frame);
 
         assertEquals(3, manager.getDirtyColumnCount(), "only known positions take dirty marks");
         assertEquals(-1L, manager.columnsForTest().timestampFor(frame[3]),
                 "unknown positions stay unknown — the scan ladder requests those anyway");
-        assertEquals(0, manager.getConfirmedRing());
+        assertEquals(confirmedBefore, manager.getConfirmedRing(),
+                "the prefix survives; only the known marks' rings reopen (2026-08-18)");
+        assertEquals(3, manager.getReopenedRingCount(),
+                "the three known marks reopen exactly their rings (20, 21, 22 from the (0,0) anchor)");
         assertTrue(maybeScanOnce() >= 0,
                 "even a wire-cap dirty frame must not defer the cadence (cadence-neutral path)");
     }

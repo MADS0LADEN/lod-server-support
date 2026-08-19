@@ -400,7 +400,7 @@ class SpiralScannerTest {
     }
 
     @Test
-    void retryMarkInsideConfirmedDiscForcesRescanFromRingZero() {
+    void retryMarkInsideConfirmedDiscReopensTheMarkRing() {
         var columns = new ColumnStateMap();
         int[] c = new int[2];
         for (int r = 3; r <= 4; r++) {
@@ -418,17 +418,29 @@ class SpiralScannerTest {
 
         // An ingest failure (the consumer rejected the column) retry-marks a ring-3 position.
         // (Pre-want-set this same rung was driven by a rate-limited bounce; the bounce is gone,
-        // the retry mark and its invariant are not.) The disc is already confirmed past it, so
-        // the next scan must restart from ring 0 or the retry would sit inside the skipped
-        // prefix and never be re-declared.
+        // the retry mark and its invariant are not.) The disc is already confirmed past it.
+        // 2026-08-18 (scanner-reopened-rings-plan.md): the actionable mark now reopens exactly
+        // ITS ring instead of collapsing the prefix to 0 — the full-disc re-walk per scan was
+        // the measured render-thread hitch at large distances.
         SpiralScanner.ringIndexToCoord(3, 0, CX, CZ, c);
         long retried = PositionUtil.packPosition(c[0], c[1]);
         columns.onIngestFailed(retried);
 
         assertEquals(1, fireScan(s, 2, columns, queue),
-                "scan after a retry mark must re-walk the confirmed disc and re-declare the retry");
+                "scan after a retry mark must re-walk the mark's ring and re-declare the retry");
         assertEquals(List.of(retried), queue.positions());
-        assertEquals(3, s.getConfirmedRing(), "confirmation holds at the unsatisfied retry ring");
+        assertEquals(5, s.getConfirmedRing(),
+                "the confirmed prefix SURVIVES — only the mark's ring reopened");
+        assertEquals(1, s.getReopenedRingCount(),
+                "the unsatisfied reopened ring keeps its bit (the mark is consumed by the"
+                        + " ANSWER, so the ring must re-walk until one lands)");
+
+        // The answer consumes the mark and satisfies the position; the next walk finds the
+        // ring clean and clears the bit.
+        columns.onReceived(retried, 2000L);
+        assertEquals(0, fireScan(s, 2, columns, queue));
+        assertEquals(0, s.getReopenedRingCount(), "a re-confirmed ring clears its bit");
+        assertEquals(5, s.getConfirmedRing());
     }
 
     @Test
@@ -461,13 +473,25 @@ class SpiralScannerTest {
         assertEquals(5, s.getConfirmedRing(),
                 "an unconsumable (vanilla-excluded) retry mark must not reset the confirmed ring");
 
+        assertEquals(0, s.getReopenedRingCount(),
+                "a PARKED (unconsumable) mark must not hold a reopened ring — bounded walks"
+                        + " (the F1 pin strengthened: no per-scan below-prefix re-walk either)");
+
         // Heal path: the exclusion is anchored on the player, so once the player moves off,
-        // the same mark becomes actionable — and movement recenters the walk from ring 0,
-        // which reaches it. Pinned at the predicate level (fireScan fixes the center).
+        // the same mark becomes actionable — the per-scan actionable recomputation reopens
+        // (or frontier-covers) its ring at the new center. Predicate level first:
         assertTrue(columns.hasActionableRetries(CX + 10, CZ, 2),
                 "the parked mark becomes actionable from a position whose exclusion misses it");
         assertFalse(columns.hasActionableRetries(CX, CZ, 2),
                 "still parked from the original center");
+
+        // End-to-end: a +4 crossing (retention path, below the full-reset delta) moves the
+        // exclusion off the mark; the next scan declares it.
+        s.recenter(4);
+        queue.clear();
+        int healed = fireScanFull(s, CX + 4, CZ, 2, 0, 1000, 0, columns, queue);
+        assertTrue(queue.positions(healed).contains(excluded),
+                "the un-parked mark is declared once the exclusion moves off it");
     }
 
     @Test
@@ -596,7 +620,7 @@ class SpiralScannerTest {
     // ---- reset matrix: movement / dimension change / disconnect (CL-016) ----
 
     @Test
-    void movementRecenterZeroesConfirmedRingKeepsCadenceAndMarks() {
+    void movementRecenterDecrementsPrefixReopensCrescentKeepsCadenceAndMarks() {
         var columns = new ColumnStateMap();
         seedSatisfied(columns, 3, 4);
         var s = scanner(4);
@@ -613,16 +637,24 @@ class SpiralScannerTest {
         for (int i = 0; i < LSSConstants.TICKS_PER_SECOND - 1; i++) {
             assertEquals(-1, s.maybeScan(CX, CZ, 2, 0, 1000, 0L, Long.MAX_VALUE, -1, 1000, () -> 0, columns, queue.pos, queue.ts));
         }
-        s.recenter();
+        s.recenter(1);
 
-        assertEquals(0, s.getConfirmedRing(),
-                "movement must zero ring confirmation (the confirmed prefix belonged to the old center)");
+        // 2026-08-18 (scanner-reopened-rings-plan.md): a d=1 crossing DECREMENTS the prefix
+        // (a ring confirmed at the old center is conservatively confirmed within [r-1, r+1]
+        // at the new one) and reopens the view-exclusion crescent band — the full zeroing
+        // (and its full-disc re-walk, the measured render-thread hitch) is retired.
+        assertEquals(4, s.getConfirmedRing(),
+                "movement decrements ring confirmation by the crossing delta, never zeroes it");
+        assertEquals(4, s.getReopenedRingCount(),
+                "the view-exclusion crescent band [0, viewR+d] reopens below the prefix");
         assertTrue(columns.hasRetries(), "movement preserves in-range retry marks");
         queue.clear();
         int n = s.maybeScan(CX, CZ, 2, 0, 1000, 0L, Long.MAX_VALUE, -1, 1000, () -> 0, columns, queue.pos, queue.ts);
         assertEquals(1, n, "the in-progress cadence window completes ON SCHEDULE through a"
-                + " recenter and the scan re-walks the disc, declaring the retry");
+                + " recenter and the scan re-walks the reopened band + frontier, declaring the retry");
         assertEquals(List.of(retried), queue.positions(n));
+        assertEquals(0, s.getReopenedRingCount(),
+                "the clean crescent band re-confirms and clears in the same walk");
     }
 
     @Test
@@ -641,11 +673,16 @@ class SpiralScannerTest {
         columns.markRetry(ringPos(4, 0));
 
         // The production dimension-change sequence (LodRequestManager.onDimensionChange).
+        s.reopenRing(3); // stale retained state that must not survive the dimension change
         columns.clear();
         queue.clear();
         s.resetScanCounter();
 
         assertEquals(0, s.getConfirmedRing(), "dimension change must zero ring confirmation");
+        assertEquals(0, s.getReopenedRingCount(),
+                "the fresh dimension shares nothing with the old one's ring geometry");
+        assertFalse(s.recenteredSinceLastFireForTest(), "retention flags reset with the session state");
+        assertFalse(s.truncatedBelowPrefixForTest());
         assertFalse(columns.hasRetries(), "map clear drops retry marks with the old dimension");
         assertFalse(queue.hasNext(), "the old dimension's want-set is dropped");
         int n = fireScan(s, 2, columns, queue);
@@ -758,8 +795,11 @@ class SpiralScannerTest {
 
         // The SHRINK: positions inside the old exclusion but outside the new one are newly
         // LOD-needing and sit below the confirmed prefix — the reset makes them reachable.
+        s.reopenRing(7); // a stale reopened bit rides into the shrink to prove the clear
         int declared = fireScan(s, 2, columns, queue);
         assertTrue(declared > 0, "shrunk exclusion re-walks and declares the newly exposed band");
+        assertEquals(0, s.getReopenedRingCount(),
+                "the shrink's full from-0 re-walk covers every reopened ring — the bitset clears with it");
         for (int i = 0; i < declared; i++) {
             int cx = PositionUtil.unpackX(queue.pos[i]);
             int cz = PositionUtil.unpackZ(queue.pos[i]);
@@ -794,7 +834,8 @@ class SpiralScannerTest {
         assertEquals(0, fireScan(s, 2, columns, queue));
 
         assertTrue(columns.markDirtyIfKnown(covered));
-        s.resetConfirmedRing(); // production dirty-broadcast path (LodRequestManager.onDirtyColumns)
+        s.reopenRing(2); // production dirty-broadcast path (LodRequestManager.onDirtyColumns
+                         // reopens the position's own ring — cheb 2 from the center)
 
         assertEquals(0, fireScan(s, 2, columns, queue),
                 "a dirty column under vanilla coverage must not be re-requested (vanilla renders it live)");
@@ -804,7 +845,8 @@ class SpiralScannerTest {
 
         // The player moves +1 chunk: the exclusion square moves off the dirty column.
         columns.pruneOutOfRange(1, 0, 64); // production movement order: prune...
-        s.resetConfirmedRing();            // ...then the dirty-path ring re-open (cadence-neutral)
+        s.recenter(1);                     // ...then the movement recenter (crescent band
+                                           // reopens the rings that exited the view circle)
         int queued = fireScanFull(s, 1, 0, 2, 0, 1000, 0, columns, queue);
         assertTrue(queued > 0, "the un-covered scan must declare something");
         boolean foundCovered = false;
@@ -976,9 +1018,11 @@ class SpiralScannerTest {
     // below the confirmed prefix forever. Under re-declaration that trigger is structurally gone:
     // an awaited position is an ordinary unsatisfied want-set member, so it blocks its ring's
     // confirmation until data lands (awaitedPositionsAreReDeclaredAndBlockRingConfirmation pins
-    // exactly that). resetConfirmedRing's CONTRACT still has to hold — production still calls it
-    // from onColumnNotGenerated and consumeStaleCrossing as defence-in-depth — so these two tests
-    // now stage the stranded state directly instead of through the retired in-flight-skip.
+    // exactly that). The below-prefix reachability CONTRACT still has to hold — production
+    // reaches it via reopenRing from consumeStaleCrossing and the dirty batch handler
+    // (2026-08-18, scanner-reopened-rings-plan.md: resetConfirmedRing is retired; the ring
+    // reopen replaces the full prefix collapse) — so these two tests stage the stranded state
+    // directly instead of through the retired in-flight-skip.
 
     /** Seed ring 1 fully satisfied and scan once so the ring confirms PAST it. Returns ring-1[0]. */
     private static long stageRing1Confirmed(SpiralScanner s, ColumnStateMap columns, Sink queue) {
@@ -997,7 +1041,7 @@ class SpiralScannerTest {
     }
 
     @Test
-    void dirtiedPositionBelowConfirmedRingIsRereachedByResetConfirmedRing() {
+    void dirtiedPositionBelowConfirmedRingIsRereachedByReopenRing() {
         var s = scanner(1);
         var columns = new ColumnStateMap();
         var queue = new Sink();
@@ -1011,15 +1055,19 @@ class SpiralScannerTest {
         assertEquals(0, fireScanFull(s, CX, CZ, 0, 0, 1000, 0, columns, queue),
                 "without the re-walk a below-ring re-opened position is never rescanned (CL-014)");
 
-        // The fix forces a re-walk from the innermost ring, re-reaching it.
-        s.resetConfirmedRing();
+        // The fix re-walks the position's OWN ring below the prefix, re-reaching it
+        // (2026-08-18: reopenRing replaces the retired full prefix collapse).
+        s.reopenRing(1);
+        assertEquals(1, s.getReopenedRingCount(), "the ring bit is set below the prefix");
         int recount = fireScanFull(s, CX, CZ, 0, 0, 1000, 0, columns, queue);
-        assertEquals(1, recount, "resetConfirmedRing re-walks and re-emits the re-opened position");
+        assertEquals(1, recount, "reopenRing re-walks and re-emits the re-opened position");
         assertEquals(List.of(target), queue.positions());
+        assertTrue(s.getConfirmedRing() > 1,
+                "the confirmed prefix survives the below-prefix re-walk");
     }
 
     @Test
-    void notGeneratedPositionStaysParkedThroughAConfirmedRingReset() {
+    void notGeneratedPositionStaysParkedThroughARingReopen() {
         var s = new SpiralScanner();
         s.setConfig(new SessionConfigS2CPayload(LSSConstants.PROTOCOL_VERSION, true, 1, false));
         var columns = new ColumnStateMap();
@@ -1027,9 +1075,10 @@ class SpiralScannerTest {
         long target = stageRing1Confirmed(s, columns, queue);
 
         columns.onNotGenerated(target);
-        s.resetConfirmedRing();
+        s.reopenRing(1);
         // A NOT_GENERATED position is permanently session-satisfied, so even a full re-walk
-        // must NOT re-request it — only a dirty broadcast revives it (no re-request loop).
+        // of its ring must NOT re-request it — only a dirty broadcast revives it (no
+        // re-request loop).
         assertEquals(0, fireScanFull(s, CX, CZ, 0, 0, 1000, 0, columns, queue),
                 "a NOT_GENERATED position is parked for the session — a re-walk must not re-ask it");
     }
@@ -1327,11 +1376,11 @@ class SpiralScannerTest {
         var rig = new AdaptiveRig();
         rig.primeAndArm();
         rig.outstanding = 0;
-        rig.s.recenter(); // movement
+        rig.s.recenter(1); // movement (a one-chunk crossing)
         assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(),
                 "post-movement: a CHEAP re-walk fast-fires (was pinned to 1 Hz — the bug)");
 
-        rig.s.resetConfirmedRing(); // dirty re-open, same shape
+        rig.s.reopenRing(3); // dirty re-open, same shape (2026-08-18: per-ring, not prefix collapse)
         rig.outstanding = 0;
         assertEquals(SpiralScanner.FAST_RESCAN_MIN_INTERVAL_TICKS, rig.ticksToFire(),
                 "post-dirty-reopen: same — the COST decides, not the fact of invalidation");
@@ -1352,9 +1401,13 @@ class SpiralScannerTest {
         assertTrue(rig.s.predictedWalkCost() <= SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
                 "premise: with the prefix intact the frontier-only walk is cheap");
 
-        rig.s.recenter();
+        rig.s.recenter(1);
+        // 2026-08-18 (scanner-reopened-rings-plan.md §3): in the movement window
+        // (recenteredSinceLastFire) the prediction is the bare from-zero formula — the
+        // retained prefix must not LOWER the movement-window prediction, or fast fires
+        // would walk back toward the elytra wall's throughput regime.
         assertTrue(rig.s.predictedWalkCost() > SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
-                "premise: zeroing the prefix makes the NEXT walk the expensive full re-walk");
+                "premise: the movement window predicts the expensive from-zero re-walk");
         assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
                 "an expensive from-ring-0 re-walk still rides the 1 Hz fallback");
     }
@@ -1371,7 +1424,7 @@ class SpiralScannerTest {
         rig.primeAndArm();
         int frontierWalk = rig.s.predictedWalkCost();
 
-        rig.s.recenter(); // no walk has happened yet
+        rig.s.recenter(1); // no walk has happened yet
         assertTrue(rig.s.predictedWalkCost() > frontierWalk,
                 "the prediction reflects the re-walk immediately, with no walk in between");
     }
@@ -1414,7 +1467,7 @@ class SpiralScannerTest {
         // frontier the elytra trace measured.
         seedSatisfiedDisc(flight.columns, 73);
         flight.primeAndArm();
-        flight.s.recenter();
+        flight.s.recenter(1);
         assertEquals(4 * 75 * 76, flight.s.predictedWalkCost(),
                 "the measured elytra flight walk is exactly 4R(R+1) at frontier ring 75");
         assertTrue(flight.s.predictedWalkCost() <= SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
@@ -1522,13 +1575,17 @@ class SpiralScannerTest {
         var rig = new AdaptiveRig(scanner(200));
         seedSatisfiedDisc(rig.columns, 140);
         rig.primeAndArm();
-        rig.s.recenter();
+        rig.s.recenter(1);
         assertTrue(rig.s.predictedWalkCost() > SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
                 "premise: an expensive prediction is standing");
         rig.s.reset();
         assertTrue(rig.s.predictedWalkCost() > SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
                 "a fresh session has never walked, so it must predict the FULL disc and fail"
                         + " closed — never inherit a cheap stale frontier");
+        assertEquals(0, rig.s.getReopenedRingCount(),
+                "retained rings die with the session (2026-08-18 retention state)");
+        assertFalse(rig.s.recenteredSinceLastFireForTest());
+        assertFalse(rig.s.truncatedBelowPrefixForTest());
     }
 
     @Test
@@ -1788,5 +1845,372 @@ class SpiralScannerTest {
         assertTrue(rig.s.getRateGated() > 0, "premise: refusals were counted");
         rig.s.reset();
         assertEquals(0, rig.s.getRateGated(), "reset() zeroes rateGated with fastScans");
+    }
+
+    // ═══ Scan prefix retention (docs/planning/scanner-reopened-rings-plan.md, 2026-08-18) ═══
+    //
+    // The measured defect (spark profile 6HZTTXT5pn): every chunk crossing / dirty re-open
+    // collapsed the confirmed prefix to 0, and the next walk classified the ENTIRE disc on
+    // the render thread — ~1.05M probes at distance 512, 30-90 ms per hitch, every 2-3 s at
+    // sprint speed. Retention keeps the prefix (decremented by the crossing delta) and
+    // re-walks only a reopened-ring bitset: the crescent band that exited the view circle,
+    // dirty/retry rings, nothing else.
+
+    /** Classify-counting seam: walk cost becomes ASSERTABLE, not inferred. */
+    static final class CountingColumnStateMap extends ColumnStateMap {
+        int classifyCalls;
+        @Override
+        long classify(long packed) {
+            this.classifyCalls++;
+            return super.classify(packed);
+        }
+    }
+
+    /** Seed every position of the radius-{@code radius} square around (cx, cz) that vanilla
+     *  does NOT render at {@code vd} as satisfied (received + validated). */
+    private static void seedNonExcludedSquare(ColumnStateMap columns, int cx, int cz,
+                                              int radius, int vd) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                if (SpiralScanner.isVanillaRendered(cx + dx, cz + dz, cx, cz, vd)) continue;
+                long packed = PositionUtil.packPosition(cx + dx, cz + dz);
+                columns.onReceived(packed, 1000L);
+                columns.onUpToDate(packed);
+            }
+        }
+    }
+
+    @Test
+    void warmDiscChunkCrossingWalkIsBoundedAndDeclaresTheTrailingCrescent() {
+        // THE hitch pin — the plan's test 1. Converged warm disc at the 2048-capable
+        // distance 512, one chunk crossing: the next walk must be bounded (crescent band +
+        // frontier ring only — orders of magnitude under the 1.05M full-disc count) and the
+        // trailing crescent (positions that exited the view circle behind the player, known
+        // to vanilla but never declared to LSS) must be declared.
+        final int lod = 512, vd = 16;
+        var columns = new CountingColumnStateMap();
+        seedNonExcludedSquare(columns, CX, CZ, lod, vd);
+        var s = scanner(lod);
+        var queue = new Sink();
+        assertEquals(0, fireScan(s, vd, columns, queue), "premise: converged warm disc");
+        assertEquals(lod + 1, s.getConfirmedRing());
+
+        s.recenter(1); // the crossing: (0,0) -> (1,0)
+        columns.classifyCalls = 0;
+        int declared = fireScanFull(s, CX + 1, CZ, vd, 0, 1000, 0, columns, queue);
+
+        assertTrue(columns.classifyCalls < 32_000,
+                "the post-crossing walk must be bounded (crescent + frontier), got "
+                        + columns.classifyCalls + " classify probes vs ~1.05M for the full disc");
+        // Every trailing-crescent position (rendered from the old center, not from the new
+        // one, inside the lod range) must be in the declared set.
+        var declaredSet = new LongOpenHashSet();
+        for (int i = 0; i < declared; i++) declaredSet.add(queue.pos[i]);
+        int crescent = 0;
+        for (int dx = -vd - 2; dx <= vd + 2; dx++) {
+            for (int dz = -vd - 2; dz <= vd + 2; dz++) {
+                boolean oldRendered = SpiralScanner.isVanillaRendered(CX + dx, CZ + dz, CX, CZ, vd);
+                boolean newRendered = SpiralScanner.isVanillaRendered(CX + dx, CZ + dz, CX + 1, CZ, vd);
+                if (oldRendered && !newRendered) {
+                    crescent++;
+                    assertTrue(declaredSet.contains(PositionUtil.packPosition(CX + dx, CZ + dz)),
+                            "trailing-crescent position (" + dx + "," + dz + ") must be declared"
+                                    + " — a miss here is a permanent LOD hole behind the player");
+                }
+            }
+        }
+        assertTrue(crescent > 0, "premise: the crossing produced a trailing crescent");
+    }
+
+    @Test
+    void steadyStateConvergedWalkVisitsNothing() {
+        // The plan's test 10: bit-clearing regressions surface as count creep. A converged
+        // disc with no events must walk NOTHING (empty frontier interval, empty bitset).
+        var columns = new CountingColumnStateMap();
+        seedNonExcludedSquare(columns, CX, CZ, 32, 4);
+        var s = scanner(32);
+        var queue = new Sink();
+        assertEquals(0, fireScan(s, 4, columns, queue));
+        assertEquals(33, s.getConfirmedRing());
+
+        columns.classifyCalls = 0;
+        assertEquals(0, fireScan(s, 4, columns, queue));
+        assertEquals(0, columns.classifyCalls,
+                "a converged steady-state walk visits zero positions (prefix past lod, no bits)");
+    }
+
+    @Test
+    void crescentLostAnswerIsRedeclaredNextScan() {
+        // The plan's test 4: the crescent declaration rides the same silent-drop reality as
+        // everything else — an unanswered (superseded) crescent position keeps its ring
+        // reopened and is re-declared next scan under its own steam.
+        var columns = new ColumnStateMap();
+        seedNonExcludedSquare(columns, CX, CZ, 16, 4);
+        var s = scanner(16);
+        var queue = new Sink();
+        assertEquals(0, fireScan(s, 4, columns, queue));
+
+        s.recenter(1);
+        int first = fireScanFull(s, CX + 1, CZ, 4, 0, 1000, 0, columns, queue);
+        assertTrue(first > 0, "premise: the crossing declared the trailing crescent");
+        var firstSet = new LongOpenHashSet();
+        for (int i = 0; i < first; i++) firstSet.add(queue.pos[i]);
+        assertTrue(s.getReopenedRingCount() > 0,
+                "unanswered crescent rings keep their bits");
+
+        // NO answers arrive (server-side supersession). The next scan must re-declare them.
+        queue.clear();
+        int second = fireScanFull(s, CX + 1, CZ, 4, 0, 1000, 0, columns, queue);
+        var secondSet = new LongOpenHashSet();
+        for (int i = 0; i < second; i++) secondSet.add(queue.pos[i]);
+        for (long p : firstSet) {
+            assertTrue(secondSet.contains(p),
+                    "a lost crescent answer must be re-declared next scan (self-heal)");
+        }
+    }
+
+    @Test
+    void movementWindowPredictionIgnoresRetainedStateUntilTheNextFire() {
+        // The plan's §3 in isolation: between a recenter and the next actual walk,
+        // predictedWalkCost must reproduce the pre-retention from-zero value (the elytra
+        // regime — retention must not LOWER the movement-window prediction), and the first
+        // fired walk closes the window so the retained prefix prices the walk again.
+        var rig = new AdaptiveRig(scanner(200));
+        seedSatisfiedDisc(rig.columns, 140);
+        rig.primeAndArm(); // truncates in ring 141: prefix 141, scanRing 141
+        int retained = rig.s.predictedWalkCost();
+        assertTrue(retained <= SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "premise: the retained-prefix prediction is cheap");
+
+        rig.s.recenter(1);
+        assertTrue(rig.s.recenteredSinceLastFireForTest());
+        assertEquals(4 * 141 * 142, rig.s.predictedWalkCost(),
+                "the movement window predicts the bare from-zero cost despite the retained"
+                        + " prefix (141 -> 140) standing");
+
+        // The 1 Hz fallback fires (the expensive prediction refuses the fast path), the
+        // walk runs, and the window closes: the prediction returns to the retained form.
+        rig.outstanding = 0;
+        assertEquals(LSSConstants.TICKS_PER_SECOND, rig.ticksToFire(),
+                "the movement-window prediction holds the fast path off");
+        assertFalse(rig.s.recenteredSinceLastFireForTest(), "a fired walk closes the window");
+        assertTrue(rig.s.predictedWalkCost() <= SpiralScanner.FAST_RESCAN_MAX_WALK_COST,
+                "post-walk the retained prefix prices the next walk again");
+    }
+
+    @Test
+    void reopenValveFallsBackToFullReset() {
+        // The plan's test 7: past REOPENED_RING_VALVE distinct rings the retained state is
+        // no longer cheaper than a full re-walk — fall back to today's semantics wholesale.
+        var columns = new ColumnStateMap();
+        seedNonExcludedSquare(columns, CX, CZ, 100, 2);
+        var s = scanner(100);
+        var queue = new Sink();
+        assertEquals(0, fireScan(s, 2, columns, queue));
+        assertEquals(101, s.getConfirmedRing());
+
+        for (int r = 1; r <= SpiralScanner.REOPENED_RING_VALVE; r++) {
+            s.reopenRing(r);
+        }
+        assertEquals(SpiralScanner.REOPENED_RING_VALVE, s.getReopenedRingCount());
+        assertEquals(101, s.getConfirmedRing(), "at the valve: retained state still standing");
+
+        s.reopenRing(SpiralScanner.REOPENED_RING_VALVE + 1); // the 65th distinct ring
+        assertEquals(0, s.getReopenedRingCount(), "valve trip clears the bitset...");
+        assertEquals(0, s.getConfirmedRing(), "...and falls back to the full prefix reset");
+    }
+
+    @Test
+    void budgetTruncationInsideAReopenedRingKeepsTheBitAndFailsClosed() {
+        // The plan's test 9 + v1.1 MAJOR-2: a budget break INSIDE the reopened interval
+        // keeps the bit (the ring re-walks next scan) and flags truncatedBelowPrefix so the
+        // walk-cost prediction fails closed over the full span (scanRing alone would be
+        // blind to the frontier interval the next walk also iterates).
+        var columns = new ColumnStateMap();
+        seedNonExcludedSquare(columns, CX, CZ, 50, 2);
+        var s = scanner(50);
+        var queue = new Sink();
+        assertEquals(0, fireScan(s, 2, columns, queue));
+        assertEquals(51, s.getConfirmedRing());
+
+        // Dirty the whole of rings 30 and 40 (the production dirty path: mark + reopen).
+        int[] c = new int[2];
+        for (int r : new int[] {30, 40}) {
+            for (int i = 0; i < 8 * r; i++) {
+                SpiralScanner.ringIndexToCoord(r, i, CX, CZ, c);
+                assertTrue(columns.markDirtyIfKnown(PositionUtil.packPosition(c[0], c[1])));
+            }
+            s.reopenRing(r);
+        }
+        assertEquals(2, s.getReopenedRingCount());
+
+        // Deep queue pressure tapers the budget to 8 — the walk truncates inside ring 30.
+        int declared = fireScan(s, 2, 990, 1000, 0, columns, queue);
+        assertEquals(8, declared, "premise: the tapered budget truncated inside ring 30");
+        assertEquals(2, s.getReopenedRingCount(),
+                "a truncated reopened ring keeps its bit (and ring 40 was never reached)");
+        assertTrue(s.truncatedBelowPrefixForTest(),
+                "the below-prefix truncation is flagged for the prediction");
+        assertEquals(51, s.getConfirmedRing(), "the prefix survives throughout");
+        // Fail-closed prediction: full span from the lowest reopened ring to the LOD
+        // distance — NOT the truncated scanRing (30), which would hide the frontier
+        // interval. 4*(50*51 - 30*29) = 6720.
+        assertEquals(4 * (50 * 51 - 30 * 29), s.predictedWalkCost());
+
+        // Full budget: both rings drain over the following scans and the bits clear.
+        int drained = 0;
+        for (int i = 0; i < 4; i++) {
+            int n = fireScan(s, 2, columns, queue);
+            drained += n;
+            for (int j = 0; j < n; j++) columns.onReceived(queue.pos[j], 9000L + i);
+        }
+        // 560 = both full rings: the 8 declared by the truncated scan were never ANSWERED,
+        // so they re-declare (declaration does not consume a dirty mark).
+        assertEquals(8 * 30 + 8 * 40, drained, "every dirty position is eventually served");
+        assertEquals(0, fireScan(s, 2, columns, queue));
+        assertEquals(0, s.getReopenedRingCount(), "served rings cleared their bits");
+    }
+
+    @Test
+    void sustainedCrossingsKeepBitPopulationUnderTheValve() {
+        // The plan's test 11: the flight regime. Sixty 1-chunk crossings with a scan after
+        // each — the crescent bands must keep draining (re-confirming rings clear their
+        // bits) so the population never creeps toward the 64-bit valve; a silent valve trip
+        // would revert to full-disc hitches invisibly.
+        final int vd = 16, lod = 64;
+        var columns = new ColumnStateMap();
+        var s = scanner(lod);
+        var queue = new Sink();
+        // Converge at the origin first (answer everything declared; ~15.5k positions at
+        // 800/scan needs ~20 walks).
+        for (int i = 0; i < 30; i++) {
+            int n = fireScanFull(s, CX, CZ, vd, 0, 1000, 0, columns, queue);
+            for (int j = 0; j < n; j++) {
+                columns.onReceived(queue.pos[j], 1000L + i);
+                columns.onUpToDate(queue.pos[j]);
+            }
+            if (n == 0) break;
+        }
+        assertEquals(lod + 1, s.getConfirmedRing(), "premise: converged at the origin");
+
+        for (int step = 1; step <= 60; step++) {
+            s.recenter(1);
+            int n = fireScanFull(s, CX + step, CZ, vd, 0, 1000, 0, columns, queue);
+            for (int j = 0; j < n; j++) {
+                columns.onReceived(queue.pos[j], 5000L + step);
+                columns.onUpToDate(queue.pos[j]);
+            }
+            assertTrue(s.getReopenedRingCount() < SpiralScanner.REOPENED_RING_VALVE,
+                    "step " + step + ": bit population must stay under the valve, got "
+                            + s.getReopenedRingCount());
+            assertTrue(s.getConfirmedRing() > 0,
+                    "step " + step + ": the valve (or a full reset) must never fire in"
+                            + " ordinary sustained flight");
+        }
+    }
+
+    @Test
+    void movementChaosLeavesNoPositionPermanentlyOrphaned() {
+        // The §9 amendment to the CL-014 orphan property: MOVEMENT chaos. Random
+        // interleavings of crossings (retention-path and full-reset-scale), dirty re-opens
+        // (production shape: mark + reopenRing at the position's CURRENT ring), retry
+        // marks, answers and silent supersessions — then convergence at the final center.
+        // A single silently-orphaned position (a hole in the crescent geometry, a bit lost
+        // to a shift, a stranded below-prefix want) never converges. The fixed-center form
+        // lives in anyChaosInterleavingLeavesNoPositionPermanentlyOrphaned above.
+        final int vd = 16, lod = 24;
+        for (long seed : new long[] {3L, 11L, 77L}) {
+            var rng = new Random(seed);
+            var columns = new ColumnStateMap();
+            var queue = new Sink();
+            var s = scanner(lod);
+            int cx = 0, cz = 0;
+
+            for (int cycle = 0; cycle < 25; cycle++) {
+                // Random movement: mostly small retention-path crossings, occasionally a
+                // teleport-scale hop (exercises the full-reset rung).
+                if (rng.nextInt(100) < 60) {
+                    int d = rng.nextInt(100) < 90 ? 1 + rng.nextInt(3)
+                            : SpiralScanner.RECENTER_FULL_RESET_DELTA + rng.nextInt(4);
+                    int dir = rng.nextBoolean() ? 1 : -1;
+                    if (rng.nextBoolean()) cx += dir * d; else cz += dir * d;
+                    s.recenter(d);
+                }
+                int n = fireScanFull(s, cx, cz, vd, 0, 1000, 0, columns, queue);
+                for (int i = 0; i < n; i++) {
+                    long pos = queue.pos[i];
+                    int roll = rng.nextInt(100);
+                    if (roll < 40) { columns.onReceived(pos, 1_000L + cycle); columns.onUpToDate(pos); }
+                    else if (roll < 50) columns.markRetry(pos);
+                    else if (roll < 60) columns.onUpToDate(pos);
+                    // else: superseded — no answer, ever; only re-declaration saves it.
+                }
+                // A dirty broadcast on a random known position (production: mark + reopen
+                // at the position's ring from the CURRENT center).
+                if (rng.nextInt(100) < 40 && columns.receivedCount() > 0) {
+                    int dx = rng.nextInt(2 * lod + 1) - lod, dz = rng.nextInt(2 * lod + 1) - lod;
+                    long dirtyPos = PositionUtil.packPosition(cx + dx, cz + dz);
+                    if (columns.markDirtyIfKnown(dirtyPos)) {
+                        s.reopenRing(Math.max(Math.abs(dx), Math.abs(dz)));
+                    }
+                }
+            }
+
+            // Convergence at the final center: answers now always succeed.
+            boolean converged = false;
+            for (int i = 0; i < 40 && !converged; i++) {
+                int n = fireScanFull(s, cx, cz, vd, 0, 1000, 0, columns, queue);
+                for (int j = 0; j < n; j++) {
+                    columns.onReceived(queue.pos[j], 50_000L + i);
+                    columns.onUpToDate(queue.pos[j]);
+                }
+                converged = n == 0 && s.getConfirmedRing() == lod + 1;
+            }
+            assertTrue(converged, "seed " + seed + ": movement chaos never converged"
+                    + " (confirmedRing=" + s.getConfirmedRing() + ")");
+            // The oracle: nothing in range is left unsatisfied (the orphan-proof).
+            for (int dx = -lod; dx <= lod; dx++) {
+                for (int dz = -lod; dz <= lod; dz++) {
+                    if (SpiralScanner.isVanillaRendered(cx + dx, cz + dz, cx, cz, vd)) continue;
+                    long p = PositionUtil.packPosition(cx + dx, cz + dz);
+                    assertEquals(ColumnStateMap.SATISFIED, columns.classify(p),
+                            "seed " + seed + ": position (" + dx + "," + dz + ") relative to"
+                                    + " the final center was permanently orphaned");
+                }
+            }
+        }
+    }
+
+    @Test
+    void killSwitchRestoresLegacyResetSemantics() {
+        // The plan's test 12: enableScanPrefixRetention=false is DELEGATION to today's
+        // semantics, not a parallel implementation — every reset path collapses the prefix
+        // to 0 and no bit is ever set. The field A/B lever and the silent-orphan safety net.
+        var columns = new ColumnStateMap();
+        seedNonExcludedSquare(columns, CX, CZ, 8, 2);
+        var s = scanner(8);
+        s.prefixRetentionEnabled = () -> false;
+        var queue = new Sink();
+        assertEquals(0, fireScan(s, 2, columns, queue));
+        assertEquals(9, s.getConfirmedRing());
+
+        s.recenter(1);
+        assertEquals(0, s.getConfirmedRing(), "kill switch: movement zeroes the prefix (legacy)");
+        assertEquals(0, s.getReopenedRingCount(), "kill switch: no bits, ever");
+
+        assertEquals(0, fireScan(s, 2, columns, queue)); // reconverge
+        assertEquals(9, s.getConfirmedRing());
+
+        s.reopenRing(3);
+        assertEquals(0, s.getConfirmedRing(), "kill switch: a dirty re-open zeroes the prefix (legacy)");
+        assertEquals(0, s.getReopenedRingCount());
+
+        // The legacy retry-reset rung: an actionable mark zeroes the prefix inside scan().
+        assertEquals(0, fireScan(s, 2, columns, queue));
+        long marked = ringPos(5, 0);
+        columns.onIngestFailed(marked);
+        int n = fireScan(s, 2, columns, queue);
+        assertEquals(1, n, "kill switch: the legacy from-0 re-walk declares the retry");
+        assertEquals(List.of(marked), queue.positions());
     }
 }

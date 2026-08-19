@@ -33,9 +33,10 @@ class ColumnStateMap {
     // Positions whose delivery was lost after being stamped (ingest failure) and that must be
     // re-reachable by a later scan. The name is historical: through v16 the rate-limit bounce
     // was the other writer, but v17 retired the bounce, so onIngestFailed is now the only one.
-    // The mark's live job is hasActionableRetries() -> the scanner's confirmed-ring reset,
-    // without which an unstamped position inside an already-confirmed ring is never rescanned
-    // (marks under the vanilla-view exclusion are parked — see hasActionableRetries).
+    // The mark's live job is collectActionableRetryRings() -> the scanner reopening the
+    // mark's ring (2026-08-18, scanner-reopened-rings-plan.md; formerly a full confirmed-ring
+    // reset), without which an unstamped position inside an already-confirmed ring is never
+    // rescanned (marks under the vanilla-view exclusion are parked — see hasActionableRetries).
     private final LongOpenHashSet retry = new LongOpenHashSet();
     // Positions confirmed current (data or up-to-date) in this session; cleared on
     // reconnect/dimension change so cached-but-stale positions get revalidated.
@@ -506,6 +507,31 @@ class ColumnStateMap {
             }
         }
         return false;
+    }
+
+    /**
+     * The prefix-retention twin of {@link #hasActionableRetries}: visit the Chebyshev RING
+     * (around the player) of every actionable retry mark, so the scanner reopens exactly
+     * those rings instead of collapsing the whole confirmed prefix
+     * (docs/planning/scanner-reopened-rings-plan.md). SAME actionability ladder as the
+     * boolean form — a mark inside the vanilla-view exclusion stays parked (unreachable,
+     * unconsumable) and is not visited; the two methods must not drift. Marks at/beyond
+     * the confirmed prefix are handed over too — the scanner's {@code reopenRing} skips
+     * them for free (the frontier walk covers those rings). O(|retry|) per scan, same as
+     * the boolean form; the retry set is small.
+     */
+    void collectActionableRetryRings(int playerCx, int playerCz, int exclusionRadius,
+                                     java.util.function.IntConsumer ringVisitor) {
+        if (this.retry.isEmpty()) return;
+        var iter = this.retry.iterator();
+        while (iter.hasNext()) {
+            long packed = iter.nextLong();
+            int cx = PositionUtil.unpackX(packed);
+            int cz = PositionUtil.unpackZ(packed);
+            if (!SpiralScanner.isVanillaRendered(cx, cz, playerCx, playerCz, exclusionRadius)) {
+                ringVisitor.accept(Math.max(Math.abs(cx - playerCx), Math.abs(cz - playerCz)));
+            }
+        }
     }
     int receivedCount() { return this.receivedCount; }
     int emptyCount() { return this.emptyCount; }

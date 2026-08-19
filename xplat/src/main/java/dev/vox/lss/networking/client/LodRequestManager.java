@@ -444,9 +444,15 @@ public class LodRequestManager {
                 this.lastPruneChunkX = playerCx;
                 this.lastPruneChunkZ = playerCz;
             }
+            // Chebyshev crossing delta, computed BEFORE the anchor update: the scanner's
+            // prefix retention shifts its state by exactly this much (a diagonal sprint
+            // crossing is d=1; a teleport is large and recenter() full-resets past
+            // RECENTER_FULL_RESET_DELTA).
+            int crossingDelta = Math.max(Math.abs(playerCx - this.lastChunkX),
+                    Math.abs(playerCz - this.lastChunkZ));
             this.lastChunkX = playerCx;
             this.lastChunkZ = playerCz;
-            this.scanner.recenter();
+            this.scanner.recenter(crossingDelta);
             // Live round 2: a crossing holds the governor's up-probe for the current
             // interval — vanilla's own chunk bursts are about to compete for the link.
             this.governor.noteMovement();
@@ -532,6 +538,7 @@ public class LodRequestManager {
             }
             ClientTraceLog.event("scan", "\"center\":[" + playerCx + "," + playerCz
                     + "],\"confirmed\":" + this.scanner.getConfirmedRing()
+                    + ",\"reopened\":" + this.scanner.getReopenedRingCount()
                     + ",\"fast\":" + this.scanner.wasLastScanFast()
                     + ",\"declared\":" + scanned
                     + ",\"budget\":" + this.scanner.getLastBudget()
@@ -679,9 +686,23 @@ public class LodRequestManager {
                     + ",\"first\":[" + PositionUtil.unpackX(dirtyPositions[0]) + ","
                     + PositionUtil.unpackZ(dirtyPositions[0]) + "]");
         }
-        boolean added = false;
         for (long packed : dirtyPositions) {
-            added |= this.columns.markDirtyIfKnown(packed);
+            if (this.columns.markDirtyIfKnown(packed)) {
+                // Cadence-NEUTRAL: only re-open the position's OWN ring so it (which may
+                // sit below the confirmed prefix) is reachable at the NEXT scheduled scan
+                // — a full prefix collapse here cost a full-disc re-walk per broadcast
+                // (the render-thread hitch; docs/planning/scanner-reopened-rings-plan.md).
+                // resetScanCounter() here was the last survivor of the cadence-debounce
+                // class: it DELAYED the next scan 20 ticks per broadcast, and at the floor
+                // for a SENDING dirtyBroadcastIntervalSeconds (1 s; 0 disables sends
+                // entirely — this handler simply never fires then) a sustained edit stream
+                // could phase-lock scans off entirely — starving re-declaration, the
+                // want-set's only self-heal (the same failure class as the removed
+                // movement debounce).
+                this.scanner.reopenRing(Math.max(
+                        Math.abs(PositionUtil.unpackX(packed) - this.lastChunkX),
+                        Math.abs(PositionUtil.unpackZ(packed) - this.lastChunkZ)));
+            }
             // Record a crossing REGARDLESS of markDirtyIfKnown's result: a dirty crossing an
             // in-flight request survives onReceived's dirty-clear only via staleInFlight. This
             // must cover the resync case (stored>0, where markDirtyIfKnown returns true) as well
@@ -689,17 +710,6 @@ public class LodRequestManager {
             // arrives while the first serve is in flight has its dirty mark cleared by onReceived
             // and is never re-requested (a permanent stale column). No-op when not in flight.
             this.columns.noteStaleIfInFlight(packed, this.tracker.isInFlight(packed));
-        }
-        if (added) {
-            // Cadence-NEUTRAL: only re-open the ring walk so the dirty position (which may
-            // sit below the confirmed ring) is reachable at the NEXT scheduled scan.
-            // resetScanCounter() here was the last survivor of the cadence-debounce class:
-            // it DELAYED the next scan 20 ticks per broadcast, and at the floor for a
-            // SENDING dirtyBroadcastIntervalSeconds (1 s; 0 disables sends entirely — this
-            // handler simply never fires then) a sustained edit stream could
-            // phase-lock scans off entirely — starving re-declaration, the want-set's only
-            // self-heal (the same failure class as the removed movement debounce).
-            this.scanner.resetConfirmedRing();
         }
     }
 
@@ -711,7 +721,12 @@ public class LodRequestManager {
     private void consumeStaleCrossing(long packed) {
         if (this.columns.resolveStale(packed)) {
             this.columns.markDirtyIfKnown(packed); // now that it has a disposition, re-mark for re-request
-            this.scanner.resetConfirmedRing();     // reach it below the confirmed ring
+            // Reach it below the confirmed prefix — its own ring only, like the dirty
+            // batch handler (a full prefix collapse per stale crossing was the
+            // render-thread-hitch shape).
+            this.scanner.reopenRing(Math.max(
+                    Math.abs(PositionUtil.unpackX(packed) - this.lastChunkX),
+                    Math.abs(PositionUtil.unpackZ(packed) - this.lastChunkZ)));
         }
     }
 
@@ -952,6 +967,8 @@ public class LodRequestManager {
     public long getTotalPositionsRequested() { return this.metrics.getTotalPositionsRequested(); }
     public int getDirtyColumnCount() { return this.columns.dirtyCount(); }
     public int getConfirmedRing() { return this.scanner.getConfirmedRing(); }
+    /** Reopened-below-prefix ring count (scanner-reopened-rings-plan.md) — the diag/exporter field. */
+    public int getReopenedRingCount() { return this.scanner.getReopenedRingCount(); }
     public int getScanRing() { return this.scanner.getScanRing(); }
     public int getMissingVanillaChunks() { return this.scanner.getMissingVanillaChunks(); }
     /** Fast (completion-triggered) scan fires this session — the adaptive-cadence liveness signal. */

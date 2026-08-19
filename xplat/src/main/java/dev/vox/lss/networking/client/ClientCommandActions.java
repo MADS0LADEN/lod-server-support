@@ -149,9 +149,9 @@ public final class ClientCommandActions {
         int scanRing = manager.getScanRing();
         int maxRing = manager.getEffectiveLodDistanceChunks();
         feedback.accept(Component.literal(String.format(
-                "Scan: confirmed=%d, scanning=%d/%d, missing_vanilla=%d, fast=%d",
-                confirmedRing, scanRing, maxRing, manager.getMissingVanillaChunks(),
-                manager.getFastScans()
+                "Scan: confirmed=%d, reopened=%d, scanning=%d/%d, missing_vanilla=%d, fast=%d",
+                confirmedRing, manager.getReopenedRingCount(), scanRing, maxRing,
+                manager.getMissingVanillaChunks(), manager.getFastScans()
         )).withStyle(ChatFormatting.GRAY));
 
         // Budget line (ingest_backlog: the consumer-reported pending sections driving the

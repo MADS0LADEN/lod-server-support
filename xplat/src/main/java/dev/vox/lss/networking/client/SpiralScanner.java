@@ -105,6 +105,40 @@ class SpiralScanner {
     private int scanTickCounter = LSSConstants.TICKS_PER_SECOND - 1; // starts at max so first scan fires immediately on join
     private int missingVanillaChunks = Integer.MAX_VALUE;
 
+    // --- Reopened rings (docs/planning/scanner-reopened-rings-plan.md) ---
+    // Rings BELOW the confirmed prefix that must be re-walked, so a chunk crossing or a
+    // dirty mark no longer collapses the prefix to 0 (the measured render-thread hitch:
+    // one full-disc walk = ~1M classify probes = 30-90 ms on one tick at distance 512).
+    // long[33] covers rings 0..2048 inclusive — MAX_LOD_DISTANCE itself is a walkable
+    // ring. Main client thread only, like the rest of the scan state.
+    private final long[] reopenedRings = new long[33];
+    /** Chebyshev crossing delta at which {@link #recenter(int)} gives up on shifting and
+     *  falls back to the full reset (teleport-scale movement; the prune hysteresis fires
+     *  at the same magnitude, so all shifted state would be pruned anyway). */
+    static final int RECENTER_FULL_RESET_DELTA = 8;
+    /** Overflow valve: above this many set bits the bitset clears and the prefix drops to
+     *  0 — today's full-reset behavior as the conservative fallback (pathological only:
+     *  a dirty storm touching more distinct rings than this). */
+    static final int REOPENED_RING_VALVE = 64;
+    /** Set by {@link #recenter(int)}, cleared when a scan actually WALKS (fires-not-
+     *  declares — a 0-count walked fire clears it; converged clients fire 1 Hz walks, so
+     *  it cannot stick). While set, {@link #predictedWalkCost()} uses the bare from-zero
+     *  formula — the pre-retention movement semantics the elytra-wall calibration pin
+     *  asserts exactly. */
+    private boolean recenteredSinceLastFire = false;
+    /** Did the last walk budget-break at a ring BELOW the prefix? Then {@code scanRing}
+     *  is the low reopened ring and the truncated-walk prediction branch would be blind
+     *  to the frontier interval the next walk also iterates — predict the full span
+     *  instead (fail closed; plan v1.1 MAJOR-2). */
+    private boolean truncatedBelowPrefix = false;
+    /** Kill switch seam ({@code enableScanPrefixRetention}, default true) — injectable
+     *  like {@link #adaptiveCadenceEnabled}. False = every reset path keeps today's
+     *  prefix-to-0 semantics (delegation, not a parallel implementation): the field A/B
+     *  lever, and the safety net for the silent-orphan failure class no conservation law
+     *  can see. */
+    BooleanSupplier prefixRetentionEnabled =
+            () -> LSSClientConfig.CONFIG.enableScanPrefixRetention;
+
     // --- Adaptive-cadence state (see fastRescanDue) ---
     /**
      * The armed state: the count of the last want-set batch the manager DECLARED (tracker
@@ -171,6 +205,116 @@ class SpiralScanner {
     /** Set once per session, alongside {@link #reset()}. */
     void setConfig(SessionConfigS2CPayload sessionConfig) {
         this.sessionConfig = sessionConfig;
+    }
+
+    // --- Reopened-ring bit helpers (main client thread only) ---
+
+    private boolean reopenedGet(int ring) {
+        return (this.reopenedRings[ring >> 6] & (1L << (ring & 63))) != 0;
+    }
+
+    private void reopenedSetBit(int ring) {
+        this.reopenedRings[ring >> 6] |= (1L << (ring & 63));
+    }
+
+    private void reopenedClearBit(int ring) {
+        this.reopenedRings[ring >> 6] &= ~(1L << (ring & 63));
+    }
+
+    private void clearAllReopened() {
+        java.util.Arrays.fill(this.reopenedRings, 0L);
+    }
+
+    int reopenedRingCount() {
+        int n = 0;
+        for (long w : this.reopenedRings) n += Long.bitCount(w);
+        return n;
+    }
+
+    /** The lowest set ring at or after {@code from}, or -1. */
+    private int nextReopenedBit(int from) {
+        if (from < 0) from = 0;
+        int word = from >> 6;
+        if (word >= this.reopenedRings.length) return -1;
+        long w = this.reopenedRings[word] & (-1L << (from & 63));
+        while (true) {
+            if (w != 0) return (word << 6) + Long.numberOfTrailingZeros(w);
+            if (++word >= this.reopenedRings.length) return -1;
+            w = this.reopenedRings[word];
+        }
+    }
+
+    private int lowestReopenedBit() {
+        return nextReopenedBit(0);
+    }
+
+    /** Clear every bit above {@code lodDistance} — the effective distance is dynamic
+     *  (server value, client override, Voxy's), and a bit above it would never be walked,
+     *  never cleared, and would pollute the overflow valve forever. Also converts the
+     *  shrunk-lodDistance retry flavor from "full walk each scan" to "no walk, mark
+     *  unconsumable" — declared in the plan (strictly better; the mark heals when the
+     *  distance grows back or the mark prunes). */
+    private void clearReopenedAbove(int lodDistance) {
+        for (int r = nextReopenedBit(lodDistance + 1); r >= 0; r = nextReopenedBit(r + 1)) {
+            reopenedClearBit(r);
+        }
+    }
+
+    /** Union of the bitset shifted by every offset in [-d, d] — a reopened ring r around
+     *  the old center spans rings [r-d, r+d] around the new one. */
+    private void shiftReopenedBits(int d) {
+        long[] src = this.reopenedRings.clone();
+        clearAllReopened();
+        for (int k = -d; k <= d; k++) {
+            orShifted(src, k);
+        }
+    }
+
+    /** OR {@code src} shifted by {@code k} rings (negative = toward ring 0) into the live
+     *  bitset. |k| < 64 always (RECENTER_FULL_RESET_DELTA bounds it). */
+    private void orShifted(long[] src, int k) {
+        int n = this.reopenedRings.length;
+        if (k == 0) {
+            for (int i = 0; i < n; i++) this.reopenedRings[i] |= src[i];
+            return;
+        }
+        int shift = Math.abs(k);
+        for (int i = 0; i < n; i++) {
+            long lo, hi;
+            if (k > 0) { // toward higher rings
+                lo = src[i] << shift;
+                hi = i > 0 ? src[i - 1] >>> (64 - shift) : 0;
+            } else {     // toward ring 0
+                lo = src[i] >>> shift;
+                hi = i + 1 < n ? src[i + 1] << (64 - shift) : 0;
+            }
+            int dst = i;
+            this.reopenedRings[dst] |= (lo | hi);
+        }
+    }
+
+    /**
+     * Reopen one ring for re-walking (the manager's dirty sites, the crescent band, the
+     * actionable-retry collect). No-ops above the current effective LOD distance
+     * (set-time clamp) and at/above the prefix (the frontier walk covers those). With
+     * retention off, delegates to today's semantics: the prefix drops to 0.
+     */
+    void reopenRing(int ring) {
+        if (!this.prefixRetentionEnabled.getAsBoolean()) {
+            this.confirmedRing = 0;
+            return;
+        }
+        if (ring < 0) return;
+        int lod = this.sessionConfig == null
+                ? LSSConstants.MAX_LOD_DISTANCE : getEffectiveLodDistance();
+        if (ring > lod) return;
+        if (ring >= this.confirmedRing) return;
+        reopenedSetBit(ring);
+        if (reopenedRingCount() > REOPENED_RING_VALVE) {
+            // Overflow valve: conservative fallback to today's full reset.
+            this.confirmedRing = 0;
+            clearAllReopened();
+        }
     }
 
     /**
@@ -264,6 +408,12 @@ class SpiralScanner {
         this.lastScanWasFast = fast;
         if (fast) this.fastScans++;
 
+        // The movement window closes on FIRES, not declares: this walk re-derives the
+        // prefix for the CURRENT center, so predictedWalkCost may trust the retained
+        // state again. A converged client's 0-count walked fire clears it too (1 Hz
+        // fallback fires walk unconditionally), so the flag cannot stick.
+        this.recenteredSinceLastFire = false;
+
         return scan(playerCx, playerCz, viewDistance, columns, posOut, tsOut, budget);
     }
 
@@ -282,17 +432,17 @@ class SpiralScanner {
      * and the v16 protocol versions, so {@code != 16} is exact today and stays conservative
      * if an intermediate legacy dialect ever lands.
      *
-     * <p>The walk-cost gate has two halves, because the prefix resets in two tempos. The
+     * <p>The walk-cost gate has two halves, because the walk grows in two tempos. The
      * {@link #predictedWalkCost()} term sees the SYNCHRONOUS invalidations — movement
-     * ({@link #recenter}) and dirty re-opens ({@link #resetConfirmedRing}) zero
-     * {@code confirmedRing} before the next tick's predicate, so the prediction becomes the
-     * full from-ring-0 re-walk those force. The {@code hasActionableRetries} term sees the
-     * IN-WALK one: an actionable retry mark resets the prefix inside {@code scan()} (after
-     * this predicate already ran) and the walk always re-derives {@code confirmedRing >= 1}
-     * (ring 0 is empty), so no prefix-derived value can gate it. Either way a zero-prefix
-     * walk re-walks from ring 0 (the render-thread-hitch shape documented at the 2048
-     * ceiling above) — but only walks that are actually EXPENSIVE stay at the 1 Hz
-     * fallback now, rather than every reset regardless of cost.
+     * ({@link #recenter}) and dirty re-opens ({@link #reopenRing}) adjust the retained
+     * state (or, kill-switch off, zero {@code confirmedRing}) before the next tick's
+     * predicate, so the prediction reflects the walk those force. The
+     * {@code hasActionableRetries} term sees the IN-WALK one: an actionable retry mark
+     * reopens its ring inside {@code scan()} (after this predicate already ran), so no
+     * prediction-derived value can gate it — the boolean rung stays verbatim under
+     * retention (plan v1.1: the option-a rung), refusing fast fires while any actionable
+     * mark is pending. Only walks that are actually EXPENSIVE stay at the 1 Hz fallback,
+     * rather than every reset regardless of cost.
      *
      * <p>The predecessor of the cost term was {@code confirmedRing > 0}, which conflated
      * "the prefix was invalidated" with "the walk is expensive". Those coincide for a
@@ -366,8 +516,13 @@ class SpiralScanner {
      * mis-sized budget constant.
      *
      * <p><b>Coverage limit — deliberate, and load-bearing for what the release notes may
-     * claim.</b> {@link #recenter} zeroes {@code confirmedRing} on every chunk crossing and
-     * nothing re-derives it until the next walk, so under sustained movement {@code c} is 0
+     * claim.</b> In the MOVEMENT WINDOW ({@code recenteredSinceLastFire} — a crossing with no
+     * walk since) this deliberately prices the bare from-zero walk even though prefix
+     * retention (2026-08-18, scanner-reopened-rings-plan.md) keeps the prefix standing: the
+     * retained state makes the walk CHEAP, but admitting fast fires on it would lift the
+     * flight regime toward the stationary 2-3 Hz — the 50-75 MB/s consequence the elytra
+     * investigation argued against. Retention decouples the WALK COST from recenter without
+     * touching this cadence policy. So under sustained movement {@code c} is 0
      * and this reduces to {@code 4·s(s+1)}. Against
      * {@link #FAST_RESCAN_MAX_WALK_COST} = 65536 that admits {@code s ≤ 127}
      * (4·127·128 = 65024) and refuses {@code s = 128} (4·128·129 = 66048). So on the shipped
@@ -403,8 +558,28 @@ class SpiralScanner {
         // ~viewDistance, so scanRing stays tiny while the walk still iterates every
         // satisfied ring out to lodDistance. Predicting off scanRing there under-reports by
         // three orders of magnitude and admits exactly the walk this gate exists to refuse.
-        int s = this.lastWalkTruncated ? this.scanRing : getEffectiveLodDistance();
-        int c = this.confirmedRing;
+        // A walk that budget-broke INSIDE the reopened interval left scanRing at the low
+        // reopened ring, blind to the frontier interval the next walk also iterates —
+        // predict the full span instead (fail closed; plan v1.1 MAJOR-2).
+        int s = (this.lastWalkTruncated && !this.truncatedBelowPrefix)
+                ? this.scanRing : getEffectiveLodDistance();
+        int c;
+        if (this.recenteredSinceLastFire) {
+            // The movement window (a recenter with no walk since): the bare from-zero
+            // formula — the pre-retention movement semantics, verbatim. Prefix retention
+            // must not LOWER the movement-window prediction: that would admit fast fires
+            // sustained flight never had, walking back toward the elytra chunk wall's
+            // 50-75 MB/s regime (plan v1.1 MAJOR-3; the coverage-limit paragraph above
+            // still holds for exactly this window).
+            c = 0;
+        } else {
+            c = this.confirmedRing;
+            // A reopened ring below the prefix is where the next walk actually STARTS.
+            // Bounding with the ring-sum from that floor over-counts the skipped
+            // in-between rings — conservative, the safe direction for an admission gate.
+            int lowBit = lowestReopenedBit();
+            if (lowBit >= 0 && lowBit < c) c = lowBit;
+        }
         if (s < c) return 0;
         // Σ 8r for r in [c, s] — the loop starts AT confirmedRing, so the lower term is
         // c(c-1), not c(c+1).
@@ -443,39 +618,59 @@ class SpiralScanner {
         int localScanRing = -1;
         int queued = 0;
         boolean truncated = false;
+        boolean truncatedBelow = false;
+
+        // The effective distance is dynamic — drop reopened bits the walk can never reach
+        // (they would otherwise never clear and pollute the overflow valve forever).
+        clearReopenedAbove(lodDistance);
 
         // A SHRUNK exclusion radius (render distance lowered) resets the prefix once: the
         // rings between the new and old radius confirmed while vanilla rendered them and
         // would otherwise never be walked again for a stationary player (2026-08-05 review
         // F1). Cheap — fires once per change, and the shrink walk has real work to declare.
+        // The full from-0 walk covers every reopened ring, so the bitset clears with it.
         if (this.lastExclusionRadius >= 0 && exclusionRadius < this.lastExclusionRadius) {
             this.confirmedRing = 0;
+            clearAllReopened();
         }
         this.lastExclusionRadius = exclusionRadius;
 
-        // Only an ACTIONABLE retry mark (outside the vanilla-view exclusion) resets the
-        // confirmed ring. A mark whose position slipped INSIDE the exclusion after it was
-        // set is unconsumable — an excluded position is never declared, so no terminal
-        // answer ever consumes it — and letting it reset the ring forced a full-distance
-        // re-walk EVERY scan for as long as the player lingered (negligible at the default
-        // distance, a render-thread hitch per scan at the 2048 ceiling). The parked mark
-        // stays; movement recenters the walk from ring 0 anyway, so once the exclusion
-        // moves off the position the mark is reachable again. (A mark beyond a SHRUNK
-        // lodDistance is a separate, deliberately-unhandled flavor — it still resets the
-        // ring every scan, bounded by the smaller walk it forces. An exclusion-radius
-        // shrink is handled above.)
-        if (columns.hasActionableRetries(playerCx, playerCz, exclusionRadius)) {
+        // Only an ACTIONABLE retry mark (outside the vanilla-view exclusion) can force
+        // below-prefix re-walking. A mark whose position slipped INSIDE the exclusion
+        // after it was set is unconsumable — an excluded position is never declared, so no
+        // terminal answer ever consumes it — and letting it invalidate the prefix forced a
+        // full-distance re-walk EVERY scan for as long as the player lingered. With
+        // retention on, each actionable mark reopens exactly ITS ring (the collect visitor
+        // applies the same actionability ladder as hasActionableRetries — the two must not
+        // drift); with the kill switch off, the legacy prefix-to-0 reset applies.
+        if (this.prefixRetentionEnabled.getAsBoolean()) {
+            columns.collectActionableRetryRings(playerCx, playerCz, exclusionRadius, this::reopenRing);
+        } else if (columns.hasActionableRetries(playerCx, playerCz, exclusionRadius)) {
             this.confirmedRing = 0;
         }
 
         int localConfirmedRing = this.confirmedRing;
 
+        // Two-interval walk (retention plan §4): the reopened rings below the prefix
+        // (ascending), then the frontier interval [confirmedRing, lodDistance]. All
+        // reopened bits sit below the prefix, so the combined order is still ascending —
+        // the want-set stays closest-first.
+        int r = -1;
         outer:
-        for (int r = localConfirmedRing; r <= lodDistance; r++) {
+        while ((r = nextWalkRing(r, localConfirmedRing, lodDistance)) >= 0) {
+            boolean reopenedBelowPrefix = r < localConfirmedRing;
             boolean ringFullySatisfied = true;
             int ringSize = 8 * r;
             for (int i = 0; i < ringSize; i++) {
-                if (count >= budget) { ringFullySatisfied = false; truncated = true; break outer; }
+                if (count >= budget) {
+                    ringFullySatisfied = false;
+                    truncated = true;
+                    // A budget break INSIDE the reopened interval leaves scanRing blind to
+                    // the frontier interval the next walk also iterates — predictedWalkCost
+                    // must fail closed off the full span (plan v1.1 MAJOR-2).
+                    truncatedBelow = reopenedBelowPrefix;
+                    break outer;
+                }
 
                 ringIndexToCoord(r, i, playerCx, playerCz, chunkCoords);
                 int cx = chunkCoords[0];
@@ -510,21 +705,47 @@ class SpiralScanner {
                 if (localScanRing < r) localScanRing = r;
             }
 
-            // Contiguous prefix only: confirming a satisfied OUTER ring while an inner ring still
-            // has unsatisfied positions (an uncovered corner hole) would start every later scan
-            // past the inner ring — a permanent LOD hole for a stationary player.
-            if (ringFullySatisfied && localConfirmedRing == r) {
-                localConfirmedRing = r + 1;
+            if (ringFullySatisfied) {
+                if (reopenedBelowPrefix) {
+                    // The reopened ring is clean again; an unsatisfied or truncated ring
+                    // keeps its bit and re-walks next scan.
+                    reopenedClearBit(r);
+                } else if (localConfirmedRing == r) {
+                    // Contiguous prefix only: confirming a satisfied OUTER ring while an
+                    // inner ring still has unsatisfied positions (an uncovered corner hole)
+                    // would start every later scan past the inner ring — a permanent LOD
+                    // hole for a stationary player.
+                    localConfirmedRing = r + 1;
+                }
             }
         }
 
         this.confirmedRing = localConfirmedRing;
         this.scanRing = localScanRing >= 0 ? localScanRing : localConfirmedRing;
         this.lastWalkTruncated = truncated;
+        this.truncatedBelowPrefix = truncatedBelow;
         this.lastBudget = budget;
         this.lastQueued = queued;
 
         return count;
+    }
+
+    /**
+     * The walk-order iterator: the next ring after {@code prev} — the lowest reopened bit
+     * below {@code confirmedRing}, then the frontier interval up to {@code lodDistance},
+     * -1 when done. {@code confirmedRing} may ADVANCE between calls (frontier rings
+     * confirming); by then {@code prev} is already at/past it, so the reopened interval is
+     * never re-entered.
+     */
+    private int nextWalkRing(int prev, int confirmedRing, int lodDistance) {
+        if (prev + 1 < confirmedRing) {
+            int bit = nextReopenedBit(prev + 1);
+            if (bit >= 0 && bit < confirmedRing) return bit;
+            // Reopened interval exhausted — jump to the frontier.
+            return confirmedRing <= lodDistance ? confirmedRing : -1;
+        }
+        int next = Math.max(prev + 1, confirmedRing);
+        return next <= lodDistance ? next : -1;
     }
 
     /**
@@ -567,6 +788,9 @@ class SpiralScanner {
         this.lastScanWasFast = false;
         this.fastScans = 0;
         this.rateGated = 0;
+        clearAllReopened();
+        this.recenteredSinceLastFire = false;
+        this.truncatedBelowPrefix = false;
     }
 
     void resetScanCounter() {
@@ -576,32 +800,69 @@ class SpiralScanner {
         // fresh dimension's empty awaiting set would otherwise satisfy the fast trigger
         // trivially against a stale armed count.
         this.lastSentCount = 0;
+        // The fresh dimension shares nothing with the old one's ring geometry.
+        clearAllReopened();
+        this.recenteredSinceLastFire = false;
+        this.truncatedBelowPrefix = false;
     }
 
-    /** Movement re-center: re-walk from ring 0 at the new center WITHOUT touching the
-     *  cadence. The pre-v17 movement path used {@link #resetScanCounter} (a debounce),
-     *  which starved scanning — and with it re-declaration, the want-set's only healer —
-     *  for as long as the player crossed a chunk boundary more often than every 20 ticks:
-     *  sustained creative flight stopped LOD generation entirely. Under latest-wins
-     *  replace semantics a moving client declaring on schedule is the DESIGNED behavior
-     *  (stale asks are superseded and re-declared); yielding to vanilla's own chunk
-     *  loading during fast travel is SERVER-SIDE read/generation priority's job (the
-     *  client-side vanilla-load budget scale is retired), not the cadence's. The confirmed-ring reset stays: the confirmed prefix was computed for
-     *  the OLD center, and keeping it would skip never-scanned rings at the new one. */
-    void recenter() {
-        this.confirmedRing = 0;
-    }
-
-    /**
-     * Force the next scan to re-walk from the innermost ring (cheaply skipping already-satisfied
-     * positions) WITHOUT resetting the scan-tick cadence. Used when a position BELOW the confirmed
-     * ring became requestable again while the ring confirmed past it — a dirty mark landing at a
-     * terminal outcome (the stale-crossing path): only a re-walk re-reaches it. Unlike
-     * {@link #resetScanCounter} this leaves the cadence alone (a steady trickle of terminal
-     * answers would otherwise debounce scans back indefinitely).
-     */
-    void resetConfirmedRing() {
-        this.confirmedRing = 0;
+    /** Movement re-center: adjust the scan state for a Chebyshev crossing of {@code d}
+     *  chunks WITHOUT touching the cadence. The pre-v17 movement path used
+     *  {@link #resetScanCounter} (a debounce), which starved scanning — and with it
+     *  re-declaration, the want-set's only healer — for as long as the player crossed a
+     *  chunk boundary more often than every 20 ticks: sustained creative flight stopped
+     *  LOD generation entirely. Under latest-wins replace semantics a moving client
+     *  declaring on schedule is the DESIGNED behavior; yielding to vanilla's own chunk
+     *  loading during fast travel is SERVER-SIDE read/generation priority's job, not the
+     *  cadence's.
+     *
+     *  <p>The prefix handling is the retention plan's core
+     *  (docs/planning/scanner-reopened-rings-plan.md §5): the old behavior zeroed
+     *  {@code confirmedRing} on EVERY crossing, forcing a full-disc re-walk (~1M classify
+     *  probes at distance 512 — the measured 30-90 ms render-thread hitch, spark profile
+     *  6HZTTXT5pn). A ring confirmed around the old center is instead conservatively
+     *  still-confirmed within {@code [r-d, r+d]} around the new one, so the prefix only
+     *  DECREMENTS by {@code d} — except for the view-exclusion crescent: positions that
+     *  confirmed while vanilla rendered them and just exited the (Euclidean, buffered)
+     *  view circle behind the player. Their Chebyshev rings around the NEW center span
+     *  {@code [⌊(R−d)/√2⌋−1, R+d]} (the {@code /√2} low edge is the diagonal exit — a
+     *  Chebyshev band down only to {@code R−d} misses it and leaves PERMANENT holes;
+     *  plan v1.1 MAJOR-1), reopened as a band. Existing reopened bits shift by the union
+     *  {@code [r-d, r+d]}. A crossing of {@link #RECENTER_FULL_RESET_DELTA} or more
+     *  (teleport-scale — the prune hysteresis fires at the same magnitude) falls back to
+     *  the full reset, as does the kill switch. */
+    void recenter(int d) {
+        // Both modes: the movement window opens for predictedWalkCost — the elytra-wall
+        // calibration must see the bare from-zero prediction until the next actual walk.
+        this.recenteredSinceLastFire = true;
+        if (!this.prefixRetentionEnabled.getAsBoolean()) {
+            this.confirmedRing = 0;
+            clearAllReopened();
+            return;
+        }
+        if (d <= 0) return;
+        if (d >= RECENTER_FULL_RESET_DELTA || this.lastExclusionRadius < 0) {
+            // Teleport-scale crossing, or no walk yet (nothing confirmed to retain).
+            this.confirmedRing = 0;
+            clearAllReopened();
+            return;
+        }
+        int oldPrefix = this.confirmedRing;
+        shiftReopenedBits(d);
+        this.confirmedRing = Math.max(0, oldPrefix - d);
+        // Invariant: bits live strictly BELOW the prefix (the shift can push one to or
+        // past it; the frontier walk covers those rings anyway, and a stranded bit would
+        // pollute the overflow valve).
+        for (int r = nextReopenedBit(this.confirmedRing); r >= 0; r = nextReopenedBit(r + 1)) {
+            reopenedClearBit(r);
+        }
+        // The view-exclusion crescent band (Euclidean low edge — see javadoc).
+        int viewR = this.lastExclusionRadius;
+        int low = Math.max(0, (int) Math.floor((viewR - d) / Math.sqrt(2.0)) - 1);
+        int high = viewR + d;
+        for (int r = low; r <= high; r++) {
+            reopenRing(r); // set-time lod clamp + ≥prefix skip + overflow valve inside
+        }
     }
 
 
@@ -642,6 +903,11 @@ class SpiralScanner {
     // --- Getters ---
 
     int getConfirmedRing() { return this.confirmedRing; }
+    /** Reopened-below-prefix ring count — the diag/exporter {@code reopened=} field. */
+    int getReopenedRingCount() { return reopenedRingCount(); }
+    // Test accessors for the retention flags (the reset-path pins assert they clear).
+    boolean recenteredSinceLastFireForTest() { return this.recenteredSinceLastFire; }
+    boolean truncatedBelowPrefixForTest() { return this.truncatedBelowPrefix; }
     int getScanRing() { return this.scanRing; }
     int getMissingVanillaChunks() { return this.missingVanillaChunks; }
     int getLastBudget() { return this.lastBudget; }
