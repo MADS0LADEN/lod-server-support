@@ -131,27 +131,23 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
         // which keeps pure-resync sessions stamping exactly as before, while an inner
         // dirty head no longer collapses the generation admission window for ~5 s of
         // outward damping (the measured 40%-of-backfill stall).
-        boolean acquisitionStamped = false;
-        long deferredRevalStamp = Long.MIN_VALUE;
+        var frontierPass = new FrontierPass();
         while (!stopPass && (req = state.pollBacklog()) != null) {
             long packed = PositionUtil.packPosition(req.cx(), req.cz());
             var duplicate = resolvedAsDuplicate(state, playerUuid, req, packed);
             if (duplicate != Duplicate.NO) {
                 // In-flight duplicates (pending read/generation, enqueued payload) are
-                // UNSATISFIED: the first such entry pins the live frontier so the
-                // generation band can never walk away from a starving head. SATISFIED
+                // UNSATISFIED: the first such ts<=0 entry pins the live frontier so the
+                // generation band can never walk away from a starving acquisition head
+                // (a ts>0 in-flight entry's anti-starvation carrier is the pending map —
+                // see the liveFrontierRing field comment). SATISFIED
                 // resolutions (the done-bit up_to_date answer here, and the timestamp/
                 // probe ladder below) deliberately do not stamp — the frontier advances
                 // through them at drain speed (20 Hz), and stamping a satisfied ring
                 // would over-gate the true frontier and tick gen_order_gated on
                 // FIFO-clean servers, diluting that counter's runaway meaning.
-                if (duplicate == Duplicate.IN_FLIGHT && !acquisitionStamped) {
-                    if (req.clientTimestamp() <= 0) {
-                        state.stampLiveFrontier(req.cx(), req.cz(), true);
-                        acquisitionStamped = true;
-                    } else if (deferredRevalStamp == Long.MIN_VALUE) {
-                        deferredRevalStamp = packed;
-                    }
+                if (duplicate == Duplicate.IN_FLIGHT) {
+                    frontierPass.observe(state, req);
                 }
                 this.ctx.diagnostics().incrementRequestRouted();
                 continue;
@@ -162,14 +158,7 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
                 // timestamp ladder yet, so this can under-estimate the frontier — the
                 // safe direction (transient over-gating while the send queue is already
                 // saturating delivery), unlike leaving a stale higher stamp in place.
-                if (!acquisitionStamped) {
-                    if (req.clientTimestamp() <= 0) {
-                        state.stampLiveFrontier(req.cx(), req.cz(), true);
-                        acquisitionStamped = true;
-                    } else if (deferredRevalStamp == Long.MIN_VALUE) {
-                        deferredRevalStamp = packed;
-                    }
-                }
+                frontierPass.observe(state, req);
                 // Retain (no disposition): the entry stays queued for the next cycle or is
                 // superseded by the next replace. queue_full stays a pure event counter,
                 // no longer a law A1 term. Stopping the pass keeps order: this entry is
@@ -189,15 +178,8 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
             }
 
             // First entry needing real work this pass: the live frontier (see the
-            // duplicate branch above — in-flight entries stamp it too).
-            if (!acquisitionStamped) {
-                if (req.clientTimestamp() <= 0) {
-                    state.stampLiveFrontier(req.cx(), req.cz(), true);
-                    acquisitionStamped = true;
-                } else if (deferredRevalStamp == Long.MIN_VALUE) {
-                    deferredRevalStamp = packed;
-                }
-            }
+            // duplicate branch above — ts<=0 in-flight entries stamp it too).
+            frontierPass.observe(state, req);
             // Every request routes the same way — the client no longer classifies sync vs
             // generation (server-owned generation: the disk miss is the generation trigger,
             // and a ts of 0 is just another "no data" shape, as inert as the retired byte 0).
@@ -237,16 +219,49 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
         }
 
         // End-of-pass revalidation fallback: no unsatisfied acquisition entry was seen,
-        // so the first unsatisfied ts>0 entry stamps — identical VALUE to the pre-split
-        // behavior for pure-revalidation passes (cold-restart resync, converged players
-        // under dirty pushes); the within-pass deferral is immaterial against the
-        // 333 ms/ring outward damping.
-        if (!acquisitionStamped && deferredRevalStamp != Long.MIN_VALUE) {
-            state.stampLiveFrontier(PositionUtil.unpackX(deferredRevalStamp),
-                    PositionUtil.unpackZ(deferredRevalStamp), false);
-        }
+        // so the first unsatisfied ts>0 entry stamps — the identical POSITION to the
+        // pre-split behavior for pure-revalidation passes (cold-restart resync, converged
+        // players under dirty pushes). The damped RING may differ by at most one ring
+        // outward: the deferred call reads a clock later by one drain pass (~50 ms), so
+        // an outward stamp straddling a 333 ms damping tick lands one ring further —
+        // bounded, permissive-direction only, inward stamps unaffected.
+        frontierPass.finish(state);
 
         if (retained != null) state.restoreBacklog(retained);
+    }
+
+    /**
+     * Per-drain-pass frontier stamping state (the acquisition-frontier rule's one
+     * implementation — three call sites observe, one finishes; keeping the split logic
+     * here stops the sites drifting). An unsatisfied ts&lt;=0 entry stamps immediately
+     * (acquisition); the FIRST unsatisfied ts&gt;0 entry is recorded and stamps at end of
+     * pass only when no acquisition entry appeared. A dedicated boolean marks the
+     * recording — no packed-position sentinel (Long.MIN_VALUE is a representable
+     * position: {@code packPosition(Integer.MIN_VALUE, 0)}).
+     */
+    private static final class FrontierPass {
+        private boolean acquisitionStamped;
+        private boolean deferredRevalSet;
+        private int deferredRevalCx;
+        private int deferredRevalCz;
+
+        void observe(AbstractPlayerRequestState state, IncomingRequest req) {
+            if (this.acquisitionStamped) return;
+            if (req.clientTimestamp() <= 0) {
+                state.stampLiveFrontier(req.cx(), req.cz(), true);
+                this.acquisitionStamped = true;
+            } else if (!this.deferredRevalSet) {
+                this.deferredRevalSet = true;
+                this.deferredRevalCx = req.cx();
+                this.deferredRevalCz = req.cz();
+            }
+        }
+
+        void finish(AbstractPlayerRequestState state) {
+            if (!this.acquisitionStamped && this.deferredRevalSet) {
+                state.stampLiveFrontier(this.deferredRevalCx, this.deferredRevalCz, false);
+            }
+        }
     }
 
     /**

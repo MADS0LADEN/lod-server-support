@@ -147,9 +147,11 @@ with the 10 s dirty cadence; duty cycle from ~60% to ~95%+.
   direction (over-gating), same as today. No new starvation shape.
 - **R2 — sessions mixing deleted-region resync with backfill.** ts>0 asks that
   genuinely need generation anchor the window only when no ts≤0 work exists; when
-  both exist the window keys on ts≤0 work. Worst case matches the pre-live-frontier
-  1 Hz fallback semantics for the ts>0 population — acceptable, noted in the
-  gate's javadoc.
+  both exist the window keys on ts≤0 work. Concrete bound (3-Opus review,
+  2026-08-18): an inner ts>0 miss facing an outer cohort holding every gen slot
+  waits ~one generation-slot turnover — the closest-first drain gives it first
+  refusal on the next freed slot, and once outstanding it gates the outer cohort
+  (cohort span 1). Noted in the gate's javadoc.
 - **R3 — counter drift in soak baselines.** `gen_order_gated` is unpinned
   (diagnostic); the churn ceilings (`superseded` 1500 storm baseline) were measured
   under 1 Hz-dominated profiles that this change does not alter. Verify against the
@@ -168,12 +170,11 @@ with the 10 s dirty cadence; duty cycle from ~60% to ~95%+.
 
 ## 7. Review questions
 
-1. **Kill switch?** Plan says no new config key (revert = rollback). If you want a
-   belt anyway, a hidden `@HiddenFromFile` boolean (`useAcquisitionFrontier`,
-   default true) is ~5 extra lines and matches the expert-switch convention.
-2. **Docs surface:** CLAUDE.md's spread-gate parenthetical gets one clause ("anchored
-   on the client-declared ACQUISITION frontier (ts≤0)"). Worth also amending
-   miss-memo-design.md's pacing section, or is the plan doc enough?
-3. **Trace observability:** should the `[lss-adm]` admission trace tag the stamp
-   source (`acq`/`reval-fallback`)? ~3 lines, helps the next investigation of this
-   area; omitted from the base plan.
+1. **Kill switch?** DECIDED no (revert = rollback) — reaffirmed by the 3-Opus
+   review round (2026-08-18): a strict server-internal admission refinement.
+2. **Docs surface:** DECIDED both — CLAUDE.md's spread-gate clause AND a
+   miss-memo-design.md amendment note (added 2026-08-18); the normative javadocs
+   (liveFrontierRing, generationOrderSpreadExceeded) record the invariant
+   relocation (ts>0 anti-starvation now carried by the pending map).
+3. **Trace observability:** ADOPTED — `fsrc=acq|reval|-` in `[lss-adm]`, tagging
+   the last EFFECTIVE stamp (a zero-step damped stamp keeps the standing tag).

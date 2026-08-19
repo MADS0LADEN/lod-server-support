@@ -376,12 +376,20 @@ public abstract class AbstractPlayerRequestState<T> {
         this.playerChunkPacked = PositionUtil.packPosition(cx, cz);
     }
 
-    // The LIVE frontier: ring (from the player chunk) of the first entry in declaration
-    // order that is not ACTUALLY satisfied — stamped by the router every drain pass
-    // (~20 Hz). In-flight positions (pending disk/generation, enqueued payloads) stamp it
-    // (they are unsatisfied — the anti-starvation pin, mirroring the client scanner's
-    // "awaited positions block ring confirmation"); timestamp/probe resolutions do not.
-    // -1 until the first stamp. Processing thread only.
+    // The LIVE frontier: ring (from the player chunk) of the first unsatisfied
+    // ACQUISITION entry (ts<=0) of the drain pass — stamped by the router every pass
+    // (~20 Hz); a pass with only unsatisfied REVALIDATION entries (ts>0) stamps its first
+    // one at end of pass instead (the acquisition-frontier rule, 2026-08-18 —
+    // docs/planning/gen-frontier-acquisition-anchor-plan.md). Timestamp/probe resolutions
+    // never stamp. THE ANTI-STARVATION INVARIANT MOVED for the ts>0 population: a ts>0
+    // in-flight entry no longer stamps the frontier, but by construction it sits in
+    // pendingByPosition, and generationOvertakesNearerInFlight reads exactly that map —
+    // a STRICTLY TIGHTER hold (a nearer pending SYNC blocks every farther gen candidate
+    // outright; a nearer gen ticket collapses the band to cohort span 1). Do not "fix"
+    // that pending-map rule without restoring a frontier carrier for ts>0 work.
+    // ts<=0 in-flight entries still stamp at their own ring (mirroring the client
+    // scanner's "awaited positions block ring confirmation"). -1 until the first stamp.
+    // Processing thread only.
     private int liveFrontierRing = -1;
 
     /** Package-private admission-trace probes (flag-gated caller; processing thread only,
@@ -444,7 +452,10 @@ public abstract class AbstractPlayerRequestState<T> {
     }
 
     // Stamp-source tag for the admission trace ("acq" = ts<=0 acquisition entry, "reval"
-    // = the end-of-pass ts>0 fallback, "-" = never stamped). Diagnostic only — the gates
+    // = the end-of-pass ts>0 fallback, "-" = never stamped). Tags the last EFFECTIVE
+    // stamp — the last call that actually moved (or first-set) the ring; a damping-held
+    // outward stamp that advances zero rings leaves the tag on whoever set the standing
+    // value, so a trace line's f=/fsrc= pair stays coherent. Diagnostic only — the gates
     // never read it. Processing thread only, like the frontier itself.
     private boolean lastFrontierStampAcquisition;
     private boolean frontierEverStamped;
@@ -454,8 +465,10 @@ public abstract class AbstractPlayerRequestState<T> {
         return this.lastFrontierStampAcquisition ? "acq" : "reval";
     }
 
-    /** Two-arg form: rigs and legacy call sites stamp as acquisition (the pre-split
-     *  semantics — every stamp was equally authoritative). */
+    /** Two-arg form: stamps as acquisition (the pre-split semantics — every stamp was
+     *  equally authoritative). No production callers — the router uses the 3-arg form
+     *  everywhere; this exists for test rigs, and `acquisition` is diagnostic-only so
+     *  the default is semantically inert there. */
     public void stampLiveFrontier(int cx, int cz) {
         stampLiveFrontier(cx, cz, true);
     }
@@ -471,8 +484,6 @@ public abstract class AbstractPlayerRequestState<T> {
     public void stampLiveFrontier(int cx, int cz, boolean acquisition) {
         long player = this.playerChunkPacked;
         if (player == NO_PLAYER_CHUNK) return;
-        this.lastFrontierStampAcquisition = acquisition;
-        this.frontierEverStamped = true;
         int observed = PositionUtil.chebyshevDistance(cx, cz,
                 PositionUtil.unpackX(player), PositionUtil.unpackZ(player));
         int current = this.liveFrontierRing;
@@ -480,6 +491,8 @@ public abstract class AbstractPlayerRequestState<T> {
             // Off, first stamp, or inward: apply instantly and restart the outward budget.
             this.liveFrontierRing = observed;
             this.frontierAdvanceMarkNanos = this.frontierClock.getAsLong();
+            this.lastFrontierStampAcquisition = acquisition;
+            this.frontierEverStamped = true;
             return;
         }
         long now = this.frontierClock.getAsLong();
@@ -487,7 +500,11 @@ public abstract class AbstractPlayerRequestState<T> {
         if (steps > 0) {
             this.liveFrontierRing = (int) Math.min(observed, current + steps);
             this.frontierAdvanceMarkNanos = now;
+            this.lastFrontierStampAcquisition = acquisition;
+            this.frontierEverStamped = true;
         }
+        // A zero-step damped stamp changes nothing — the source tag stays with the call
+        // that set the standing value (see the tag's comment).
     }
 
     /**
@@ -498,11 +515,22 @@ public abstract class AbstractPlayerRequestState<T> {
      * (20 Hz — the client-declared frontier alone goes stale for a full second between
      * 1 Hz declarations, which collapsed superflat backfill throughput 4x and starved the
      * IOWorker into read timeouts, soak 2026-07-17); else the applied want-set's first
-     * entry (closest-first construction). Neither reference can be dragged outward by
-     * in-flight work — an in-flight position stamps the frontier AT its own ring, so the
-     * band cannot walk away from a starving head (the min-outstanding law's straggler
-     * leak, closed for good). False (gate skipped) without a stamped player chunk or any
-     * frontier basis — a rig or a converged player, neither of which floods.
+     * entry (closest-first construction — deliberately NOT acquisition-filtered: it only
+     * applies before a session's first stamp, and the frontier never returns to -1).
+     * Neither reference can be dragged outward by in-flight work — a ts&lt;=0 in-flight
+     * position stamps the frontier AT its own ring, so the band cannot walk away from a
+     * starving acquisition head (the min-outstanding law's straggler leak, closed for
+     * good). Since the acquisition-frontier rule (2026-08-18) a ts&gt;0 in-flight entry no
+     * longer stamps; its anti-starvation carrier is the PENDING MAP — such an entry is in
+     * {@code pendingByPosition} by construction, and {@code generationOvertakesNearerInFlight}
+     * holds every farther gen candidate against it (strictly tighter than the old frontier
+     * hold: a nearer pending SYNC blocks outright, a nearer gen ticket collapses the band
+     * to cohort span 1). Worst case for an inner ts&gt;0 ask that genuinely needs
+     * generation while an outer cohort holds every slot: ~one generation-slot turnover of
+     * added latency (the closest-first drain gives it first refusal on the next freed
+     * slot, and once outstanding it gates the outer cohort). False (gate skipped) without
+     * a stamped player chunk or any frontier basis — a rig or a converged player, neither
+     * of which floods.
      */
     public boolean generationOrderSpreadExceeded(int cx, int cz, int maxSpread) {
         long player = this.playerChunkPacked;

@@ -1225,11 +1225,16 @@ class IncomingRequestRouterTest {
             assertEquals(1, p1.getHeldSyncSlots());
             assertEquals(0, proc.getDiagnostics().getTotalSuperseded());
 
-            // The explicit clear
+            // The explicit clear. Barrier on routeCycles, not the marker's submit: routeAll
+            // ROTATES player order per cycle (M4), so in a shared snapshot the marker can
+            // route BEFORE p1 — waiting on its submit alone raced the clear (one-off
+            // backlog=2 failure sighted in a full-tier run, 2026-08-18 review round).
+            int clearCycles = proc.routeCyclesForTest();
             offer(p1);
             marker.enqueue(new IncomingRequest(200, 0, -1));
             proc.postSnapshot(snapshot(p1, marker), List.of());
-            waitFor(() -> submitPositions(proc).contains(packed(200, 0)), "the clearing cycle ran");
+            waitFor(() -> proc.routeCyclesForTest() > clearCycles, "the clearing cycle ran");
+            assertTrue(submitPositions(proc).contains(packed(200, 0)));
 
             assertEquals(0, p1.getBacklogSize(), "an empty batch clears the backlog");
             assertEquals(2, proc.getDiagnostics().getTotalSuperseded(),
@@ -1393,24 +1398,30 @@ class IncomingRequestRouterTest {
             proc.start();
             // Declaration order is the wire's closest-first: the dirty re-ask (ts>0,
             // ring 2) leads, the acquisition ask (ts<=0, ring 20) follows.
+            int cycles = proc.routeCyclesForTest();
             offer(p1, new IncomingRequest(2, 0, TS_BASE + 100), new IncomingRequest(20, 0, -1));
             proc.postSnapshot(snapshot(p1), List.of());
-            waitFor(() -> proc.submits.size() == 2, "both entries admitted to reads");
+            // routeCycles is volatile and incremented AFTER the whole pass (end-of-pass
+            // stamp included) — the airtight barrier for the frontier/fsrc value asserts
+            // (a waitFor on the value itself fails as a 30 s timeout, the exact shape the
+            // flake catalog trains contributors to re-run; a value assert fails legibly).
+            waitFor(() -> proc.routeCyclesForTest() > cycles, "routing cycle");
+            assertEquals(2, proc.submits.size(), "both entries admitted to reads");
 
             // Delivery order is untouched: the dirty head is still served first.
             assertEquals(List.of(packed(2, 0), packed(20, 0)), submitPositions(proc),
                     "declaration order drains first-to-last — the rule changes only the stamp");
 
-            waitFor(() -> p1.liveFrontierRingForTrace() == 20,
+            assertEquals(20, p1.liveFrontierRingForTrace(),
                     "the ACQUISITION entry (ring 20) stamps the frontier, not the dirty head");
             assertEquals("acq", p1.frontierStampSourceForTrace());
             // The generation admission window keys on ring 20 — and stays one-sided
-            // outward, so the inner dirty position itself is never gated (the plan's
-            // inner-regeneration-not-starved claim).
+            // outward (candidate > frontier + spread — arithmetically incapable of gating
+            // an inner candidate; the pipeline-level inner-regeneration-not-starved claim
+            // is pinned in OffThreadProcessorDiskResultTest's
+            // innerMissEscalatesUnderAnOuterAcquisitionFrontier).
             assertFalse(p1.generationOrderSpreadExceeded(22, 0, 2), "frontier+2 admits");
             assertTrue(p1.generationOrderSpreadExceeded(23, 0, 2), "frontier+3 gates");
-            assertFalse(p1.generationOrderSpreadExceeded(2, 0, 2),
-                    "an inner candidate is never gated by an outer frontier (one-sided)");
         } finally {
             proc.shutdown();
         }
@@ -1426,11 +1437,18 @@ class IncomingRequestRouterTest {
             proc.start();
             // Cold-restart resync shape: every entry ts>0, none satisfiable from the
             // (empty) timestamp cache. The pre-split behavior stamped the first
-            // unsatisfied entry; the fallback must reproduce that VALUE exactly.
-            offer(p1, new IncomingRequest(3, 0, TS_BASE + 100), new IncomingRequest(8, 0, TS_BASE + 100));
+            // unsatisfied entry; the fallback must reproduce that POSITION exactly.
+            // NO-REGRESSION PIN: the deferral itself is unobservable by construction
+            // (escalations drain BEFORE routing in the same cycle), so old-vs-new differs
+            // only in the fsrc tag here — the VALUE asserts carry forward protection
+            // (dropping the first-wins guard or the end-of-pass block reds them).
+            // Negative coordinates pin the record→stamp path's coordinate handling.
+            int cycles = proc.routeCyclesForTest();
+            offer(p1, new IncomingRequest(-3, 0, TS_BASE + 100), new IncomingRequest(0, -8, TS_BASE + 100));
             proc.postSnapshot(snapshot(p1), List.of());
-            waitFor(() -> proc.submits.size() == 2, "both revalidations admitted");
-            waitFor(() -> p1.liveFrontierRingForTrace() == 3,
+            waitFor(() -> proc.routeCyclesForTest() > cycles, "routing cycle");
+            assertEquals(2, proc.submits.size(), "both revalidations admitted");
+            assertEquals(3, p1.liveFrontierRingForTrace(),
                     "no acquisition entry in the pass → the first reval entry stamps");
             assertEquals("reval", p1.frontierStampSourceForTrace());
         } finally {
@@ -1449,10 +1467,13 @@ class IncomingRequestRouterTest {
             proc.start();
             // The reval head reaches admission, hits NO_DISK_HEADROOM, is retained, and
             // the pass STOPS — the deferred stamp must still apply at end of pass
-            // (today's conservative retained-head under-estimate, preserved).
+            // (today's conservative retained-head under-estimate, preserved). NO-REGRESSION
+            // PIN like the pure-reval case: identical stamped position to pre-split.
+            int cycles = proc.routeCyclesForTest();
             offer(p1, new IncomingRequest(5, 0, TS_BASE + 100), new IncomingRequest(9, 0, -1));
             proc.postSnapshot(snapshot(p1), List.of());
-            waitFor(() -> p1.liveFrontierRingForTrace() == 5,
+            waitFor(() -> proc.routeCyclesForTest() > cycles, "routing cycle");
+            assertEquals(5, p1.liveFrontierRingForTrace(),
                     "stopped pass with no acquisition entry → retained reval head stamps");
             assertEquals("reval", p1.frontierStampSourceForTrace());
             assertEquals(0, proc.submits.size(), "nothing was admitted (no headroom)");
@@ -1461,6 +1482,7 @@ class IncomingRequestRouterTest {
             // while the reader pool is already saturated).
         } finally {
             proc.shutdown();
+            reader.shutdown();
         }
     }
 
@@ -1474,11 +1496,16 @@ class IncomingRequestRouterTest {
             proc.start();
             // Interleaving: reval first (ring 6), acquisition second (ring 15). The
             // recorded reval candidate must be DISCARDED once the acquisition stamps —
-            // the frontier lands at 15, not 6.
-            offer(p1, new IncomingRequest(6, 0, TS_BASE + 100), new IncomingRequest(15, 0, -1));
+            // the frontier lands at 15, not 6. The acquisition entry carries ts == 0
+            // deliberately: the boundary of the <=0 discriminator (the retired v16
+            // generate-request shape routes as "no data" everywhere — this pins the
+            // stamp split to the same boundary).
+            int cycles = proc.routeCyclesForTest();
+            offer(p1, new IncomingRequest(6, 0, TS_BASE + 100), new IncomingRequest(15, 0, 0));
             proc.postSnapshot(snapshot(p1), List.of());
-            waitFor(() -> proc.submits.size() == 2, "both admitted");
-            waitFor(() -> p1.liveFrontierRingForTrace() == 15, "acquisition outranks");
+            waitFor(() -> proc.routeCyclesForTest() > cycles, "routing cycle");
+            assertEquals(2, proc.submits.size(), "both admitted");
+            assertEquals(15, p1.liveFrontierRingForTrace(), "acquisition (ts=0) outranks");
             assertEquals("acq", p1.frontierStampSourceForTrace());
         } finally {
             proc.shutdown();
@@ -1494,20 +1521,134 @@ class IncomingRequestRouterTest {
         try {
             proc.start();
             // Cycle 1: a ts>0 entry admits and stays pending (the stub never completes).
+            int cycles = proc.routeCyclesForTest();
             offer(p1, new IncomingRequest(4, 0, TS_BASE + 100));
             proc.postSnapshot(snapshot(p1), List.of());
-            waitFor(() -> proc.submits.size() == 1, "first admission");
-            waitFor(() -> p1.liveFrontierRingForTrace() == 4, "sole reval entry stamps");
+            waitFor(() -> proc.routeCyclesForTest() > cycles, "first routing cycle");
+            assertEquals(1, proc.submits.size(), "first admission");
+            assertEquals(4, p1.liveFrontierRingForTrace(), "sole reval entry stamps");
 
             // Cycle 2: the same ts>0 entry is now an IN_FLIGHT duplicate (site 1 of the
             // split) alongside a new acquisition entry — the duplicate defers, the
             // acquisition stamps, and the frontier moves OUT (damping is off in this rig).
+            int cycles2 = proc.routeCyclesForTest();
             offer(p1, new IncomingRequest(4, 0, TS_BASE + 100), new IncomingRequest(12, 0, -1));
             proc.postSnapshot(snapshot(p1), List.of());
-            waitFor(() -> proc.submits.size() == 2, "acquisition admitted");
-            waitFor(() -> p1.liveFrontierRingForTrace() == 12,
+            waitFor(() -> proc.routeCyclesForTest() > cycles2, "second routing cycle");
+            assertEquals(2, proc.submits.size(), "acquisition admitted");
+            assertEquals(12, p1.liveFrontierRingForTrace(),
                     "the in-flight reval duplicate records only the fallback; acq wins");
             assertEquals("acq", p1.frontierStampSourceForTrace());
+        } finally {
+            proc.shutdown();
+        }
+    }
+
+    @Test
+    void inFlightAcquisitionDuplicatePinsTheFrontierAtItsOwnRing() throws Exception {
+        // Site 1's ACQUISITION arm — the anti-starvation pin through the IN_FLIGHT
+        // duplicate branch, which is the arm that carries the fix in production (during a
+        // dirty burst the outer backfill positions are usually already pending, so the
+        // stamp arrives here, not at first-entry-needing-work). Deleting this stamp left
+        // every other Tier 1 test green (2026-08-18 review mutation) — this one reds it:
+        // the band would walk out to ring 30 and away from the starving ring-4 head.
+        var players = new ConcurrentHashMap<UUID, TestState>();
+        var p1 = addPlayer(players, 8, 4);
+        p1.updatePlayerChunk(0, 0);
+        var proc = new TestProcessor(players, new StubDiskReader(), false, null);
+        try {
+            proc.start();
+            // Cycle 1: a ts<=0 entry admits and stays pending (the stub never completes).
+            int cycles = proc.routeCyclesForTest();
+            offer(p1, new IncomingRequest(4, 0, -1));
+            proc.postSnapshot(snapshot(p1), List.of());
+            waitFor(() -> proc.routeCyclesForTest() > cycles, "first routing cycle");
+            assertEquals(4, p1.liveFrontierRingForTrace(), "premise: acquisition head at 4");
+
+            // Cycle 2: the re-declaration leads with the SAME pending ts<=0 entry (an
+            // IN_FLIGHT acquisition duplicate) plus a farther fresh want. The duplicate
+            // must stamp ring 4 — the frontier cannot walk out to 30 while the nearer
+            // acquisition head is still starving.
+            int cycles2 = proc.routeCyclesForTest();
+            offer(p1, new IncomingRequest(4, 0, -1), new IncomingRequest(30, 0, -1));
+            proc.postSnapshot(snapshot(p1), List.of());
+            waitFor(() -> proc.routeCyclesForTest() > cycles2, "second routing cycle");
+            assertEquals(4, p1.liveFrontierRingForTrace(),
+                    "the in-flight ts<=0 duplicate pins the frontier at its own ring");
+            assertEquals("acq", p1.frontierStampSourceForTrace());
+        } finally {
+            proc.shutdown();
+        }
+    }
+
+    @Test
+    void sendQueueFullRetainedRevalHeadStampsAtEndOfPass() throws Exception {
+        // Site 2 of the split (the send-queue-full retained head) — previously the only
+        // stamp site with zero ts-split coverage. A ts>0 head that hits the full queue is
+        // recorded, the pass breaks, and the deferred stamp applies at end of pass.
+        var players = new ConcurrentHashMap<UUID, TestState>();
+        var p1 = addPlayer(players, 8, 4);
+        p1.updatePlayerChunk(0, 0);
+        // One stuck payload + maxSendQueueSize=1 makes p1's send queue read as full.
+        p1.addReadyPayload(new QueuedPayload<>(new Object(), 100, 0, packed(90, 90)));
+        p1.flushSendQueue(0, new SharedBandwidthLimiter(1_000_000), new TickDiagnostics(),
+                payload -> fail("zero allocation must not send"));
+        assertEquals(1, p1.getSendQueueSize());
+        var proc = new TestProcessor(players, new StubDiskReader(), false, null);
+        try {
+            proc.start();
+            int cycles = proc.routeCyclesForTest();
+            offer(p1,
+                    new IncomingRequest(7, 0, TS_BASE + 100), // reval head: queue-full retained
+                    new IncomingRequest(11, 0, -1));          // behind the break: never polled
+            proc.postSnapshot(snapshot(Map.of(), 1, p1), List.of());
+            waitFor(() -> proc.routeCyclesForTest() > cycles, "queue-full pass");
+            assertEquals(1, proc.getDiagnostics().getTotalQueueFull(), "premise: the break fired");
+            assertEquals(7, p1.liveFrontierRingForTrace(),
+                    "the retained reval head stamps at end of pass (the conservative"
+                            + " under-estimate — the acquisition entry behind the break was"
+                            + " never scanned, so no acquisition preference can apply)");
+            assertEquals("reval", p1.frontierStampSourceForTrace());
+        } finally {
+            proc.shutdown();
+        }
+    }
+
+    @Test
+    void dampedMixedPassKeepsTheOuterAcquisitionFrontier() throws Exception {
+        // The production-shaped case with DAMPING ON (every other pin in this block runs
+        // the rig's damping-off calibration): the frontier stands at the outer acquisition
+        // ring, a dirty burst leads the next declaration, and the pass must NOT collapse
+        // the ring inward — inward-instant application is exactly the mechanism the live
+        // trace measured (~5 s of 333 ms/ring outward re-walk per broadcast). Old code
+        // stamped the ts>0 head instantly; the split leaves the standing value.
+        var players = new ConcurrentHashMap<UUID, TestState>();
+        var p1 = addPlayer(players, 8, 4);
+        p1.updatePlayerChunk(0, 0);
+        var clock = new java.util.concurrent.atomic.AtomicLong();
+        p1.setFrontierDampingForTest(333_000_000L, clock::get);
+        var proc = new TestProcessor(players, new StubDiskReader(), false, null);
+        try {
+            proc.start();
+            // Cycle 1: pure acquisition pass — first stamp applies instantly at ring 20.
+            int cycles = proc.routeCyclesForTest();
+            offer(p1, new IncomingRequest(20, 0, -1));
+            proc.postSnapshot(snapshot(p1), List.of());
+            waitFor(() -> proc.routeCyclesForTest() > cycles, "first routing cycle");
+            assertEquals(20, p1.liveFrontierRingForTrace(), "premise: outer frontier standing");
+
+            // Cycle 2 (~50 ms later — under one damping interval): the dirty re-ask leads,
+            // the pending outer acquisition follows as an IN_FLIGHT duplicate.
+            clock.addAndGet(50_000_000L);
+            int cycles2 = proc.routeCyclesForTest();
+            offer(p1, new IncomingRequest(2, 0, TS_BASE + 100), new IncomingRequest(20, 0, -1));
+            proc.postSnapshot(snapshot(p1), List.of());
+            waitFor(() -> proc.routeCyclesForTest() > cycles2, "mixed routing cycle");
+            assertEquals(20, p1.liveFrontierRingForTrace(),
+                    "the dirty head must not collapse the outer frontier (the measured"
+                            + " backfill stall); the acquisition duplicate re-stamps 20");
+            assertFalse(p1.generationOrderSpreadExceeded(22, 0, 2),
+                    "the generation admission window stays keyed on the outer frontier");
         } finally {
             proc.shutdown();
         }

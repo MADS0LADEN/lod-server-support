@@ -113,6 +113,14 @@ validated from scratch, fixes mutation-checked):**
   seam only); the plan's Tier-2 memo gametest, Paper twin tests, and a live
   requirement-2 ("already generated") pin are deferred to `v0.7.1-candidates.md`.
 
+> **2026-08-18 amendment (gen-frontier-acquisition-anchor-plan.md):** wherever this
+> document says the live frontier is "the first unsatisfied declared position", read
+> "the first unsatisfied ts<=0 (ACQUISITION) entry; a pure-revalidation pass stamps its
+> first ts>0 entry at end of pass". Inner dirty revalidations no longer collapse the
+> generation admission window (~40% of backfill throughput was lost to their damped
+> re-walk); the ts>0 anti-starvation carrier moved to the pending map
+> (`generationOvertakesNearerInFlight`). Everything else here is unchanged.
+
 **Movement "line inversions" — admission-trace verdict + frontier outward damping
 (2026-07-19, maintainer-reported: far ring-arcs popping after "move fast then stop"):**
 diagnosed with the new `-Dlss.admissionTrace=true` instrument (one `[lss-adm]` line per
