@@ -503,6 +503,7 @@ public final class BenchmarkMetricsExporter {
 
         var scan = new LinkedHashMap<String, Object>();
         scan.put("confirmed", manager != null ? manager.getConfirmedRing() : 0);
+        scan.put("reopened", manager != null ? manager.getReopenedRingCount() : 0);
         scan.put("ring", manager != null ? manager.getScanRing() : 0);
         scan.put("missing_vanilla", manager != null ? manager.getMissingVanillaChunks() : 0);
         scan.put("budget", manager != null ? manager.getLastBudget() : 0);

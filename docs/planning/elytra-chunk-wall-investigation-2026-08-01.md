@@ -423,6 +423,13 @@ Scan gaps: `0.35, 0.5, 0.5` while stationary, then `1.0` twenty times over. Stat
 fast path runs at **2–3 Hz**; the instant the player moves it drops to the **1 Hz fallback
 and never recovers for the rest of the flight**.
 
+> **2026-08-18 amendment (scanner-reopened-rings-plan.md):** `recenter(d)` no longer
+> zeroes the confirmed prefix — prefix retention decrements it and reopens a ring
+> bitset, so the WALK COST paragraph below describes the retired behavior. The CADENCE
+> conclusion stands unchanged: `predictedWalkCost` still prices the movement window at
+> the bare from-zero cost (deliberately — see its javadoc), so the flight regime and the
+> ring-127 cliff documented here are preserved.
+
 **Mechanism (verified in code, not inferred).** `SpiralScanner.recenter()` sets
 `confirmedRing = 0` on every chunk-boundary crossing — deliberate and correct, since the
 confirmed prefix was derived for the old center (its comment says so). But

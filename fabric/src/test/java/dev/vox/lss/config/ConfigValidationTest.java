@@ -722,6 +722,26 @@ class ConfigValidationTest {
     }
 
     @Test
+    void scanPrefixRetentionDefaultsOnAndRoundTripsThroughJson() {
+        // Scan prefix retention (docs/planning/scanner-reopened-rings-plan.md) ships ON —
+        // a silent default-off revert would pass CI green (unit rigs set the seam
+        // explicitly) while quietly restoring the per-crossing full-disc walk hitch. Plus
+        // the GSON leg: exact key + a saved false binds back as false.
+        var c = clientConfig();
+        assertTrue(c.enableScanPrefixRetention, "scan prefix retention must default ON");
+        c.validate();
+        assertTrue(c.enableScanPrefixRetention, "validate() must not touch the boolean");
+        var gson = new com.google.gson.Gson();
+        String saved = gson.toJson(clientConfig());
+        assertTrue(saved.contains("\"enableScanPrefixRetention\":true"),
+                "a fresh config must persist the default under the exact key: " + saved);
+        var loaded = gson.fromJson(saved.replace(
+                "\"enableScanPrefixRetention\":true", "\"enableScanPrefixRetention\":false"),
+                dev.vox.lss.config.LSSClientConfig.class);
+        assertFalse(loaded.enableScanPrefixRetention, "a saved false must bind back as false");
+    }
+
+    @Test
     void adaptiveScanCadenceRoundTripsThroughJson() {
         // The GSON leg: the field serializes under its exact key (a rename would silently
         // orphan every saved kill-switch choice) and a saved false binds back as false.

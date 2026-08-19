@@ -56,6 +56,15 @@ public class LSSClientConfig extends JsonConfig {
     // fast/warm servers. Kill switch: false restores the fixed 1 Hz cadence everywhere.
     // No effect on legacy (protocol-16) server sessions — those always keep 1 Hz.
     public boolean enableAdaptiveScanCadence = true;
+    // Scan prefix retention (docs/planning/scanner-reopened-rings-plan.md): keep the
+    // scanner's confirmed-ring prefix across chunk crossings and dirty re-opens, re-walking
+    // only the affected rings (a reopened-ring bitset) instead of the whole disc. Removes
+    // the per-crossing full-disc classify walk — the measured render-thread hitch at large
+    // LOD distances (30-90 ms every 2-3 s while moving at distance 512). Kill switch:
+    // false restores the legacy collapse-to-ring-0 semantics on every reset path — the
+    // field A/B lever, and the safety net for any retained-state hole (a silently orphaned
+    // position self-heals under legacy semantics on the next crossing).
+    public boolean enableScanPrefixRetention = true;
     // Ingest-pressure request pacing (issue #71, docs/planning/ingest-backpressure-design.md):
     // scale the want-set budget down — and halt declarations entirely at a threshold — when a
     // registered LOD consumer reports a pending ingest backlog (Voxy's ingest queue depth via
