@@ -87,13 +87,23 @@ rungs, both answering the existing `up_to_date` response:
   `up_to_date`, skipping the read AND the send. Refresh the tscache stamp from the
   answer so the next re-ask hits the cheap rung.
 
-**Honesty argument.** The client's stamp is a server-clock acquisition second whose
-bytes reflect region state no earlier than that second (read-start stamping,
-R1-M2). If the chunk's last save second precedes it strictly, the client's copy
-includes that save. Same-second and future values fail toward serving. Clock
-rewind/backup restore behaves exactly like today's tscache comparison (shared,
-pre-existing limitation — one wrong `up_to_date` per affected position, healed by
-the next real save's dirty broadcast).
+**Honesty argument (corrected at implementation — the P1 3-Opus fold).** The
+original draft claimed read-START stamping; in fact the wire/tscache stamp
+(`columnTimestamp`) is issued at read COMPLETION, so a read that raced a pending
+region write can hand the client PRE-change bytes stamped up to one read duration
+AFTER the change's header second — a bare strict compare would validate exactly
+those. Two mechanisms close it: (a) claims must clear the header second by a
+**serve-latency margin** (`HEADER_FRESH_MARGIN_SECONDS` = read timeout + 5 s — nil
+cost in the target regime, where stamps beat static terrain's last save by hours);
+(b) the liveSaveMark is a **LATCH, not a stamp**: while a marked change postdates
+every examined header second the whole region declines (comparing stamps against
+mark TIME is unsound for the same raced-read reason), self-clearing when the write
+lands. The tscache refresh from a header answer is **monotonic-max** — a
+header-derived bound never lowers a higher observed acquisition stamp (the
+downgrade would persist a memo claim globally and bypass the rung's own 5 s
+re-validation). Clock rewind/backup restore behaves exactly like today's tscache
+comparison (shared, pre-existing limitation — healed by the next real save's
+dirty broadcast).
 
 **Harness.** Soak-neutral in the hit regime (same `up_to_date` counters; soaks run
 intact-tscache single-player). New Tier-1 pins: the strict-inequality margin, the

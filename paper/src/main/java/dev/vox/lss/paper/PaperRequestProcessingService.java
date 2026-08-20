@@ -465,13 +465,33 @@ public class PaperRequestProcessingService {
         var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
         var regionDirs = new java.util.HashMap<String, java.nio.file.Path>();
         for (ServerLevel level : server.getAllLevels()) {
-            regionDirs.put(level.dimension().identifier().toString(),
-                    net.minecraft.world.level.dimension.DimensionType
-                            .getStorageFolder(level.dimension(), worldRoot)
-                            .resolve("region").normalize());
+            // Per-level belt: this loop now runs on STORE-LESS servers too, where the
+            // storage-folder API was never touched before — an exotic dimension key
+            // must degrade that one dimension to UNKNOWN (the table's designed
+            // fail-safe), never take down service start.
+            try {
+                regionDirs.put(level.dimension().identifier().toString(),
+                        net.minecraft.world.level.dimension.DimensionType
+                                .getStorageFolder(level.dimension(), worldRoot)
+                                .resolve("region").normalize());
+            } catch (Throwable t) {
+                LSSLogger.warn("Could not resolve the region directory for "
+                        + level.dimension().identifier() + " — region freshness there"
+                        + " falls through to full reads", t);
+            }
         }
         var regionStamps = new dev.vox.lss.common.region.RegionStampTable(regionDirs::get);
         diskReader.attachRegionStamps(regionStamps);
+        // Tracker + mark listener BEFORE the processor starts (the Fabric twin's
+        // ordering): every dirty mark from the first tick onward must bump the region's
+        // live save mark. Paper's Bukkit events register later either way; this keeps
+        // the two platforms' wiring order identical.
+        var dirtyTracker = new DirtyColumnTracker();
+        // Marks fire at EDIT time on Paper — strictly no later than the save, so the
+        // latch arms before the write can lag the header. Region threads under Folia —
+        // the bump is atomic.
+        dirtyTracker.setMarkListener((dim, cx, cz) -> regionStamps
+                .bumpLiveSaveMark(dim, cx, cz, LSSConstants.epochSeconds()));
 
         if (storeMode != dev.vox.lss.common.store.LodStoreMode.OFF) {
             var maskFingerprints = new java.util.HashMap<String, String>();
@@ -521,13 +541,6 @@ public class PaperRequestProcessingService {
 
         offThreadProcessor.start();
 
-        var dirtyTracker = new DirtyColumnTracker();
-        // Every dirty mark (Paper's Bukkit events — fired at EDIT time, strictly no
-        // later than the save) bumps the region's live save mark, blocking header-rung
-        // freshness claims across the event->write window. Region threads under Folia —
-        // the bump is atomic.
-        dirtyTracker.setMarkListener((dim, cx, cz) -> regionStamps
-                .bumpLiveSaveMark(dim, cx, cz, LSSConstants.epochSeconds()));
         var dirtyBroadcaster = new PaperDirtyColumnBroadcaster(
                 server, players, dirtyTracker, offThreadProcessor);
         return new Wiring(players, diskReader, generationService, offThreadProcessor,

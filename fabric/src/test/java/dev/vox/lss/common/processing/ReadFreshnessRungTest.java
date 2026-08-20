@@ -57,6 +57,9 @@ class ReadFreshnessRungTest {
         void submit(UUID player, int cx, int cz, long order, long clientTs, ReadOperation op) {
             submitRead(player, cx, cz, DIM, order, clientTs, op);
         }
+        void submitLegacy(UUID player, int cx, int cz, long order, ReadOperation op) {
+            submitRead(player, cx, cz, DIM, order, op);
+        }
     }
 
     @TempDir
@@ -100,37 +103,89 @@ class ReadFreshnessRungTest {
         }
     }
 
+    private static final long MARGIN = AbstractChunkDiskReader.HEADER_FRESH_MARGIN_SECONDS;
+
     @Test
-    void strictlyNewerClientStampSkipsTheRead() throws Exception {
+    void marginClearingClientStampSkipsTheRead() throws Exception {
         writeRegion(3, 4, HEADER_SECOND);
         var opRuns = new AtomicInteger();
-        reader().submit(this.player, 3, 4, 1L, HEADER_SECOND + 1, () -> {
+        reader().submit(this.player, 3, 4, 1L, HEADER_SECOND + MARGIN + 1, () -> {
             opRuns.incrementAndGet();
             return new byte[]{1};
         });
         var result = awaitOneResult();
         assertTrue(result.headerFresh(), "must be the header rung's answer");
-        assertEquals(HEADER_SECOND, result.columnTimestamp(), "carries the proven second");
+        assertEquals(HEADER_SECOND + MARGIN, result.columnTimestamp(),
+                "carries the MARGINED bound — delivery compare and tscache refresh inherit it");
         assertNull(result.sectionBytes());
         assertEquals(0, opRuns.get(), "the read must be skipped");
         assertEquals(1, reader().getDiag().getHeaderHitsCount());
         assertEquals(0, reader().getDiag().getSubmittedCount(),
                 "a header hit never enters the disk.submitted/completed partition");
+        // The operator's live receipt renders on the disk diag line.
+        assertTrue(reader().getDiagnostics().contains("header_hits=1"),
+                "the header_hits= token must render: " + reader().getDiagnostics());
     }
 
     @Test
-    void sameSecondClientStampFallsThroughToTheRead() throws Exception {
-        // STRICT margin: a save in the client's acquisition second may postdate its
-        // read, so equality serves (R1-M2's discipline).
+    void stampInsideTheMarginFallsThroughToTheRead() throws Exception {
+        // The serve-latency margin (P1 review MAJOR): client stamps are issued at read
+        // COMPLETION, so a stamp within one read duration of the save second may carry
+        // PRE-save bytes — the whole margin, equality included, serves.
         writeRegion(3, 4, HEADER_SECOND);
         var opRuns = new AtomicInteger();
-        reader().submit(this.player, 3, 4, 1L, HEADER_SECOND, () -> {
+        reader().submit(this.player, 3, 4, 1L, HEADER_SECOND + MARGIN, () -> {
             opRuns.incrementAndGet();
             return new byte[]{1};
         });
         var result = awaitOneResult();
         assertFalse(result.headerFresh());
         assertEquals(1, opRuns.get());
+
+        reader().submit(this.player, 3, 4, 2L, HEADER_SECOND + 1, () -> {
+            opRuns.incrementAndGet();
+            return new byte[]{1};
+        });
+        awaitOneResult();
+        assertEquals(2, opRuns.get());
+        assertEquals(0, reader().getDiag().getHeaderHitsCount());
+    }
+
+    @Test
+    void rungIsInertWithoutATable() throws Exception {
+        // Bare rigs never attach a table — a ts>0 submit must run the operation.
+        var bare = new TestDiskReader();
+        try {
+            bare.registerPlayer(this.player);
+            var opRuns = new AtomicInteger();
+            bare.submit(this.player, 3, 4, 1L, HEADER_SECOND + MARGIN + 100, () -> {
+                opRuns.incrementAndGet();
+                return new byte[]{1};
+            });
+            long deadline = System.nanoTime() + 30_000_000_000L;
+            while (bare.getPlayerQueue(this.player).poll() == null) {
+                if (System.nanoTime() > deadline) fail("timed out");
+                Thread.sleep(5);
+            }
+            assertEquals(1, opRuns.get());
+            assertEquals(0, bare.getDiag().getHeaderHitsCount());
+        } finally {
+            bare.shutdown();
+        }
+    }
+
+    @Test
+    void legacySubmitOverloadNeverConsultsTheHeader() throws Exception {
+        // The 6-arg submitRead (no clientTimestamp) must pass ts=0, not smear the
+        // submission order into the timestamp slot.
+        writeRegion(3, 4, HEADER_SECOND);
+        var opRuns = new AtomicInteger();
+        reader().submitLegacy(this.player, 3, 4, Long.MAX_VALUE - 1, () -> {
+            opRuns.incrementAndGet();
+            return new byte[]{1};
+        });
+        awaitOneResult();
+        assertEquals(1, opRuns.get(), "legacy overload is an acquisition-shaped submit");
         assertEquals(0, reader().getDiag().getHeaderHitsCount());
     }
 
@@ -144,6 +199,26 @@ class ReadFreshnessRungTest {
         });
         awaitOneResult();
         assertEquals(1, opRuns.get(), "ts<=0 has nothing to validate — always read");
+    }
+
+    @Test
+    void latchedRegionFallsThroughToTheRead() throws Exception {
+        // A mark above the observed header (a change in flight to disk) voids every
+        // claim for the region until a re-read proves the write landed — even a stamp
+        // far beyond the margin must serve (the write-pending race, review MAJOR).
+        writeRegion(3, 4, HEADER_SECOND);
+        var table = new RegionStampTable(d -> DIM.equals(d) ? this.regionDir : null);
+        reader();
+        this.reader.attachRegionStamps(table);
+        table.bumpLiveSaveMark(DIM, 3, 4, NOW - 50);
+        var opRuns = new AtomicInteger();
+        reader().submit(this.player, 3, 4, 1L, NOW + 3600, () -> {
+            opRuns.incrementAndGet();
+            return new byte[]{1};
+        });
+        awaitOneResult();
+        assertEquals(1, opRuns.get());
+        assertEquals(0, reader().getDiag().getHeaderHitsCount());
     }
 
     @Test
@@ -166,32 +241,6 @@ class ReadFreshnessRungTest {
         assertEquals(0, reader().getDiag().getHeaderHitsCount());
     }
 
-    @Test
-    void liveSaveMarkAtOrAboveTheStampBlocksTheRung() throws Exception {
-        writeRegion(3, 4, HEADER_SECOND);
-        var table = new RegionStampTable(d -> DIM.equals(d) ? this.regionDir : null);
-        reader(); // instantiate, then re-attach the table we hold a handle to
-        this.reader.attachRegionStamps(table);
-        table.bumpLiveSaveMark(DIM, 3, 4, NOW - 50);
-        var opRuns = new AtomicInteger();
-        // Client stamp between the header second and the mark: effective stamp is the
-        // mark, so the rung must NOT fire (content moved after the client's copy).
-        reader().submit(this.player, 3, 4, 1L, NOW - 75, () -> {
-            opRuns.incrementAndGet();
-            return new byte[]{1};
-        });
-        awaitOneResult();
-        assertEquals(1, opRuns.get());
-        // A stamp strictly above the mark fires normally.
-        reader().submit(this.player, 3, 4, 2L, NOW - 25, () -> {
-            opRuns.incrementAndGet();
-            return new byte[]{1};
-        });
-        var fresh = awaitOneResult();
-        assertTrue(fresh.headerFresh());
-        assertEquals(NOW - 50, fresh.columnTimestamp(), "the mark is the effective stamp");
-        assertEquals(1, opRuns.get());
-    }
 
     // ---- delivery-side rig (mirrors OffThreadProcessorDiskResultTest) ----
 
@@ -226,8 +275,11 @@ class ReadFreshnessRungTest {
     }
 
     private static final class TestProcessor extends OffThreadProcessor<TestState> {
-        record EnqueuedColumn(UUID player, int cx, int cz, long ts, byte source) {}
+        record EnqueuedColumn(UUID player, int cx, int cz, long ts, byte source, int rawSize) {}
         final ConcurrentLinkedQueue<EnqueuedColumn> enqueued = new ConcurrentLinkedQueue<>();
+        // Clearing 0-section columns (the all-air ghost-terrain guard) land separately
+        // so the pins can tell "bytes served" from "clear sent" apart.
+        final ConcurrentLinkedQueue<EnqueuedColumn> emptiedColumns = new ConcurrentLinkedQueue<>();
 
         TestProcessor(Map<UUID, TestState> players, AbstractChunkDiskReader reader) {
             super(players, reader, false, null, 1, 0);
@@ -244,8 +296,14 @@ class ReadFreshnessRungTest {
                                                        String dimension, long columnTimestamp,
                                                        long submissionOrder, ColumnBytes bytes,
                                                        int estimatedBytes, byte source) {
-            this.enqueued.add(new EnqueuedColumn(state.getPlayerUUID(), cx, cz,
-                    columnTimestamp, source));
+            var column = new EnqueuedColumn(state.getPlayerUUID(), cx, cz,
+                    columnTimestamp, source, bytes.raw().length);
+            // The clearing column is the 2-byte v20 zero-section body.
+            if (bytes.raw().length <= 2) {
+                this.emptiedColumns.add(column);
+            } else {
+                this.enqueued.add(column);
+            }
             return true;
         }
     }
@@ -467,6 +525,152 @@ class ReadFreshnessRungTest {
             rig.proc.postSnapshot(snapshot(rig.uuid), List.of());
             waitFor(() -> rig.proc.enqueued.size() == 1,
                     "an acquisition ask always gets the bytes");
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
+    @Test
+    void headerFreshRefreshNeverLowersAnExistingStamp() throws Exception {
+        // Monotonic max (P1 review MAJOR): put() overwrites unconditionally and a
+        // LOWER cached value is strictly MORE permissive — a header-derived bound must
+        // never replace a higher acquisition stamp the server actually observed (it
+        // would persist to lss-timestamps.bin and bypass the rung's own 5 s
+        // re-validation forever).
+        var rig = new Rig();
+        try {
+            long clientTs = HEADER_SECOND + 100;
+            declareAndAwaitPending(rig, rig.state, 21, 21, clientTs);
+            long packed = PositionUtil.packPosition(21, 21);
+            long seeded = HEADER_SECOND + 10_000;
+            rig.proc.timestampCacheForTest().put(DIM, packed, seeded,
+                    System.currentTimeMillis() / 1000L);
+            rig.inject(ChunkReadResult.headerFresh(rig.uuid, 21, 21, DIM, 1L, HEADER_SECOND));
+            rig.proc.postSnapshot(snapshot(rig.uuid), List.of());
+            drainUntil(rig.proc, rs -> rs.stream().anyMatch(
+                    r -> r.type() == LSSConstants.RESPONSE_UP_TO_DATE && r.packed() == packed));
+            assertEquals(seeded, rig.proc.timestampCacheForTest().get(DIM, packed),
+                    "the higher acquisition stamp must survive the header refresh");
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
+    @Test
+    void headerFreshAttachedMemberAtExactBoundDropsSilently() throws Exception {
+        // Delivery-side margin at EQUALITY: an attached member whose stamp equals the
+        // carried bound exactly is inside the margin — standard transient drop.
+        var rig = new Rig();
+        try {
+            var other = rig.addPlayer(UUID.randomUUID());
+            long packed = PositionUtil.packPosition(23, 23);
+            declareAndAwaitPending(rig, rig.state, 23, 23, HEADER_SECOND + 10);
+            declareAndAwaitPending(rig, other, 23, 23, HEADER_SECOND);
+            long before = rig.proc.getDiagnostics().getTotalSuperseded();
+            rig.inject(ChunkReadResult.headerFresh(rig.uuid, 23, 23, DIM, 1L, HEADER_SECOND));
+            rig.proc.postSnapshot(snapshot(rig.uuid, other.getPlayerUUID()), List.of());
+            drainUntil(rig.proc, rs -> rs.stream().anyMatch(
+                    r -> r.player().equals(rig.uuid)
+                            && r.type() == LSSConstants.RESPONSE_UP_TO_DATE
+                            && r.packed() == packed));
+            waitFor(() -> rig.proc.getDiagnostics().getTotalSuperseded() > before,
+                    "the equal-stamped member's drop counted superseded");
+            assertFalse(other.hasDiskReadDone(23, 23),
+                    "equality must not earn a done-bit — the compare is strict");
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
+    @Test
+    void plainDiskReadNeverConvertsToUpToDate() throws Exception {
+        // The fromStore guard (P1 review MAJOR): a plain NBT read's columnTimestamp is
+        // acquisition-now, but a future-dated client stamp (clock rewind, hostile
+        // ts=2^62) must NOT convert a real read into a permanent no-serve hole.
+        var rig = new Rig();
+        try {
+            declareAndAwaitPending(rig, rig.state, 17, 17, HEADER_SECOND + 100_000);
+            rig.inject(new ChunkReadResult(rig.uuid, 17, 17, new byte[]{1, 2, 3}, DIM,
+                    64, HEADER_SECOND, false, false, false, false, 1L, 0L));
+            rig.proc.postSnapshot(snapshot(rig.uuid), List.of());
+            waitFor(() -> rig.proc.enqueued.size() == 1,
+                    "a plain disk read always serves its bytes");
+            assertEquals(LSSConstants.COLUMN_SOURCE_DISK, rig.proc.enqueued.peek().source());
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
+    @Test
+    void allAirStoreHitStillClearsForADataClaimingClient() throws Exception {
+        // The columnBytes != null guard (P1 review MAJOR): an all-air store hit for a
+        // data-claiming client must send the authoritative clearing 0-section column,
+        // never up_to_date — converting would seal ghost terrain over a now-empty
+        // column permanently.
+        var rig = new Rig();
+        try {
+            declareAndAwaitPending(rig, rig.state, 18, 18, HEADER_SECOND + 100);
+            // All-air store hit: null section bytes, fromStore, stored stamp below the
+            // client's — the conversion condition holds EXCEPT for the bytes guard.
+            rig.inject(new ChunkReadResult(rig.uuid, 18, 18, null, DIM,
+                    0, HEADER_SECOND, false, false, false, true, 1L, 0L));
+            rig.proc.postSnapshot(snapshot(rig.uuid), List.of());
+            waitFor(() -> rig.proc.emptiedColumns.size() == 1,
+                    "the clearing 0-section column must be sent");
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
+    @Test
+    void ghostStoreHitDropsSilently() throws Exception {
+        // No pending backs the delivery (raced/duplicate result): the conversion's
+        // pending != null conjunct must hold or this NPEs out of deliverDiskResult.
+        var rig = new Rig();
+        try {
+            long before = rig.proc.getDiagnostics().getTotalSuperseded();
+            rig.inject(new ChunkReadResult(rig.uuid, 19, 19, new byte[]{1, 2, 3}, DIM,
+                    64, HEADER_SECOND, false, false, false, true, 1L, 0L));
+            rig.proc.postSnapshot(snapshot(rig.uuid), List.of());
+            // A ghost data result is the documented silent shape: delivered with no
+            // pending, it builds a payload but earns no done-bit... the pin here is
+            // simply that nothing throws and the cycle survives — drive a second
+            // request through to completion.
+            declareAndAwaitPending(rig, rig.state, 20, 20, -1L);
+            rig.inject(new ChunkReadResult(rig.uuid, 20, 20, new byte[]{1, 2, 3}, DIM,
+                    64, HEADER_SECOND, false, false, false, true, 2L, 0L));
+            rig.proc.postSnapshot(snapshot(rig.uuid), List.of());
+            waitFor(() -> rig.proc.enqueued.stream().anyMatch(e -> e.cx() == 20),
+                    "the pipeline survives a ghost store hit");
+            assertTrue(rig.proc.getDiagnostics().getTotalSuperseded() >= before);
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
+    @Test
+    void storeHitDedupSplitsPerRecipientStamp() throws Exception {
+        // Two members of one dedup group: only the at-or-above-stamp member converts;
+        // the older-stamped member still gets the bytes.
+        var rig = new Rig();
+        try {
+            var other = rig.addPlayer(UUID.randomUUID());
+            long packed = PositionUtil.packPosition(24, 24);
+            declareAndAwaitPending(rig, rig.state, 24, 24, HEADER_SECOND);
+            declareAndAwaitPending(rig, other, 24, 24, HEADER_SECOND - 10);
+            rig.inject(new ChunkReadResult(rig.uuid, 24, 24, new byte[]{1, 2, 3}, DIM,
+                    64, HEADER_SECOND, false, false, false, true, 1L, 0L));
+            rig.proc.postSnapshot(snapshot(rig.uuid, other.getPlayerUUID()), List.of());
+            drainUntil(rig.proc, rs -> rs.stream().anyMatch(
+                    r -> r.player().equals(rig.uuid)
+                            && r.type() == LSSConstants.RESPONSE_UP_TO_DATE
+                            && r.packed() == packed));
+            waitFor(() -> rig.proc.enqueued.stream().anyMatch(
+                            e -> e.cx() == 24 && e.player().equals(other.getPlayerUUID())),
+                    "the older-stamped member must receive the stored bytes");
+            assertTrue(rig.proc.enqueued.stream().noneMatch(
+                            e -> e.cx() == 24 && e.player().equals(rig.uuid)),
+                    "the converted member must not also receive bytes");
         } finally {
             rig.proc.shutdown();
         }

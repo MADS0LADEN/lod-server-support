@@ -102,33 +102,94 @@ class RegionStampTableTest {
     }
 
     @Test
-    void liveSaveMarkRaisesTheEffectiveStampInstantly() throws Exception {
+    void markAboveTheObservedHeaderLatchesTheWholeRegion() throws Exception {
         writeRegion(3, 4, NOW - 100);
         assertEquals(NOW - 100, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
-        // A mark anywhere in the region raises every chunk's effective stamp — the
-        // header has not changed on disk, but content is known to be moving.
+        // A mark NEWER than any examined header second means a change is in flight to
+        // disk: the whole region must answer NEVER_CLEAN — comparing client stamps
+        // against the mark TIME is unsound (a read racing the pending write hands out
+        // stamps newer than the mark while carrying pre-change bytes).
         table().bumpLiveSaveMark(DIM, 3, 4, NOW - 10);
-        assertEquals(NOW - 10, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
-        // Monotonic max: an older mark never lowers it.
-        table().bumpLiveSaveMark(DIM, 3, 4, NOW - 50);
-        assertEquals(NOW - 10, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
+        assertEquals(RegionStampTable.NEVER_CLEAN, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
         assertEquals(NOW - 10, table().liveSaveMarkForTest(DIM, 3, 4));
+        // The latch self-clears when the write LANDS: a re-read observing a header
+        // second at/above the mark proves the change is disk-visible, and per-chunk
+        // seconds answer alone again (the mark never degrades the region permanently).
+        Path mca = writeRegion(3, 4, NOW - 5);
+        Files.setLastModifiedTime(mca, FileTime.fromMillis(System.currentTimeMillis() + 4000));
+        table().expireStatHorizonForTest(DIM, 3, 4);
+        assertEquals(NOW - 5, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
     }
 
     @Test
-    void mtimeChangeForcesHeaderRereadAfterHorizon() throws Exception {
-        Path mca = writeRegion(3, 4, NOW - 100);
+    void markAtOrBelowTheObservedHeaderDoesNotLatch() throws Exception {
+        writeRegion(3, 4, NOW - 100);
         assertEquals(NOW - 100, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
-        // Rewrite with a newer save second and a distinct mtime; the memo answers the
-        // OLD value until the horizon lapses (bounded staleness), then must re-read.
+        // A mark the examined header already covers (mark <= maxHeaderSecond) proves
+        // nothing is pending — per-chunk seconds keep answering.
+        table().bumpLiveSaveMark(DIM, 3, 4, NOW - 150);
+        assertEquals(NOW - 100, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
+        table().bumpLiveSaveMark(DIM, 3, 4, NOW - 100);
+        assertEquals(NOW - 100, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
+    }
+
+    @Test
+    void mtimeIsTheChangeDetectorOnceSettled() throws Exception {
+        // A SETTLED first read (mtime in the past second, stable across the re-stat)
+        // arms the == shortcut; this pins the detector in BOTH directions (review
+        // minor: the original shape read in the write's own second, never settled,
+        // and would have passed with the mtime compare inverted or deleted).
+        Path mca = writeRegion(3, 4, NOW - 100);
+        Files.setLastModifiedTime(mca, FileTime.fromMillis(System.currentTimeMillis() - 5000));
+        FileTime settledMtime = Files.getLastModifiedTime(mca);
+        assertEquals(NOW - 100, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
+        // Rewrite the CONTENT but restore the EXACT same mtime: the == shortcut must
+        // keep the memo (no re-read) — that is the stat-as-detector contract.
         var buf = ByteBuffer.allocate(8192);
         int idx = (3 & 31) + ((4 & 31) << 5);
         buf.putInt(idx * 4, 0x0000_0201);
         buf.putInt(4096 + idx * 4, (int) (NOW - 5));
         Files.write(mca, buf.array());
+        Files.setLastModifiedTime(mca, settledMtime);
+        table().expireStatHorizonForTest(DIM, 3, 4);
+        assertEquals(NOW - 100, table().chunkStampSecondsOrUnknown(DIM, 3, 4),
+                "unchanged mtime must keep the memo — the detector is the mtime, not the horizon");
+        // Now move the mtime: the != compare must force the re-read.
         Files.setLastModifiedTime(mca, FileTime.fromMillis(System.currentTimeMillis() + 4000));
         table().expireStatHorizonForTest(DIM, 3, 4);
-        assertEquals(NOW - 5, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
+        assertEquals(NOW - 5, table().chunkStampSecondsOrUnknown(DIM, 3, 4),
+                "a changed mtime must re-read the header");
+    }
+
+    @Test
+    void unreadableHeaderIsCachedForAHorizonThenRetried() throws Exception {
+        Path mca = this.dir.resolve("r.0.0.mca");
+        Files.write(mca, new byte[100]); // truncated: unreadable
+        assertEquals(RegionStampTable.UNKNOWN, table().chunkStampSecondsOrUnknown(DIM, 1, 1));
+        // Repaired within the horizon: the UNREADABLE sentinel must still answer (one
+        // probe per horizon — doubt never becomes per-ask IO).
+        writeRegion(1, 1, NOW - 100);
+        assertEquals(RegionStampTable.UNKNOWN, table().chunkStampSecondsOrUnknown(DIM, 1, 1));
+        table().expireStatHorizonForTest(DIM, 1, 1);
+        assertEquals(NOW - 100, table().chunkStampSecondsOrUnknown(DIM, 1, 1));
+    }
+
+    @Test
+    void snapshotCapStripsAndRelearns() throws Exception {
+        // A 2-snapshot cap over 4 regions: the FIFO strips, the count honors the cap,
+        // and a stripped region answers CORRECTLY on re-demand (strip-and-relearn).
+        var t = new RegionStampTable(d -> this.dir, 2);
+        for (int r = 0; r < 4; r++) {
+            writeRegion(r * 32, 0, NOW - 100 - r);
+        }
+        for (int r = 0; r < 4; r++) {
+            assertEquals(NOW - 100 - r, t.chunkStampSecondsOrUnknown(DIM, r * 32, 0));
+        }
+        assertTrue(t.retainedHeaderCountForTest() <= 2,
+                "cap must hold: " + t.retainedHeaderCountForTest());
+        // Region 0 was stripped; re-demand relearns the same honest answer.
+        assertEquals(NOW - 100, t.chunkStampSecondsOrUnknown(DIM, 0, 0));
+        assertTrue(t.retainedHeaderCountForTest() <= 2);
     }
 
     @Test

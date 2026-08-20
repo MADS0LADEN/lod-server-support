@@ -92,6 +92,11 @@ SERVER_MECHANISM = {
     # supersession. Persistent growth means a config mismatch, not data loss.
     "range filtered": "service.range_filtered",
     "honest re-resolutions": "service.re_resolved",
+    # Header freshness rung (region-summary-sync-plan.md P1): ts>0 reads answered
+    # up_to_date from the region header without region IO. Mechanism, not concern —
+    # expected ~0 on every current scenario (all keep their tscache intact); nonzero
+    # explains an up_to_date/columns shift on evicted-tscache workloads.
+    "header-fresh skips": "disk.header_hits",
     # Duplicate-serve grace: crossing re-asks absorbed silently instead of re-resolved
     # (each avoided a redundant disk read + send). Expect these to replace most
     # re_resolved growth during backfill bursts.

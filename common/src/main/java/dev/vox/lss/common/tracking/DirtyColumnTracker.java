@@ -37,21 +37,23 @@ public class DirtyColumnTracker {
     }
 
     public void markDirty(String dimension, int cx, int cz) {
-        synchronized (this) {
-            long packed = PositionUtil.packPosition(cx, cz);
-            if (dirtyColumns.computeIfAbsent(dimension, k -> new LongOpenHashSet()).add(packed)) {
-                totalMarked++;
-            }
-        }
-        // Outside the monitor: the listener does its own (lock-free) synchronization,
-        // and holding this lock through foreign code invites ordering deadlocks.
+        // Listener FIRST (P1 review): the freshness bump must be visible before the
+        // position becomes drainable, or a reader between the two could claim clean
+        // for an already-marked position. Outside the monitor (the listener does its
+        // own lock-free synchronization; holding this lock through foreign code
+        // invites ordering deadlocks) and throw-contained — an advisory bump must
+        // never take down the mark path that feeds dirty broadcasts.
         var listener = this.markListener;
         if (listener != null) {
             try {
                 listener.onMarkDirty(dimension, cx, cz);
             } catch (Throwable ignored) {
-                // A freshness bump is advisory armor — it must never take down the
-                // mark path that feeds dirty broadcasts.
+            }
+        }
+        synchronized (this) {
+            long packed = PositionUtil.packPosition(cx, cz);
+            if (dirtyColumns.computeIfAbsent(dimension, k -> new LongOpenHashSet()).add(packed)) {
+                totalMarked++;
             }
         }
     }

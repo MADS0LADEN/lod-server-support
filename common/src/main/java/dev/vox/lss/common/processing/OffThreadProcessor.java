@@ -961,11 +961,21 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                     // Refresh the timestamp cache at stamp + 1 so the next re-ask hits
                     // the router's cheap rung: the non-strict tscache compare
                     // (cached <= clientTs) then fires exactly iff clientTs > stamp — the
-                    // header rung's own strict margin, preserved. Stale-guarded like
-                    // every stamp write: an overtaking edit means the proof predates it.
+                    // header rung's own margined bound, preserved (the stamp already
+                    // carries the serve-latency margin from the reader). MONOTONIC MAX
+                    // (P1 review MAJOR): put() overwrites unconditionally and a LOWER
+                    // cached value is strictly MORE permissive, so a header-derived
+                    // bound must never replace a higher acquisition stamp the server
+                    // actually observed — the downgrade would persist a memo-derived
+                    // claim globally (lss-timestamps.bin) and bypass the rung's own
+                    // 5 s re-validation forever. Stale-guarded like every stamp write.
                     if (!staleAgainstEdit) {
-                        this.timestampCache.put(result.dimension(), packed,
-                                result.columnTimestamp() + 1, this.cycleNow);
+                        long refreshed = result.columnTimestamp() + 1;
+                        long existing = this.timestampCache.get(result.dimension(), packed);
+                        if (refreshed > existing) {
+                            this.timestampCache.put(result.dimension(), packed,
+                                    refreshed, this.cycleNow);
+                        }
                     }
                 } else if (!staleAgainstEdit && !result.saturated() && !result.notFound()) {
                     // Store timestamp so reconnecting clients get up-to-date responses
@@ -1067,6 +1077,7 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                     && pending.clientTimestamp() > result.columnTimestamp()) {
                 state.markDiskReadDone(cx, cz);
                 this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state));
+                this.ctx.diagnostics().incrementUpToDate();
             } else {
                 this.ctx.diagnostics().addSuperseded(1);
             }
@@ -1089,6 +1100,7 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                     && columnBytes != null) {
                 state.markDiskReadDone(cx, cz);
                 this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state));
+                this.ctx.diagnostics().incrementUpToDate();
                 this.ctx.diagnostics().incrementDiskDrained();
                 return;
             }

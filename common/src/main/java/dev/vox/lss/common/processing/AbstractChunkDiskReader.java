@@ -34,6 +34,14 @@ public abstract class AbstractChunkDiskReader {
     private static final AtomicInteger THREAD_COUNTER = new AtomicInteger();
     private static final int QUEUE_CAPACITY_PER_THREAD = 32;
 
+    /** The header rung's serve-latency margin (P1 review MAJOR): a client's stamp is
+     *  issued at read COMPLETION, so a read that raced a pending region write hands out
+     *  a stamp up to one read duration (bounded by the read timeout) NEWER than the
+     *  change's header second while carrying the PRE-change bytes. Claims must clear
+     *  the header second by this margin; the cost is nil for the rung's target regime
+     *  (warm-rejoin stamps beat static terrain's last save by hours, not seconds). */
+    static final long HEADER_FRESH_MARGIN_SECONDS = LSSConstants.DISK_READ_TIMEOUT_SECONDS + 5;
+
     // Saturation is a normal, self-healing path: the result is dropped silently and the
     // client's next want-set re-declares the position (v17 — nothing is bounced back). Since
     // the router's headroom gate stops submits into a full pool, a rejection here is now a
@@ -595,10 +603,17 @@ public abstract class AbstractChunkDiskReader {
         // Header freshness rung (region-summary-sync-plan.md P1) — FIRST: cheaper than
         // the store rung once memoized (pure memory vs a b-tree row fetch) and it makes
         // the store lookup moot when it fires (the client's copy is current; no bytes of
-        // any provenance are needed). ts>0 only — an acquisition ask (ts<=0) has nothing
-        // to validate. STRICT compare: a same-second save may postdate the client's
-        // acquisition, so equality fails toward the read (R1-M2's margin discipline).
-        // UNKNOWN/NEVER_CLEAN fall through — never answer from doubt.
+        // any provenance are needed). Runs BEFORE the disk-read gate deliberately: the
+        // memoized cost is one stat + one 8 KiB read per region per horizon, and every
+        // doubt state is a cached sentinel, so this can never become the ungated bulk
+        // IO the gate exists to bound. ts>0 only — an acquisition ask (ts<=0) has
+        // nothing to validate. The claim must clear the stamp PLUS the serve-latency
+        // margin (P1 review MAJOR): client stamps are issued at read COMPLETION, so a
+        // read that raced a pending write can carry pre-change bytes stamped up to a
+        // full read duration (bounded by the read timeout) after the change's header
+        // second — a bare strict compare would validate exactly those. The margin also
+        // absorbs the latch's unrelated-save-clears-early corner (RegionStampTable
+        // javadoc). UNKNOWN/NEVER_CLEAN fall through — never answer from doubt.
         if (clientTimestamp > 0) {
             var rs = this.regionStamps;
             if (rs != null) {
@@ -610,10 +625,15 @@ public abstract class AbstractChunkDiskReader {
                     // group behind Duplicate.IN_FLIGHT for the session. Doubt = read.
                     stamp = dev.vox.lss.common.region.RegionStampTable.UNKNOWN;
                 }
-                if (stamp >= 0 && stamp < clientTimestamp) {
+                if (stamp >= 0 && stamp != dev.vox.lss.common.region.RegionStampTable.NEVER_CLEAN
+                        && stamp + HEADER_FRESH_MARGIN_SECONDS < clientTimestamp) {
                     this.diag.recordHeaderHit();
+                    // The result carries the MARGINED bound, so the delivery-side
+                    // per-recipient compare and the tscache refresh (stamp + 1)
+                    // inherit the margin without a second constant.
                     addResult(playerUuid, ChunkReadResult.headerFresh(playerUuid, chunkX,
-                            chunkZ, dimension, submissionOrder, stamp));
+                            chunkZ, dimension, submissionOrder,
+                            stamp + HEADER_FRESH_MARGIN_SECONDS));
                     return;
                 }
             }
