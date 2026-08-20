@@ -40,9 +40,11 @@ import java.util.function.Function;
  * self-clears when the write lands (mtime change → header re-read raises
  * {@code maxHeaderSecond} to at least the write second ≥ the mark second). Once
  * cleared, per-chunk header seconds answer alone — the mark never degrades the region's
- * other 1023 chunks permanently. Residual corner (an unrelated same-region save
- * clearing the latch while the marked chunk's own write is still queued): absorbed by
- * the caller's serve-latency margin, which every claim must clear anyway.
+ * other 1023 chunks permanently. The unrelated-same-region-save corner (a sibling
+ * chunk's same-second landing clearing the latch while the marked chunk's own write is
+ * still queued) is closed by the clear-side GRACE — see {@code latchedOrInGrace}; the
+ * serve-latency margin does NOT absorb it (it bounds acquisition-stamp skew, never
+ * write-landing lag).
  *
  * <p>Threading: read by the disk reader pool (stat + header IO happen there, never on
  * the processing thread — and BEFORE the disk-read gate: a deliberate exemption, the
@@ -108,6 +110,10 @@ public final class RegionStampTable {
         volatile HeaderSnapshot header;          // null = never examined / stripped
         volatile long statDeadlineNanos;         // consulted only while header != null
         volatile long maxHeaderSecond;           // monotonic; the latch's disk-visible bound
+        // The latch-clear GRACE (final review, both Fable lenses): 0 while the latch is
+        // armed; set to now+STAT_HORIZON at the first observation of the clear
+        // condition. Claims stay NEVER_CLEAN until it lapses — see latchedOrInGrace.
+        volatile long latchClearGraceDeadlineNanos;
         // Sticky: some examined header slot carried a degenerate second (garbage
         // timestamps on an EXISTING chunk). The per-chunk path answers NEVER for that
         // slot already; the TILE stamp must go NEVER for the whole region — a chunk
@@ -173,7 +179,7 @@ public final class RegionStampTable {
         // The mark latch (class javadoc): a marked change not yet observed in any
         // examined header voids every per-chunk claim for the region. Read the mark
         // AFTER the refresh so a just-raised maxHeaderSecond is seen.
-        if (entry.liveSaveMarkSeconds.get() > entry.maxHeaderSecond) {
+        if (latchedOrInGrace(entry)) {
             return NEVER_CLEAN;
         }
         // The REGION HEADER's index layout — z-major, the store sweep's exact formula.
@@ -221,7 +227,7 @@ public final class RegionStampTable {
             return NEVER_CLEAN;
         }
         if (entry.degenerateStamps) return NEVER_CLEAN;
-        if (entry.liveSaveMarkSeconds.get() > entry.maxHeaderSecond) {
+        if (latchedOrInGrace(entry)) {
             return NEVER_CLEAN; // the latch (class javadoc)
         }
         // A header whose slots carried NO valid second (all chunks absent — the residue
@@ -298,11 +304,41 @@ public final class RegionStampTable {
     }
 
     /**
+     * The latch, with its clear-side GRACE (final review, both Fable lenses — the
+     * unrelated-same-second-save corner): {@code maxHeaderSecond >= mark} proves only
+     * that SOME write from the marked flush landed, not the marked chunk's own — with
+     * split per-chunk IO queues (Moonrise/C2ME) a sibling chunk's same-second landing
+     * used to clear the latch while the marked chunk's write was still pending, and a
+     * dirty re-ask inside that window could claim freshness against the STALE header
+     * slot (the margin bounds acquisition-stamp skew, NOT write-landing lag — the old
+     * javadoc's "absorbed by the margin" was wrong). So the first observation of the
+     * clear condition starts a one-{@code STAT_HORIZON} grace during which the region
+     * still answers NEVER_CLEAN; by its lapse the pending sibling writes have landed
+     * and the re-read header answers honestly. Mark-gated: an unmarked region (the
+     * evicted-tscache resync, plain warm rejoins) never pays it.
+     */
+    private boolean latchedOrInGrace(RegionEntry entry) {
+        long mark = entry.liveSaveMarkSeconds.get();
+        if (mark == 0) return false;
+        if (mark > entry.maxHeaderSecond) {
+            entry.latchClearGraceDeadlineNanos = 0; // armed — a later clear re-earns the grace
+            return true;
+        }
+        long grace = entry.latchClearGraceDeadlineNanos;
+        if (grace == 0) {
+            entry.latchClearGraceDeadlineNanos = System.nanoTime() + STAT_HORIZON_NANOS;
+            return true; // first clear observation — grace starts now
+        }
+        return System.nanoTime() - grace < 0;
+    }
+
+    /**
      * Record that content in this chunk's region changed no earlier than
      * {@code epochSeconds} (a hash-confirmed save on Fabric, a dirty-marking Bukkit
      * event on Paper — both strictly no later than the change reaching the region
      * file). Monotonic max; any thread. This arms the latch that blocks every claim
-     * for the region until an examined header proves the write landed.
+     * for the region until an examined header proves the write landed AND the
+     * clear-side grace lapses ({@link #latchedOrInGrace}).
      */
     public void bumpLiveSaveMark(String dimension, int cx, int cz, long epochSeconds) {
         var entry = entryFor(dimension, PositionUtil.packRegionOf(PositionUtil.packPosition(cx, cz)));
@@ -538,5 +574,17 @@ public final class RegionStampTable {
         if (dims == null) return;
         var entry = dims.get(PositionUtil.packRegionOf(PositionUtil.packPosition(cx, cz)));
         if (entry != null) entry.statDeadlineNanos = System.nanoTime();
+    }
+
+    /** Collapse the latch-clear grace so tests observe the post-grace honest answer.
+     *  No-op unless the grace has started (a deadline of 0 means armed/never-cleared,
+     *  and stamping it non-zero here would skip the first-observation start). */
+    void expireLatchGraceForTest(String dimension, int cx, int cz) {
+        var dims = this.byDimension.get(dimension);
+        if (dims == null) return;
+        var entry = dims.get(PositionUtil.packRegionOf(PositionUtil.packPosition(cx, cz)));
+        if (entry != null && entry.latchClearGraceDeadlineNanos != 0) {
+            entry.latchClearGraceDeadlineNanos = System.nanoTime();
+        }
     }
 }

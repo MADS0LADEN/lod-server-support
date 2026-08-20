@@ -133,11 +133,40 @@ class SectionStateFuzzTest {
                         ref.onReceived(lp, 9_000L);
                     }
                 }
-            } else if (kind < 97) {
+            } else if (kind < 96) {
                 int px = rng.nextInt(41) - 20, pz = rng.nextInt(41) - 20;
                 int dist = 8 + rng.nextInt(80);
                 impl.pruneOutOfRange(px, pz, dist);
                 ref.pruneOutOfRange(px, pz, dist);
+            } else if (kind < 97) {
+                // Region-summary tile validation (final review MAJOR-1/2): the
+                // provenance-scoped two-directional writer — validate strictly-newer
+                // stamps as SUMMARY provenance, revoke ONLY summary-set bits, report
+                // revocations. The one transition no other op produces is
+                // revocation-in-isolation (validated cleared with no stamp/mark
+                // change), so the needs invariant's coverage depends on this op.
+                int tileX = PositionUtil.unpackX(p) >> 5;
+                int tileZ = PositionUtil.unpackZ(p) >> 5;
+                long stampM = switch (rng.nextInt(3)) {
+                    case 0 -> 0L;                        // margined floor — validates all
+                    case 1 -> 1L + rng.nextInt(5_000);   // mid-domain — mixed outcomes
+                    default -> 9_999L;                   // above every stamp — revokes
+                };
+                var implRevoked = new LongArrayList();
+                var refRevoked = new LongArrayList();
+                var implOut = impl.applyTileValidation(tileX, tileZ, stampM, implRevoked::add);
+                long[] refOut = ref.applyTileValidation(tileX, tileZ, stampM, refRevoked::add);
+                assertEquals(refOut[0], implOut.newlyValidated(),
+                        "applyTileValidation newlyValidated divergence at op " + op
+                                + " seed " + seed);
+                assertEquals(refOut[1] == 1, implOut.fullyValidated(),
+                        "applyTileValidation fullyValidated divergence at op " + op
+                                + " seed " + seed);
+                implRevoked.sort(null);
+                refRevoked.sort(null);
+                assertEquals(refRevoked, implRevoked,
+                        "applyTileValidation revocation-set divergence at op " + op
+                                + " seed " + seed);
             } else if (kind < 98) {
                 impl.clear();
                 ref.clear();

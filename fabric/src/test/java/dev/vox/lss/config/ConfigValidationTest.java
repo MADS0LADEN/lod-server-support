@@ -729,6 +729,26 @@ class ConfigValidationTest {
     }
 
     @Test
+    void regionSummarySyncDefaultsOnAndRoundTripsThroughJson() {
+        // The client half of region summaries (region-summary-sync-plan.md §9) ships ON,
+        // and the GSON leg pins the exact key + a saved false binding back as false —
+        // the enableScanPrefixRetention precedent (a silent default-off revert would
+        // pass CI green while quietly killing the warm-rejoin suppression in the field).
+        var c = clientConfig();
+        assertTrue(c.enableRegionSummarySync, "region summary sync must default ON");
+        c.validate();
+        assertTrue(c.enableRegionSummarySync, "validate() must not touch the boolean");
+        var gson = new com.google.gson.Gson();
+        String saved = gson.toJson(clientConfig());
+        assertTrue(saved.contains("\"enableRegionSummarySync\":true"),
+                "a fresh config must persist the default under the exact key: " + saved);
+        var loaded = gson.fromJson(saved.replace(
+                "\"enableRegionSummarySync\":true", "\"enableRegionSummarySync\":false"),
+                dev.vox.lss.config.LSSClientConfig.class);
+        assertFalse(loaded.enableRegionSummarySync, "a saved false must bind back as false");
+    }
+
+    @Test
     void scanPrefixRetentionDefaultsOnAndRoundTripsThroughJson() {
         // Scan prefix retention (docs/planning/scanner-reopened-rings-plan.md) ships ON —
         // a silent default-off revert would pass CI green (unit rigs set the seam

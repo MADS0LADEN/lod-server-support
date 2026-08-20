@@ -180,6 +180,114 @@ class LodRequestManagerSummaryTest {
     }
 
     @Test
+    void noRegionTilesAreNoEvidenceAndValidateNothing() {
+        // Final honesty review MAJOR-1: the table's never-observed scope is
+        // server-lifetime only — a region deleted while the server was OFF also reads
+        // STAMP_NO_REGION, and validating cached stamps against it would seal the
+        // deleted terrain forever (never re-asked, so never even regenerated). Both
+        // sentinels validate nothing; the stamped residue re-declares and heals.
+        // Counted under its OWN counter (tiles_no_region, the server-disposition
+        // mirror) so the harness honesty legs on tiles_unknown stay sharp — a window
+        // legitimately covers many never-generated regions.
+        seedStamped(dim("overworld"), 5000L);
+        manager.onRegionSummaryFrame(frame("lss_test:overworld",
+                RegionSummaryWire.STAMP_NO_REGION));
+        assertEquals(0, manager.getSummaryColumnsValidated());
+        assertEquals(1, manager.getSummaryTilesNoRegion());
+        assertEquals(0, manager.getSummaryTilesUnknown());
+        assertEquals(5000L, manager.columnsForTest().classify(POS),
+                "the cached stamp re-declares — the read path's not-found ladder heals");
+    }
+
+    @Test
+    void aRevokedPositionReopensItsRingAndRedeclares() {
+        // Final review, client lens MAJOR-1 end to end: a fresher frame's revocation
+        // below the scanner's confirmed prefix must REOPEN the position's ring — the
+        // needs bit alone is structurally outside both walk intervals and the position
+        // would otherwise never re-declare until a full scanner reset (demonstrated
+        // orphan: a fully-quiesced client with hundreds of needy positions).
+        var overworld = dim("overworld");
+        setupWithLod(12);
+        long pos = PositionUtil.packPosition(10, 3); // ring 10 of the lod-12 disc
+        manager.markCacheLoadedForTest();
+        manager.setLastDimensionForTest(overworld);
+        // The WHOLE disc is cache-stamped, so one validating frame satisfies every
+        // position and the first walk confirms all rings with zero declarations —
+        // no answer choreography needed for the confirmed-prefix premise.
+        var loaded = new Long2LongOpenHashMap();
+        for (int x = -12; x <= 12; x++) {
+            for (int z = -12; z <= 12; z++) {
+                loaded.put(PositionUtil.packPosition(x, z), 7000L);
+            }
+        }
+        manager.columnsForTest().loadFrom(loaded);
+        manager.onRegionSummaryFrame(frame9("lss_test:overworld", 1L));
+        driveScansUntilQuiet(overworld);
+        int confirmed = manager.getConfirmedRing();
+        assertTrue(confirmed > 10, "premise: the walk confirmed past the position's ring "
+                + "(confirmed=" + confirmed + ")");
+        assertFalse(declared(pos), "premise: the validated position never declared");
+        sent.clear();
+
+        // The fresher frame revokes the summary's own claim...
+        manager.onRegionSummaryFrame(frame9("lss_test:overworld", 9999L));
+        assertTrue(manager.getReopenedRingCount() > 0,
+                "the revocation must reopen the position's ring below the prefix");
+        // ...and the next scheduled scan re-declares it.
+        for (int i = 0; i <= 21 && !declared(pos); i++) {
+            manager.tickWithContext(0, 0, overworld, 0, 0, 0L, -1, () -> 0);
+        }
+        assertTrue(declared(pos),
+                "the revoked position re-declares at the next scheduled scan");
+    }
+
+    /** Rig variant with a custom session distance + a batch recorder. */
+    private void setupWithLod(int lod) {
+        manager = new LodRequestManager();
+        manager.joinSlowStartEnabled = () -> false;
+        manager.onSessionConfig(new SessionConfigS2CPayload(
+                LSSConstants.PROTOCOL_VERSION, true, lod, true),
+                "lss-summary-lod-" + System.nanoTime());
+        requests.clear();
+        manager.setSummarySenderForTest(requests::add);
+        manager.summaryHarnessGate = () -> false;
+        manager.summarySessionVersion = () -> LSSConstants.PROTOCOL_VERSION;
+        sent.clear();
+        manager.setBatchSenderForTest(p -> sent.add(java.util.Arrays.copyOf(
+                p.packedPositions(), p.count())));
+    }
+
+    private final List<long[]> sent = new ArrayList<>();
+
+    private boolean declared(long packed) {
+        for (long[] batch : sent) {
+            for (long p : batch) {
+                if (p == packed) return true;
+            }
+        }
+        return false;
+    }
+
+    /** Drive ticks until two consecutive scan windows produce no batches. */
+    private void driveScansUntilQuiet(net.minecraft.resources.ResourceKey
+            <net.minecraft.world.level.Level> d) {
+        int quietTicks = 0;
+        for (int i = 0; i < 200 && quietTicks < 45; i++) {
+            int before = sent.size();
+            manager.tickWithContext(0, 0, d, 0, 0, 0L, -1, () -> 0);
+            quietTicks = sent.size() == before ? quietTicks + 1 : 0;
+        }
+    }
+
+    /** A radius-1 frame centered on tile (0,0) carrying one stamp for all 9 tiles. */
+    private static byte[] frame9(String dimension, long stamp) {
+        long[] stamps = new long[9];
+        java.util.Arrays.fill(stamps, stamp);
+        return RegionSummaryWire.encodeSummary(new RegionSummaryWire.Summary(
+                dimension, 0, 0, 1, stamps));
+    }
+
+    @Test
     void frameForAnotherDimensionDrops() {
         seedStamped(dim("overworld"), 7000L);
         manager.onRegionSummaryFrame(frame("lss_test:the_end", 6000L));
@@ -241,7 +349,8 @@ class LodRequestManagerSummaryTest {
         assertTrue(manager.tickCacheGatePhase());
         assertEquals(1, manager.getSummaryColumnsValidated(), "only the LATEST frame applied");
         assertEquals(1, manager.getSummaryTilesClean() + manager.getSummaryTilesStale()
-                + manager.getSummaryTilesUnknown(), "exactly one frame's tiles counted");
+                + manager.getSummaryTilesUnknown() + manager.getSummaryTilesNoRegion(),
+                "exactly one frame's tiles counted");
     }
 
     @Test
@@ -284,7 +393,8 @@ class LodRequestManagerSummaryTest {
         assertDoesNotThrow(() -> manager.onRegionSummaryFrame(w.toByteArray()));
         assertEquals(0, manager.getSummaryColumnsValidated());
         assertEquals(0, manager.getSummaryTilesClean() + manager.getSummaryTilesStale()
-                + manager.getSummaryTilesUnknown(), "a rejected frame counts nothing");
+                + manager.getSummaryTilesUnknown() + manager.getSummaryTilesNoRegion(),
+                "a rejected frame counts nothing");
         assertEquals(7000L, manager.columnsForTest().classify(POS), "state untouched");
     }
 

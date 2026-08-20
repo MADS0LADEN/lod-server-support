@@ -162,11 +162,12 @@ public final class ClientCommandActions {
         // Region summaries (§6 attributability): rendered once any summary applied —
         // why the want-set skipped revalidating the clean bulk after this rejoin.
         if (manager.getSummaryTilesClean() + manager.getSummaryTilesStale()
-                + manager.getSummaryTilesUnknown() > 0) {
+                + manager.getSummaryTilesUnknown() + manager.getSummaryTilesNoRegion() > 0) {
             feedback.accept(Component.literal(String.format(
-                    "Summary: tiles clean=%d stale=%d unknown=%d, columns_validated=%d",
+                    "Summary: tiles clean=%d stale=%d unknown=%d no_region=%d, columns_validated=%d",
                     manager.getSummaryTilesClean(), manager.getSummaryTilesStale(),
-                    manager.getSummaryTilesUnknown(), manager.getSummaryColumnsValidated()
+                    manager.getSummaryTilesUnknown(), manager.getSummaryTilesNoRegion(),
+                    manager.getSummaryColumnsValidated()
             )).withStyle(ChatFormatting.GRAY));
         }
 

@@ -112,12 +112,17 @@ class RegionStampTableTest {
         table().bumpLiveSaveMark(DIM, 3, 4, NOW - 10);
         assertEquals(RegionStampTable.NEVER_CLEAN, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
         assertEquals(NOW - 10, table().liveSaveMarkForTest(DIM, 3, 4));
-        // The latch self-clears when the write LANDS: a re-read observing a header
-        // second at/above the mark proves the change is disk-visible, and per-chunk
-        // seconds answer alone again (the mark never degrades the region permanently).
+        // The latch self-clears when the write LANDS — via the clear-side GRACE (final
+        // review): the first observation of the clear condition still answers
+        // NEVER_CLEAN for one stat horizon (a sibling chunk's same-second landing must
+        // not validate against a still-pending marked write), then per-chunk seconds
+        // answer alone again (the mark never degrades the region permanently).
         Path mca = writeRegion(3, 4, NOW - 5);
         Files.setLastModifiedTime(mca, FileTime.fromMillis(System.currentTimeMillis() + 4000));
         table().expireStatHorizonForTest(DIM, 3, 4);
+        assertEquals(RegionStampTable.NEVER_CLEAN, table().chunkStampSecondsOrUnknown(DIM, 3, 4),
+                "the first clear observation starts the grace, not the claim");
+        table().expireLatchGraceForTest(DIM, 3, 4);
         assertEquals(NOW - 5, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
     }
 
@@ -126,11 +131,17 @@ class RegionStampTableTest {
         writeRegion(3, 4, NOW - 100);
         assertEquals(NOW - 100, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
         // A mark the examined header already covers (mark <= maxHeaderSecond) proves
-        // nothing is pending — per-chunk seconds keep answering.
+        // nothing is pending — but ANY marked region pays the one-horizon clear-side
+        // grace at its first observation (final review: the split-landing corner),
+        // then per-chunk seconds keep answering.
         table().bumpLiveSaveMark(DIM, 3, 4, NOW - 150);
+        assertEquals(RegionStampTable.NEVER_CLEAN, table().chunkStampSecondsOrUnknown(DIM, 3, 4),
+                "first observation of a marked region starts the grace");
+        table().expireLatchGraceForTest(DIM, 3, 4);
         assertEquals(NOW - 100, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
         table().bumpLiveSaveMark(DIM, 3, 4, NOW - 100);
-        assertEquals(NOW - 100, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
+        assertEquals(NOW - 100, table().chunkStampSecondsOrUnknown(DIM, 3, 4),
+                "a covered mark after the grace lapsed does not re-arm anything");
     }
 
     @Test
@@ -301,10 +312,14 @@ class RegionStampTableTest {
         assertEquals(NOW - 100, table().tileStampSeconds(DIM, 0, 0));
         table().bumpLiveSaveMark(DIM, 3, 4, NOW - 10);
         assertEquals(RegionStampTable.NEVER_CLEAN, table().tileStampSeconds(DIM, 0, 0));
-        // The write lands: header re-read at/above the mark clears the latch.
+        // The write lands: header re-read at/above the mark clears the latch — after
+        // the one-horizon clear-side grace (final review: split landings).
         Path mca = writeRegion(3, 4, NOW - 5);
         Files.setLastModifiedTime(mca, FileTime.fromMillis(System.currentTimeMillis() + 4000));
         table().expireStatHorizonForTest(DIM, 3, 4);
+        assertEquals(RegionStampTable.NEVER_CLEAN, table().tileStampSeconds(DIM, 0, 0),
+                "grace holds at the first clear observation");
+        table().expireLatchGraceForTest(DIM, 3, 4);
         assertEquals(NOW - 5, table().tileStampSeconds(DIM, 0, 0));
     }
 

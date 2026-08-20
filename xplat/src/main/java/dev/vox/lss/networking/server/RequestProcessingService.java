@@ -524,6 +524,15 @@ public class RequestProcessingService {
             }, (uuid, frame) -> {
                 var player = this.server.getPlayerList().getPlayer(uuid);
                 if (player == null) return false; // disconnected while assembling — uncounted
+                // The far-player lane's writability discipline (final review F2): a frame
+                // is sent at the join/portal moment lodYieldsToVanillaTransport protects,
+                // so an unwritable channel DROPS it uncounted — the client's fallback is
+                // ordinary per-column revalidation, exactly today's behavior.
+                var snap = FabricChannelPressure.forPlayer(player).snapshot();
+                if (snap.writable() == dev.vox.lss.common.processing.ChannelPressureProbe
+                        .Writability.NOT_WRITABLE) {
+                    return false;
+                }
                 dev.vox.lss.platform.LoaderServices.get().sendToPlayer(player,
                         new dev.vox.lss.networking.payloads.RegionSummaryS2CPayload(frame));
                 return true;

@@ -559,6 +559,7 @@ public final class BenchmarkMetricsExporter {
         summary.put("tiles_clean", manager != null ? manager.getSummaryTilesClean() : 0L);
         summary.put("tiles_stale", manager != null ? manager.getSummaryTilesStale() : 0L);
         summary.put("tiles_unknown", manager != null ? manager.getSummaryTilesUnknown() : 0L);
+        summary.put("tiles_no_region", manager != null ? manager.getSummaryTilesNoRegion() : 0L);
         summary.put("columns_validated", manager != null ? manager.getSummaryColumnsValidated() : 0L);
         result.put("summary", summary);
 

@@ -58,6 +58,13 @@ class ColumnStateMap {
         long dirty;
         long retry;
         long validated;
+        // Provenance sub-mask of `validated` (final review, client lens MAJOR-2):
+        // bits set by a region-summary tile validation, as opposed to the server's
+        // per-column onReceived/onUpToDate proofs. A summary may only REVOKE its own
+        // bits — a coarse tile stamp must never downgrade a per-column terminal
+        // answer, or one warm-rejoin frame revokes the whole freshly-answered disc.
+        // Invariant: summaryValidated is a subset of validated.
+        long summaryValidated;
         long sessionSatisfied;
         long staleInFlight;
         /** Derived: bit set ⇔ classify(position) would return non-SATISFIED. */
@@ -291,8 +298,10 @@ class ColumnStateMap {
     }
 
     /** One tile's validation outcome (region-summary-sync-plan.md §6): how many stamps
-     *  were newly validated, and whether ANY stamped position in the tile remains
-     *  unvalidated (the tile is then "stale" — its residue re-declares per column). */
+     *  were newly validated, and whether ANY stamped position in the tile ends
+     *  UN-validated (the tile is then "stale" — its residue re-declares per column; a
+     *  server-proofed position that merely conflicts with the coarse tile stamp is NOT
+     *  residue and does not mark the tile). */
     record TileValidation(int newlyValidated, boolean fullyValidated) {}
 
     /**
@@ -300,40 +309,52 @@ class ColumnStateMap {
      * position in the 32×32-chunk tile at ({@code tileX}, {@code tileZ}), set
      * {@code validated} iff its stamp is STRICTLY above the reported tile stamp
      * {@code stampM} (the wire value already carries the server's serve-latency
-     * margin, so this compare inherits the raced-read protection) — and CLEAR it
-     * otherwise. Load-bearing properties, each pinned:
+     * margin, so this compare inherits the raced-read protection) — and REVOKE
+     * summary-set bits otherwise. Load-bearing properties, each pinned:
      * <ul>
-     *   <li><b>Two-directional</b> (P2 client review MAJOR-2): a failing compare
-     *       REVOKES a previously-set validated bit, so a fresher frame corrects a
-     *       staler one's over-validation instead of being ratcheted out by it (frames
-     *       can land out of order across a dimension excursion or a mid-session
-     *       manager rebuild, and the dirty-broadcast heal channel does not reach a
-     *       player who was elsewhere at drain time). The cost direction is the
-     *       doctrine's: a stale frame can only cause redundant re-asks (which resolve
-     *       up_to_date off the warm tscache), never a false clean.</li>
-     *   <li><b>Mark-preserving</b>: touches ONLY {@code validated} bits — dirty and
-     *       retry marks survive, and dirty outranks validated in {@link #classify},
-     *       so a dirty notice racing the summary in either order still re-asks.</li>
+     *   <li><b>Two-directional but PROVENANCE-SCOPED</b> (final review, client lens
+     *       MAJOR-1/2): a failing compare revokes only bits THIS mechanism set
+     *       ({@code summaryValidated}), so a fresher frame corrects a staler one's
+     *       over-validation — while the server's per-column {@code onReceived}/
+     *       {@code onUpToDate} proofs are strictly stronger evidence than a coarse
+     *       tile stamp and are never downgraded by one (revoking them would turn
+     *       every field warm-rejoin — where recent regions' headers postdate the
+     *       client's stamps — into a full-disc redundant re-declaration). Ordering
+     *       note: fresh-then-stale frame delivery is unreachable in-session (one
+     *       MIN_PRIORITY sweeper assembling in admission order, a FIFO ready queue,
+     *       TCP, latest-wins buffering), so a stale frame can only OVER-validate —
+     *       which the next fresher frame now corrects, and which classify's dirty
+     *       rung outranks meanwhile.</li>
+     *   <li><b>Revocations are reported to the caller</b> ({@code revokedOut}) so the
+     *       manager can reopen their rings — a revoked position below the scanner's
+     *       confirmed prefix is otherwise structurally outside both walk intervals
+     *       and never re-declares (the orphan the final review demonstrated).</li>
+     *   <li><b>Mark-preserving</b>: touches ONLY validated bits — dirty and retry
+     *       marks survive, and dirty outranks validated in {@link #classify}, so a
+     *       dirty notice racing the summary in either order still re-asks.</li>
      *   <li><b>Never creates leaves</b>: a hostile/stale frame must not allocate;
      *       unstamped positions (all-air 0-stamps, session-satisfied, pruned, fresh
-     *       installs) are untouchable by construction — they classify exactly as
-     *       today. Session-satisfied positions are excluded even when they retain a
-     *       positive stamp (their validated bit is never read, and counting them
-     *       would inflate {@code columns_validated}).</li>
+     *       installs) are untouchable by construction. Session-satisfied positions
+     *       are excluded even when they retain a positive stamp.</li>
      *   <li><b>Sentinel handling is the CALLER's job</b>: pass only real margined
-     *       stamps or {@code 0} (no region — every positive stamp validates); a
-     *       NEVER_CLEAN tile must be skipped before this call.</li>
+     *       stamps; BOTH sentinels must be skipped before this call — NEVER_CLEAN
+     *       (doubt) and NO_REGION (no evidence: a region absent from a booted
+     *       server's listing may have been deleted while the server was OFF, and
+     *       validating cached stamps against "no file" seals that deleted terrain
+     *       forever — the final honesty review's MAJOR-1).</li>
      * </ul>
      * A 32×32 tile is exactly 4×4 leaves; the walk is mask math + one array scan per
      * stamped-position-bearing leaf.
      */
-    TileValidation applyTileValidation(int tileX, int tileZ, long stampM) {
+    TileValidation applyTileValidation(int tileX, int tileZ, long stampM,
+                                       java.util.function.LongConsumer revokedOut) {
         int validated = 0;
         boolean fully = true;
         int lx0 = tileX << 2, lz0 = tileZ << 2;
         for (int lz = lz0; lz < lz0 + 4; lz++) {
             for (int lx = lx0; lx < lx0 + 4; lx++) {
-                Leaf leaf = this.leaves.get(PositionUtil.packPosition(lx, lz));
+                long leafKey = PositionUtil.packPosition(lx, lz);
+                Leaf leaf = this.leaves.get(leafKey);
                 if (leaf == null) continue;
                 long stamped = leaf.positiveTs & ~leaf.sessionSatisfied;
                 if (stamped == 0) continue;
@@ -343,19 +364,29 @@ class ColumnStateMap {
                     long b = 1L << bit;
                     if (leaf.ts[bit] > stampM) {
                         if ((leaf.validated & b) == 0) setBits |= b;
-                    } else {
+                    } else if ((leaf.validated & b) == 0) {
+                        fully = false; // unvalidated residue — re-declares per column
+                    } else if ((leaf.summaryValidated & b) != 0) {
                         fully = false;
-                        if ((leaf.validated & b) != 0) clearBits |= b;
+                        clearBits |= b; // revoke ONLY the summary's own earlier claim
+                        if (revokedOut != null) revokedOut.accept(positionFor(leafKey, bit));
                     }
+                    // else: a per-column server proof outranks the coarse tile stamp.
                 }
                 if (setBits != 0 || clearBits != 0) {
                     leaf.validated = (leaf.validated | setBits) & ~clearBits;
+                    leaf.summaryValidated = (leaf.summaryValidated | setBits) & ~clearBits;
                     leaf.recomputeNeeds();
                     validated += Long.bitCount(setBits);
                 }
             }
         }
         return new TileValidation(validated, fully);
+    }
+
+    /** Test convenience: the production caller always passes a revocation consumer. */
+    TileValidation applyTileValidation(int tileX, int tileZ, long stampM) {
+        return applyTileValidation(tileX, tileZ, stampM, null);
     }
 
     /** Test seam: the "never creates leaves" pin's observable. */
@@ -472,6 +503,7 @@ class ColumnStateMap {
         clearRetry(leaf, m);
         tsPut(leaf, bit, columnTimestamp);
         leaf.validated |= m;
+        leaf.summaryValidated &= ~m; // upgraded to a per-column proof — un-revocable
         leaf.recomputeNeeds();
     }
 
@@ -507,6 +539,7 @@ class ColumnStateMap {
             }
         } else {
             leaf.validated |= m;
+            leaf.summaryValidated &= ~m; // upgraded to a per-column proof — un-revocable
         }
         leaf.recomputeNeeds();
     }
@@ -621,6 +654,7 @@ class ColumnStateMap {
             // Either way: session-satisfied so it stops re-downloading THIS session.
             setSessionSatisfied(leaf, m);
             leaf.validated &= ~m;
+            leaf.summaryValidated &= ~m;
             clearRetry(leaf, m);
             clearDirty(leaf, m);
             this.clearedResync.remove(packed);
@@ -638,6 +672,7 @@ class ColumnStateMap {
             // honest. Counts net zero: put swaps one >0 stamp (T_clear) for another (T_content).
             tsPut(leaf, bit, clearPreStamp);
             leaf.validated &= ~m;
+            leaf.summaryValidated &= ~m;
             clearDirty(leaf, m);
             setRetry(leaf, m);
             leaf.recomputeNeeds();
@@ -648,6 +683,7 @@ class ColumnStateMap {
         tsPut(leaf, bit, -1L);
         this.persistentRemovals.add(packed); // deliberate delete — must reach the file
         leaf.validated &= ~m;
+        leaf.summaryValidated &= ~m;
         clearDirty(leaf, m);
         setRetry(leaf, m);
         leaf.recomputeNeeds();
@@ -694,6 +730,7 @@ class ColumnStateMap {
                 clearRetry(leaf, m);
                 clearSessionSatisfied(leaf, m);
                 leaf.validated &= ~m;
+                leaf.summaryValidated &= ~m;
                 leaf.staleInFlight &= ~m;
                 changed = true;
             }

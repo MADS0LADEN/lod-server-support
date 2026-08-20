@@ -1111,6 +1111,14 @@ public class PaperRequestProcessingService {
             }, (uuid, frame) -> {
                 var player = this.server.getPlayerList().getPlayer(uuid);
                 if (player == null) return false; // disconnected while assembling — uncounted
+                // The far-player lane's writability discipline (final review F2): an
+                // unwritable channel DROPS the frame uncounted — the client falls back
+                // to per-column revalidation, exactly today's behavior.
+                var snap = PaperChannelPressure.forPlayer(player).snapshot();
+                if (snap.writable() == dev.vox.lss.common.processing.ChannelPressureProbe
+                        .Writability.NOT_WRITABLE) {
+                    return false;
+                }
                 return PaperPayloadHandler.sendRegionSummary(player, frame);
             });
         } catch (Exception e) {

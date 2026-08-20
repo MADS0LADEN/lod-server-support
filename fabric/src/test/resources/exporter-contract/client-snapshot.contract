@@ -38,6 +38,7 @@ server_enabled=boolean
 session_version=int
 summary.columns_validated=long
 summary.tiles_clean=long
+summary.tiles_no_region=long
 summary.tiles_stale=long
 summary.tiles_unknown=long
 tracker_in_flight=int

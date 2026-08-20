@@ -158,9 +158,10 @@ public abstract class ServerConfigBase extends JsonConfig {
      * {@code lss:region_summary_req} frames with per-region freshness stamp windows so
      * an upgraded client validates the clean bulk of its cached disc in one exchange
      * instead of re-declaring ~1M positions over minutes. Checked in the HANDLER (not
-     * just channel advertisement), so a runtime flip applies to connected clients: off
-     * = requests are silently dropped and clients fall back to per-column
-     * revalidation (exactly the pre-summary behavior).
+     * just channel advertisement), though boot-set in practice — the key is not in the
+     * {@code /lsslod set} registry, so a flip needs a restart. Off = requests are
+     * silently dropped and clients fall back to per-column revalidation (exactly the
+     * pre-summary behavior).
      */
     public boolean enableRegionSummaries = true;
 

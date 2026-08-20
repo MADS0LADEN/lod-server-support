@@ -244,7 +244,8 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                 // Region summaries (P2 §5): decode on the messenger thread (pure — a
                 // Folia region thread is fine, no entity access), offer into the
                 // latest-wins mailbox; the pump reads player state at admission. The
-                // kill switch is HANDLER-checked (flips apply to connected clients).
+                // kill switch is HANDLER-checked; boot-set in practice (not in the
+                // /lsslod set registry — a flip needs a restart).
                 data -> service.handleRegionSummaryRequest(nmsPlayer.getUUID(), data));
     }
 

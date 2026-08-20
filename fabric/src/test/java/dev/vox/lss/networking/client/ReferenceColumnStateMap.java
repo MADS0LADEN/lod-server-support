@@ -28,6 +28,9 @@ class ReferenceColumnStateMap {
     private final LongOpenHashSet dirty = new LongOpenHashSet();
     private final LongOpenHashSet retry = new LongOpenHashSet();
     private final LongOpenHashSet validated = new LongOpenHashSet();
+    // Provenance twin (final review, client lens MAJOR-2): bits set by tile validation,
+    // revocable; server per-column proofs are not. Subset of `validated`.
+    private final LongOpenHashSet summaryValidated = new LongOpenHashSet();
     private final LongOpenHashSet sessionSatisfied = new LongOpenHashSet();
     private final LongOpenHashSet staleInFlight = new LongOpenHashSet();
     private final Long2IntOpenHashMap ingestFailures = new Long2IntOpenHashMap();
@@ -98,6 +101,7 @@ class ReferenceColumnStateMap {
         this.retry.remove(packed);
         put(packed, columnTimestamp);
         this.validated.add(packed);
+        this.summaryValidated.remove(packed); // upgraded to a per-column proof
     }
 
     void onUpToDate(long packed) {
@@ -113,6 +117,7 @@ class ReferenceColumnStateMap {
             }
         } else {
             this.validated.add(packed);
+            this.summaryValidated.remove(packed); // upgraded to a per-column proof
         }
     }
 
@@ -152,6 +157,7 @@ class ReferenceColumnStateMap {
             }
             this.sessionSatisfied.add(packed);
             this.validated.remove(packed);
+        this.summaryValidated.remove(packed);
             this.retry.remove(packed);
             this.dirty.remove(packed);
             this.clearedResync.remove(packed);
@@ -161,6 +167,7 @@ class ReferenceColumnStateMap {
         if (clearPreStamp > 0) {
             put(packed, clearPreStamp);
             this.validated.remove(packed);
+        this.summaryValidated.remove(packed);
             this.dirty.remove(packed);
             this.retry.add(packed);
             return;
@@ -171,6 +178,7 @@ class ReferenceColumnStateMap {
         if (old > 0) this.receivedCount--;
         else if (old == 0) this.emptyCount--;
         this.validated.remove(packed);
+        this.summaryValidated.remove(packed);
         this.dirty.remove(packed);
         this.retry.add(packed);
     }
@@ -191,6 +199,7 @@ class ReferenceColumnStateMap {
         pruneSet(this.dirty, playerCx, playerCz, pruneDistance);
         pruneSet(this.retry, playerCx, playerCz, pruneDistance);
         pruneSet(this.validated, playerCx, playerCz, pruneDistance);
+        pruneSet(this.summaryValidated, playerCx, playerCz, pruneDistance);
         pruneSet(this.sessionSatisfied, playerCx, playerCz, pruneDistance);
         pruneSet(this.staleInFlight, playerCx, playerCz, pruneDistance);
         var failIter = this.ingestFailures.long2IntEntrySet().fastIterator();
@@ -231,6 +240,7 @@ class ReferenceColumnStateMap {
         this.dirty.clear();
         this.retry.clear();
         this.validated.clear();
+        this.summaryValidated.clear();
         this.sessionSatisfied.clear();
         this.staleInFlight.clear();
         this.ingestFailures.clear();
@@ -291,4 +301,36 @@ class ReferenceColumnStateMap {
     int receivedCount() { return this.receivedCount; }
     int emptyCount() { return this.emptyCount; }
     int dirtyCount() { return this.dirty.size(); }
+
+    /** The provenance-scoped tile-validation twin (final review MAJOR-1/2): validate
+     *  strictly-newer stamps as SUMMARY provenance; revoke ONLY summary-set bits on a
+     *  failing compare (server per-column proofs survive); report revocations. Returns
+     *  {newlyValidated, fullyValidated ? 1 : 0}. */
+    long[] applyTileValidation(int tileX, int tileZ, long stampM,
+                               java.util.function.LongConsumer revokedOut) {
+        long newly = 0;
+        boolean fully = true;
+        int cx0 = tileX << 5, cz0 = tileZ << 5;
+        for (int cz = cz0; cz < cz0 + 32; cz++) {
+            for (int cx = cx0; cx < cx0 + 32; cx++) {
+                long packed = dev.vox.lss.common.PositionUtil.packPosition(cx, cz);
+                long ts = this.timestamps.get(packed);
+                if (ts <= 0 || this.sessionSatisfied.contains(packed)) continue;
+                if (ts > stampM) {
+                    if (this.validated.add(packed)) {
+                        this.summaryValidated.add(packed);
+                        newly++;
+                    }
+                } else if (!this.validated.contains(packed)) {
+                    fully = false;
+                } else if (this.summaryValidated.contains(packed)) {
+                    fully = false;
+                    this.validated.remove(packed);
+                    this.summaryValidated.remove(packed);
+                    if (revokedOut != null) revokedOut.accept(packed);
+                }
+            }
+        }
+        return new long[]{newly, fully ? 1 : 0};
+    }
 }

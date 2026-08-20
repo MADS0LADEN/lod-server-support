@@ -1,6 +1,17 @@
 # Plan: warm-revalidation acceleration — read-path freshness rungs + region-summary sync
 
-**Status:** v2.0 2026-08-19 — the SYNTHESIS of the five-reviewer round (2 Fable:
+**Status:** IMPLEMENTED 2026-08-20 on `feat/region-summary-sync` (P1 + P2, three
+changesets, each 3-Opus-reviewed, plus a final 2-Fable + 3-Opus branch panel —
+all findings folded). CLAUDE.md's `RegionStampTable`/`RegionSummaryService`/
+`LodRequestManager` entries are the AS-BUILT record; where this document and
+CLAUDE.md disagree, CLAUDE.md wins. §5/§6 below carry inline as-built corrections
+from the folds. **P0 was not run as a separate rig session**: P1 landed on its
+standing independent justification, and the eviction-regime measurement became a
+permanent live gate instead (`summary_evicted.sh` / `evicted-tscache-rejoin` —
+header_hits ≈ up_to_date ≈ 2k, re-download bounded to the poisoned residue), which
+measures the rung's win on every run rather than once.
+
+Plan lineage: v2.0 2026-08-19 — the SYNTHESIS of the five-reviewer round (2 Fable:
 protocol honesty, integration; 3 Opus: adversarial, performance, design
 alternatives) over the v1.0 draft. **v1.0's client-side watermark/sidecar design is
 REPLACED** (see §13 — the alternatives review's Fact A made it unnecessary, and the
@@ -82,10 +93,12 @@ rungs, both answering the existing `up_to_date` response:
 - **Header rung**: on a ts>0 request that missed the tscache, consult the region
   header's per-chunk save second (a per-region **memoized** 8 KiB header read — the
   `readHeaderTimestamps` machinery; memo invalidated by mtime change and by the
-  save hook, shared with §5's table). `headerSecond < clientTimestamp` (STRICT —
-  same-second fails toward serving, the store deposit's R1-M2 discipline) ⇒
-  `up_to_date`, skipping the read AND the send. Refresh the tscache stamp from the
-  answer so the next re-ask hits the cheap rung.
+  save hook, shared with §5's table). As-built the compare is MARGINED, not bare:
+  `clientTimestamp >= headerSecond + HEADER_FRESH_MARGIN_SECONDS` ⇒ `up_to_date`
+  (see the honesty argument below — a bare strict compare validates exactly the
+  raced reads), skipping the read AND the send. Refresh the tscache stamp from the
+  answer (monotonic max, at the margined bound + 1) so the next re-ask hits the
+  cheap rung.
 
 **Honesty argument (corrected at implementation — the P1 3-Opus fold).** The
 original draft claimed read-START stamping; in fact the wire/tscache stamp
@@ -139,8 +152,13 @@ round showed was unnecessary:
   never ratcheted — §6).
 - **Hard decode caps as constants** (the FarPlayerWire discipline):
   `MAX_SUMMARY_TILE_RADIUS = ceil(MAX_LOD_DISTANCE/32)+1 = 65` checked at DECODE on
-  both sides (long arithmetic — `(2r+1)²` overflows int at hostile radii), dimension
-  string ≤ 256 UTF-8 bytes, `requireDrained`, unknown version byte → drop. Tier-1
+  both sides (long arithmetic — `(2r+1)²` overflows int at hostile radii), plus the
+  as-built `MAX_SUMMARY_TILE_ABS = 2_000_000` CENTER-domain bound in both compact
+  constructors (the final panel's hostile-center finding: an extreme center passes
+  the radius cap but overflows the tile walk's `tileX<<2` leaf arithmetic — AIOOBE
+  server-side, leaf aliasing client-side), dimension string ≤ 256 UTF-8 bytes, a
+  remaining-bytes floor before the stamp-array allocation, `requireDrained`,
+  unknown version byte → drop. Tier-1
   hostile-decode twins of the FarPlayerWire suite (negative/overflow radius,
   truncation, trailing bytes, oversized dimension).
 - Census/registration touch-list (verified): both `WireParityTests` channel
@@ -157,15 +175,22 @@ performance M2/M3 — three independent derivations of the same fix): the summar
 answer is per-dimension data; only the window is per-player.
 
 **The table.** Per dimension: `regionPos → {seenMtimeSecond, maxHeaderSecond,
-liveSaveMark}` in a concurrent map owned by ONE dedicated single-thread daemon
-(`RegionStampSweeper`, MIN_PRIORITY — the `StoreBackfill` restraint precedent).
-**Never the reader pool** (bounded queue + abort policy, the single-submitter
-`hasHeadroom` contract, thread-stealing below gate K — all verified; the disk gate
-does not even see stats).
+liveSaveMark}` in a concurrent map. As-built naming/threading (no
+`RegionStampSweeper` class exists): the table is `common/region/RegionStampTable`,
+and the SUMMARY sweeper is a dedicated MIN_PRIORITY daemon inside
+`RegionSummaryService` (the `StoreBackfill` restraint precedent), lazily started
+on the first offered request. Summary sweeps never touch the reader pool (bounded
+queue + abort policy, the single-submitter `hasHeadroom` contract — the disk gate
+does not even see stats); the ONE exemption is the P1 chunk rung itself, whose
+memoized 8 KiB header read runs inline on the asking reader thread — bounded,
+horizon-cached, and cheaper than the region read it replaces.
 
 - **Seeding**: on a dimension's first demand, ONE `readdir` of its region directory
-  (never N constructed-path probes — sparse worlds pay for what exists), then stat +
-  header-read per present file, once per server lifetime. The region-dir resolver
+  (never N constructed-path probes — sparse worlds pay for what exists). As-built
+  this is lazier than planned: the readdir existence listing is taken once per STAT
+  HORIZON (5 s) per dimension, and header reads happen lazily per-ask, memoized
+  with mtime-`!=` invalidation — there is no boot-time stat+header sweep of every
+  present file. The region-dir resolver
   is HOISTED out of the store branch (`RequestProcessingService:229` builds it only
   when `storeMode != OFF` today, and the compiled store default is off — v1.0 would
   have silently no-opped on most servers; integration M2) and shared with the
@@ -186,8 +211,17 @@ does not even see stats).
   `DirtyColumnTracker` probe — is DELETED; `drainDirty` clears unconditionally
   every interval, so it never was a superset of unsaved change). The hook's P3 skip
   gate is harmless: anything it skips is recovered by the stat/header refresh.
-- **Reported stamp** `M = max(maxHeaderSecond, liveSaveMark)`; missing region = 0;
-  any doubt = `NEVER_CLEAN`. Every rung fails toward stale.
+- **Reported stamp** — as-built the mark is a LATCH, never max'd into the stamp
+  (the final panel's raced-read proof, and its clear side carries a one-horizon
+  grace): while `liveSaveMark > maxHeaderSecond` the whole region answers
+  `NEVER_CLEAN` (comparing client stamps against mark TIME is unsound — a read
+  racing the pending write hands out stamps NEWER than the mark carrying
+  PRE-change bytes), and the FIRST observation of the clear condition still
+  answers `NEVER_CLEAN` for one STAT_HORIZON (a sibling chunk's same-second
+  landing can clear the latch while the marked write is still pending). Reported
+  `M = maxHeaderSecond` once honest, `+ FRESH_CLAIM_MARGIN_SECONDS` on the wire;
+  missing region = 0 ONLY for never-observed absence on a listable dir (§7's
+  no-evidence doctrine); any doubt = `NEVER_CLEAN`. Every rung fails toward stale.
 
 **Request handling.** The request lands on the platform's normal ingress (Paper:
 `dispatchPluginMessage` on whatever thread — on Folia a region thread — so it is
@@ -242,6 +276,28 @@ toward revalidation, mirroring P1's margin). Leaf math: per leaf, candidates =
   positions, plus a dedicated pin that a dirty/retry-marked position inside a
   validated tile still re-asks. Never creates leaves (adversarial m2 — a hostile
   frame must not allocate; pinned).
+- **Provenance-scoped and two-directional, as-built** (the final panel's two client
+  MAJORs, whose individual fixes would each make the other worse): summary
+  validation sets a `summaryValidated` mask (a subset of `validated`); a fresher
+  frame whose margined stamp a position's stamp no longer clears REVOKES the bit —
+  but ONLY summary-provenance bits: a per-column server proof (`onReceived`/
+  `onUpToDate`, which upgrade by clearing `summaryValidated`) is never downgraded
+  by a tile claim. Revoked positions are reported to the caller
+  (`applyTileValidation`'s `LongConsumer`), and `applySummary` reopens each one's
+  scanner ring — a revoked position below the confirmed prefix would otherwise be
+  orphaned until a full scanner reset. `fullyValidated` treats server-proofed
+  conflicts as non-residue. Frame ordering is honest without sequencing: a stale
+  frame can only OVER-validate, the reachable order (stale-then-fresh) is corrected
+  by the fresher frame's revocation, and classify's dirty rung outranks validation
+  meanwhile. Dirty notices arriving DURING a dimension's cache load are queued
+  (`dirtyDuringCacheLoad`) and re-marked (+ ring reopened) after `adoptLoaded` and
+  the ingest-failure re-applies, strictly before the buffered frame applies.
+- **Both sentinels are skipped client-side** (the final honesty review's
+  no-evidence doctrine): `STAMP_NEVER_CLEAN` counts `tiles_unknown`,
+  `STAMP_NO_REGION` counts `tiles_no_region` — the server's never-observed scope is
+  server-lifetime only, so "no region" also describes a region deleted while the
+  server was off, and validating cached stamps against it would seal deleted
+  terrain forever (never re-asked ⇒ never regenerated).
 - **Per-column granularity degrades gracefully**: a stale tile still validates every
   column acquired after its last change — the busy-server regime where v1.0's
   all-or-nothing tile rule collapsed to zero benefit.
@@ -268,8 +324,8 @@ toward revalidation, mirroring P1's margin). Leaf math: per leaf, candidates =
   `summary.*`-inert mirror of the far-player all-snapshots check.
 
 **Counter attributability** (performance m8): client diag gains a `Summary:` line
-(tiles clean/stale/unknown, columns validated) and the server diag a summary
-counter group, so operators see WHY `re_resolved`/`up_to_date` collapse on
+(tiles clean/stale/unknown/no_region, columns validated) and the server diag a
+summary counter group, so operators see WHY `re_resolved`/`up_to_date` collapse on
 upgraded pairs instead of reading it as breakage.
 
 ## 7. Honesty analysis (what remains after the reshape)
@@ -300,10 +356,13 @@ upgraded pairs instead of reading it as breakage.
   region whose header carries no valid save second (all-absent chunks — the
   residue of a chunk-delete pass; its `maxHeaderSecond == 0` would otherwise alias
   the sentinel on the wire). Residuals accepted and stated: absence-after-presence
-  detection is server-lifetime-scoped (a region deleted while the server is OFF
-  reads as never-observed on the next boot — same as today's tscache, which also
-  dies with the restart... today heals via the read path's not-found → generation,
-  and so does this, because the client re-asks whatever it cannot validate); and a
+  detection is server-lifetime-scoped — a region deleted while the server is OFF
+  reads as never-observed on the next boot (NOTE, corrected at the final panel:
+  the tscache does NOT share this scope — it persists across restarts via
+  `world/data/lss-timestamps.bin` — which is exactly why the CLIENT must skip
+  `STAMP_NO_REGION` rather than validate against it; with that skip in place the
+  claim "the client re-asks whatever it cannot validate" is enforced, and the
+  deleted region heals via the read path's not-found → generation); and a
   single chunk deleted INSIDE a surviving region is invisible at tile granularity
   (poisoning on any absent slot would kill the feature — sparse regions are mostly
   absent slots). The per-CHUNK rung is unaffected: an absent chunk's header slot
@@ -311,23 +370,32 @@ upgraded pairs instead of reading it as breakage.
 
 ## 8. Observability, laws, harness (P2)
 
-- Server: `summary.requests`, `summary.tiles_{known,never_clean}`,
-  `summary.range_filtered`, `summary.bytes`, sweeper `summary.refresh_ms` high-water.
-  Client: `summary.tiles_{clean,stale,unknown}`, `summary.columns_validated`.
-  Exporter + BOTH contract files + `PaperSoakMetricsExporter` parity +
-  `check_soak.py` KNOWN keys + `DiagnosticsFormatter` (+tests) — the verified
-  touch-list, priced in §10.
+- Server (as-built): `summary.requests`, `summary.range_filtered`,
+  `summary.frames`, `summary.tiles_{known,never_clean,no_region}`, `summary.bytes`,
+  sweeper `summary.refresh_ms_hw` high-water (`tiles_no_region` is its own
+  disposition — a whole-window no_region reading is the resolver-gone-wrong
+  signal). Client: `summary.tiles_{clean,stale,unknown,no_region}`,
+  `summary.columns_validated`. Exporter + BOTH contract files +
+  `PaperSoakMetricsExporter` parity + `check_soak.py` KNOWN keys +
+  `DiagnosticsFormatter` (+tests) — the verified touch-list, priced in §10.
 - Laws unaffected structurally (suppression removes client asks; server
   dispositions stay conserved); the quiescence/traffic-floor exposure is closed by
-  the property gate (§6). New scenarios: `warm-rejoin-summary` (premise:
-  `summary.columns_validated` ≈ the stamped disc, `requests_received` under an
-  ABSOLUTE ceiling — cross-scenario comparisons are inexpressible in the checker)
-  and `dirty-while-offline-summary` (the false-clean canary: the offline edit's
-  column must re-serve while the rest validates). Both run on
-  `SOAK_PLATFORM=paper`/`folia` too — the Paper twin's live gate (integration m1;
-  the no-cheap-unit-test doctrine).
-- Tier 2: one server gametest (crafted summary request → response shape → stale
-  tile re-serve), joining the `fabric-gametest` entrypoint. Tier 1: everything in
+  the property gate (§6). Scenarios as-built (three, plus the chain): `warm-rejoin-summary`
+  (bulk validation + the t195 poison honesty leg + a SELF-SCALING suppression pin —
+  `requested_total < columns.known` — plus an absolute ceiling; server volume
+  ceilings on requests/frames/bytes/range_filtered), `dirty-while-offline-summary`
+  (the false-clean canary: the offline edit's column must re-serve while the
+  control stays equal), and `evicted-tscache-rejoin` (phase 2 of
+  `summary_evicted.sh` — the P1 header rung's live gate). Platform coverage
+  as-built: `warm-rejoin-summary` joins the Paper AND Folia sets (the sweeper's
+  live Bukkit gate — integration m1, the no-cheap-unit-test doctrine);
+  `dirty-while-offline-summary` stays Fabric-only like its namesake (console
+  setblock fires no Bukkit event); the evicted chain is Fabric-only (Bukkit's
+  split world dirs — see summary_evicted.sh's header).
+- Tier 2 (as-built): `regionFreshnessServesRealRegionHeaders` — header rung + tile
+  stamps + the whole summary pipeline against REAL game-written region files
+  (terminal-pass shutdown — the static-mask-manager stomping hazard), in the
+  `fabric-gametest` entrypoint. Tier 1: everything in
   §3/§4/§6 plus the sweeper's rungs against a temp region dir (mtime inequality,
   header refresh, degenerate mtimes 0/negative/future → NEVER_CLEAN — adversarial
   A10 — and int-formatted, range-checked region filenames — adversarial m5).
@@ -340,6 +408,9 @@ upgraded pairs instead of reading it as breakage.
 - P1 has no config (it is a correctness-preserving optimization of an existing
   path; the flag would be `useHeaderFreshnessRung` ONLY if review of the
   implementation wants a field lever — decide at implementation review).
+  As-built: DECIDED, no lever — none of the four reviews asked for one, every
+  doubt path fails toward serving, and `evicted-tscache-rejoin` gates the rung
+  live on every chain run.
 
 ## 10. Effort (re-priced against the verified touch-lists)
 

@@ -110,8 +110,13 @@ public final class RegionSummaryService {
         this.sweeper = new Thread(this::sweeperLoop, Brand.shortName() + " Region Summary Sweeper");
         this.sweeper.setDaemon(true);
         this.sweeper.setPriority(Thread.MIN_PRIORITY);
-        this.sweeper.start();
+        // LAZY start on the first request (final review F3): a config-disabled server
+        // and every throwaway test wiring never pay an idle daemon, and the thread can
+        // only observe a fully-constructed instance (no ctor this-escape).
     }
+
+    private final java.util.concurrent.atomic.AtomicBoolean sweeperStarted =
+            new java.util.concurrent.atomic.AtomicBoolean();
 
     public RegionSummaryDiagnostics diagnostics() {
         return this.diag;
@@ -122,6 +127,9 @@ public final class RegionSummaryService {
      * CALLER's job (the handler-checked kill switch); this only stores pure data.
      */
     public void offerRequest(UUID player, RegionSummaryWire.Request request) {
+        if (this.sweeperStarted.compareAndSet(false, true) && !this.shutdown) {
+            this.sweeper.start();
+        }
         this.diag.recordRequest();
         this.pending.put(player, new Pending(request, this.nanoClock.getAsLong() + PENDING_TTL_NANOS));
     }

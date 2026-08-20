@@ -59,22 +59,22 @@
     },
     {
       "anchor": 1,
-      "at": 212,
+      "at": 211,
       "cmd": "forceload add 576 -64"
     },
     {
       "anchor": 1,
-      "at": 213,
+      "at": 212,
       "cmd": "setblock 580 310 -60 minecraft:stone"
     },
     {
       "anchor": 1,
-      "at": 215,
+      "at": 213,
       "cmd": "save-all"
     },
     {
       "anchor": 1,
-      "at": 217,
+      "at": 214,
       "cmd": "forceload remove 576 -64"
     }
   ],

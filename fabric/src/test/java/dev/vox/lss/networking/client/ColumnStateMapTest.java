@@ -942,15 +942,60 @@ class ColumnStateMapTest {
     }
 
     @Test
-    void tileValidationHandlesTheNoRegionZeroStamp() {
-        // STAMP_NO_REGION (0): every positive stamp validates — a never-observed region
-        // holds nothing the client's stamps could be stale against.
+    void tileValidationWithAZeroFloorValidatesEveryPositiveStamp() {
+        // stampM = 0 as a margined FLOOR validates even the minimum positive stamp.
+        // NOTE this is the map-level compare only: the manager never passes the wire's
+        // STAMP_NO_REGION sentinel here — "no region file" is NO EVIDENCE, not a claim
+        // (a region deleted while the server was OFF also reads never-observed, and
+        // validating cached stamps against it would seal the deleted terrain forever —
+        // the final honesty review's MAJOR-1; the sentinel skip is pinned at the
+        // manager level).
         var loaded = new Long2LongOpenHashMap();
-        loaded.put(POS, 1L); // even the minimum positive stamp
+        loaded.put(POS, 1L);
         map.loadFrom(loaded);
         var outcome = map.applyTileValidation(POS_TILE_X, POS_TILE_Z, 0L);
         assertEquals(1, outcome.newlyValidated());
         assertEquals(SATISFIED, map.classify(POS));
+    }
+
+    @Test
+    void tileValidationNeverRevokesServerPerColumnProofs() {
+        // Provenance scoping (final review, client lens MAJOR-2): onUpToDate/onReceived
+        // proofs are strictly stronger evidence than a coarse tile stamp — a failing
+        // frame compare must not downgrade them, or one warm-rejoin frame (whose tile
+        // headers postdate the client's stamps on every recently-saved region) revokes
+        // the whole freshly-answered disc into a redundant re-declaration.
+        var loaded = new Long2LongOpenHashMap();
+        loaded.put(POS, 7000L);
+        map.loadFrom(loaded);
+        map.onUpToDate(POS); // the server's per-column proof
+        var outcome = map.applyTileValidation(POS_TILE_X, POS_TILE_Z, 9999L);
+        assertEquals(0, outcome.newlyValidated());
+        assertTrue(outcome.fullyValidated(),
+                "a server-proofed position is not residue — it will not re-declare");
+        assertEquals(SATISFIED, map.classify(POS), "the proof survives the tile stamp");
+
+        // And a RECEIVED column's proof survives identically.
+        long pos2 = PositionUtil.packPosition(11, -3);
+        map.onReceived(pos2, 7000L);
+        map.applyTileValidation(POS_TILE_X, POS_TILE_Z, 9999L);
+        assertEquals(SATISFIED, map.classify(pos2));
+    }
+
+    @Test
+    void tileValidationReportsRevokedPositionsToTheCaller() {
+        // The revocation consumer (final review, client lens MAJOR-1): a revoked
+        // position may sit below the scanner's confirmed prefix, so the caller must
+        // learn WHICH positions to reopen — silence orphans them until a full reset.
+        var loaded = new Long2LongOpenHashMap();
+        loaded.put(POS, 7000L);
+        map.loadFrom(loaded);
+        map.applyTileValidation(POS_TILE_X, POS_TILE_Z, 0L); // summary-validates
+        var revoked = new java.util.ArrayList<Long>();
+        map.applyTileValidation(POS_TILE_X, POS_TILE_Z, 9999L, revoked::add);
+        assertEquals(java.util.List.of(POS), revoked,
+                "exactly the revoked position, as its packed coordinate");
+        assertEquals(7000L, map.classify(POS), "and it re-declares");
     }
 
     @Test

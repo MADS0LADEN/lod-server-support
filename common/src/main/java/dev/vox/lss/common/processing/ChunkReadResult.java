@@ -89,7 +89,8 @@ public record ChunkReadResult(UUID playerUuid, int chunkX, int chunkZ,
 
     /**
      * The header freshness rung's answer (region-summary-sync-plan.md P1): the region
-     * header (max'd with the live save mark) proves this chunk's on-disk content last
+     * header (with the live save mark as a LATCH — never max'd in: a marked-but-unlanded
+     * write voids every claim for the region instead) proves this chunk's on-disk content last
      * changed at {@code stampSeconds}, which the submitting client's stamp strictly
      * exceeds — the read was skipped. {@code columnTimestamp} carries the stamp so the
      * delivery side can (a) re-verify per dedup recipient (an attached player's stamp
