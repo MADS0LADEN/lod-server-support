@@ -83,6 +83,35 @@ public class LodRequestManager {
     // Edge-trigger for the decode-backpressure clear: exactly one empty batch per halt episode.
     private boolean backpressureClearSent = false;
 
+    // --- Region summaries (region-summary-sync-plan.md §6) ---
+    /** Send seam for the fire-and-forget C2S request (the lss:client_info doctrine:
+     *  legacy servers discard the unregistered channel; a send failure never matters). */
+    interface SummarySender {
+        void send(byte[] requestBody) throws Exception;
+    }
+
+    private SummarySender summarySender = body -> dev.vox.lss.platform.LoaderServices.get()
+            .sendToServer(new dev.vox.lss.networking.payloads.RegionSummaryRequestC2SPayload(body));
+    /** The S2C frame buffered while this dimension's cache load is in flight (LATEST
+     *  wins — a re-entered dimension's fresh frame replaces a stale one). Applied right
+     *  after {@code adoptLoaded} + the buffered ingest-failure re-applies. */
+    private byte[] pendingSummaryFrame;
+    // Attributability counters (§6/§8): why re_resolved/up_to_date collapse on upgraded
+    // pairs. Main client thread only; exported as the client summary.* group.
+    private long summaryTilesClean;
+    private long summaryTilesStale;
+    private long summaryTilesUnknown;
+    private long summaryColumnsValidated;
+    /** Harness gate (the far-player capability precedent): soak/benchmark clients never
+     *  request, so no scenario baseline can shift; the summary scenarios opt back in
+     *  via -Dlss.soak.summary. Seam for tests. */
+    java.util.function.BooleanSupplier summaryHarnessGate = () ->
+            (Boolean.getBoolean("lss.soak") || Boolean.getBoolean("lss.benchmark"))
+                    && !Boolean.getBoolean("lss.soak.summary");
+    /** CURRENT-dialect gate (the far-player/fast-cadence v16 doctrine): only a v20
+     *  session requests. Seam for tests. */
+    IntSupplier summarySessionVersion = ClientNetGlue::getSessionVersion;
+
     // Tier B v16 backward-compat (docs/planning/v16-client-compat-design.md §4). When true, the
     // egress rewrites a first-serve request stamp (<=0) to 0 — v16's generate-on-miss trigger —
     // so a legacy protocol-16 server generates cold columns instead of serving load-only. The
@@ -315,7 +344,7 @@ public class LodRequestManager {
                          int viewDistance, int columnQueueSize, long columnQueueBytes,
                          int ingestBacklogSections, IntSupplier missingVanilla) {
         this.lastIngestBacklog = ingestBacklogSections;
-        tickDimensionAndCachePhase(currentDim);
+        tickDimensionAndCachePhase(currentDim, playerCx, playerCz);
         tickMovementPhase(playerCx, playerCz);
         this.metrics.updateRollingRates();
         boolean halted = haltedByBackpressure(columnQueueSize, columnQueueBytes,
@@ -402,13 +431,17 @@ public class LodRequestManager {
         }
     }
 
-    /** Dimension change: flush state, reload cache. First tick starts the initial load. */
-    void tickDimensionAndCachePhase(ResourceKey<Level> currentDim) {
+    /** Dimension change: flush state, reload cache, and fire the region-summary request
+     *  in parallel with the load (§6 — the position is this tick's, so a portal's 8×
+     *  coordinate scale centers the window correctly). First tick starts the initial load. */
+    void tickDimensionAndCachePhase(ResourceKey<Level> currentDim, int playerCx, int playerCz) {
         if (this.lastDimension != null && !currentDim.equals(this.lastDimension)) {
             this.onDimensionChange(currentDim);
+            sendRegionSummaryRequest(currentDim, playerCx, playerCz);
         } else if (!this.cacheLoaded) {
             this.cacheLoaded = true;
             startAsyncCacheLoad(currentDim);
+            sendRegionSummaryRequest(currentDim, playerCx, playerCz);
         }
         this.lastDimension = currentDim;
     }
@@ -510,6 +543,14 @@ public class LodRequestManager {
                     this.columns.onIngestFailed(failed);
                 }
                 this.failuresDuringCacheLoad.clear();
+            }
+            if (this.pendingSummaryFrame != null) {
+                // The buffered summary applies strictly AFTER the failure re-applies:
+                // an unstamped position has no candidate bit, so a failure can never be
+                // sealed validated by a frame that raced the load.
+                byte[] frame = this.pendingSummaryFrame;
+                this.pendingSummaryFrame = null;
+                onRegionSummaryFrame(frame);
             }
         }
         return true;
@@ -684,13 +725,92 @@ public class LodRequestManager {
         return true;
     }
 
-    /** Region-summary S2C frame (region-summary-sync-plan.md §6). Wiring stub for the
-     *  server changeset: the client never REQUESTS yet, so no frame arrives in
-     *  production; the full client half (decode, dimension check, per-column
-     *  mark-preserving validation, buffered apply behind the cache load) lands with
-     *  the P2 client changeset. */
+    /**
+     * Region-summary S2C frame (region-summary-sync-plan.md §6). Kill switch checked at
+     * APPLY too (never request, never apply — a mid-session flip stops both halves);
+     * malformed frames drop contained; a frame for another dimension drops (the entire
+     * anti-stale binding — a same-dimension stale frame is harmless because stamps are
+     * only ever COMPARED, never ratcheted); a frame racing this dimension's cache load
+     * is BUFFERED (latest wins) and applied right after {@code adoptLoaded} — validating
+     * before the stamps exist would be a silent no-op and lose the whole exchange.
+     */
     public void onRegionSummaryFrame(byte[] body) {
+        if (!LSSClientConfig.CONFIG.enableRegionSummarySync) return;
+        if (this.lastDimension == null) return;
+        dev.vox.lss.common.region.RegionSummaryWire.Summary summary;
+        try {
+            summary = dev.vox.lss.common.region.RegionSummaryWire.decodeSummary(body);
+        } catch (Exception e) {
+            LSSLogger.debug("Malformed region summary dropped: " + e.getMessage());
+            return;
+        }
+        if (!this.lastDimension.identifier().toString().equals(summary.dimension())) return;
+        if (this.pendingCacheLoad != null) {
+            this.pendingSummaryFrame = body;
+            return;
+        }
+        applySummary(summary);
     }
+
+    /** Decoded-and-dimension-checked apply: per-tile, per-column validation. */
+    private void applySummary(dev.vox.lss.common.region.RegionSummaryWire.Summary summary) {
+        int r = summary.tileRadius();
+        long validatedTotal = 0;
+        int i = 0;
+        for (int tz = summary.centerTileZ() - r; tz <= summary.centerTileZ() + r; tz++) {
+            for (int tx = summary.centerTileX() - r; tx <= summary.centerTileX() + r; tx++) {
+                long stamp = summary.stampSeconds()[i++];
+                if (stamp == dev.vox.lss.common.region.RegionSummaryWire.STAMP_NEVER_CLEAN) {
+                    this.summaryTilesUnknown++;
+                    continue;
+                }
+                var outcome = this.columns.applyTileValidation(tx, tz, stamp);
+                validatedTotal += outcome.newlyValidated();
+                if (outcome.fullyValidated()) this.summaryTilesClean++;
+                else this.summaryTilesStale++;
+            }
+        }
+        this.summaryColumnsValidated += validatedTotal;
+        if (ClientTraceLog.enabled()) {
+            ClientTraceLog.event("summary", "\"tiles\":" + (i)
+                    + ",\"validated\":" + validatedTotal);
+        }
+    }
+
+    /**
+     * Fire the summary request at dimension entry, in PARALLEL with the async cache
+     * load (§6: the RTT hides in the merge-save → load dead window; the response, if it
+     * beats the load, is buffered). Fire-and-forget: no gating, no timeout, no retry —
+     * a lost frame = today's per-column behavior. Gated on the client kill switch, the
+     * CURRENT dialect, and the harness property gate.
+     */
+    private void sendRegionSummaryRequest(ResourceKey<Level> dimension, int playerCx, int playerCz) {
+        this.pendingSummaryFrame = null; // a new dimension invalidates any buffered frame
+        if (!LSSClientConfig.CONFIG.enableRegionSummarySync) return;
+        if (this.summaryHarnessGate.getAsBoolean()) return;
+        if (this.summarySessionVersion.getAsInt() != LSSConstants.PROTOCOL_VERSION) return;
+        int lod = this.scanner.getEffectiveLodDistance();
+        int radius = Math.min(dev.vox.lss.common.region.RegionSummaryWire.MAX_SUMMARY_TILE_RADIUS,
+                (lod + 31) / 32 + 1);
+        try {
+            this.summarySender.send(dev.vox.lss.common.region.RegionSummaryWire.encodeRequest(
+                    new dev.vox.lss.common.region.RegionSummaryWire.Request(
+                            dimension.identifier().toString(),
+                            playerCx >> 5, playerCz >> 5, radius)));
+            if (ClientTraceLog.enabled()) {
+                ClientTraceLog.event("summary_req", "\"r\":" + radius);
+            }
+        } catch (Exception e) {
+            LSSLogger.debug("Region-summary request send failed: " + e.getMessage());
+        }
+    }
+
+    public long getSummaryTilesClean() { return this.summaryTilesClean; }
+    public long getSummaryTilesStale() { return this.summaryTilesStale; }
+    public long getSummaryTilesUnknown() { return this.summaryTilesUnknown; }
+    public long getSummaryColumnsValidated() { return this.summaryColumnsValidated; }
+
+    void setSummarySenderForTest(SummarySender sender) { this.summarySender = sender; }
 
     public void onDirtyColumns(long[] dirtyPositions) {
         if (ClientTraceLog.enabled() && dirtyPositions.length > 0) {

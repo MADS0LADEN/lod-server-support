@@ -41,13 +41,18 @@ ALL_SCENARIOS=(fresh-backfill warm-rejoin dimension-trip dirty-broadcast
                cold-restart-resync enabled-false teleport-prune
                dirty-range-filter dirty-during-backfill dirty-while-offline
                clearcache-mid-session dimension-rejoin-warm store-second-join
-               store-save-storm)
+               store-save-storm warm-rejoin-summary dirty-while-offline-summary)
 # Scenarios ported to Paper. The remaining ones are Fabric-specific for now: the dirty-*
 # family leans on the save-hook + DirtyContentFilter (Paper's dirty detection is
 # event-driven — paper-dirty-falling-block is the Paper-native dirty scenario),
 # cold-restart-resync restores a Fabric-layout world/cache snapshot pair, and the
 # stress/config scenarios simply haven't been validated on Paper yet.
-PAPER_SCENARIOS=(fresh-backfill warm-rejoin dimension-trip paper-dirty-falling-block)
+# warm-rejoin-summary is in the Bukkit sets per the no-cheap-unit-test doctrine (the
+# summary sweeper's live Paper/Folia gate); dirty-while-offline-summary stays Fabric-only
+# like its namesake — its console setblock fires no Bukkit event, so the Paper tscache
+# would answer the probe stale (the documented unfired-event staleness bound).
+PAPER_SCENARIOS=(fresh-backfill warm-rejoin dimension-trip warm-rejoin-summary
+                 paper-dirty-falling-block)
 # Folia runs the identical Paper scenario set: same plugin jar, same timelines, same checker.
 # save-all steps are mapped to acknowledged no-ops by the driver (Folia unregisters the
 # command); an aggressive bukkit.yml autosave keeps chunks flushing mid-run instead.
@@ -64,7 +69,10 @@ STORE_STANDALONE_SCENARIOS=(store-second-join)
 # Phases of scripts/store_offline_edit.sh (populate -> offline mutate -> verify, chained
 # via SOAK_WORLD_FROM). Valid standalone invocations on fabric AND paper, but excluded
 # from every 'all' list: mutate/verify are meaningless without the carried world.
-PHASE_SCENARIOS=(store-offline-populate store-offline-mutate store-offline-verify)
+# evicted-tscache-rejoin is likewise phase 2 of scripts/summary_evicted.sh (the P1
+# header-rung live gate) — it hard-requires the warm-rejoin-summary carried world.
+PHASE_SCENARIOS=(store-offline-populate store-offline-mutate store-offline-verify
+                 evicted-tscache-rejoin)
 # Paper-only, AFTER the Folia copy above so Folia does not inherit it (the store is
 # unvalidated on Folia): console setblock fires no Bukkit event, so only the store's
 # periodic resweep (lodStoreResweepSeconds) can catch the edit — the unfired-event
@@ -162,6 +170,7 @@ case "$SCENARIO" in
     store-offline-populate|store-offline-mutate|store-offline-verify) ;;
     store-migration-join) ;;
     store-save-storm|store-save-storm-off) ;;
+    warm-rejoin-summary|dirty-while-offline-summary|evicted-tscache-rejoin) ;;
     paper-dirty-falling-block|paper-store-unfired-event) ;;
     *)
         echo "[soak] ERROR: Unknown scenario '$SCENARIO'"
@@ -216,6 +225,33 @@ case "$SCENARIO" in
     dirty-during-backfill)      CLIENT_RUNS=1; EXPECTED_SECONDS=240 ;;
     dirty-while-offline)        CLIENT_RUNS=2; EXPECTED_SECONDS=420
                                 CLIENT_EXTRA_ARGS=("-Psoak.probes=20:0,-20:0") ;;
+    warm-rejoin-summary)        CLIENT_RUNS=2; EXPECTED_SECONDS=470
+                                # Region summaries (region-summary-sync-plan.md §8): run 1
+                                # generates the 9-tile disc around mid-tile chunk (16,16),
+                                # then the 150s clearcache re-serves it so the cached stamps
+                                # CLEAR the freshness margin over every already-settled
+                                # region header (a serve-then-save stamp never can). Run 2
+                                # (too short for the action to re-fire) validates the disc
+                                # off one summary frame; only the player's own tile — the
+                                # kick-save — may stay stale.
+                                CLIENT_EXTRA_ARGS=("-Psoak.summary=true"
+                                                   "-Psoak.clientActionAt=150:clearcache") ;;
+    dirty-while-offline-summary) CLIENT_RUNS=2; EXPECTED_SECONDS=480
+                                # The false-clean canary: warm-rejoin-summary's shape plus
+                                # an offline edit in chunk (36,-4) (tile (1,-1)). The edited
+                                # tile must NOT validate (probe 36:-4 rises) while the
+                                # control tile does (probe -4:36 stays exactly equal).
+                                CLIENT_EXTRA_ARGS=("-Psoak.summary=true"
+                                                   "-Psoak.clientActionAt=150:clearcache"
+                                                   "-Psoak.probes=36:-4,-4:36") ;;
+    evicted-tscache-rejoin)     CLIENT_RUNS=1; EXPECTED_SECONDS=260
+                                # P1 header-rung live gate (chained phase 2 — run via
+                                # scripts/summary_evicted.sh, which carries the
+                                # warm-rejoin-summary world forward): a fresh server boot
+                                # with world/data/lss-timestamps.bin DELETED re-resolves the
+                                # whole-disc ts>0 re-declare through the region-header rung
+                                # (disk.header_hits) instead of a full re-download.
+                                ;;
     clearcache-mid-session)     CLIENT_RUNS=1; EXPECTED_SECONDS=280
                                 CLIENT_EXTRA_ARGS=("-Psoak.clientActionAt=60:clearcache") ;;
     store-second-join)
@@ -355,6 +391,19 @@ if [[ -n "${SOAK_WORLD_FROM:-}" ]]; then
 elif [[ " $FRESH_WORLD_SCENARIOS " != *" $SCENARIO "* ]]; then
     cp -r "$BASE_WORLD_DIR"/world* "$SERVER_RUN_DIR"/
 fi
+if [[ "$SCENARIO" == "evicted-tscache-rejoin" ]]; then
+    if [[ -z "${SOAK_WORLD_FROM:-}" ]]; then
+        echo "[soak] ERROR: evicted-tscache-rejoin is phase 2 of scripts/summary_evicted.sh"
+        echo "[soak]        (needs the warm-rejoin-summary world carried via SOAK_WORLD_FROM"
+        echo "[soak]        — the plain base world's headers all postdate its cached stamps,"
+        echo "[soak]        so the header rung would legitimately answer nothing)"
+        exit 1
+    fi
+    # The P1 premise: boot with an EMPTY timestamp cache so every ts>0 re-declare
+    # falls through to the region-header freshness rung instead of the tscache.
+    rm -f "$SERVER_RUN_DIR/world/data/lss-timestamps.bin"
+    echo "[soak] evicted-tscache-rejoin: deleted world/data/lss-timestamps.bin (empty-tscache boot)"
+fi
 
 # Step 5b: Stage client column cache. warm-rejoin clears too: its run 1 IS the
 # cache-populating run (otherwise, under 'all' ordering, run 1 starts warm from the
@@ -383,6 +432,12 @@ fi
 case "$SCENARIO" in
     dirty-broadcast)
         echo "[soak] Keeping client column cache"
+        ;;
+    evicted-tscache-rejoin)
+        # Phase 2 of summary_evicted.sh: the cache carries the phase-1 clearcache
+        # re-serve stamps — clearing it would turn the run into a cold resync and the
+        # header rung would never be consulted (ts<=0 declares skip it by design).
+        echo "[soak] Keeping client column cache (carried from warm-rejoin-summary)"
         ;;
     cold-restart-resync)
         echo "[soak] Restoring client column cache from $BASE_WORLD_DIR/client-cache"

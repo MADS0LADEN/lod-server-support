@@ -551,6 +551,17 @@ public final class BenchmarkMetricsExporter {
         scan.put("valve_trips", manager != null ? manager.getValveTrips() : 0L);
         result.put("scan", scan);
 
+        // Region summaries (region-summary-sync-plan.md §6/§8): the client half's
+        // attributability counters — tiles by disposition + columns validated. Additive
+        // top-level group (check_soak treats unknown client keys as an aggregated
+        // warning until registered; the KNOWN set carries it).
+        var summary = new LinkedHashMap<String, Object>();
+        summary.put("tiles_clean", manager != null ? manager.getSummaryTilesClean() : 0L);
+        summary.put("tiles_stale", manager != null ? manager.getSummaryTilesStale() : 0L);
+        summary.put("tiles_unknown", manager != null ? manager.getSummaryTilesUnknown() : 0L);
+        summary.put("columns_validated", manager != null ? manager.getSummaryColumnsValidated() : 0L);
+        result.put("summary", summary);
+
         // Declared-and-unanswered (the awaiting-answer set), replaced per scan.
         result.put("tracker_in_flight", manager != null ? manager.getPendingCount() : 0);
 

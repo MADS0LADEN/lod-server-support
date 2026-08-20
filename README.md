@@ -69,6 +69,7 @@ Config files are generated during first run at `config/lss-server-config.json` o
 | `lodYieldsToVanillaTransport` | `true` | Pause LOD sending to a player while their connection is backed up, so vanilla packets always go first |
 | `enablePingBackstop` | `true` | Cut a player's LOD rate when their ping spikes, keeping gameplay responsive on slow connections |
 | `enableSendPacing` | `true` | Smooth LOD sending into small per-tick slices instead of bursts |
+| `enableRegionSummaries` | `true` | Answer clients' region-summary requests at join/dimension entry: one small frame tells a returning client which areas are unchanged, so it skips re-checking terrain it already has instead of re-asking column by column |
 | `lodStore` | `"on"` (new installs) | Keeps a compressed copy of every served LOD column in `<world>/lss-lod/` and serves repeat requests from it, which is far less CPU and disk work per chunk. The cost: it roughly doubles your world folder. Generated as `"on"` for brand-new servers; on an upgraded server whose config file doesn't have the key, it stays `"off"` until you enable it. See **Server Performance Tuning** |
 | `lodStoreBackfill` | `true` | Pre-warms the store with a low-priority background walk of your existing world, so the first player to arrive already gets fast serves. Inert unless `lodStore` is on. Yields to players, pauses under load, resumes across restarts. Not available on Paper |
 | `lodStoreMaxMB` | `0` | Size cap for the store. `0` = uncapped; set a value to bound it, and the oldest columns are evicted first |

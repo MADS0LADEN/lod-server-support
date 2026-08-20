@@ -214,6 +214,10 @@ loom {
             vmArg "-Dlss.soak.probes=${findProperty('soak.probes') ?: ''}"
             vmArg "-Dlss.soak.clientActionAt=${findProperty('soak.clientActionAt') ?: ''}"
             vmArg "-Dlss.soak.dialect=${findProperty('soak.dialect') ?: ''}"
+            // Region summaries (region-summary-sync-plan.md §6): -Dlss.soak gates the
+            // client OFF requesting so no baseline shifts; the summary scenarios opt
+            // back in with -Psoak.summary=true.
+            vmArg "-Dlss.soak.summary=${findProperty('soak.summary') ?: 'false'}"
             programArg "--quickPlayMultiplayer"
             // Overridable so the same task doubles as the FARP live-gate dummy against
             // a test-server.sh instance (harness runs keep the default and are

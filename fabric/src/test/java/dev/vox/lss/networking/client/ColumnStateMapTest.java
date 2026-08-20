@@ -872,4 +872,129 @@ class ColumnStateMapTest {
         assertFalse(map.hasRetries());
         assertEquals(0, map.dirtyCount());
     }
+
+    // ---- region-summary tile validation (region-summary-sync-plan.md §6) ----
+
+    /** POS = (10,-3) → leaf (0,-1) → tile (0,-1) (a 32×32 tile is 4×4 leaves). */
+    private static final int POS_TILE_X = 10 >> 5;
+    private static final int POS_TILE_Z = -3 >> 5;
+
+    @Test
+    void tileValidationIsStrictlyAboveTheMarginedStamp() {
+        var loaded = new Long2LongOpenHashMap();
+        loaded.put(POS, 7000L);
+        map.loadFrom(loaded);
+        // Equal is NOT newer: the wire stamp is a margined upper bound, and a stamp AT
+        // the bound could be a raced read's — the strict compare is the honesty line.
+        var equal = map.applyTileValidation(POS_TILE_X, POS_TILE_Z, 7000L);
+        assertEquals(0, equal.newlyValidated());
+        assertFalse(equal.fullyValidated(), "the residue marks the tile stale");
+        assertEquals(7000L, map.classify(POS), "still revalidates per column");
+
+        var below = map.applyTileValidation(POS_TILE_X, POS_TILE_Z, 6999L);
+        assertEquals(1, below.newlyValidated());
+        assertTrue(below.fullyValidated());
+        assertEquals(SATISFIED, map.classify(POS), "validated — no resync ask");
+    }
+
+    @Test
+    void tileValidationPreservesDirtyAndRetryMarks() {
+        var loaded = new Long2LongOpenHashMap();
+        loaded.put(POS, 7000L);
+        map.loadFrom(loaded);
+        map.markDirtyIfKnown(POS);
+        var outcome = map.applyTileValidation(POS_TILE_X, POS_TILE_Z, 0L);
+        assertEquals(1, outcome.newlyValidated(),
+                "the stamp validates — validation is about FRESHNESS, not about marks");
+        assertEquals(7000L, map.classify(POS),
+                "dirty outranks validated: a dirty notice racing the summary in either"
+                        + " order still re-asks");
+
+        long pos2 = PositionUtil.packPosition(11, -3);
+        var loaded2 = new Long2LongOpenHashMap();
+        loaded2.put(pos2, 7000L);
+        map.loadFrom(loaded2);
+        map.markRetry(pos2);
+        map.applyTileValidation(POS_TILE_X, POS_TILE_Z, 0L);
+        assertEquals(7000L, map.classify(pos2), "retry outranks validated too");
+    }
+
+    @Test
+    void tileValidationNeverCreatesLeaves() {
+        assertEquals(0, map.leafCountForTest());
+        var outcome = map.applyTileValidation(0, 0, 0L);
+        assertEquals(0, outcome.newlyValidated());
+        assertTrue(outcome.fullyValidated(), "an empty tile has no residue");
+        assertEquals(0, map.leafCountForTest(),
+                "a hostile/stale frame must not allocate client state");
+    }
+
+    @Test
+    void tileValidationSkipsUnstampedStates() {
+        // Session-satisfied (NOT_GENERATED park) has no positive stamp — untouchable.
+        map.onNotGenerated(POS);
+        var outcome = map.applyTileValidation(POS_TILE_X, POS_TILE_Z, 0L);
+        assertEquals(0, outcome.newlyValidated());
+        assertTrue(outcome.fullyValidated());
+        assertEquals(SATISFIED, map.classify(POS), "parked exactly as before");
+        assertTrue(map.markDirtyIfKnown(POS), "the dirty revival path survives");
+        assertEquals(-1L, map.classify(POS));
+    }
+
+    @Test
+    void tileValidationHandlesTheNoRegionZeroStamp() {
+        // STAMP_NO_REGION (0): every positive stamp validates — a never-observed region
+        // holds nothing the client's stamps could be stale against.
+        var loaded = new Long2LongOpenHashMap();
+        loaded.put(POS, 1L); // even the minimum positive stamp
+        map.loadFrom(loaded);
+        var outcome = map.applyTileValidation(POS_TILE_X, POS_TILE_Z, 0L);
+        assertEquals(1, outcome.newlyValidated());
+        assertEquals(SATISFIED, map.classify(POS));
+    }
+
+    @Test
+    void tileValidationResidueKeepsPerColumnRevalidation() {
+        long newer = PositionUtil.packPosition(12, -3);
+        var loaded = new Long2LongOpenHashMap();
+        loaded.put(POS, 5000L);
+        loaded.put(newer, 9000L);
+        map.loadFrom(loaded);
+        var outcome = map.applyTileValidation(POS_TILE_X, POS_TILE_Z, 6000L);
+        assertEquals(1, outcome.newlyValidated(), "only the strictly-newer stamp");
+        assertFalse(outcome.fullyValidated());
+        assertEquals(SATISFIED, map.classify(newer));
+        assertEquals(5000L, map.classify(POS),
+                "the residue re-declares per column — graceful degradation, never a hole");
+    }
+
+    @Test
+    void tileValidationIsEquivalentToUpToDateForMarkFreeStampedPositions() {
+        // The §6 differential: for MARK-FREE stamped positions, validating via a tile
+        // stamp M must classify exactly like the per-column up_to_date answer the
+        // server would have sent for a strictly-newer stamp (and like NO answer
+        // otherwise). Seeded random stamps across one tile.
+        var rng = new java.util.Random(0x5EED);
+        long stampM = 5000L;
+        var viaSummary = new ColumnStateMap();
+        var viaAnswers = new ColumnStateMap();
+        var loaded = new Long2LongOpenHashMap();
+        long[] positions = new long[64];
+        long[] stamps = new long[64];
+        for (int i = 0; i < 64; i++) {
+            positions[i] = PositionUtil.packPosition(i % 32, i / 32); // distinct, one tile
+            stamps[i] = 1 + rng.nextInt(10_000);
+            loaded.put(positions[i], stamps[i]);
+        }
+        viaSummary.loadFrom(loaded);
+        viaAnswers.loadFrom(loaded);
+        viaSummary.applyTileValidation(0, 0, stampM);
+        for (int i = 0; i < 64; i++) {
+            if (stamps[i] > stampM) viaAnswers.onUpToDate(positions[i]);
+        }
+        for (int i = 0; i < 64; i++) {
+            assertEquals(viaAnswers.classify(positions[i]), viaSummary.classify(positions[i]),
+                    "position " + i + " (stamp " + stamps[i] + " vs M " + stampM + ")");
+        }
+    }
 }

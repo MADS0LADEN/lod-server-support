@@ -159,6 +159,17 @@ public final class ClientCommandActions {
                 manager.getQuadRingSkips(), manager.getValveTrips()
         )).withStyle(ChatFormatting.GRAY));
 
+        // Region summaries (§6 attributability): rendered once any summary applied —
+        // why the want-set skipped revalidating the clean bulk after this rejoin.
+        if (manager.getSummaryTilesClean() + manager.getSummaryTilesStale()
+                + manager.getSummaryTilesUnknown() > 0) {
+            feedback.accept(Component.literal(String.format(
+                    "Summary: tiles clean=%d stale=%d unknown=%d, columns_validated=%d",
+                    manager.getSummaryTilesClean(), manager.getSummaryTilesStale(),
+                    manager.getSummaryTilesUnknown(), manager.getSummaryColumnsValidated()
+            )).withStyle(ChatFormatting.GRAY));
+        }
+
         // Budget line (ingest_backlog: the consumer-reported pending sections driving the
         // #71 taper/halt; -1 = no consumer reports. rate_cap: the manual column-rate cap,
         // 0=off; rate_gated: TICKS the cap's spacing gate held a would-be fast fire back

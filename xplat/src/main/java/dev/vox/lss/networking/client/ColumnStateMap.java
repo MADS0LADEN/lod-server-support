@@ -288,6 +288,67 @@ class ColumnStateMap {
         return leaf == null || leaf.needs != 0;
     }
 
+    /** One tile's validation outcome (region-summary-sync-plan.md §6): how many stamps
+     *  were newly validated, and whether ANY stamped position in the tile remains
+     *  unvalidated (the tile is then "stale" — its residue re-declares per column). */
+    record TileValidation(int newlyValidated, boolean fullyValidated) {}
+
+    /**
+     * Region-summary validation (region-summary-sync-plan.md §6): for every STAMPED
+     * position in the 32×32-chunk tile at ({@code tileX}, {@code tileZ}), set
+     * {@code validated} iff its stamp is STRICTLY above the reported tile stamp
+     * {@code stampM} (the wire value already carries the server's serve-latency
+     * margin, so this compare inherits the raced-read protection). Load-bearing
+     * properties, each pinned:
+     * <ul>
+     *   <li><b>Mark-preserving</b>: touches ONLY {@code validated} bits — dirty and
+     *       retry marks survive, and dirty outranks validated in {@link #classify},
+     *       so a dirty notice racing the summary in either order still re-asks.</li>
+     *   <li><b>Never creates leaves</b>: a hostile/stale frame must not allocate;
+     *       unstamped positions (all-air 0-stamps, session-satisfied, pruned, fresh
+     *       installs) are untouchable by construction — they classify exactly as
+     *       today.</li>
+     *   <li><b>Sentinel handling is the CALLER's job</b>: pass only real margined
+     *       stamps or {@code 0} (no region — every positive stamp validates); a
+     *       NEVER_CLEAN tile must be skipped before this call.</li>
+     * </ul>
+     * A 32×32 tile is exactly 4×4 leaves; the walk is mask math + one array scan per
+     * candidate-bearing leaf.
+     */
+    TileValidation applyTileValidation(int tileX, int tileZ, long stampM) {
+        int validated = 0;
+        boolean fully = true;
+        int lx0 = tileX << 2, lz0 = tileZ << 2;
+        for (int lz = lz0; lz < lz0 + 4; lz++) {
+            for (int lx = lx0; lx < lx0 + 4; lx++) {
+                Leaf leaf = this.leaves.get(PositionUtil.packPosition(lx, lz));
+                if (leaf == null) continue;
+                long candidates = leaf.positiveTs & ~leaf.validated;
+                if (candidates == 0) continue;
+                long newly = 0;
+                for (long m = candidates; m != 0; m &= m - 1) {
+                    int bit = Long.numberOfTrailingZeros(m);
+                    if (leaf.ts[bit] > stampM) {
+                        newly |= 1L << bit;
+                    } else {
+                        fully = false;
+                    }
+                }
+                if (newly != 0) {
+                    leaf.validated |= newly;
+                    leaf.recomputeNeeds();
+                    validated += Long.bitCount(newly);
+                }
+            }
+        }
+        return new TileValidation(validated, fully);
+    }
+
+    /** Test seam: the "never creates leaves" pin's observable. */
+    int leafCountForTest() {
+        return this.leaves.size();
+    }
+
     void markSessionSatisfied(long packed) {
         Leaf leaf = leafForCreate(packed);
         setSessionSatisfied(leaf, 1L << bitIndexFor(packed));
