@@ -19,13 +19,16 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * Pins the stamped-up_to_date server flow (stamped-up-to-date-plan.md §3/§9).
  *
- * <p>SITE pins (the §9.1 narrowing): ONLY the compare-backed rungs consult the stamp
- * source and produce stamped actions — the delivery-path header-fresh and store-stamp
- * conversions here (the router's tscache rung shares the same 5-arg construction,
- * pinned via the tscache round-trip case), each labeled with the RESULT's dimension.
- * The never-stamp 3-arg form ships an ordinary up_to_date and no frame — the done-bit
- * rung and every cannot-improve flavor construct it, so a frame for them cannot exist
- * by type.
+ * <p>SITE pins (the §9.1 narrowing, as re-narrowed by the 3-Opus fold to TWO rungs):
+ * only the router's tscache rung and the header-fresh delivery consult the stamp
+ * source and produce stamped actions — the header-fresh site live here, the tscache
+ * rung via the tscache round-trip case (a store-hit delivery stamps the tscache, the
+ * re-declare draws the rung's up_to_date + a frame), each labeled with the RESULT's
+ * dimension. The store-stamp conversion is pinned NEVER-STAMP (its own doctrine:
+ * delivery honesty, never a fabricated fresh stamp). The never-stamp 3-arg form ships
+ * an ordinary up_to_date and no frame — the done-bit rung and every cannot-improve
+ * flavor construct it. The site CENSUS (exactly two 5-arg construction sites, in the
+ * two named methods) is enforced by {@link #stampedSiteCensusHoldsTheNarrowing}.
  *
  * <p>DRAIN pins (§3/§9.5): stamped actions accumulate per (player, dimension), flush
  * as ColumnStampsWire frames through the sink ONLY for eligible players, SPLIT at the
@@ -256,8 +259,10 @@ class StampedUpToDateFlowTest {
     void headerFreshDeliveryStampsWithTheSourceSecond() throws Exception {
         var rig = new Rig();
         try {
-            rig.proc.setUpToDateStampSource((dim, packed) -> {
+            rig.proc.setUpToDateStampSource((player, dim, packed) -> {
                 assertEquals(DIM, dim, "the predicate sees the RESULT's dimension");
+                assertEquals(rig.uuid, player, "the predicate sees the recipient (the "
+                        + "platform short-circuits on stamps eligibility first)");
                 return NOW + 7;
             });
             rig.proc.start();
@@ -298,7 +303,7 @@ class StampedUpToDateFlowTest {
     void predicateRefusalShipsUpToDateWithNoFrame() throws Exception {
         var rig = new Rig();
         try {
-            rig.proc.setUpToDateStampSource((dim, packed) -> -1L); // pending mark / latch
+            rig.proc.setUpToDateStampSource((player, dim, packed) -> -1L); // pending mark / latch
             rig.proc.start();
             rig.state.enqueue(new IncomingRequest(7, 7, NOW - 50));
             rig.postSnapshot();
@@ -313,17 +318,160 @@ class StampedUpToDateFlowTest {
         }
     }
 
+    @Test
+    void tscacheRungStampsOnTheReDeclare() throws Exception {
+        var rig = new Rig();
+        try {
+            rig.proc.setUpToDateStampSource((player, dim, packed) -> NOW + 3);
+            rig.proc.start();
+            // Serve once via a store hit (stamps the tscache at NOW-50)...
+            rig.state.enqueue(new IncomingRequest(4, 4, -1L));
+            rig.postSnapshot();
+            waitFor(() -> rig.state.hasPendingRequest(4, 4), "pending admission");
+            rig.inject(new ChunkReadResult(rig.uuid, 4, 4, new byte[]{1, 2, 3, 4}, DIM,
+                    64, NOW - 50, false, false, false, true, 1L, 0L));
+            rig.postSnapshot();
+            waitFor(() -> !rig.state.hasPendingRequest(4, 4), "delivery");
+            // The delivery set the done-bit, and the done-bit rung answers a ts>0
+            // re-declare BEFORE the tscache rung (and never stamps, by design). The
+            // live heal happens on REJOIN — the done-bit dies with the session while
+            // the tscache survives — so model that by clearing it through the
+            // processor's own mailbox route.
+            rig.proc.clearDiskReadDone(rig.uuid, new long[]{PositionUtil.packPosition(4, 4)});
+            rig.postSnapshot();
+            waitFor(() -> !rig.state.hasDiskReadDone(4, 4), "done-bit clear applied");
+            // ...then a ts>0 re-declare at the served stamp draws the ROUTER's tscache
+            // rung (cachedTs <= clientTs): up_to_date + a stamped frame. This is the
+            // rung that produces essentially all of the live heal.
+            rig.state.enqueue(new IncomingRequest(4, 4, NOW - 50));
+            rig.postSnapshot();
+            drainUntil(rig, r -> !r.frames.isEmpty());
+            var d = ColumnStampsWire.decode(rig.frames.get(0).frame(), NOW + 100);
+            assertEquals(DIM, d.dimension());
+            assertArrayEquals(new long[]{PositionUtil.packPosition(4, 4)}, d.packedPositions());
+            assertArrayEquals(new long[]{NOW + 3}, d.stampSeconds());
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
+    @Test
+    void storeStampConversionNeverStamps() throws Exception {
+        // The 3-Opus re-narrowing: a store hit converting to up_to_date (stored stamp
+        // <= the recipient's stamp) must ship NO frame — a re-serve would hand the
+        // STORED acquisition second, so a "verified now" stamp here would claim
+        // strictly more than the bytes the rung declined to send.
+        var rig = new Rig();
+        try {
+            rig.proc.setUpToDateStampSource((player, dim, packed) -> NOW + 3);
+            rig.proc.start();
+            rig.state.enqueue(new IncomingRequest(6, 6, NOW - 10));
+            rig.postSnapshot();
+            waitFor(() -> rig.state.hasPendingRequest(6, 6), "pending admission");
+            rig.inject(new ChunkReadResult(rig.uuid, 6, 6, new byte[]{1, 2, 3, 4}, DIM,
+                    64, NOW - 50, false, false, false, true, 1L, 0L)); // fromStore, stored <= client
+            rig.postSnapshot();
+            drainUntil(rig, r -> !r.responses.isEmpty());
+            rig.drainOnce();
+            assertEquals(0, rig.frames.size(), "the store rung is never-stamp by doctrine");
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
+    @Test
+    void stampedSiteCensusHoldsTheNarrowing() throws Exception {
+        // The §9.1 narrowing's enforcement (3-Opus fold: "the least-pinned thing in
+        // the change"): exactly TWO 5-arg ColumnUpToDate construction sites may exist
+        // in the processing package, and only in the two compare-backed methods. A
+        // third stamped site (or one moved elsewhere) must red HERE, not in review.
+        var dir = java.nio.file.Path.of("../common/src/main/java/dev/vox/lss/common/processing");
+        if (!java.nio.file.Files.isDirectory(dir)) {
+            dir = java.nio.file.Path.of("common/src/main/java/dev/vox/lss/common/processing");
+        }
+        var pattern = java.util.regex.Pattern.compile(
+                "new SendAction\\.ColumnUpToDate\\([^;]*?stampSource\\(\\)", java.util.regex.Pattern.DOTALL);
+        int stamped = 0;
+        StringBuilder where = new StringBuilder();
+        try (var files = java.nio.file.Files.list(dir)) {
+            for (var f : files.filter(x -> x.toString().endsWith(".java")).toList()) {
+                String src = java.nio.file.Files.readString(f);
+                var m = pattern.matcher(src);
+                while (m.find()) {
+                    stamped++;
+                    where.append(f.getFileName()).append(' ');
+                }
+            }
+        }
+        assertEquals(2, stamped, "exactly the two compare-backed rungs may stamp "
+                + "(router tscache + header-fresh delivery); found in: " + where);
+    }
+
+    @Test
+    void stampsFrameFlushesBeforeTheBatchResponse() {
+        // Load-bearing order (3-Opus fold): FIFO delivery applies the ratchet BEFORE
+        // the same tick's onUpToDate consumes retry/dirty marks, keeping the client's
+        // mark-skip armor live for the same-tick pair. A well-meaning "flush stamps
+        // last" refactor must red here.
+        var rig = new Rig();
+        try {
+            var order = new ArrayList<String>();
+            rig.proc.enqueueSendActionForTest(stamped(rig, 3, -4, NOW));
+            rig.proc.drainSendActions((s, types, positions, count) -> order.add("batch"),
+                    new OffThreadProcessor.StampsSink<>() {
+                        @Override public boolean eligible(UUID u) { return true; }
+                        @Override public void send(TestState s, byte[] frame, int entries) {
+                            order.add("stamps");
+                        }
+                    });
+            assertEquals(List.of("stamps", "batch"), order);
+        } finally {
+            rig.proc.shutdown();
+        }
+    }
+
     // ---- predicate pin: the dirty-tracker half (§9.2) ----
 
     @Test
-    void trackerIsPendingTracksTheMarkToDrainWindow() {
+    void theEventBlindStateStampsByAcceptedDesign() {
+        // Plan §9.3, pinned as DELIBERATE (3-Opus fold's middle option — the
+        // paper-store-unfired-event canary is structurally impossible, its soak
+        // client is summary-gated off): a content change that fires NO dirty mark
+        // (Paper's unfired-event class) is invisible to BOTH predicate guards — no
+        // pending mark, no armed latch — so the platform predicate STAMPS. This is
+        // the accepted residual: the resulting seal holds until the chunk's next
+        // save advances the header past the stamp; the store resweep bounds the
+        // store-rung arm. If this test starts failing because a guard now catches
+        // the shape, update plan §9.3 — the residual shrank.
+        var tracker = new DirtyColumnTracker();
+        long packed = PositionUtil.packPosition(3, 3);
+        // The platform composition (both service lambdas): eligibility short-circuit
+        // is modeled true; then isPending, then the latch.
+        assertFalse(tracker.isPending(DIM, packed), "no mark — the event never fired");
+        // No RegionStampTable entry either (no mark ever bumped it) — the latch half
+        // answers false for an unexamined region (pinned in RegionStampTableTest).
+        // Composed outcome: the predicate returns a positive second — the seal.
+        long second = tracker.isPending(DIM, packed) ? -1L : System.currentTimeMillis() / 1000L;
+        assertTrue(second > 0, "the event-blind state stamps — the ACCEPTED residual");
+    }
+
+    @Test
+    void trackerIsPendingSpansMarkToInvalidationApply() {
+        // TWO-PHASE (the 3-Opus fold's honesty MAJOR): the drain hands positions to a
+        // mailbox invalidation applied LATER on the processing thread — isPending must
+        // stay true across that gap or stamps issued inside it seal permanently at any
+        // dirtyBroadcastIntervalSeconds > 15.
         var tracker = new DirtyColumnTracker();
         long packed = PositionUtil.packPosition(9, -2);
         assertFalse(tracker.isPending(DIM, packed));
         tracker.markDirty(DIM, 9, -2);
         assertTrue(tracker.isPending(DIM, packed),
-                "marked-but-undrained is exactly the refuse-to-stamp window");
-        tracker.drainDirty(DIM);
-        assertFalse(tracker.isPending(DIM, packed), "the drain closes the window");
+                "phase one: marked-but-undrained refuses to stamp");
+        long[] drained = tracker.drainDirty(DIM);
+        assertTrue(tracker.isPending(DIM, packed),
+                "phase two: drained-but-invalidation-not-applied STILL refuses");
+        tracker.confirmInvalidated(DIM, drained);
+        assertFalse(tracker.isPending(DIM, packed),
+                "the applied invalidation releases the guard — the evidence is gone");
     }
 }

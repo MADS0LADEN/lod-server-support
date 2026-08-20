@@ -1389,6 +1389,18 @@ class PaperRequestProcessingServiceTest {
             wired.handleRegionSummaryRequest(uuid, body);
             assertEquals(1, wired.getRegionSummaries().diagnostics().getRequests(),
                     "with both gates open the request reaches the service");
+            // Legacy-never-eligible (stamped-up-to-date-plan.md §9.4, the pin the
+            // 3-Opus fold found missing — dialectOf defaults CURRENT for unknown
+            // UUIDs, so only an explicitly legacy-marked session exercises the guard):
+            // a v18 session's request must neither admit NOR arm stamps eligibility.
+            var legacy = UUID.randomUUID();
+            wired.getDialectTracker().onHandshake(legacy,
+                    dev.vox.lss.common.HandshakeGate.WireDialect.V18);
+            wired.handleRegionSummaryRequest(legacy, body);
+            assertEquals(1, wired.getRegionSummaries().diagnostics().getRequests(),
+                    "a legacy-dialect request drops at the CURRENT-only guard");
+            assertFalse(wired.getRegionSummaries().hasRequestedThisSession(legacy),
+                    "and never becomes stamps-eligible");
         } finally {
             config.enabled = true;
             config.enableRegionSummaries = true;

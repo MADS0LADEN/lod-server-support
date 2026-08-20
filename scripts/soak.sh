@@ -73,6 +73,9 @@ STORE_STANDALONE_SCENARIOS=(store-second-join)
 # header-rung live gate) — it hard-requires the warm-rejoin-summary carried world.
 PHASE_SCENARIOS=(store-offline-populate store-offline-mutate store-offline-verify
                  evicted-tscache-rejoin stamp-heal-rejoin)
+# stamp-heal-prime is phase 1 of scripts/stamp_heal.sh — standalone-runnable (its own
+# named check pins the UNHEALED before-state) but kept out of 'all' with its chain.
+STAMP_HEAL_SCENARIOS=(stamp-heal-prime)
 # Paper-only, AFTER the Folia copy above so Folia does not inherit it (the store is
 # unvalidated on Folia): console setblock fires no Bukkit event, so only the store's
 # periodic resweep (lodStoreResweepSeconds) can catch the edit — the unfired-event
@@ -171,7 +174,7 @@ case "$SCENARIO" in
     store-migration-join) ;;
     store-save-storm|store-save-storm-off) ;;
     warm-rejoin-summary|dirty-while-offline-summary|evicted-tscache-rejoin) ;;
-    stamp-heal-rejoin) ;;
+    stamp-heal-prime|stamp-heal-rejoin) ;;
     paper-dirty-falling-block|paper-store-unfired-event) ;;
     *)
         echo "[soak] ERROR: Unknown scenario '$SCENARIO'"
@@ -262,13 +265,24 @@ case "$SCENARIO" in
                                 # whole-disc ts>0 re-declare through the region-header rung
                                 # (disk.header_hits) instead of a full re-download.
                                 ;;
+    stamp-heal-prime)           CLIENT_RUNS=2; EXPECTED_SECONDS=470
+                                # Phase 1 of scripts/stamp_heal.sh (3-Opus fold: the
+                                # heal gate needs an UNHEALED before-state, and
+                                # warm-rejoin-summary's clearcache re-stamp erases it):
+                                # warm-rejoin-summary WITHOUT the clearcache and
+                                # WITHOUT the poison — run 1's stamps stay
+                                # serve-then-save, so run 2's frame finds the BULK
+                                # stale (the before-pin), re-asks it, and the
+                                # up_to_date answers RATCHET the carried cache.
+                                CLIENT_EXTRA_ARGS=("-Psoak.summary=true") ;;
     stamp-heal-rejoin)          CLIENT_RUNS=1; EXPECTED_SECONDS=260
                                 # Stamped-up_to_date heal gate (chained phase 2 — run via
                                 # scripts/stamp_heal.sh, which carries the
-                                # warm-rejoin-summary world AND client cache forward):
-                                # phase 1's run-2 up_to_date answers ratcheted the cached
-                                # stamps, so THIS rejoin's summary frame must validate the
-                                # once-stale bulk (stale -> stamped -> clean).
+                                # stamp-heal-prime world AND client cache forward):
+                                # phase 1 PINNED the bulk stale (before), its run-2
+                                # up_to_date answers ratcheted the cached stamps, so THIS
+                                # rejoin's frame must validate the once-stale bulk
+                                # (stale -> stamped -> clean, both halves pinned).
                                 CLIENT_EXTRA_ARGS=("-Psoak.summary=true") ;;
     clearcache-mid-session)     CLIENT_RUNS=1; EXPECTED_SECONDS=280
                                 CLIENT_EXTRA_ARGS=("-Psoak.clientActionAt=60:clearcache") ;;
@@ -411,7 +425,7 @@ elif [[ " $FRESH_WORLD_SCENARIOS " != *" $SCENARIO "* ]]; then
 fi
 if [[ "$SCENARIO" == "stamp-heal-rejoin" && -z "${SOAK_WORLD_FROM:-}" ]]; then
     echo "[soak] ERROR: stamp-heal-rejoin is phase 2 of scripts/stamp_heal.sh"
-    echo "[soak]        (needs the warm-rejoin-summary world carried via SOAK_WORLD_FROM —"
+    echo "[soak]        (needs the stamp-heal-prime world carried via SOAK_WORLD_FROM —"
     echo "[soak]        the heal premise is phase 1's STAMPED client cache against that"
     echo "[soak]        exact world's headers; tscache and lss-timestamps.bin stay INTACT,"
     echo "[soak]        unlike the evicted chain)"

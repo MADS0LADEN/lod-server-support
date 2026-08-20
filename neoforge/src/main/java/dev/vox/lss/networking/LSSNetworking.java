@@ -20,7 +20,7 @@ import net.neoforged.neoforge.network.registration.HandlerThread;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
 /**
- * NeoForge payload registration — the fabric {@code LSSNetworking} twin, all 12
+ * NeoForge payload registration — the fabric {@code LSSNetworking} twin, all 13
  * {@code lss:*} channels. Two loader-bound invariants (plan §1.2, both fatal if
  * violated): every registration rides an {@code .optional()} registrar — a
  * MANDATORY payload refuses vanilla/Fabric clients at login (the community

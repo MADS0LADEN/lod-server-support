@@ -409,7 +409,7 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
             // Compare-backed rung — stamped-up_to_date eligible (plan §9.1): the
             // predicate answers -1 under a pending mark / armed latch (§9.2).
             this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state,
-                    this.ctx.stampSource().stampSecond(dimension, packed), dimension));
+                    this.ctx.stampSource().stampSecond(playerUuid, dimension, packed), dimension));
             this.ctx.diagnostics().incrementUpToDate();
             return true;
         }

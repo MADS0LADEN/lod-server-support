@@ -1501,6 +1501,15 @@ public class ServiceLifecycleGameTests {
                             + " no_region=" + summary.getTilesNoRegion());
             helper.assertTrue(summary.getTilesKnown() >= 1,
                     "the saved chunk's own tile must report a real stamp");
+            // Stamped up_to_date (the whole server lane's ONE real-server pin, per the
+            // 3-Opus fold): the summary request armed eligibility, the header rung's
+            // margined-fresh interception is a compare-backed disposition, so its
+            // up_to_date must ship a verification-stamp frame on lss:col_stamps.
+            helper.assertTrue(summary.getStampsFrames() >= 1
+                            && summary.getStampsEntries() >= 1,
+                    "the compare-backed up_to_date must stamp (frames="
+                            + summary.getStampsFrames() + " entries="
+                            + summary.getStampsEntries() + ")");
             // Terminal pass: tear down like the class's async probe test does — the
             // throwaway service must not leak its threads/pools NOR leave its
             // constructor-published XrayMaskManager as the static manager (the

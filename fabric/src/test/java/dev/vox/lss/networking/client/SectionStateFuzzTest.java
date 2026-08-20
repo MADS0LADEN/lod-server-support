@@ -63,7 +63,19 @@ class SectionStateFuzzTest {
         boolean probeFired = false;
         for (int op = 0; op < 4_000; op++) {
             long p = pool[rng.nextInt(pool.length)];
-            int kind = rng.nextInt(100);
+            int kind = rng.nextInt(101); // 100 = the ratchet op (3-Opus fold: added by WIDENING, not by halving prune)
+            if (kind == 100) {
+                // Stamped-up_to_date ratchet (stamped-up-to-date-plan.md §4): a pure
+                // monotonic ts advance on an existing positive mark-free unsatisfied
+                // stamp. NOTE (3-Opus fold): this op CANNOT affect the needs mask by
+                // construction — the differential's value here is the guard chain
+                // (positive/dirty/retry/sessionSatisfied precedence) and the ts value
+                // flowing into later classify/tile-validation ops identically.
+                long second = 1L + rng.nextInt(12_000);
+                assertEquals(ref.ratchetStamp(p, second), impl.ratchetStamp(p, second),
+                        "ratchetStamp divergence at op " + op + " seed " + seed);
+                continue;
+            }
             if (kind < 28) {
                 // Mostly real stamps; occasionally the wire-legal ts=0 (a hostile/buggy
                 // server — onColumnReceived applies it unchecked; review round 2).
@@ -133,19 +145,11 @@ class SectionStateFuzzTest {
                         ref.onReceived(lp, 9_000L);
                     }
                 }
-            } else if (kind < 95) {
+            } else if (kind < 96) {
                 int px = rng.nextInt(41) - 20, pz = rng.nextInt(41) - 20;
                 int dist = 8 + rng.nextInt(80);
                 impl.pruneOutOfRange(px, pz, dist);
                 ref.pruneOutOfRange(px, pz, dist);
-            } else if (kind < 96) {
-                // Stamped-up_to_date ratchet (stamped-up-to-date-plan.md §4): a pure
-                // monotonic ts advance on an existing positive mark-free stamp — the
-                // one op that changes a ts VALUE without any membership transition,
-                // so the needs-invariant coverage depends on it.
-                long second = 1L + rng.nextInt(12_000);
-                assertEquals(ref.ratchetStamp(p, second), impl.ratchetStamp(p, second),
-                        "ratchetStamp divergence at op " + op + " seed " + seed);
             } else if (kind < 97) {
                 // Region-summary tile validation (final review MAJOR-1/2): the
                 // provenance-scoped two-directional writer — validate strictly-newer

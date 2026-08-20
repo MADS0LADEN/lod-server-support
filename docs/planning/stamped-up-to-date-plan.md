@@ -1,6 +1,8 @@
 # Plan: stamped up_to_date — healing the permanent summary-stale set
 
-**Status:** v1.1 2026-08-20 — v1.0 + the 1-Fable review fold (§9). The review
+**Status:** v1.2 2026-08-20 — v1.1 + the 3-Opus IMPLEMENTATION review fold (§10,
+normative where it tightens §9; the three lenses converged on four MAJORs, all
+landed). The review
 falsified v1.0's central claim ("the stamp adds no new claim") via three verified
 mechanisms and prescribed a NARROWING, not a redesign; §9 is normative where it
 tightens §2-§7. Follow-up to region-summary-sync-plan.md, targets
@@ -267,3 +269,84 @@ version bump, no config surface.
     existing `summary.bytes` ceiling stays sharp. Support-line record
     (NOTE-12): if summaries ever backport, stamps travel with them — wire is
     never tiered.
+
+## 10. v1.2 — the 3-Opus implementation review fold (normative over §9)
+
+1. **The narrowing is now TWO rungs, not three** (honesty MAJOR: the store-stamp
+   conversion's own doctrine is "delivery honesty — never a fabricated fresh
+   stamp"; a re-serve hands the STORED acquisition second, so a "verified now"
+   stamp claims strictly more than the bytes the rung declined to send, and the
+   store's staleness bound — boot sweep + the invalidation channel, NO periodic
+   resweep on Fabric at the default 0 — is not provably inside the margin). Only
+   the router's tscache rung and the header-fresh delivery stamp; the store
+   conversion is pinned NEVER-STAMP, and the site CENSUS
+   (`stampedSiteCensusHoldsTheNarrowing`) enforces exactly two 5-arg construction
+   sites. Store-served columns heal via the tscache rung on a later ask.
+2. **The §9.2 guard is TWO-PHASE** (honesty MAJOR: the tracker set empties at
+   DRAIN on the tick thread, but the tscache/store invalidation is a mailbox event
+   applied later on the processing thread — stamps issued in the drain-to-apply
+   gap seal permanently at any `dirtyBroadcastIntervalSeconds > 15`, a legal
+   `/lsslod set` value up to 300). `drainDirty` moves positions into an
+   `invalidating` set `isPending` also consults; the invalidation APPLY releases
+   them via the broadcasters' `onApplied` callback (`confirmInvalidated`) — the
+   guard now spans mark → applied-evidence-gone with zero residual for every
+   mark-covered change.
+3. **The stamps sinks carry the writability drop** (all three lenses): the frames
+   land at exactly the join/portal moment the yield/pacing machinery protects, and
+   this was the only raw-body S2C lane without a pressure consult. NOT_WRITABLE →
+   a plain UNCOUNTED drop (never RETRY — §3's loss tolerance is the design).
+4. **The heal gate is rebuilt on a primed phase 1** (client MAJOR: on
+   warm-rejoin-summary's deliberately-clean geometry — its clearcache re-stamp is
+   exactly the move that erases the inversion — healed and unhealed phase-2 runs
+   produced identical counters; the gate passed with the feature disabled).
+   `stamp_heal.sh` = `stamp-heal-prime` (wrs WITHOUT the clearcache and poison;
+   its named check PINS the before-state: run-2 `tiles_stale+unknown >= 8` and
+   `stamps_applied >= 400`) → `stamp-heal-rejoin` (the after: `stale+unknown <=
+   5`, clean bulk, re-asks bounded ≤ 2000). The rejoin ceiling is the measured
+   STRUCTURAL after-set + 1: phase 1's own shutdown kick-save re-stales the
+   spawn/player corner tiles after the session's last stamps (the heal is
+   measured one session behind by design — one frame per session), plus one
+   persistent no-evidence doubt tile; live 2026-08-20: before 8+1, after 3+1,
+   1,876 stamps primed / 256 at rejoin, 1,121 columns validated off the frame. NOTE: the chain stays OUT of `soak.sh all` (chain-only, like the
+   evicted chain) — §9.9's "on every burn-in" is corrected to "on every chain
+   run".
+5. **§9.3's canary claim corrected: accepted-open, UNCANARIED.** The
+   paper-store-unfired-event canary is structurally impossible — that scenario's
+   soak client is summary-gated off, and the inert check would red on any stamps
+   counter movement there. The residual is instead pinned DELIBERATE at Tier 1
+   (`theEventBlindStateStampsByAcceptedDesign`): no mark + no latch ⇒ the
+   predicate stamps; the seal holds until the chunk's next save, the store resweep
+   bounds the store-side arm (moot for stamps since §10.1), and Fabric is fully
+   covered by the hash-confirmed save hook.
+6. **Eligibility is dialect-conjunctive at the SINK too** (§9.4 completed): a
+   session that re-handshakes DOWN to a legacy dialect keeps its request mark
+   until disconnect, so `eligible()` re-checks `dialectOf == CURRENT` (the
+   far-player re-handshake discipline); the legacy-never-eligible pin exists now
+   (Paper ingress test with a v18-marked session — `dialectOf` defaults CURRENT
+   for unknown UUIDs, so only an explicit mark exercises the guard).
+7. **Hardening set**: predicate short-circuits on eligibility FIRST (the dirty
+   tracker's monitor — shared with the save hook — stays off the router's hot
+   path on servers with no summary-requesting session; the SAM now takes the
+   player UUID); `isClaimSuppressed` is a READ-ONLY latch probe (the shared
+   helper WRITES the grace deadline — a hot third writer raced it and consumed
+   the header rung's clear-side grace early; not-yet-started grace reads as
+   still-suppressed, strictly conservative); the stamps flush is
+   Throwable-contained so an Error cannot eat the tick's batch responses, keyed
+   by the identity-checked STATE, and pinned to flush BEFORE the batch (FIFO then
+   applies the ratchet while same-tick marks are still set — the client armor
+   order §9.7 mis-described, now corrected in the ratchet javadoc and pinned);
+   `ratchetStamp` also skips sessionSatisfied (the applyTileValidation exclusion
+   mirrored — the lost-CLEAR park retains a positive stamp under it) and guards
+   `second <= 0`; `ColumnUpToDate`'s compact ctor normalizes a dimension-less
+   stamp claim to never-stamp; `ColumnStampsWire.encode` bounds seconds
+   producer-side (one clock-damaged entry would discard whole frames at every
+   client); the fuzz ratchet op was added by WIDENING the kind space to 101 (not
+   by halving prune). Paper's `registerOutgoingPluginChannel` pin (§7) is MOOT —
+   Paper sends via NMS DiscardedPayload, bypassing Bukkit's Messenger (recorded so
+   nobody "fixes" it).
+8. **Known-unpinned residuals, named**: a latched region releases the stamping
+   predicate only when some OTHER caller refreshes its header (the probe is pure
+   memory — safe direction, costs heal coverage; symptom: `stamps_entries` far
+   below `up_to_date` with no error); server-clock-ahead-of-client beyond the
+   3600 s skew silently drops every frame client-side (diagnosable cross-exporter:
+   server entries > 0, client applied == 0 — the wrs floors' exact shape).

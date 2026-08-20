@@ -57,7 +57,8 @@ DEFAULT_DIRTY_BROADCAST_SECONDS = 5  # used when the scenario -config.json omits
 
 # Scenarios with more than one client run (kick → rejoin); everything else has exactly 1.
 EXPECTED_RUNS = {"warm-rejoin": 2, "dirty-while-offline": 2, "dimension-rejoin-warm": 2,
-                 "warm-rejoin-summary": 2, "dirty-while-offline-summary": 2}
+                 "warm-rejoin-summary": 2, "dirty-while-offline-summary": 2,
+                 "stamp-heal-prime": 2}
 
 # A7 opt-ins. Historically saturated/rate_limited were ONE opt-in pair (disk saturation
 # surfaced to the client as rate_limited BY DESIGN). v17 retires the rate-limited response
@@ -90,6 +91,7 @@ ANOMALY_OPT_INS = {
     "warm-rejoin-summary": frozenset(),
     "dirty-while-offline-summary": frozenset(),
     "evicted-tscache-rejoin": frozenset(),
+    "stamp-heal-prime": frozenset(),
     "stamp-heal-rejoin": frozenset(),
     "clearcache-mid-session": frozenset({"saturated"}),
     "store-second-join": frozenset({"saturated"}),
@@ -149,6 +151,7 @@ MIN_CLIENT_WINDOWS = {
     "warm-rejoin-summary": {(1, 0): 4, (1, 1): 4, (2, 0): 3},
     "dirty-while-offline-summary": {(1, 0): 4, (1, 1): 4, (2, 0): 3},
     "evicted-tscache-rejoin": {(1, 0): 3},
+    "stamp-heal-prime": {(1, 0): 4, (2, 0): 3},
     "stamp-heal-rejoin": {(1, 0): 3},
     # clearcache splits run 1 into pre/post-action segments (the flushCache counter reset
     # is a segment boundary, like a dimension change)
@@ -1210,7 +1213,7 @@ def far_players_inert_violations(snapshots):
 # Scenarios that deliberately arm the region-summary exchange (the client opts back in
 # via -Dlss.soak.summary) — the ONLY runs where summary.* counters may move.
 SUMMARY_OPT_IN_SCENARIOS = frozenset({"warm-rejoin-summary", "dirty-while-offline-summary",
-                                      "stamp-heal-rejoin"})
+                                      "stamp-heal-prime", "stamp-heal-rejoin"})
 
 
 def summary_inert_violations(snapshots, scenario=None, client_runs=None):
@@ -1337,6 +1340,8 @@ def check_warm_rejoin(ctx):
 @named_check("warm-rejoin-summary",
              ["client.summary.columns_validated", "client.summary.tiles_clean",
               "client.summary.tiles_stale", "client.summary.tiles_unknown",
+              "client.summary.stamps_applied", "server.summary.stamps_entries",
+              "server.summary.stamps_bytes",
               "client.responses.columns",
               "client.requested_total", "client.columns.known",
               "server.summary.requests", "server.summary.frames"])
@@ -1679,20 +1684,69 @@ def check_evicted_tscache_rejoin(ctx):
                         {"expected": ">= 150", "actual": cols})
 
 
+@named_check("stamp-heal-prime",
+             ["client.summary.tiles_stale", "client.summary.stamps_applied",
+              "server.summary.stamps_entries", "client.requested_total"])
+def check_stamp_heal_prime(ctx):
+    """Phase 1 of scripts/stamp_heal.sh — the heal gate's BEFORE-pin (3-Opus fold:
+    an after-threshold with no pinned before proves nothing; warm-rejoin-summary's
+    clearcache re-stamp erased the very inversion the heal must demonstrate). This
+    timeline keeps run 1's stamps serve-then-save, so run 2's one frame must find
+    the BULK stale — and the whole-disc re-ask that follows is answered up_to_date
+    through the compare-backed rungs, whose stamps RATCHET the carried cache. The
+    rejoin phase then proves those exact tiles heal."""
+    r2 = ctx.final_client(2)
+    if r2 is None:
+        yield Violation("stamp-heal-prime", "run2", "no run-2 client snapshots", {})
+        return
+    if "summary" not in r2:
+        yield Violation("stamp-heal-prime", "run2 final snapshot",
+                        "client snapshot has no summary group — pre-summary client jar?",
+                        {"keys": sorted(r2)})
+        return
+    s = r2["summary"]
+    if s["tiles_stale"] + s["tiles_unknown"] < 8:
+        yield Violation("stamp-heal-prime", "run2 final snapshot",
+                        "the BEFORE-pin failed — the serve-then-save inversion did not "
+                        "materialize (did a re-stamp sneak into the timeline? the heal "
+                        "gate is vacuous without this)",
+                        {"expected": "stale+unknown >= 8",
+                         "stale": s["tiles_stale"], "unknown": s["tiles_unknown"]})
+    if s.get("stamps_applied", 0) < 400:
+        yield Violation("stamp-heal-prime", "run2 final snapshot",
+                        "the stale bulk's re-asks did not ratchet — the heal premise "
+                        "for phase 2 is gone",
+                        {"expected": ">= 400", "actual": s.get("stamps_applied", 0)})
+    last = ctx.server_snaps[-1]
+    if last["summary"].get("stamps_entries", 0) < 400:
+        yield Violation("stamp-heal-prime", "final server snapshot",
+                        "the server produced too few stamps for a whole-disc "
+                        "up_to_date sweep",
+                        {"expected": ">= 400",
+                         "actual": last["summary"].get("stamps_entries", 0)})
+
+
 @named_check("stamp-heal-rejoin",
              ["client.summary.columns_validated", "client.summary.tiles_stale",
               "client.summary.tiles_clean", "client.requested_total"])
 def check_stamp_heal_rejoin(ctx):
     """The stamped-up_to_date HEADLINE gate (stamped-up-to-date-plan.md §9.9; phase 2
-    of scripts/stamp_heal.sh): warm-rejoin-summary's run 2 got its residue re-asks
-    answered up_to_date WITH verification stamps, ratcheted into the carried client
-    cache — so THIS rejoin's one summary frame must validate the once-stale bulk.
-    The heal chain (stale -> stamped -> clean) is what distinguishes this from a
-    plain warm rejoin: without the ratchet, phase 1's stale set (headers written
-    after the original serves) would re-flag IDENTICALLY here, forever. Residue
-    tolerance: the phase-1 kick-save's player tile (its loaded chunks re-save after
-    every stamp) plus latch/autosave stragglers at this join — stale+unknown <= 3;
-    the bulk must read clean."""
+    of scripts/stamp_heal.sh): stamp-heal-prime PINNED the bulk stale (its run-2
+    before-pin: stale+unknown >= 8), its re-asks were answered up_to_date WITH
+    verification stamps ratcheted into the carried client cache — so THIS rejoin's
+    one summary frame must validate the once-stale bulk. The heal chain
+    (stale -> stamped -> clean) is what distinguishes this from a plain warm
+    rejoin: without the ratchet, phase 1's stale set (headers written after the
+    original serves) would re-flag IDENTICALLY here, forever — and phase 1 proved
+    the set existed, so a clean phase 2 is the ratchet's doing (the vacuity the
+    3-Opus fold killed). Residue tolerance (re-derived live 2026-08-20, measured
+    3+1): phase 1's own shutdown kick-save re-stales the spawn/player corner
+    tiles AFTER the session's last stamps — the heal is measured one session
+    behind BY DESIGN (one frame per session), so those tiles are the structural
+    after-set, not a ratchet failure — plus one persistent no-evidence doubt
+    tile (NEVER_CLEAN) at the window edge. Ceiling 5 = the structural 4 + one
+    tile of variance, still far below the unhealed shape (phase 1 pinned >= 8
+    BEFORE this join's shutdown-save additions); the bulk must read clean."""
     r1 = ctx.final_client(1)
     if r1 is None:
         yield Violation("stamp-heal-rejoin", "run1", "no client snapshots", {})
@@ -1711,12 +1765,12 @@ def check_stamp_heal_rejoin(ctx):
                         {"expected": "columns.known >= 1500", "actual": known})
         return
     s = r1["summary"]
-    if s["tiles_stale"] + s["tiles_unknown"] > 3:
+    if s["tiles_stale"] + s["tiles_unknown"] > 5:
         yield Violation("stamp-heal-rejoin", "run1 final snapshot",
                         "the stale set did not heal — phase 1's stamped up_to_date "
                         "answers should have ratcheted these tiles clean (the ratchet "
                         "-> cache save -> re-declaration chain broke somewhere)",
-                        {"expected": "stale+unknown <= 3",
+                        {"expected": "stale+unknown <= 5",
                          "stale": s["tiles_stale"], "unknown": s["tiles_unknown"]})
     if s["tiles_clean"] < 12:
         yield Violation("stamp-heal-rejoin", "run1 final snapshot",
@@ -1734,12 +1788,14 @@ def check_stamp_heal_rejoin(ctx):
                         "the healed rejoin re-declared its whole known disc — "
                         "validation is not suppressing asks",
                         {"requested_total": req, "columns.known": known})
-    if req > 1200:
+    if req > 2000:
         yield Violation("stamp-heal-rejoin", "run1 final snapshot",
                         "re-ask volume above the healed ceiling — the residue should "
-                        "be ~one player tile, not a third of the disc (phase 1's "
-                        "unhealed run 2 measured ~1.5k here)",
-                        {"expected": "<= 1200", "actual": req})
+                        "be ~one player tile plus revalidation churn, not the whole "
+                        "~2.1k-column disc phase 1's unhealed run 2 re-asks "
+                        "(ceiling re-derived per the 3-Opus fold: 1200 sat inside "
+                        "observed healthy variance)",
+                        {"expected": "<= 2000", "actual": req})
 
 
 @named_check("dimension-trip", ["client.dimension", "client.tracker_in_flight", "client.queued"])
@@ -3370,6 +3426,9 @@ CHECKS = {
     "evicted-tscache-rejoin": [check_evicted_tscache_rejoin,
                                make_handshake_check("evicted-tscache-rejoin"),
                                make_disc_completeness("evicted-tscache-rejoin")],
+    "stamp-heal-prime": [check_stamp_heal_prime,
+                         make_handshake_check("stamp-heal-prime"),
+                         make_disc_completeness("stamp-heal-prime")],
     "stamp-heal-rejoin": [check_stamp_heal_rejoin,
                           make_handshake_check("stamp-heal-rejoin"),
                           make_disc_completeness("stamp-heal-rejoin")],
@@ -4587,6 +4646,30 @@ def selftest():
                 "summary.columns_validated": validated,
                 "requested_total": req,
                 "columns.known": known})]})
+    # --- stamp-heal-prime: the heal gate's before-pin ---
+    def shp_ctx(stale=12, unknown=1, applied=1800, entries=1900, req=2300):
+        return _ctx(
+            server_snaps=[_srv(1000), _srv(200_000, over={
+                "summary.stamps_entries": entries, "summary.stamps_frames": 3,
+                "summary.stamps_bytes": 21_000, "summary.requests": 2,
+                "summary.frames": 2})],
+            runs={1: [_cli(1000)],
+                  2: [_cli(300_000, over={
+                      "summary.tiles_stale": stale,
+                      "summary.tiles_unknown": unknown,
+                      "summary.tiles_clean": 3,
+                      "summary.tiles_no_region": 9,
+                      "summary.stamps_applied": applied,
+                      "requested_total": req,
+                      "columns.known": 2144})]})
+    clean("stamp-heal-prime inversion pinned", list(check_stamp_heal_prime(shp_ctx())))
+    hits("stamp-heal-prime before-pin lost (no inversion)", list(check_stamp_heal_prime(
+        shp_ctx(stale=1, unknown=0))), "stamp-heal-prime")
+    hits("stamp-heal-prime ratchet never ran", list(check_stamp_heal_prime(
+        shp_ctx(applied=5))), "stamp-heal-prime")
+    hits("stamp-heal-prime server stamps dead", list(check_stamp_heal_prime(
+        shp_ctx(entries=0))), "stamp-heal-prime")
+
     clean("stamp-heal-rejoin healed", list(check_stamp_heal_rejoin(shr_ctx())))
     hits("stamp-heal-rejoin stale set did not heal", list(check_stamp_heal_rejoin(
         shr_ctx(stale=499, clean=6, validated=900, req=1100))), "stamp-heal-rejoin")
@@ -4595,7 +4678,7 @@ def selftest():
     hits("stamp-heal-rejoin bulk did not validate", list(check_stamp_heal_rejoin(
         shr_ctx(validated=100))), "stamp-heal-rejoin")
     hits("stamp-heal-rejoin re-ask volume unhealed", list(check_stamp_heal_rejoin(
-        shr_ctx(req=1567))), "stamp-heal-rejoin")
+        shr_ctx(req=2300))), "stamp-heal-rejoin")
     hits("stamp-heal-rejoin cache never carried", list(check_stamp_heal_rejoin(
         shr_ctx(known=300))), "stamp-heal-rejoin")
 

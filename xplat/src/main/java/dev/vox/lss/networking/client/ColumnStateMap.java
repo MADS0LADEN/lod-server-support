@@ -401,13 +401,17 @@ class ColumnStateMap {
      *     stamp: ts<=0 positions carry no claim to extend, and the ingest-failure
      *     lost-CONTENT path unstamps to -1, so a late frame cannot re-stamp a
      *     rejected column.</li>
-     * <li>Dirty/retry-marked positions are SKIPPED — defense-in-depth, not the
-     *     load-bearing protection (plan §9.7): the same-tick batch response's
-     *     onUpToDate consumes the retry mark BEFORE the stamps frame applies, so a
-     *     client-side filter alone cannot stop the F2 lost-CLEAR chain; the
-     *     server-side rung narrowing (only compare-backed rungs stamp, never the
-     *     done-bit rung) is what closes it. Do not "simplify" this into the only
-     *     guard.</li>
+     * <li>Dirty/retry-marked positions are SKIPPED, and so are sessionSatisfied ones
+     *     (the applyTileValidation exclusion, mirrored — the ingest-failure lost-CLEAR
+     *     park retains a positive pre-clear stamp under sessionSatisfied, and
+     *     ratcheting it past the server's cached clear stamp would be the F2 ghost
+     *     seal). ORDERING (3-Opus fold, corrected): the stamps frame flushes BEFORE
+     *     the batch response and FIFO delivery preserves that, so the ratchet runs
+     *     while the marks are STILL SET — this skip is live armor for the same-tick
+     *     pair, pinned by the flow test's order case. It is still defense-in-depth,
+     *     not the load-bearing protection: the server-side rung narrowing (only the
+     *     tscache and header rungs stamp, never the done-bit rung) is what closes
+     *     the F2 chain by construction. Do not "simplify" either layer away.</li>
      * <li>validated/summaryValidated are untouched — the ordinary onUpToDate path
      *     owns those bits; needs membership is unchanged by a ts VALUE change on an
      *     already-stamped position, so the derived mask stays consistent by
@@ -417,12 +421,14 @@ class ColumnStateMap {
      * @return true when the stamp actually advanced (the diag "applied" counter).
      */
     boolean ratchetStamp(long packed, long second) {
+        if (second <= 0) return false; // armor: the ts write below bypasses tsPut
         Leaf leaf = leafFor(packed);
         if (leaf == null) return false;
         int bit = bitIndexFor(packed);
         long b = 1L << bit;
         if ((leaf.positiveTs & b) == 0) return false;
         if ((leaf.dirty & b) != 0 || (leaf.retry & b) != 0) return false;
+        if ((leaf.sessionSatisfied & b) != 0) return false;
         if (second <= leaf.ts[bit]) return false;
         leaf.ts[bit] = second;
         return true;

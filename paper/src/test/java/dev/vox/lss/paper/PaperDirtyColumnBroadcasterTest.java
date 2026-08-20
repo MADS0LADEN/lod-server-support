@@ -66,8 +66,14 @@ class PaperDirtyColumnBroadcasterTest {
         }
 
         @Override
-        public void invalidateTimestamps(String dimension, long[] positions) {
+        public void invalidateTimestamps(String dimension, long[] positions, Runnable onApplied) {
+            // The 2-arg form delegates here, so both call shapes record. Run the
+            // callback inline — the fake "applies" instantly, standing in for the
+            // processing-thread apply that releases the stamping guard's phase two.
             invalidations.add(new Invalidation(dimension, positions));
+            if (onApplied != null) {
+                onApplied.run();
+            }
         }
 
         @Override

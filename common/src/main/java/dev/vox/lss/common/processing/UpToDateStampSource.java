@@ -23,9 +23,14 @@ package dev.vox.lss.common.processing;
 @FunctionalInterface
 public interface UpToDateStampSource {
 
-    UpToDateStampSource NEVER = (dimension, packedPosition) -> -1L;
+    UpToDateStampSource NEVER = (player, dimension, packedPosition) -> -1L;
 
     /** Server-clock epoch second to stamp this verification with, or -1 to answer
-     *  the ordinary unstamped up_to_date. Called on the processing thread. */
-    long stampSecond(String dimension, long packedPosition);
+     *  the ordinary unstamped up_to_date. Called on the processing thread. The
+     *  player is passed so the platform can SHORT-CIRCUIT on stamps eligibility
+     *  first (3-Opus fold: on a server with no summary-requesting session — the
+     *  common case today — the predicate must not put the dirty tracker's monitor,
+     *  shared with the save hook, on the router's hot path for work that is thrown
+     *  away). */
+    long stampSecond(java.util.UUID player, String dimension, long packedPosition);
 }

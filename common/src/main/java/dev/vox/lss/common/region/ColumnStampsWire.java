@@ -55,14 +55,19 @@ public final class ColumnStampsWire {
         }
         long base = stampSeconds[0];
         if (base <= 0) throw new WireFormatException("stamps base second " + base + " <= 0");
+        // Producer-side upper bound (3-Opus fold): the client rejects out-of-bound
+        // frames WHOLE, so one clock-damaged second would silently discard up to 1023
+        // good entries at every client — fail loudly at the server instead.
+        long producerBound = System.currentTimeMillis() / 1000L + FUTURE_SKEW_ALLOWANCE_SECONDS;
         var w = new WireBytes.Writer(16 + count * 10);
         w.writeByte(VERSION);
         w.writeUtf(dimension);
         RegionSummaryWire.writeZigVarLong(w, base);
         w.writeVarInt(count);
         for (int i = 0; i < count; i++) {
-            if (stampSeconds[i] <= 0) {
-                throw new WireFormatException("stamps second " + stampSeconds[i] + " <= 0");
+            if (stampSeconds[i] <= 0 || stampSeconds[i] > producerBound) {
+                throw new WireFormatException("stamps second " + stampSeconds[i]
+                        + " outside (0, now+" + FUTURE_SKEW_ALLOWANCE_SECONDS + "]");
             }
             w.writeLong(packedPositions[i]);
             RegionSummaryWire.writeZigVarLong(w, stampSeconds[i] - base);

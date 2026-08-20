@@ -63,8 +63,8 @@ class ColumnStampsWireTest {
 
     @Test
     void hostileCountsDrop() {
-        // count = 0 and count > MAX both reject; a huge declared count on a short
-        // frame rejects at the remaining-bytes floor before sizing anything.
+        // count = 0 rejects at the count bound; count > MAX rejects at the count cap
+        // (the remaining-bytes floor's own pin is truncatedFrameDropsBeforeAllocation).
         var w = new WireBytes.Writer(32);
         w.writeByte(ColumnStampsWire.VERSION);
         w.writeUtf(DIM);
@@ -95,13 +95,36 @@ class ColumnStampsWireTest {
     void futureSecondBeyondSkewDropsWhole() {
         // The permanent-seal shape (§9.6): one hostile huge second must reject the
         // WHOLE frame — partial application of a corrupt frame is worse than losing
-        // it (loss is the designed-tolerant case).
-        byte[] f = frame(NOW, NOW + ColumnStampsWire.FUTURE_SKEW_ALLOWANCE_SECONDS + 100);
-        assertThrows(WireFormatException.class, () -> ColumnStampsWire.decode(f, NOW));
-        // At the boundary it passes.
+        // it (loss is the designed-tolerant case). Hand-crafted: encode itself now
+        // refuses out-of-bound seconds (the producer-side bound), so the hostile
+        // frame must be built raw.
+        var w = new WireBytes.Writer(64);
+        w.writeByte(ColumnStampsWire.VERSION);
+        w.writeUtf(DIM);
+        RegionSummaryWire.writeZigVarLong(w, NOW);
+        w.writeVarInt(2);
+        w.writeLong(PositionUtil.packPosition(0, 0));
+        RegionSummaryWire.writeZigVarLong(w, 0); // NOW — fine
+        w.writeLong(PositionUtil.packPosition(1, 1));
+        RegionSummaryWire.writeZigVarLong(w,
+                ColumnStampsWire.FUTURE_SKEW_ALLOWANCE_SECONDS + 100); // beyond skew
+        assertThrows(WireFormatException.class,
+                () -> ColumnStampsWire.decode(w.toByteArray(), NOW));
+        // At the boundary it passes (receiver clock == NOW here).
         var ok = ColumnStampsWire.decode(
                 frame(NOW + ColumnStampsWire.FUTURE_SKEW_ALLOWANCE_SECONDS), NOW);
         assertEquals(1, ok.stampSeconds().length);
+    }
+
+    @Test
+    void encodeRefusesAClockDamagedSecond() {
+        // The producer-side bound (3-Opus fold): the client rejects out-of-bound
+        // frames WHOLE, so one damaged second would silently discard up to 1023 good
+        // entries at every client — the server must fail loudly at build instead.
+        long damaged = System.currentTimeMillis() / 1000L
+                + ColumnStampsWire.FUTURE_SKEW_ALLOWANCE_SECONDS + 1000;
+        assertThrows(WireFormatException.class, () -> ColumnStampsWire.encode(
+                DIM, new long[]{1L}, new long[]{damaged}, 1));
     }
 
     @Test

@@ -155,6 +155,28 @@ class LodRequestManagerSummaryTest {
                 dimension, new long[]{pos}, new long[]{second}, 1);
     }
 
+    /** Raw frame builder for HOSTILE shapes {@code encode} itself now refuses
+     *  (the producer-side second bound) — the client must still contain them. */
+    private static byte[] rawStampsFrame(String dimension, long pos, long second) {
+        var w = new dev.vox.lss.common.wire.WireBytes.Writer(64);
+        w.writeByte(dev.vox.lss.common.region.ColumnStampsWire.VERSION);
+        w.writeUtf(dimension);
+        writeZigVarLong(w, second); // base = the second itself
+        w.writeVarInt(1);
+        w.writeLong(pos);
+        writeZigVarLong(w, 0);      // delta 0
+        return w.toByteArray();
+    }
+
+    private static void writeZigVarLong(dev.vox.lss.common.wire.WireBytes.Writer w, long value) {
+        long zig = (value << 1) ^ (value >> 63);
+        while ((zig & ~0x7FL) != 0) {
+            w.writeByte((int) ((zig & 0x7F) | 0x80));
+            zig >>>= 7;
+        }
+        w.writeByte((int) zig);
+    }
+
     // ---- stamped up_to_date (stamped-up-to-date-plan.md §4) ----
 
     @Test
@@ -189,12 +211,54 @@ class LodRequestManagerSummaryTest {
         seedStamped(dim("overworld"), 5000L);
         assertDoesNotThrow(() -> manager.onColumnStamps(new byte[]{9, 1, 2, 3}));
         // The permanent-seal shape: a frame whose second is beyond now+skew drops WHOLE.
+        // Hand-crafted raw — encode itself refuses this second (the producer bound).
         long hostile = System.currentTimeMillis() / 1000L
                 + dev.vox.lss.common.region.ColumnStampsWire.FUTURE_SKEW_ALLOWANCE_SECONDS + 500;
         assertDoesNotThrow(() -> manager.onColumnStamps(
-                stampsFrame("lss_test:overworld", POS, hostile)));
+                rawStampsFrame("lss_test:overworld", POS, hostile)));
         assertEquals(0, manager.getSummaryStampsApplied());
         assertEquals(5000L, manager.columnsForTest().classify(POS), "no seal, no ratchet");
+    }
+
+    @Test
+    void aStampsFrameDuringACacheLoadIsAHarmlessNoOp() {
+        // The no-buffering decision (plan §4, pinned per the 3-Opus fold): during a
+        // load the leaf map is empty, so every entry no-ops as `ignored` and no leaf
+        // is allocated — and after adoption the un-ratcheted stamps validate nothing
+        // they shouldn't (the frame was a stale prior-session shape by definition).
+        var overworld = dim("overworld");
+        manager.markCacheLoadedForTest();
+        manager.setLastDimensionForTest(overworld);
+        var pending = new java.util.concurrent.CompletableFuture<Long2LongOpenHashMap>();
+        manager.setPendingCacheLoadForTest(pending);
+        int leaves = manager.columnsForTest().leafCountForTest();
+        manager.onColumnStamps(stampsFrame("lss_test:overworld", POS,
+                System.currentTimeMillis() / 1000L));
+        assertEquals(0, manager.getSummaryStampsApplied());
+        assertEquals(1, manager.getSummaryStampsIgnored(), "empty map: counted ignored");
+        assertEquals(leaves, manager.columnsForTest().leafCountForTest(),
+                "a frame must not allocate leaves during a load");
+    }
+
+    @Test
+    void aStampsFrameBeforeAnyTickIsContained() {
+        // lastDimension == null (pre-first-tick): silently dropped, no counters.
+        assertDoesNotThrow(() -> manager.onColumnStamps(stampsFrame(
+                "lss_test:overworld", POS, System.currentTimeMillis() / 1000L)));
+        assertEquals(0, manager.getSummaryStampsApplied());
+        assertEquals(0, manager.getSummaryStampsIgnored());
+    }
+
+    @Test
+    void aMixedFrameCountsAppliedAndIgnoredPerEntry() {
+        seedStamped(dim("overworld"), 5000L);
+        long now = System.currentTimeMillis() / 1000L;
+        long unknown = PositionUtil.packPosition(200, 200); // never stamped
+        byte[] mixed = dev.vox.lss.common.region.ColumnStampsWire.encode(
+                "lss_test:overworld", new long[]{POS, unknown}, new long[]{now, now}, 2);
+        manager.onColumnStamps(mixed);
+        assertEquals(1, manager.getSummaryStampsApplied(), "the stamped position ratchets");
+        assertEquals(1, manager.getSummaryStampsIgnored(), "the unknown one no-ops");
     }
 
     @Test

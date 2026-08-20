@@ -337,9 +337,11 @@ class ReferenceColumnStateMap {
     /** Twin of {@code ColumnStateMap.ratchetStamp} — pure monotonic ts advance on an
      *  existing positive, mark-free stamp (stamped-up-to-date-plan.md §4). */
     boolean ratchetStamp(long packed, long second) {
+        if (second <= 0) return false;
         long stored = this.timestamps.get(packed);
         if (stored <= 0) return false;
         if (this.dirty.contains(packed) || this.retry.contains(packed)) return false;
+        if (this.sessionSatisfied.contains(packed)) return false;
         if (second <= stored) return false;
         this.timestamps.put(packed, second);
         return true;

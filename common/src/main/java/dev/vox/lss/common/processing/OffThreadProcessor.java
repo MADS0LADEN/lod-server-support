@@ -41,7 +41,8 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     public record GenerationTicketRequest(UUID playerUuid, int cx, int cz, String dimension,
                                            long submissionOrder) {}
 
-    private record TimestampInvalidation(String dimension, long[] positions) {}
+    private record TimestampInvalidation(String dimension, long[] positions,
+                                         Runnable onApplied) {}
 
     /** Everything the processing thread takes from the mailbox in one cycle. */
     private record MailboxTake(TickSnapshot snapshot,
@@ -244,7 +245,7 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
         // keeps every up_to_date bit-identical to the unstamped behavior.
         this.ctx = new ProcessingContext(this.sendActions, this.generationTicketRequests,
                 new ProcessingDiagnostics(), new SequenceCounter(),
-                (dim, packed) -> this.stampSource.stampSecond(dim, packed));
+                (player, dim, packed) -> this.stampSource.stampSecond(player, dim, packed));
         this.requestRouter = new IncomingRequestRouter<>(this, this.players, this.timestampCache,
                 this.dedupTracker, diskReader != null, generationAvailable, this.ctx);
         this.processingThread = new Thread(this::processingLoop, Brand.shortName() + " Processing Thread");
@@ -283,8 +284,16 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
 
     /** Queue timestamp invalidation for dirty positions. */
     public void invalidateTimestamps(String dimension, long[] positions) {
+        invalidateTimestamps(dimension, positions, null);
+    }
+
+    /** Callback form: {@code onApplied} runs on the processing thread RIGHT AFTER the
+     *  tscache/store invalidation lands — the dirty broadcasters pass the tracker's
+     *  {@code confirmInvalidated} so the stamping guard's second phase releases
+     *  exactly when the stale evidence is gone (plan §9.2, the 3-Opus fold). */
+    public void invalidateTimestamps(String dimension, long[] positions, Runnable onApplied) {
         synchronized (this.mailboxLock) {
-            this.pendingInvalidations.add(new TimestampInvalidation(dimension, positions));
+            this.pendingInvalidations.add(new TimestampInvalidation(dimension, positions, onApplied));
         }
     }
 
@@ -364,9 +373,11 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
      */
     public void drainSendActions(BatchSender<PlayerState> sender, StampsSink<PlayerState> stampsSink) {
         this.sendActionBatcher.clear();
-        // (player, dimension) -> stamps; allocated lazily — empty on every tick that
+        // (state, dimension) -> stamps; allocated lazily — empty on every tick that
         // produced no stamped verification (all tests, harness runs, cold joins).
-        java.util.Map<UUID, java.util.Map<String, StampBatch>> stampBatches = null;
+        // Keyed by the identity-checked STATE (3-Opus fold), so the flush cannot
+        // deliver into a session that re-registered mid-drain.
+        java.util.Map<PlayerState, java.util.Map<String, StampBatch>> stampBatches = null;
 
         SendAction action;
         while ((action = this.sendActions.poll()) != null) {
@@ -389,7 +400,7 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                 if (stampsSink != null && utd.stampSecond() > 0 && utd.stampDimension() != null
                         && stampsSink.eligible(action.playerUuid())) {
                     if (stampBatches == null) stampBatches = new java.util.HashMap<>();
-                    stampBatches.computeIfAbsent(action.playerUuid(), u -> new java.util.HashMap<>())
+                    stampBatches.computeIfAbsent(state, u -> new java.util.HashMap<>())
                             .computeIfAbsent(utd.stampDimension(), d -> new StampBatch())
                             .add(action.packedPosition(), utd.stampSecond());
                 }
@@ -398,7 +409,21 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
         }
 
         if (stampBatches != null) {
-            flushStampBatches(stampBatches, stampsSink);
+            // Stamps flush BEFORE the batch responses, deliberately (3-Opus fold, both
+            // lenses): FIFO delivery then applies the ratchet BEFORE the same tick's
+            // onUpToDate consumes retry/dirty marks, so the client-side mark-skip armor
+            // is live for the same-tick pair — and a contained batch-send failure then
+            // leaves only a strictly-weaker-claim shape. Contained as a whole: an Error
+            // out of the stamps lane must never eat the tick's batch responses.
+            try {
+                flushStampBatches(stampBatches, stampsSink);
+            } catch (Throwable t) {
+                long n = this.deliveryErrorWarn.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+                if (n > 0) {
+                    LSSLogger.error("Column-stamps flush failed — contained (" + n
+                            + " failure(s) since the last report)", t);
+                }
+            }
         }
 
         if (this.sendActionBatcher.isEmpty()) return;
@@ -422,11 +447,15 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
      *  §9.5 — never truncated: silent tail truncation would systematically drop the
      *  warm-rejoin bulk this exists for). Send failures are contained and dropped —
      *  the designed loss-tolerant case. */
-    private void flushStampBatches(java.util.Map<UUID, java.util.Map<String, StampBatch>> batches,
+    private void flushStampBatches(java.util.Map<PlayerState, java.util.Map<String, StampBatch>> batches,
                                    StampsSink<PlayerState> sink) {
-        batches.forEach((uuid, byDimension) -> {
-            var state = this.players.get(uuid);
-            if (state == null || !state.hasCompletedHandshake()) return;
+        batches.forEach((state, byDimension) -> {
+            // Identity re-check (belt — the accumulation already identity-checked):
+            // the captured state must still be the live session.
+            if (this.players.get(state.getPlayerUUID()) != state
+                    || !state.hasCompletedHandshake()) {
+                return;
+            }
             byDimension.forEach((dimension, batch) -> {
                 int offset = 0;
                 while (offset < batch.count) {
@@ -440,12 +469,11 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                                 java.util.Arrays.copyOfRange(batch.seconds, offset, offset + n),
                                 n);
                         sink.send(state, frame, n);
-                    } catch (Exception e) {
+                    } catch (Throwable e) {
                         long c = this.deliveryErrorWarn.recordAndTryAcquire(System.nanoTime() / 1_000_000);
                         if (c > 0) {
-                            LSSLogger.error("Failed to send column-stamps frame to "
-                                    + state.getPlayerName() + " (" + c
-                                    + " delivery failure(s) since the last report)", e);
+                            LSSLogger.error("Failed to send column-stamps frame ("
+                                    + c + " delivery failure(s) since the last report)", e);
                         }
                     }
                     offset += n;
@@ -793,6 +821,14 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                 }
             }
             markGenerationStale(inv.dimension(), inv.positions());
+            if (inv.onApplied() != null) {
+                try {
+                    inv.onApplied().run();
+                } catch (Throwable ignored) {
+                    // The guard's release is advisory armor — a throw must never take
+                    // down the invalidation apply (positions just stay suppressed).
+                }
+            }
         }
     }
 
@@ -1177,7 +1213,8 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                 state.markDiskReadDone(cx, cz);
                 // Compare-backed rung — stamped-up_to_date eligible (plan §9.1/§9.2).
                 this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state,
-                        this.ctx.stampSource().stampSecond(dimension, packed), dimension));
+                        this.ctx.stampSource().stampSecond(playerUuid, dimension, packed),
+                        dimension));
                 this.ctx.diagnostics().incrementUpToDate();
             } else {
                 this.ctx.diagnostics().addSuperseded(1);
@@ -1200,10 +1237,15 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                     && result.columnTimestamp() <= pending.clientTimestamp()
                     && columnBytes != null) {
                 state.markDiskReadDone(cx, cz);
-                // Compare-backed rung — stamped-up_to_date eligible (plan §9.1/§9.2).
-                this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state,
-                        this.ctx.stampSource().stampSecond(result.dimension(), packed),
-                        result.dimension()));
+                // Deliberately NEVER-STAMP (plan §9.1 as narrowed by the 3-Opus fold):
+                // this rung's own doctrine is "delivery honesty — never a fabricated
+                // fresh stamp" (a re-serve hands the STORED acquisition second), and
+                // the store's staleness bound (boot sweep + the invalidation channel;
+                // Fabric has NO periodic resweep at 0) is not provably inside the
+                // freshness margin — a stamp here would claim strictly more than the
+                // bytes the rung declined to send. Only the tscache and header rungs
+                // stamp; these columns heal via those on a later ask.
+                this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state));
                 this.ctx.diagnostics().incrementUpToDate();
                 this.ctx.diagnostics().incrementDiskDrained();
                 return;

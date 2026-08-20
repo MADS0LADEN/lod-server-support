@@ -205,7 +205,19 @@ public final class RegionStampTable {
         var dims = this.byDimension.get(dimension);
         if (dims == null) return false;
         var entry = dims.get(PositionUtil.packPosition(cx >> 5, cz >> 5));
-        return entry != null && latchedOrInGrace(entry);
+        if (entry == null) return false;
+        // READ-ONLY variant of latchedOrInGrace (3-Opus fold): this runs at
+        // up_to_date volume on the processing thread, and the shared helper WRITES
+        // the grace deadline — a hot third writer would (a) race the plain-field
+        // read-modify-write and (b) start the clear-side grace clock EARLY on the
+        // header rung's behalf, consuming the protection it exists for. A grace not
+        // yet started (deadline 0 with the clear condition observed) reads as STILL
+        // SUPPRESSED here — strictly more conservative, side-effect free.
+        long mark = entry.liveSaveMarkSeconds.get();
+        if (mark == 0) return false;
+        if (mark > entry.maxHeaderSecond) return true;
+        long grace = entry.latchClearGraceDeadlineNanos;
+        return grace == 0 || System.nanoTime() - grace < 0;
     }
 
     /**

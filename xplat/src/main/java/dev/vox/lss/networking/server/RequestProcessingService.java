@@ -279,7 +279,11 @@ public class RequestProcessingService {
         // save-to-drain window would launder invalidation latency into a permanent
         // cross-session seal (the drain interval, up to 300 s, is not pinned inside
         // the 15 s freshness margin).
-        this.offThreadProcessor.setUpToDateStampSource((dim, packed) -> {
+        this.offThreadProcessor.setUpToDateStampSource((player, dim, packed) -> {
+            // Eligibility FIRST (3-Opus fold): on a server with no summary-requesting
+            // session the predicate must not put the dirty tracker's monitor (shared
+            // with the save hook) on the router's hot path for discarded work.
+            if (!this.regionSummaries.hasRequestedThisSession(player)) return -1L;
             if (this.dirtyTracker.isPending(dim, packed)) return -1L;
             if (this.regionStamps.isClaimSuppressed(dim,
                     PositionUtil.unpackX(packed), PositionUtil.unpackZ(packed))) {
@@ -1274,9 +1278,25 @@ public class RequestProcessingService {
             // declaration; frames are fire-and-forget (loss = today's behavior, heals
             // on the next rejoin) and counted only on a completed send call.
             @Override public boolean eligible(UUID uuid) {
-                return RequestProcessingService.this.regionSummaries.hasRequestedThisSession(uuid);
+                // CURRENT dialect conjunct (3-Opus fold, plan §9.4): a session that
+                // re-handshakes DOWN to a legacy dialect keeps its request mark until
+                // disconnect — the far-player subscription discipline drops on the
+                // re-handshake, so this lane must too.
+                return RequestProcessingService.this.dialects.dialectOf(uuid)
+                        == dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT
+                        && RequestProcessingService.this.regionSummaries.hasRequestedThisSession(uuid);
             }
             @Override public void send(PlayerRequestState state, byte[] frame, int entries) {
+                // Writability drop (3-Opus fold, all three lenses): the frames land at
+                // exactly the join/portal moment the yield/pacing machinery protects,
+                // and this is the only raw-body S2C lane without a pressure consult.
+                // A plain UNCOUNTED drop, never RETRY — loss is the designed-tolerant
+                // case (the positions re-stamp on the next rejoin).
+                var snap = FabricChannelPressure.forPlayer(state.getPlayer()).snapshot();
+                if (snap.writable() == dev.vox.lss.common.processing.ChannelPressureProbe
+                        .Writability.NOT_WRITABLE) {
+                    return;
+                }
                 dev.vox.lss.platform.LoaderServices.get().sendToPlayer(state.getPlayer(),
                         new dev.vox.lss.networking.payloads.ColumnStampsS2CPayload(frame));
                 RequestProcessingService.this.regionSummaries.diagnostics()

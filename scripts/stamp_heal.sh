@@ -3,9 +3,12 @@ set -euo pipefail
 
 # Stamped-up_to_date live heal gate (stamped-up-to-date-plan.md §9.9): two chained,
 # individually law-checked soak phases —
-#   1. warm-rejoin-summary   its run 2 re-asks the stale residue and every compare-
-#                            backed up_to_date answer now carries a verification
-#                            stamp the client RATCHETS into its cache
+#   1. stamp-heal-prime      warm-rejoin-summary WITHOUT the clearcache re-stamp and
+#                            the poison (3-Opus fold: the clearcache erased the very
+#                            inversion the heal must prove against): run 1's stamps
+#                            stay serve-then-save, run 2's frame finds the BULK stale
+#                            (the named check's before-pin: tiles_stale >= 8), and
+#                            the up_to_date answers RATCHET the carried cache
 #   2. stamp-heal-rejoin     the carried world + carried client cache rejoin once
 #                            more: the named check pins the HEADLINE claim —
 #                            tiles_stale collapsed to the designed residue (the
@@ -34,8 +37,8 @@ log() { echo "[stamp-heal] $*"; }
 cleanup() { rm -rf "$CARRY_DIR"; }
 trap cleanup EXIT
 
-log "=== phase 1: warm-rejoin-summary (platform=$PLATFORM) ==="
-SOAK_PLATFORM="$PLATFORM" "$PROJECT_ROOT/scripts/soak.sh" warm-rejoin-summary
+log "=== phase 1: stamp-heal-prime (platform=$PLATFORM) ==="
+SOAK_PLATFORM="$PLATFORM" "$PROJECT_ROOT/scripts/soak.sh" stamp-heal-prime
 
 rm -rf "$CARRY_DIR"
 mkdir -p "$CARRY_DIR"

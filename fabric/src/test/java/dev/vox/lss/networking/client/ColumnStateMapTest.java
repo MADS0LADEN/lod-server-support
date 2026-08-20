@@ -80,6 +80,15 @@ class ColumnStateMapTest {
         map.onReceived(pos2, 5000L);
         map.markRetry(pos2);
         assertFalse(map.ratchetStamp(pos2, 7000L), "retry-marked: defense-in-depth skip");
+
+        // sessionSatisfied (3-Opus fold — the applyTileValidation exclusion mirrored):
+        // the lost-CLEAR park retains a positive pre-clear stamp under
+        // sessionSatisfied; ratcheting it past the server's cached clear stamp would
+        // be the F2 ghost seal.
+        long pos3 = PositionUtil.packPosition(12, -3);
+        map.onReceived(pos3, 5000L);
+        map.markSessionSatisfied(pos3);
+        assertFalse(map.ratchetStamp(pos3, 7000L), "sessionSatisfied never ratchets");
     }
 
     @Test

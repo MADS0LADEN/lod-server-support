@@ -35,9 +35,20 @@ public sealed interface SendAction {
     record ColumnUpToDate(UUID playerUuid, long packedPosition,
                           AbstractPlayerRequestState<?> producerState,
                           long stampSecond, String stampDimension) implements SendAction {
-        /** The never-stamp form — every producer that is not a compare-backed rung. */
-        ColumnUpToDate(UUID playerUuid, long packedPosition,
-                       AbstractPlayerRequestState<?> producerState) {
+        /** A stamp claim without its dimension is malformed — normalize to the
+         *  never-stamp shape rather than let a producer bug ship a mislabeled claim
+         *  (3-Opus fold: the canonical ctor is public by record rules, so it must be
+         *  safe to misuse). */
+        public ColumnUpToDate {
+            if (stampSecond > 0 && stampDimension == null) {
+                stampSecond = -1L;
+            }
+        }
+        /** The never-stamp form — every producer that is not a compare-backed rung.
+         *  PUBLIC (unlike the record's implicit canonical): the safe default an
+         *  out-of-package producer should reach first. */
+        public ColumnUpToDate(UUID playerUuid, long packedPosition,
+                              AbstractPlayerRequestState<?> producerState) {
             this(playerUuid, packedPosition, producerState, -1L, null);
         }
         @Override public byte responseType() { return LSSConstants.RESPONSE_UP_TO_DATE; }

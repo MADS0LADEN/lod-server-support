@@ -397,7 +397,10 @@ public class PaperRequestProcessingService {
         // arm, and paper-store-unfired-event's probe legs canary the class.
         if (this.offThreadProcessor != null && this.regionStamps != null
                 && this.dirtyTracker != null) {
-            this.offThreadProcessor.setUpToDateStampSource((dim, packed) -> {
+            this.offThreadProcessor.setUpToDateStampSource((player, dim, packed) -> {
+                // Eligibility FIRST (3-Opus fold — see the Fabric twin).
+                var s = this.regionSummaries;
+                if (s == null || !s.hasRequestedThisSession(player)) return -1L;
                 if (this.dirtyTracker.isPending(dim, packed)) return -1L;
                 if (this.regionStamps.isClaimSuppressed(dim,
                         PositionUtil.unpackX(packed), PositionUtil.unpackZ(packed))) {
@@ -1555,10 +1558,21 @@ public class PaperRequestProcessingService {
             // Stamped up_to_date (plan §3): the summary request is the eligibility
             // declaration; fire-and-forget, counted on a completed send only.
             @Override public boolean eligible(UUID uuid) {
+                // CURRENT dialect conjunct (3-Opus fold — see the Fabric twin).
                 var s = PaperRequestProcessingService.this.regionSummaries;
-                return s != null && s.hasRequestedThisSession(uuid);
+                return s != null
+                        && PaperRequestProcessingService.this.dialects.dialectOf(uuid)
+                                == dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT
+                        && s.hasRequestedThisSession(uuid);
             }
             @Override public void send(PaperPlayerRequestState state, byte[] frame, int entries) {
+                // Writability drop (3-Opus fold — see the Fabric twin): uncounted, no
+                // retry; loss is the designed-tolerant case.
+                var snap = PaperChannelPressure.forPlayer(state.getPlayer()).snapshot();
+                if (snap.writable() == dev.vox.lss.common.processing.ChannelPressureProbe
+                        .Writability.NOT_WRITABLE) {
+                    return;
+                }
                 if (PaperPayloadHandler.sendColumnStamps(state.getPlayer(), frame)) {
                     PaperRequestProcessingService.this.regionSummaries.diagnostics()
                             .recordStampsFrame(entries, frame.length);
