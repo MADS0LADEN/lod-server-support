@@ -38,7 +38,8 @@ class RegionSummaryDiagnosticsTest {
         diag.recordRefreshMillis(12);
         diag.recordRefreshMillis(4); // gauge keeps the high-water
         assertEquals("Summary: reqs=2, frames=2, tiles known=100 never_clean=3"
-                        + " no_region=17, range_filtered=1, bytes=4201, refresh_ms_max=12",
+                        + " no_region=17, range_filtered=1, bytes=4201, refresh_ms_max=12,"
+                        + " stamps=0/0",
                 diag.diagLineOrNull());
     }
 }

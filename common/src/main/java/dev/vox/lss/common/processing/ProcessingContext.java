@@ -11,5 +11,6 @@ record ProcessingContext(
         ConcurrentLinkedQueue<SendAction> sendActions,
         ConcurrentLinkedQueue<OffThreadProcessor.GenerationTicketRequest> generationTicketRequests,
         ProcessingDiagnostics diagnostics,
-        SequenceCounter sequence
+        SequenceCounter sequence,
+        UpToDateStampSource stampSource
 ) {}

@@ -58,6 +58,16 @@ public class DirtyColumnTracker {
         }
     }
 
+    /** True while the position is MARKED-BUT-UNDRAINED — the save-to-drain window the
+     *  stamped-up_to_date predicate must refuse to stamp inside (plan §9.2: the drain
+     *  interval, up to 300 s, is not pinned inside the 15 s freshness margin, so a
+     *  stamp issued here would launder invalidation latency into a permanent
+     *  cross-session seal). Called from the processing thread. */
+    public synchronized boolean isPending(String dimension, long packedPosition) {
+        var set = dirtyColumns.get(dimension);
+        return set != null && set.contains(packedPosition);
+    }
+
     public synchronized long[] drainDirty(String dimension) {
         var set = dirtyColumns.get(dimension);
         if (set == null || set.isEmpty()) return null;

@@ -314,6 +314,9 @@ public final class PaperSoakMetricsExporter {
         summaryMap.put("tiles_no_region", summary == null ? 0L : summary.getTilesNoRegion());
         summaryMap.put("bytes", summary == null ? 0L : summary.getBytes());
         summaryMap.put("refresh_ms_hw", summary == null ? 0L : summary.getRefreshMsMax());
+        summaryMap.put("stamps_frames", summary == null ? 0L : summary.getStampsFrames());
+        summaryMap.put("stamps_entries", summary == null ? 0L : summary.getStampsEntries());
+        summaryMap.put("stamps_bytes", summary == null ? 0L : summary.getStampsBytes());
         result.put("summary", summaryMap);
 
         // LOD store — verbatim twin of the Fabric exporter's group (same keys, same

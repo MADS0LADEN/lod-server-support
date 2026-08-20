@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Stamped-up_to_date live heal gate (stamped-up-to-date-plan.md §9.9): two chained,
+# individually law-checked soak phases —
+#   1. warm-rejoin-summary   its run 2 re-asks the stale residue and every compare-
+#                            backed up_to_date answer now carries a verification
+#                            stamp the client RATCHETS into its cache
+#   2. stamp-heal-rejoin     the carried world + carried client cache rejoin once
+#                            more: the named check pins the HEADLINE claim —
+#                            tiles_stale collapsed to the designed residue (the
+#                            phase-1 kick-save's player tile) while
+#                            columns_validated stays bulk-scale and the re-ask
+#                            volume drops accordingly (stale -> stamped -> clean)
+#
+# Same two-carry contract as summary_evicted.sh: the WORLD travels via
+# SOAK_WORLD_FROM below; the CLIENT CACHE carry rides soak.sh's staging —
+# stamp-heal-rejoin is declared cache-KEEPING there. FABRIC-ONLY like the evicted
+# chain (Bukkit's split world dirs make the carry unvalidated on Paper).
+#
+# Usage: ./scripts/stamp_heal.sh
+# Exit nonzero on any phase failure.
+
+PLATFORM="${SOAK_PLATFORM:-fabric}"
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CARRY_DIR="$PROJECT_ROOT/soak-results/stamp-heal-carry.$$"
+
+case "$PLATFORM" in
+    fabric) SERVER_RUN_DIR="$PROJECT_ROOT/fabric/build/run/soak-server" ;;
+    *) echo "[stamp-heal] ERROR: fabric-only (see header note)" >&2; exit 1 ;;
+esac
+
+log() { echo "[stamp-heal] $*"; }
+cleanup() { rm -rf "$CARRY_DIR"; }
+trap cleanup EXIT
+
+log "=== phase 1: warm-rejoin-summary (platform=$PLATFORM) ==="
+SOAK_PLATFORM="$PLATFORM" "$PROJECT_ROOT/scripts/soak.sh" warm-rejoin-summary
+
+rm -rf "$CARRY_DIR"
+mkdir -p "$CARRY_DIR"
+cp -r "$SERVER_RUN_DIR/world" "$CARRY_DIR/world"
+
+log "=== phase 2: stamp-heal-rejoin (platform=$PLATFORM, carried world + cache) ==="
+SOAK_PLATFORM="$PLATFORM" SOAK_WORLD_FROM="$CARRY_DIR" \
+    "$PROJECT_ROOT/scripts/soak.sh" stamp-heal-rejoin
+
+log "both phases green — the stamped rejoin healed the stale set"

@@ -125,4 +125,10 @@ public class LSSClientNetworking {
             IPayloadContext context) {
         ClientNetGlue.onRegionSummaryFrame(payload.body());
     }
+
+    public static void handleColumnStampsPayload(
+            dev.vox.lss.networking.payloads.ColumnStampsS2CPayload payload,
+            IPayloadContext context) {
+        ClientNetGlue.onColumnStampsFrame(payload.body());
+    }
 }

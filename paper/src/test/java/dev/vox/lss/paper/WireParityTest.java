@@ -315,7 +315,11 @@ class WireParityTest {
                 // (RegionSummaryWireTest owns the body bytes; the Fabric twin pins its
                 // carrier framing; Paper's carrier is the same NMS DiscardedPayload /
                 // plugin-messaging ingress as above).
-                "lss:region_summary_req", "lss:region_summary");
+                "lss:region_summary_req", "lss:region_summary",
+                // Stamped up_to_date (stamped-up-to-date-plan.md §3): ColumnStampsWire
+                // byte[] bodies, same doctrine (ColumnStampsWireTest owns the bytes;
+                // Paper's carrier is the same NMS DiscardedPayload send).
+                "lss:col_stamps");
         assertEquals(covered, declared,
                 "every LSS channel must have a reference frame in this suite — a new payload"
                 + " requires frames in BOTH WireParityTests");

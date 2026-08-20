@@ -63,5 +63,9 @@ public class LSSNetworking {
                 dev.vox.lss.networking.payloads.RegionSummaryS2CPayload.TYPE,
                 dev.vox.lss.networking.payloads.RegionSummaryS2CPayload.CODEC
         );
+        PayloadTypeRegistry.clientboundPlay().register(
+                dev.vox.lss.networking.payloads.ColumnStampsS2CPayload.TYPE,
+                dev.vox.lss.networking.payloads.ColumnStampsS2CPayload.CODEC
+        );
     }
 }

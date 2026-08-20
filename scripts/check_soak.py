@@ -90,6 +90,7 @@ ANOMALY_OPT_INS = {
     "warm-rejoin-summary": frozenset(),
     "dirty-while-offline-summary": frozenset(),
     "evicted-tscache-rejoin": frozenset(),
+    "stamp-heal-rejoin": frozenset(),
     "clearcache-mid-session": frozenset({"saturated"}),
     "store-second-join": frozenset({"saturated"}),
     "store-offline-populate": frozenset({"saturated"}),
@@ -148,6 +149,7 @@ MIN_CLIENT_WINDOWS = {
     "warm-rejoin-summary": {(1, 0): 4, (1, 1): 4, (2, 0): 3},
     "dirty-while-offline-summary": {(1, 0): 4, (1, 1): 4, (2, 0): 3},
     "evicted-tscache-rejoin": {(1, 0): 3},
+    "stamp-heal-rejoin": {(1, 0): 3},
     # clearcache splits run 1 into pre/post-action segments (the flushCache counter reset
     # is a segment boundary, like a dimension change)
     "clearcache-mid-session": {(1, 0): 4, (1, 1): 4},
@@ -421,6 +423,11 @@ SERVER_MONOTONIC = (
     "summary.requests", "summary.range_filtered", "summary.frames",
     "summary.tiles_known", "summary.tiles_never_clean", "summary.tiles_no_region",
     "summary.bytes",
+    # Stamped up_to_date (stamped-up-to-date-plan.md §6): the verification-stamp
+    # frames' own accounting — like summary.bytes, deliberately NOT part of
+    # service.bytes_sent (law A2's raw==raw identity stays exact). Counted on
+    # completed sends only; zero on every non-opt-in scenario (the inert check).
+    "summary.stamps_frames", "summary.stamps_entries", "summary.stamps_bytes",
 )
 CLIENT_MONOTONIC = (
     "received_columns", "received_bytes", "dropped",
@@ -1202,7 +1209,8 @@ def far_players_inert_violations(snapshots):
 
 # Scenarios that deliberately arm the region-summary exchange (the client opts back in
 # via -Dlss.soak.summary) — the ONLY runs where summary.* counters may move.
-SUMMARY_OPT_IN_SCENARIOS = frozenset({"warm-rejoin-summary", "dirty-while-offline-summary"})
+SUMMARY_OPT_IN_SCENARIOS = frozenset({"warm-rejoin-summary", "dirty-while-offline-summary",
+                                      "stamp-heal-rejoin"})
 
 
 def summary_inert_violations(snapshots, scenario=None, client_runs=None):
@@ -1424,6 +1432,17 @@ def check_warm_rejoin_summary(ctx):
                         "client's no-evidence skip (both sentinels validate nothing) is "
                         "not engaging (~9 expected on this geometry)",
                         {"expected": ">= 5", "actual": s.get("tiles_no_region", 0)})
+    # Stamped up_to_date (stamped-up-to-date-plan.md §7): run 2's residue re-asks are
+    # answered up_to_date in volume (recorded green: 1,567) through the compare-backed
+    # rungs, so the stamps lane must be LIVE — floors at 50 (~30x headroom under the
+    # self-scaling suppression pin) on both halves: server entries produced, client
+    # ratchets applied. A dead lane here means the eligibility gate, the drain sink,
+    # or the client apply broke while every other pin stayed green.
+    if s.get("stamps_applied", 0) < 50:
+        yield Violation("warm-rejoin-summary", "run2 final snapshot",
+                        "the client ratcheted too few verification stamps — the "
+                        "stamped-up_to_date lane is not reaching the cache",
+                        {"expected": ">= 50", "actual": s.get("stamps_applied", 0)})
     if s["tiles_stale"] + s["tiles_unknown"] < 1:
         yield Violation("warm-rejoin-summary", "run2 final snapshot",
                         "the poisoned player tile validated despite the t195 edit — it "
@@ -1482,6 +1501,19 @@ def check_warm_rejoin_summary(ctx):
                         "the server's own window (radius/center drift between the two "
                         "halves)",
                         {"expected": "0", "actual": last["summary"]["range_filtered"]})
+    if last["summary"].get("stamps_entries", 0) < 50:
+        yield Violation("warm-rejoin-summary", "final server snapshot",
+                        "the server produced too few verification stamps for run 2's "
+                        "up_to_date volume — the compare-backed rungs are not stamping "
+                        "(or the eligibility mark never armed)",
+                        {"expected": ">= 50", "actual": last["summary"].get("stamps_entries", 0)})
+    # The stamps lane's own ceiling (plan §9.10 — keeps the summary.bytes ceiling
+    # sharp): ~10-11 B/entry over at most the run-2 re-ask population.
+    if last["summary"].get("stamps_bytes", 0) > 65536:
+        yield Violation("warm-rejoin-summary", "final server snapshot",
+                        "stamps bytes above the whole-scenario ceiling — a stamp loop "
+                        "or an unclamped population",
+                        {"expected": "<= 65536", "actual": last["summary"].get("stamps_bytes", 0)})
 
 
 @named_check("dirty-while-offline-summary",
@@ -1645,6 +1677,69 @@ def check_evicted_tscache_rejoin(ctx):
                         "answering up_to_date for stamps its headers postdate (a false "
                         "freshness claim, the exact failure this gate exists for)",
                         {"expected": ">= 150", "actual": cols})
+
+
+@named_check("stamp-heal-rejoin",
+             ["client.summary.columns_validated", "client.summary.tiles_stale",
+              "client.summary.tiles_clean", "client.requested_total"])
+def check_stamp_heal_rejoin(ctx):
+    """The stamped-up_to_date HEADLINE gate (stamped-up-to-date-plan.md §9.9; phase 2
+    of scripts/stamp_heal.sh): warm-rejoin-summary's run 2 got its residue re-asks
+    answered up_to_date WITH verification stamps, ratcheted into the carried client
+    cache — so THIS rejoin's one summary frame must validate the once-stale bulk.
+    The heal chain (stale -> stamped -> clean) is what distinguishes this from a
+    plain warm rejoin: without the ratchet, phase 1's stale set (headers written
+    after the original serves) would re-flag IDENTICALLY here, forever. Residue
+    tolerance: the phase-1 kick-save's player tile (its loaded chunks re-save after
+    every stamp) plus latch/autosave stragglers at this join — stale+unknown <= 3;
+    the bulk must read clean."""
+    r1 = ctx.final_client(1)
+    if r1 is None:
+        yield Violation("stamp-heal-rejoin", "run1", "no client snapshots", {})
+        return
+    if "summary" not in r1:
+        yield Violation("stamp-heal-rejoin", "run1 final snapshot",
+                        "client snapshot has no summary group — pre-summary client jar?",
+                        {"keys": sorted(r1)})
+        return
+    known = r1["columns"]["known"]
+    if known < 1500:
+        yield Violation("stamp-heal-rejoin", "run1 final snapshot",
+                        "the carried client cache did not arrive — the heal premise "
+                        "(phase 1's ratcheted stamps) is gone and this degraded to a "
+                        "cold resync",
+                        {"expected": "columns.known >= 1500", "actual": known})
+        return
+    s = r1["summary"]
+    if s["tiles_stale"] + s["tiles_unknown"] > 3:
+        yield Violation("stamp-heal-rejoin", "run1 final snapshot",
+                        "the stale set did not heal — phase 1's stamped up_to_date "
+                        "answers should have ratcheted these tiles clean (the ratchet "
+                        "-> cache save -> re-declaration chain broke somewhere)",
+                        {"expected": "stale+unknown <= 3",
+                         "stale": s["tiles_stale"], "unknown": s["tiles_unknown"]})
+    if s["tiles_clean"] < 12:
+        yield Violation("stamp-heal-rejoin", "run1 final snapshot",
+                        "too few clean tiles — the healed bulk must validate "
+                        "(same 16-real/9-no-region window geometry as "
+                        "warm-rejoin-summary)",
+                        {"expected": ">= 12", "actual": s["tiles_clean"]})
+    if s["columns_validated"] < 800:
+        yield Violation("stamp-heal-rejoin", "run1 final snapshot",
+                        "summary validated too few columns on the healed rejoin",
+                        {"expected": ">= 800", "actual": s["columns_validated"]})
+    req = r1["requested_total"]
+    if req >= known:
+        yield Violation("stamp-heal-rejoin", "run1 final snapshot",
+                        "the healed rejoin re-declared its whole known disc — "
+                        "validation is not suppressing asks",
+                        {"requested_total": req, "columns.known": known})
+    if req > 1200:
+        yield Violation("stamp-heal-rejoin", "run1 final snapshot",
+                        "re-ask volume above the healed ceiling — the residue should "
+                        "be ~one player tile, not a third of the disc (phase 1's "
+                        "unhealed run 2 measured ~1.5k here)",
+                        {"expected": "<= 1200", "actual": req})
 
 
 @named_check("dimension-trip", ["client.dimension", "client.tracker_in_flight", "client.queued"])
@@ -3275,6 +3370,9 @@ CHECKS = {
     "evicted-tscache-rejoin": [check_evicted_tscache_rejoin,
                                make_handshake_check("evicted-tscache-rejoin"),
                                make_disc_completeness("evicted-tscache-rejoin")],
+    "stamp-heal-rejoin": [check_stamp_heal_rejoin,
+                          make_handshake_check("stamp-heal-rejoin"),
+                          make_disc_completeness("stamp-heal-rejoin")],
     "clearcache-mid-session": [check_clearcache_mid_session,
                                make_handshake_check("clearcache-mid-session"),
                                make_disc_completeness("clearcache-mid-session")],
@@ -3677,7 +3775,8 @@ def _srv(wall=1000, seg=0, over=None):
                             "entries": 0, "suppressed": 0, "bytes": 0},
             "summary": {"requests": 0, "range_filtered": 0, "frames": 0,
                         "tiles_known": 0, "tiles_never_clean": 0, "tiles_no_region": 0,
-                        "bytes": 0, "refresh_ms_hw": 0},
+                        "bytes": 0, "refresh_ms_hw": 0,
+                        "stamps_frames": 0, "stamps_entries": 0, "stamps_bytes": 0},
             "store": {"hits": 0, "misses": 0, "deposits": 0, "deposit_drops": 0,
                       "deposit_skips": 0,
                       "errors": 0, "sweep_drops": 0,
@@ -3701,7 +3800,8 @@ def _cli(wall=1000, seg=0, over=None):
             "columns": {"known": 0, "empty": 0, "dirty": 0},
             "scan": {"confirmed": 0, "ring": 0, "missing_vanilla": 0},
             "summary": {"tiles_clean": 0, "tiles_stale": 0, "tiles_unknown": 0,
-                        "tiles_no_region": 0, "columns_validated": 0},
+                        "tiles_no_region": 0, "columns_validated": 0,
+                        "stamps_applied": 0, "stamps_ignored": 0},
             "tracker_in_flight": 0, "queued": 0}
     for k, v in (over or {}).items():
         _set_path(snap, k, v)
@@ -4332,7 +4432,8 @@ def selftest():
     def wrs_ctx(validated=1400, clean_tiles=15, stale_tiles=1, no_region=9, req2=900,
                 cols1=4200, pre_cols=2100, srv_reqs=2, srv_frames=2, srv_bytes=178,
                 srv_rf=0, known2=2144, cols2=16, split_run1=True, poison_ok=True,
-                with_poison=True):
+                with_poison=True, srv_stamps=800, srv_stamps_bytes=8200,
+                cli_stamps=800):
         run1 = ([_cli(1000, seg=0, over={"responses.columns": pre_cols}),
                  _cli(200_000, seg=1, over={"responses.columns": cols1})]
                 if split_run1 else [_cli(1000, over={"responses.columns": cols1})])
@@ -4341,7 +4442,10 @@ def selftest():
         return _ctx(
             server_snaps=[_srv(1000), _srv(200_000, over={
                 "summary.requests": srv_reqs, "summary.frames": srv_frames,
-                "summary.bytes": srv_bytes, "summary.range_filtered": srv_rf})],
+                "summary.bytes": srv_bytes, "summary.range_filtered": srv_rf,
+                "summary.stamps_entries": srv_stamps,
+                "summary.stamps_frames": 2 if srv_stamps else 0,
+                "summary.stamps_bytes": srv_stamps_bytes})],
             commands=commands,
             runs={1: run1,
                   2: [_cli(300_000, over={
@@ -4349,6 +4453,7 @@ def selftest():
                       "summary.tiles_clean": clean_tiles,
                       "summary.tiles_stale": stale_tiles,
                       "summary.tiles_no_region": no_region,
+                      "summary.stamps_applied": cli_stamps,
                       "requested_total": req2,
                       "columns.known": known2,
                       "responses.columns": cols2})]})
@@ -4371,6 +4476,12 @@ def selftest():
         wrs_ctx(srv_bytes=5000))), "warm-rejoin-summary")
     hits("warm-rejoin-summary window range-clamped", list(check_warm_rejoin_summary(
         wrs_ctx(srv_rf=3))), "warm-rejoin-summary")
+    hits("warm-rejoin-summary stamps lane dead server-side", list(check_warm_rejoin_summary(
+        wrs_ctx(srv_stamps=0, srv_stamps_bytes=0))), "warm-rejoin-summary")
+    hits("warm-rejoin-summary stamps never reached the client", list(check_warm_rejoin_summary(
+        wrs_ctx(cli_stamps=3))), "warm-rejoin-summary")
+    hits("warm-rejoin-summary stamps bytes runaway", list(check_warm_rejoin_summary(
+        wrs_ctx(srv_stamps_bytes=200_000))), "warm-rejoin-summary")
     hits("warm-rejoin-summary poisoned tile validated", list(check_warm_rejoin_summary(
         wrs_ctx(stale_tiles=0))), "warm-rejoin-summary")
     hits("warm-rejoin-summary runaway re-declares", list(check_warm_rejoin_summary(
@@ -4462,6 +4573,31 @@ def selftest():
     # makes every floor above vacuous — must red even with healthy-looking counters.
     hits("evicted-tscache-rejoin tscache booted warm", list(
         check_evicted_tscache_rejoin(etr_ctx(boot_ts=2100))), "evicted-tscache-rejoin")
+
+    # --- stamp-heal-rejoin: the stale -> stamped -> clean headline gate ---
+    def shr_ctx(stale=1, unknown=0, clean=15, validated=1900, req=420, known=2144,
+                no_region=9):
+        return _ctx(
+            server_snaps=[_srv(1000), _srv(150_000)],
+            runs={1: [_cli(150_000, over={
+                "summary.tiles_stale": stale,
+                "summary.tiles_unknown": unknown,
+                "summary.tiles_clean": clean,
+                "summary.tiles_no_region": no_region,
+                "summary.columns_validated": validated,
+                "requested_total": req,
+                "columns.known": known})]})
+    clean("stamp-heal-rejoin healed", list(check_stamp_heal_rejoin(shr_ctx())))
+    hits("stamp-heal-rejoin stale set did not heal", list(check_stamp_heal_rejoin(
+        shr_ctx(stale=499, clean=6, validated=900, req=1100))), "stamp-heal-rejoin")
+    hits("stamp-heal-rejoin latched-unknown residue too big", list(check_stamp_heal_rejoin(
+        shr_ctx(unknown=8))), "stamp-heal-rejoin")
+    hits("stamp-heal-rejoin bulk did not validate", list(check_stamp_heal_rejoin(
+        shr_ctx(validated=100))), "stamp-heal-rejoin")
+    hits("stamp-heal-rejoin re-ask volume unhealed", list(check_stamp_heal_rejoin(
+        shr_ctx(req=1567))), "stamp-heal-rejoin")
+    hits("stamp-heal-rejoin cache never carried", list(check_stamp_heal_rejoin(
+        shr_ctx(known=300))), "stamp-heal-rejoin")
 
     # --- summary-inert: the client-side belt (harness review m4) ---
     hits("summary moved CLIENT-side only on a gated run", summary_inert_violations(

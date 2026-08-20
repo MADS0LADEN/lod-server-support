@@ -110,6 +110,8 @@ public class LodRequestManager {
     private long summaryTilesUnknown;
     private long summaryTilesNoRegion;
     private long summaryColumnsValidated;
+    private long summaryStampsApplied;
+    private long summaryStampsIgnored;
     /** Harness gate (the far-player capability precedent): soak/benchmark clients never
      *  request, so no scenario baseline can shift; the summary scenarios opt back in
      *  via -Dlss.soak.summary. Seam for tests. */
@@ -867,6 +869,45 @@ public class LodRequestManager {
     public long getSummaryTilesUnknown() { return this.summaryTilesUnknown; }
     public long getSummaryTilesNoRegion() { return this.summaryTilesNoRegion; }
     public long getSummaryColumnsValidated() { return this.summaryColumnsValidated; }
+    public long getSummaryStampsApplied() { return this.summaryStampsApplied; }
+    public long getSummaryStampsIgnored() { return this.summaryStampsIgnored; }
+
+    /**
+     * Stamped up_to_date S2C frame (stamped-up-to-date-plan.md §4): ratchet cached
+     * acquisition stamps forward to the server's verification second, so the next
+     * summary frame validates the columns a header write once passed. Kill-switch
+     * gated like the summary apply (the ratchet's only consumer is tile validation);
+     * dimension mismatch drops (the anti-stale binding — overworld/End coords
+     * overlap); decode is contained WITH the semantic stamp bounds (a hostile huge
+     * second would seal a position against offline edits permanently — the ratchet
+     * is monotonic and revocation only touches summary provenance). No cache-load
+     * buffering: answers only flow after declarations, which only flow after the
+     * cache gate, so a frame racing a load can only be a stale prior-session frame —
+     * absent leaves make it a no-op.
+     */
+    public void onColumnStamps(byte[] body) {
+        if (!LSSClientConfig.CONFIG.enableRegionSummarySync) return;
+        if (this.lastDimension == null) return;
+        try {
+            var stamps = dev.vox.lss.common.region.ColumnStampsWire.decode(
+                    body, System.currentTimeMillis() / 1000L);
+            if (!this.lastDimension.identifier().toString().equals(stamps.dimension())) return;
+            long[] positions = stamps.packedPositions();
+            long[] seconds = stamps.stampSeconds();
+            for (int i = 0; i < positions.length; i++) {
+                if (this.columns.ratchetStamp(positions[i], seconds[i])) {
+                    this.summaryStampsApplied++;
+                } else {
+                    this.summaryStampsIgnored++;
+                }
+            }
+            if (ClientTraceLog.enabled()) {
+                ClientTraceLog.event("stamps", "\"n\":" + positions.length);
+            }
+        } catch (Exception e) {
+            LSSLogger.debug("Column-stamps frame dropped: " + e.getMessage());
+        }
+    }
 
     void setSummarySenderForTest(SummarySender sender) { this.summarySender = sender; }
 

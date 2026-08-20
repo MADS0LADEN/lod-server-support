@@ -317,6 +317,26 @@ class RegionSummaryServiceTest {
         }
     }
 
+    @Test
+    void eligibilityMarkArmsOnRequestAndSweepsAtDisconnect() {
+        // Stamped up_to_date (stamped-up-to-date-plan.md §9.4): the summary request IS
+        // the stamps-eligibility declaration; the mark survives admission (unlike the
+        // pending mailbox) and dies ONLY at the network-disconnect sweep.
+        var rig = new Rig((dim, tx, tz) -> NOW);
+        try {
+            var player = UUID.randomUUID();
+            assertFalse(rig.service.hasRequestedThisSession(player));
+            rig.service.offerRequest(player, new RegionSummaryWire.Request(DIM, 0, 0, 0));
+            assertTrue(rig.service.hasRequestedThisSession(player), "armed by the request");
+            rig.pump(rig.anchorsAt(player, DIM, 0, 0)); // admission consumes the mailbox...
+            assertTrue(rig.service.hasRequestedThisSession(player), "...but never the mark");
+            rig.service.removePlayer(player);
+            assertFalse(rig.service.hasRequestedThisSession(player), "swept at disconnect");
+        } finally {
+            rig.service.shutdown();
+        }
+    }
+
     private static void awaitAssembly(Rig rig) throws InterruptedException {
         long deadline = System.nanoTime() + POLL_DEADLINE_NANOS;
         while (rig.service.readyCountForTest() == 0) {

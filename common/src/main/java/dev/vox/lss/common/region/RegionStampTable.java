@@ -190,6 +190,25 @@ public final class RegionStampTable {
     }
 
     /**
+     * The stamped-up_to_date predicate's latch probe (stamped-up-to-date-plan.md
+     * §9.2): true while the position's region has a marked change no examined header
+     * reflects yet (or the clear-side grace is running) — a verification stamped in
+     * that window would claim currency about pre-change bytes. PURE MEMORY: no stat,
+     * no header read, no entry creation — a region this table has never examined has
+     * no mark and answers false (an unexamined region can hold no pending-claim
+     * evidence; the DIRTY-TRACKER half of the predicate covers marked changes to such
+     * regions, since every mark bumps the region's liveSaveMark via the listener
+     * BEFORE becoming drainable — see {@code DirtyColumnTracker.markDirty}).
+     * Processing-thread safe.
+     */
+    public boolean isClaimSuppressed(String dimension, int cx, int cz) {
+        var dims = this.byDimension.get(dimension);
+        if (dims == null) return false;
+        var entry = dims.get(PositionUtil.packPosition(cx >> 5, cz >> 5));
+        return entry != null && latchedOrInGrace(entry);
+    }
+
+    /**
      * The P2 summary sweeper's question (region-summary-sync-plan.md §5): the second
      * at/before which ANY content in this 32×32 tile last changed —
      * {@link RegionSummaryWire#STAMP_NO_REGION} (0) when no region file exists (nothing

@@ -150,6 +150,63 @@ class LodRequestManagerSummaryTest {
         manager.columnsForTest().loadFrom(loaded);
     }
 
+    private static byte[] stampsFrame(String dimension, long pos, long second) {
+        return dev.vox.lss.common.region.ColumnStampsWire.encode(
+                dimension, new long[]{pos}, new long[]{second}, 1);
+    }
+
+    // ---- stamped up_to_date (stamped-up-to-date-plan.md §4) ----
+
+    @Test
+    void aColumnStampsFrameRatchetsAndCounts() {
+        seedStamped(dim("overworld"), 5000L);
+        long now = System.currentTimeMillis() / 1000L;
+        manager.onColumnStamps(stampsFrame("lss_test:overworld", POS, now));
+        assertEquals(1, manager.getSummaryStampsApplied());
+        assertEquals(0, manager.getSummaryStampsIgnored());
+        // An idempotent replay (the loss-tolerant recur) counts ignored, not applied.
+        manager.onColumnStamps(stampsFrame("lss_test:overworld", POS, now));
+        assertEquals(1, manager.getSummaryStampsApplied());
+        assertEquals(1, manager.getSummaryStampsIgnored());
+        // The heal chain end to end: a tile stamp between old and new now validates.
+        var outcome = manager.columnsForTest().applyTileValidation(
+                PositionUtil.unpackX(POS) >> 5, PositionUtil.unpackZ(POS) >> 5, now - 100);
+        assertTrue(outcome.fullyValidated(), "the ratcheted stamp clears the tile compare");
+    }
+
+    @Test
+    void aColumnStampsFrameForAnotherDimensionDrops() {
+        seedStamped(dim("overworld"), 5000L);
+        long now = System.currentTimeMillis() / 1000L;
+        manager.onColumnStamps(stampsFrame("lss_test:the_end", POS, now));
+        assertEquals(0, manager.getSummaryStampsApplied());
+        assertEquals(0, manager.getSummaryStampsIgnored());
+        assertEquals(5000L, manager.columnsForTest().classify(POS), "state untouched");
+    }
+
+    @Test
+    void aHostileColumnStampsFrameIsContained() {
+        seedStamped(dim("overworld"), 5000L);
+        assertDoesNotThrow(() -> manager.onColumnStamps(new byte[]{9, 1, 2, 3}));
+        // The permanent-seal shape: a frame whose second is beyond now+skew drops WHOLE.
+        long hostile = System.currentTimeMillis() / 1000L
+                + dev.vox.lss.common.region.ColumnStampsWire.FUTURE_SKEW_ALLOWANCE_SECONDS + 500;
+        assertDoesNotThrow(() -> manager.onColumnStamps(
+                stampsFrame("lss_test:overworld", POS, hostile)));
+        assertEquals(0, manager.getSummaryStampsApplied());
+        assertEquals(5000L, manager.columnsForTest().classify(POS), "no seal, no ratchet");
+    }
+
+    @Test
+    void columnStampsRespectTheKillSwitch() {
+        seedStamped(dim("overworld"), 5000L);
+        LSSClientConfig.CONFIG.enableRegionSummarySync = false;
+        manager.onColumnStamps(stampsFrame("lss_test:overworld", POS,
+                System.currentTimeMillis() / 1000L));
+        assertEquals(0, manager.getSummaryStampsApplied());
+        assertEquals(5000L, manager.columnsForTest().classify(POS));
+    }
+
     @Test
     void aMatchingFrameValidatesAndCounts() {
         var overworld = dim("overworld");

@@ -387,6 +387,25 @@ public class PaperRequestProcessingService {
         if (this.offThreadProcessor != null) {
             this.offThreadProcessor.attachDialectTracker(this.dialects);
         }
+        // Stamped up_to_date (stamped-up-to-date-plan.md §9.2, the Fabric twin's
+        // wiring): compare-backed rungs stamp "verified now" unless the position's
+        // change is marked-but-undrained or the region latch is armed. Null table
+        // (pre-region-stamps test wirings) keeps the NEVER default — no stamps.
+        // Paper residual (plan §9.3, accepted-with-eyes-open): an event-blind content
+        // change (the unfired-event class) is invisible to BOTH guards; its stamp
+        // seals until the chunk's next save — the store resweep bounds the store-rung
+        // arm, and paper-store-unfired-event's probe legs canary the class.
+        if (this.offThreadProcessor != null && this.regionStamps != null
+                && this.dirtyTracker != null) {
+            this.offThreadProcessor.setUpToDateStampSource((dim, packed) -> {
+                if (this.dirtyTracker.isPending(dim, packed)) return -1L;
+                if (this.regionStamps.isClaimSuppressed(dim,
+                        PositionUtil.unpackX(packed), PositionUtil.unpackZ(packed))) {
+                    return -1L;
+                }
+                return LSSConstants.epochSeconds();
+            });
+        }
     }
 
     private static Wiring productionWiring(MinecraftServer server, Plugin plugin, PaperConfig config) {
@@ -1146,6 +1165,12 @@ public class PaperRequestProcessingService {
         // A malformed frame throws out into dispatchPluginMessage's hostile-frame
         // containment (throttled) — the Fabric twin contains at its own receiver.
         var request = dev.vox.lss.common.region.RegionSummaryWire.decodeRequest(body);
+        // CURRENT dialect only (plan §9.4 — the far-player subscription discipline):
+        // a legacy-dialect session must not become stamps-eligible.
+        if (this.dialects.dialectOf(player)
+                != dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT) {
+            return;
+        }
         this.regionSummaries.offerRequest(player, request);
     }
 
@@ -1526,6 +1551,19 @@ public class PaperRequestProcessingService {
             this.v16Compat.observeBatchResponse(state.getPlayerUUID(), types, positions, count);
             PaperPayloadHandler.sendBatchResponse(state.getPlayer().getBukkitEntity(),
                     types, positions, count);
+        }, new OffThreadProcessor.StampsSink<>() {
+            // Stamped up_to_date (plan §3): the summary request is the eligibility
+            // declaration; fire-and-forget, counted on a completed send only.
+            @Override public boolean eligible(UUID uuid) {
+                var s = PaperRequestProcessingService.this.regionSummaries;
+                return s != null && s.hasRequestedThisSession(uuid);
+            }
+            @Override public void send(PaperPlayerRequestState state, byte[] frame, int entries) {
+                if (PaperPayloadHandler.sendColumnStamps(state.getPlayer(), frame)) {
+                    PaperRequestProcessingService.this.regionSummaries.diagnostics()
+                            .recordStampsFrame(entries, frame.length);
+                }
+            }
         });
     }
 

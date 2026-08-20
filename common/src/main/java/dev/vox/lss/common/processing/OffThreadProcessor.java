@@ -61,6 +61,9 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
 
     // Processing thread → main thread (thread-safe output)
     private final ConcurrentLinkedQueue<SendAction> sendActions = new ConcurrentLinkedQueue<>();
+    /** Stamped-up_to_date predicate (stamped-up-to-date-plan.md §9.1/§9.2); volatile —
+     *  wired by the platform after construction, read on the processing thread. */
+    private volatile UpToDateStampSource stampSource = UpToDateStampSource.NEVER;
     private final ConcurrentLinkedQueue<GenerationTicketRequest> generationTicketRequests = new ConcurrentLinkedQueue<>();
 
     private final Thread processingThread;
@@ -187,6 +190,11 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
     /** Runtime radius re-derivation (v0.11.0 stage C): monotonic max — see the field
      *  comment. Called from the owning service's tick pass with the config-derived
      *  radius; never shrinks within a run. */
+    /** Wire the platform's stamped-up_to_date predicate (null resets to NEVER). */
+    public void setUpToDateStampSource(UpToDateStampSource source) {
+        this.stampSource = source == null ? UpToDateStampSource.NEVER : source;
+    }
+
     public void updateSweepRadius(int derivedRadiusChunks) {
         if (derivedRadiusChunks > this.diskReadDoneSweepRadiusChunks) {
             this.diskReadDoneSweepRadiusChunks = derivedRadiusChunks;
@@ -231,8 +239,12 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
         if (this.dataDir != null) {
             this.timestampCache.load(this.dataDir);
         }
+        // The stamp source is a delegating lambda so the platform can wire the real
+        // predicate AFTER construction (setUpToDateStampSource); until then NEVER
+        // keeps every up_to_date bit-identical to the unstamped behavior.
         this.ctx = new ProcessingContext(this.sendActions, this.generationTicketRequests,
-                new ProcessingDiagnostics(), new SequenceCounter());
+                new ProcessingDiagnostics(), new SequenceCounter(),
+                (dim, packed) -> this.stampSource.stampSecond(dim, packed));
         this.requestRouter = new IncomingRequestRouter<>(this, this.players, this.timestampCache,
                 this.dedupTracker, diskReader != null, generationAvailable, this.ctx);
         this.processingThread = new Thread(this::processingLoop, Brand.shortName() + " Processing Thread");
@@ -312,12 +324,49 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
         void send(PlayerState state, byte[] responseTypes, long[] packedPositions, int count) throws Exception;
     }
 
+    /** Platform hook for stamped-up_to_date frames (stamped-up-to-date-plan.md §3):
+     *  {@code eligible} gates by the summary-request mark + CURRENT dialect (the
+     *  request is the capability declaration — released clients never receive);
+     *  {@code send} ships one encoded frame, fire-and-forget (loss = today's
+     *  behavior for those positions; they re-stamp on the next rejoin — deliberately
+     *  NO retention, unlike the once-per-session summary frame). The platform counts
+     *  frames/entries/bytes on send success. */
+    public interface StampsSink<PlayerState> {
+        boolean eligible(UUID playerUuid);
+        void send(PlayerState state, byte[] frame, int entryCount) throws Exception;
+    }
+
+    /** Per-(player, dimension) stamp accumulator for one drain pass. */
+    private static final class StampBatch {
+        long[] positions = new long[64];
+        long[] seconds = new long[64];
+        int count;
+        void add(long pos, long second) {
+            if (this.count == this.positions.length) {
+                this.positions = java.util.Arrays.copyOf(this.positions, this.count * 2);
+                this.seconds = java.util.Arrays.copyOf(this.seconds, this.count * 2);
+            }
+            this.positions[this.count] = pos;
+            this.seconds[this.count] = second;
+            this.count++;
+        }
+    }
+
+    /** Back-compat overload (tests, callers without the stamps lane). */
+    public void drainSendActions(BatchSender<PlayerState> sender) {
+        drainSendActions(sender, null);
+    }
+
     /**
      * Drain completed send actions and flush them as one batched response per player
-     * (called by the main thread each tick).
+     * (called by the main thread each tick), plus the stamped-up_to_date frames for
+     * eligible sessions when a {@code stampsSink} is wired.
      */
-    public void drainSendActions(BatchSender<PlayerState> sender) {
+    public void drainSendActions(BatchSender<PlayerState> sender, StampsSink<PlayerState> stampsSink) {
         this.sendActionBatcher.clear();
+        // (player, dimension) -> stamps; allocated lazily — empty on every tick that
+        // produced no stamped verification (all tests, harness runs, cold joins).
+        java.util.Map<UUID, java.util.Map<String, StampBatch>> stampBatches = null;
 
         SendAction action;
         while ((action = this.sendActions.poll()) != null) {
@@ -332,10 +381,24 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
             // (never in enqueuedColumns) used to re-serialize every tick until the next
             // declaration. ONE site covers all five producer paths (router timestamp/
             // probe/duplicate rungs + the disk and generation all-air terminals).
-            if (action instanceof SendAction.ColumnUpToDate) {
+            if (action instanceof SendAction.ColumnUpToDate utd) {
                 state.stampProbeSuppress(action.packedPosition());
+                // Stamped verification (plan §9.1): the claim's dimension travels WITH
+                // the action (never resolved at flush — overworld/End coords overlap),
+                // and the identity check above already bound it to the live session.
+                if (stampsSink != null && utd.stampSecond() > 0 && utd.stampDimension() != null
+                        && stampsSink.eligible(action.playerUuid())) {
+                    if (stampBatches == null) stampBatches = new java.util.HashMap<>();
+                    stampBatches.computeIfAbsent(action.playerUuid(), u -> new java.util.HashMap<>())
+                            .computeIfAbsent(utd.stampDimension(), d -> new StampBatch())
+                            .add(action.packedPosition(), utd.stampSecond());
+                }
             }
             this.sendActionBatcher.add(action.playerUuid(), action.responseType(), action.packedPosition());
+        }
+
+        if (stampBatches != null) {
+            flushStampBatches(stampBatches, stampsSink);
         }
 
         if (this.sendActionBatcher.isEmpty()) return;
@@ -352,6 +415,42 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                             + " (" + n + " delivery failure(s) since the last report)", e);
                 }
             }
+        });
+    }
+
+    /** Encode + ship the tick's stamped verifications, SPLIT at the wire cap (plan
+     *  §9.5 — never truncated: silent tail truncation would systematically drop the
+     *  warm-rejoin bulk this exists for). Send failures are contained and dropped —
+     *  the designed loss-tolerant case. */
+    private void flushStampBatches(java.util.Map<UUID, java.util.Map<String, StampBatch>> batches,
+                                   StampsSink<PlayerState> sink) {
+        batches.forEach((uuid, byDimension) -> {
+            var state = this.players.get(uuid);
+            if (state == null || !state.hasCompletedHandshake()) return;
+            byDimension.forEach((dimension, batch) -> {
+                int offset = 0;
+                while (offset < batch.count) {
+                    int n = Math.min(
+                            dev.vox.lss.common.region.ColumnStampsWire.MAX_STAMP_ENTRIES,
+                            batch.count - offset);
+                    try {
+                        byte[] frame = dev.vox.lss.common.region.ColumnStampsWire.encode(
+                                dimension,
+                                java.util.Arrays.copyOfRange(batch.positions, offset, offset + n),
+                                java.util.Arrays.copyOfRange(batch.seconds, offset, offset + n),
+                                n);
+                        sink.send(state, frame, n);
+                    } catch (Exception e) {
+                        long c = this.deliveryErrorWarn.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+                        if (c > 0) {
+                            LSSLogger.error("Failed to send column-stamps frame to "
+                                    + state.getPlayerName() + " (" + c
+                                    + " delivery failure(s) since the last report)", e);
+                        }
+                    }
+                    offset += n;
+                }
+            });
         });
     }
 
@@ -1076,7 +1175,9 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
             if (!staleAgainstEdit && pending != null
                     && pending.clientTimestamp() > result.columnTimestamp()) {
                 state.markDiskReadDone(cx, cz);
-                this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state));
+                // Compare-backed rung — stamped-up_to_date eligible (plan §9.1/§9.2).
+                this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state,
+                        this.ctx.stampSource().stampSecond(dimension, packed), dimension));
                 this.ctx.diagnostics().incrementUpToDate();
             } else {
                 this.ctx.diagnostics().addSuperseded(1);
@@ -1099,7 +1200,10 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                     && result.columnTimestamp() <= pending.clientTimestamp()
                     && columnBytes != null) {
                 state.markDiskReadDone(cx, cz);
-                this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state));
+                // Compare-backed rung — stamped-up_to_date eligible (plan §9.1/§9.2).
+                this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state,
+                        this.ctx.stampSource().stampSecond(result.dimension(), packed),
+                        result.dimension()));
                 this.ctx.diagnostics().incrementUpToDate();
                 this.ctx.diagnostics().incrementDiskDrained();
                 return;

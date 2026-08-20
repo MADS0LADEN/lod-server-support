@@ -260,6 +260,17 @@ public final class ClientNetGlue {
         });
     }
 
+    /** Column-stamps receiver body (stamped-up-to-date-plan.md §4) — same hop; the
+     *  manager ratchets cached stamps forward for verified-current columns. */
+    public static void onColumnStampsFrame(byte[] body) {
+        Minecraft.getInstance().execute(() -> {
+            var manager = sessionGate.getRequestManager();
+            if (manager != null) {
+                manager.onColumnStamps(body);
+            }
+        });
+    }
+
     /** VoxelColumn receiver body: the wire counters record on the RECEIVING thread
      *  (network thread on Fabric, main on NeoForge's executesOn(MAIN) — counter timing
      *  only, no ordering dependency), then the ladder runs on the client main thread. */

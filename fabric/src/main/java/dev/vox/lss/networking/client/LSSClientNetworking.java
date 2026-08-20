@@ -141,6 +141,11 @@ public class LSSClientNetworking {
         );
 
         ClientPlayNetworking.registerGlobalReceiver(
+                dev.vox.lss.networking.payloads.ColumnStampsS2CPayload.TYPE,
+                (payload, context) -> ClientNetGlue.onColumnStampsFrame(payload.body())
+        );
+
+        ClientPlayNetworking.registerGlobalReceiver(
                 VoxelColumnS2CPayload.TYPE,
                 (payload, context) -> ClientNetGlue.onVoxelColumnFrame(payload)
         );

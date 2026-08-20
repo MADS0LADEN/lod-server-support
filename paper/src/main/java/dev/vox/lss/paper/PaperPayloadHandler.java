@@ -32,6 +32,7 @@ public final class PaperPayloadHandler {
     static final Identifier ID_VOXEL_COLUMN = Identifier.parse(LSSConstants.CHANNEL_VOXEL_COLUMN);
     private static final Identifier ID_BATCH_RESPONSE = Identifier.parse(LSSConstants.CHANNEL_BATCH_RESPONSE);
     private static final Identifier ID_REGION_SUMMARY = Identifier.parse(LSSConstants.CHANNEL_REGION_SUMMARY);
+    private static final Identifier ID_COL_STAMPS = Identifier.parse(LSSConstants.CHANNEL_COL_STAMPS);
 
     // ---- S2C Encoding ----
 
@@ -345,6 +346,16 @@ public final class PaperPayloadHandler {
         if (nmsPlayer.connection == null) return false;
         nmsPlayer.connection.send(new ClientboundCustomPayloadPacket(
                 new DiscardedPayload(ID_REGION_SUMMARY, body)));
+        return true;
+    }
+
+    /** Column-stamps S2C frame (stamped-up-to-date-plan.md §3): the raw
+     *  ColumnStampsWire body, same carrier discipline as the summary frame. */
+    public static boolean sendColumnStamps(net.minecraft.server.level.ServerPlayer nmsPlayer,
+                                           byte[] body) {
+        if (nmsPlayer.connection == null) return false;
+        nmsPlayer.connection.send(new ClientboundCustomPayloadPacket(
+                new DiscardedPayload(ID_COL_STAMPS, body)));
         return true;
     }
 }

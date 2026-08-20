@@ -406,7 +406,10 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
         long cachedTs = this.timestampCache.get(dimension, packed);
         if (cachedTs > 0 && cachedTs <= req.clientTimestamp()) {
             state.markDiskReadDone(req.cx(), req.cz());
-            this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state));
+            // Compare-backed rung — stamped-up_to_date eligible (plan §9.1): the
+            // predicate answers -1 under a pending mark / armed latch (§9.2).
+            this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state,
+                    this.ctx.stampSource().stampSecond(dimension, packed), dimension));
             this.ctx.diagnostics().incrementUpToDate();
             return true;
         }

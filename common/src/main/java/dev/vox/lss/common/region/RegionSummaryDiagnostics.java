@@ -17,6 +17,9 @@ public final class RegionSummaryDiagnostics {
     private final AtomicLong bytes = new AtomicLong();
     private final AtomicLong frames = new AtomicLong();
     private final AtomicLong refreshMsMax = new AtomicLong();
+    private final AtomicLong stampsFrames = new AtomicLong();
+    private final AtomicLong stampsEntries = new AtomicLong();
+    private final AtomicLong stampsBytes = new AtomicLong();
 
     /** One C2S request accepted at ingress (pre-clamp, pre-admission). */
     public void recordRequest() { this.requests.incrementAndGet(); }
@@ -57,10 +60,10 @@ public final class RegionSummaryDiagnostics {
         long reqs = this.requests.get();
         if (reqs == 0) return null;
         return String.format(
-                "Summary: reqs=%d, frames=%d, tiles known=%d never_clean=%d no_region=%d, range_filtered=%d, bytes=%d, refresh_ms_max=%d",
+                "Summary: reqs=%d, frames=%d, tiles known=%d never_clean=%d no_region=%d, range_filtered=%d, bytes=%d, refresh_ms_max=%d, stamps=%d/%d",
                 reqs, this.frames.get(), this.tilesKnown.get(), this.tilesNeverClean.get(),
                 this.tilesNoRegion.get(), this.rangeFiltered.get(), this.bytes.get(),
-                this.refreshMsMax.get());
+                this.refreshMsMax.get(), this.stampsEntries.get(), this.stampsFrames.get());
     }
 
     public long getRequests() { return this.requests.get(); }
@@ -71,4 +74,15 @@ public final class RegionSummaryDiagnostics {
     public long getBytes() { return this.bytes.get(); }
     public long getFrames() { return this.frames.get(); }
     public long getRefreshMsMax() { return this.refreshMsMax.get(); }
+    public long getStampsFrames() { return this.stampsFrames.get(); }
+    public long getStampsEntries() { return this.stampsEntries.get(); }
+    public long getStampsBytes() { return this.stampsBytes.get(); }
+
+    /** One stamped-up_to_date frame put on the wire (sender-confirmed, the
+     *  frames/bytes discipline). */
+    public void recordStampsFrame(int entries, int frameBytes) {
+        this.stampsFrames.incrementAndGet();
+        this.stampsEntries.addAndGet(entries);
+        this.stampsBytes.addAndGet(frameBytes);
+    }
 }

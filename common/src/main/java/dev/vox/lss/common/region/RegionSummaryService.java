@@ -106,6 +106,9 @@ public final class RegionSummaryService {
     private final ConcurrentHashMap<UUID, Pending> pending = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, SweepJob> jobs = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, Long> lastSweepNanos = new ConcurrentHashMap<>();
+    /** Stamps eligibility (plan §9.4): players that sent a summary request this session. */
+    private final java.util.Set<UUID> requestedThisSession =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final ConcurrentLinkedQueue<ReadyFrame> ready = new ConcurrentLinkedQueue<>();
     private final Object sweeperWake = new Object();
     private final Thread sweeper;
@@ -147,7 +150,18 @@ public final class RegionSummaryService {
             this.sweeper.start();
         }
         this.diag.recordRequest();
+        // The stamps-eligibility mark (stamped-up-to-date-plan.md §9.4): the summary
+        // request IS the capability declaration — a session that requested this
+        // server life receives stamped-up_to_date frames. Survives dimension change
+        // (matching the per-dimension request re-fire), swept at NETWORK disconnect.
+        this.requestedThisSession.add(player);
         this.pending.put(player, new Pending(request, this.nanoClock.getAsLong() + PENDING_TTL_NANOS));
+    }
+
+    /** True once this session sent a summary request — the stamped-up_to_date send
+     *  gate (any-thread safe: concurrent set). */
+    public boolean hasRequestedThisSession(UUID player) {
+        return this.requestedThisSession.contains(player);
     }
 
     /** NETWORK-disconnect sweep (never the dimension-change remove+register cycle —
@@ -158,6 +172,7 @@ public final class RegionSummaryService {
         this.pending.remove(player);
         this.jobs.remove(player);
         this.lastSweepNanos.remove(player);
+        this.requestedThisSession.remove(player);
     }
 
     /**

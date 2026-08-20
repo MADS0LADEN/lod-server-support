@@ -10,6 +10,7 @@ import dev.vox.lss.networking.payloads.FarPlayerRosterS2CPayload;
 import dev.vox.lss.networking.payloads.FarPlayerUpdatesS2CPayload;
 import dev.vox.lss.networking.payloads.HandshakeC2SPayload;
 import dev.vox.lss.networking.payloads.RegionSummaryRequestC2SPayload;
+import dev.vox.lss.networking.payloads.ColumnStampsS2CPayload;
 import dev.vox.lss.networking.payloads.RegionSummaryS2CPayload;
 import dev.vox.lss.networking.payloads.SessionConfigS2CPayload;
 import dev.vox.lss.networking.payloads.VoxelColumnS2CPayload;
@@ -68,5 +69,7 @@ public final class LSSNetworking {
                 LSSClientNetworking::handleFarPlayerUpdatesPayload);
         registrar.playToClient(RegionSummaryS2CPayload.TYPE, RegionSummaryS2CPayload.CODEC,
                 LSSClientNetworking::handleRegionSummaryPayload);
+        registrar.playToClient(ColumnStampsS2CPayload.TYPE, ColumnStampsS2CPayload.CODEC,
+                LSSClientNetworking::handleColumnStampsPayload);
     }
 }

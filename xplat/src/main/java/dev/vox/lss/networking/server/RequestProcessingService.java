@@ -273,6 +273,20 @@ public class RequestProcessingService {
         // rung can claim freshness across it. May run off-main — the bump is atomic.
         this.dirtyTracker.setMarkListener((dim, cx, cz) -> this.regionStamps
                 .bumpLiveSaveMark(dim, cx, cz, LSSConstants.epochSeconds()));
+        // Stamped up_to_date (stamped-up-to-date-plan.md §9.2): the compare-backed
+        // rungs stamp "verified now" UNLESS the position's change is marked-but-
+        // undrained or the region latch is armed — a stamp issued inside the
+        // save-to-drain window would launder invalidation latency into a permanent
+        // cross-session seal (the drain interval, up to 300 s, is not pinned inside
+        // the 15 s freshness margin).
+        this.offThreadProcessor.setUpToDateStampSource((dim, packed) -> {
+            if (this.dirtyTracker.isPending(dim, packed)) return -1L;
+            if (this.regionStamps.isClaimSuppressed(dim,
+                    PositionUtil.unpackX(packed), PositionUtil.unpackZ(packed))) {
+                return -1L;
+            }
+            return LSSConstants.epochSeconds();
+        });
 
         if (storeMode != dev.vox.lss.common.store.LodStoreMode.OFF) {
             var maskFingerprints = new HashMap<String, String>();
@@ -573,6 +587,14 @@ public class RequestProcessingService {
                         + player.getName().getString() + " — ignored (" + n
                         + " since the last report): " + e);
             }
+            return;
+        }
+        // CURRENT dialect only (plan §9.4 — the far-player subscription discipline):
+        // a legacy-dialect session must not become stamps-eligible; the conforming
+        // client gates its own request on the CURRENT dialect already, so this only
+        // rejects nonconforming senders.
+        if (this.dialects.dialectOf(player.getUUID())
+                != dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT) {
             return;
         }
         this.regionSummaries.offerRequest(player.getUUID(), request);
@@ -1247,6 +1269,19 @@ public class RequestProcessingService {
             this.v16Compat.observeBatchResponse(state.getPlayerUUID(), types, positions, count);
             dev.vox.lss.platform.LoaderServices.get().sendToPlayer(state.getPlayer(),
                     new BatchResponseS2CPayload(types, positions, count));
+        }, new dev.vox.lss.common.processing.OffThreadProcessor.StampsSink<>() {
+            // Stamped up_to_date (plan §3): the summary request is the eligibility
+            // declaration; frames are fire-and-forget (loss = today's behavior, heals
+            // on the next rejoin) and counted only on a completed send call.
+            @Override public boolean eligible(UUID uuid) {
+                return RequestProcessingService.this.regionSummaries.hasRequestedThisSession(uuid);
+            }
+            @Override public void send(PlayerRequestState state, byte[] frame, int entries) {
+                dev.vox.lss.platform.LoaderServices.get().sendToPlayer(state.getPlayer(),
+                        new dev.vox.lss.networking.payloads.ColumnStampsS2CPayload(frame));
+                RequestProcessingService.this.regionSummaries.diagnostics()
+                        .recordStampsFrame(entries, frame.length);
+            }
         });
     }
 

@@ -164,10 +164,11 @@ public final class ClientCommandActions {
         if (manager.getSummaryTilesClean() + manager.getSummaryTilesStale()
                 + manager.getSummaryTilesUnknown() + manager.getSummaryTilesNoRegion() > 0) {
             feedback.accept(Component.literal(String.format(
-                    "Summary: tiles clean=%d stale=%d unknown=%d no_region=%d, columns_validated=%d",
+                    "Summary: tiles clean=%d stale=%d unknown=%d no_region=%d, columns_validated=%d, stamps=%d/%d",
                     manager.getSummaryTilesClean(), manager.getSummaryTilesStale(),
                     manager.getSummaryTilesUnknown(), manager.getSummaryTilesNoRegion(),
-                    manager.getSummaryColumnsValidated()
+                    manager.getSummaryColumnsValidated(), manager.getSummaryStampsApplied(),
+                    manager.getSummaryStampsIgnored()
             )).withStyle(ChatFormatting.GRAY));
         }
 

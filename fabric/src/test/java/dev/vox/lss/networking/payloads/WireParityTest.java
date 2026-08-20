@@ -535,11 +535,12 @@ class WireParityTest {
                 dev.vox.lss.networking.payloads.FarPlayerRosterS2CPayload.TYPE.id().toString(),
                 dev.vox.lss.networking.payloads.FarPlayerUpdatesS2CPayload.TYPE.id().toString(),
                 dev.vox.lss.networking.payloads.RegionSummaryRequestC2SPayload.TYPE.id().toString(),
-                dev.vox.lss.networking.payloads.RegionSummaryS2CPayload.TYPE.id().toString());
+                dev.vox.lss.networking.payloads.RegionSummaryS2CPayload.TYPE.id().toString(),
+                dev.vox.lss.networking.payloads.ColumnStampsS2CPayload.TYPE.id().toString());
         assertEquals(covered, declared,
                 "every LSS channel must map to exactly one payload with a reference frame in "
                 + "this suite — a new payload requires frames in BOTH WireParityTests");
-        assertEquals(12, declared.size());
+        assertEquals(13, declared.size());
     }
 
     // ---- Region summaries (P2): the carriers add NO framing — the FriendlyByteBuf
@@ -567,6 +568,22 @@ class WireParityTest {
         assertArrayEquals(summary, encode(
                 dev.vox.lss.networking.payloads.RegionSummaryS2CPayload.CODEC,
                 new dev.vox.lss.networking.payloads.RegionSummaryS2CPayload(summary)),
+                "the S2C carrier must add zero framing around the shared body");
+    }
+
+    // ---- Stamped up_to_date: the carrier adds NO framing — the FriendlyByteBuf body
+    // ---- IS the ColumnStampsWire byte[] verbatim (same doctrine as above).
+
+    @Test
+    void columnStampsCarrierShipsTheSharedCodecBytesVerbatim() {
+        var stamps = dev.vox.lss.common.region.ColumnStampsWire.encode(
+                "minecraft:overworld",
+                new long[]{dev.vox.lss.common.PositionUtil.packPosition(3, -4),
+                        dev.vox.lss.common.PositionUtil.packPosition(-7, 12)},
+                new long[]{1_750_000_000L, 1_750_000_042L}, 2);
+        assertArrayEquals(stamps, encode(
+                dev.vox.lss.networking.payloads.ColumnStampsS2CPayload.CODEC,
+                new dev.vox.lss.networking.payloads.ColumnStampsS2CPayload(stamps)),
                 "the S2C carrier must add zero framing around the shared body");
     }
 

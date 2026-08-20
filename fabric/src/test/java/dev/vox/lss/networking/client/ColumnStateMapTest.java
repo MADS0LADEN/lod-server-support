@@ -48,6 +48,79 @@ class ColumnStateMapTest {
         assertEquals(SATISFIED, map.classify(packed), "precondition: parked");
     }
 
+    // ---- stamped-up_to_date ratchet (stamped-up-to-date-plan.md §4) ----
+
+    @Test
+    void ratchetAdvancesOnlyForwardOnStampedMarkFreePositions() {
+        map.onReceived(POS, 5000L);
+        map.onUpToDate(POS);
+        assertFalse(map.ratchetStamp(POS, 4000L), "backward never");
+        assertFalse(map.ratchetStamp(POS, 5000L), "equal never");
+        assertTrue(map.ratchetStamp(POS, 7000L), "forward advances");
+        assertFalse(map.ratchetStamp(POS, 7000L), "monotonic — idempotent replays no-op");
+        assertEquals(SATISFIED, map.classify(POS), "validated state untouched by the ratchet");
+        map.markDirtyIfKnown(POS);
+        assertEquals(7000L, map.classify(POS),
+                "the dirty re-declare carries the RATCHETED stamp — what the next "
+                        + "want-set (and the cache save) persists");
+    }
+
+    @Test
+    void ratchetSkipsUnstampedAndMarkedPositions() {
+        int leaves = map.leafCountForTest();
+        assertFalse(map.ratchetStamp(POS, 7000L), "unknown position: nothing to extend");
+        assertEquals(leaves, map.leafCountForTest(), "hostile frames must not allocate");
+
+        map.onReceived(POS, 5000L);
+        map.markDirtyIfKnown(POS);
+        assertFalse(map.ratchetStamp(POS, 7000L), "dirty-marked: the mark outranks");
+        assertEquals(5000L, map.classify(POS), "stamp untouched under a dirty mark");
+
+        long pos2 = PositionUtil.packPosition(11, -3);
+        map.onReceived(pos2, 5000L);
+        map.markRetry(pos2);
+        assertFalse(map.ratchetStamp(pos2, 7000L), "retry-marked: defense-in-depth skip");
+    }
+
+    @Test
+    void ratchetedStampHealsTheTileCompare() {
+        // The Tier-1 heal chain (plan §9.9's mechanism half): stale -> stamped -> clean.
+        // Seeded via loadFrom — the REJOIN shape: a cache-loaded stamp is a
+        // revalidation need, NOT a per-column server proof (onReceived would set
+        // `validated`, and server-proofed conflicts are deliberately not residue).
+        var loaded = new Long2LongOpenHashMap();
+        loaded.put(POS, 5000L);
+        map.loadFrom(loaded);
+        int tileX = PositionUtil.unpackX(POS) >> 5, tileZ = PositionUtil.unpackZ(POS) >> 5;
+        var stale = map.applyTileValidation(tileX, tileZ, 6000L);
+        assertFalse(stale.fullyValidated(), "5000 <= 6000: the serve-then-save shape");
+        assertTrue(map.ratchetStamp(POS, 7000L), "the verification stamp arrives");
+        var healed = map.applyTileValidation(tileX, tileZ, 6000L);
+        assertTrue(healed.fullyValidated(), "7000 > 6000: the same frame now validates");
+        assertEquals(SATISFIED, map.classify(POS));
+    }
+
+    @Test
+    void ratchetedStampSurvivesTheSessionRoundTrip() {
+        // The one cross-session link (plan §9.8): the ratcheted ts IS the ts the cache
+        // persists and the next session re-declares — pin it through the same
+        // loadFrom shape ColumnCacheStore round-trips. Seeded via loadFrom (the
+        // rejoin shape — see ratchetedStampHealsTheTileCompare).
+        var seed = new Long2LongOpenHashMap();
+        seed.put(POS, 5000L);
+        map.loadFrom(seed);
+        assertTrue(map.ratchetStamp(POS, 7000L));
+        assertEquals(7000L, map.classify(POS), "the re-declaration carries the ratchet");
+
+        var nextSession = new ColumnStateMap();
+        var loaded = new Long2LongOpenHashMap();
+        loaded.put(POS, 7000L);
+        nextSession.loadFrom(loaded);
+        int tileX = PositionUtil.unpackX(POS) >> 5, tileZ = PositionUtil.unpackZ(POS) >> 5;
+        assertTrue(nextSession.applyTileValidation(tileX, tileZ, 6000L).fullyValidated(),
+                "the next session's frame validates off the carried ratchet");
+    }
+
     // ---- classify ladder ----
 
     @Test

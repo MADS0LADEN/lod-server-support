@@ -133,11 +133,19 @@ class SectionStateFuzzTest {
                         ref.onReceived(lp, 9_000L);
                     }
                 }
-            } else if (kind < 96) {
+            } else if (kind < 95) {
                 int px = rng.nextInt(41) - 20, pz = rng.nextInt(41) - 20;
                 int dist = 8 + rng.nextInt(80);
                 impl.pruneOutOfRange(px, pz, dist);
                 ref.pruneOutOfRange(px, pz, dist);
+            } else if (kind < 96) {
+                // Stamped-up_to_date ratchet (stamped-up-to-date-plan.md §4): a pure
+                // monotonic ts advance on an existing positive mark-free stamp — the
+                // one op that changes a ts VALUE without any membership transition,
+                // so the needs-invariant coverage depends on it.
+                long second = 1L + rng.nextInt(12_000);
+                assertEquals(ref.ratchetStamp(p, second), impl.ratchetStamp(p, second),
+                        "ratchetStamp divergence at op " + op + " seed " + seed);
             } else if (kind < 97) {
                 // Region-summary tile validation (final review MAJOR-1/2): the
                 // provenance-scoped two-directional writer — validate strictly-newer

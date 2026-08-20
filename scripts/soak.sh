@@ -72,7 +72,7 @@ STORE_STANDALONE_SCENARIOS=(store-second-join)
 # evicted-tscache-rejoin is likewise phase 2 of scripts/summary_evicted.sh (the P1
 # header-rung live gate) — it hard-requires the warm-rejoin-summary carried world.
 PHASE_SCENARIOS=(store-offline-populate store-offline-mutate store-offline-verify
-                 evicted-tscache-rejoin)
+                 evicted-tscache-rejoin stamp-heal-rejoin)
 # Paper-only, AFTER the Folia copy above so Folia does not inherit it (the store is
 # unvalidated on Folia): console setblock fires no Bukkit event, so only the store's
 # periodic resweep (lodStoreResweepSeconds) can catch the edit — the unfired-event
@@ -171,6 +171,7 @@ case "$SCENARIO" in
     store-migration-join) ;;
     store-save-storm|store-save-storm-off) ;;
     warm-rejoin-summary|dirty-while-offline-summary|evicted-tscache-rejoin) ;;
+    stamp-heal-rejoin) ;;
     paper-dirty-falling-block|paper-store-unfired-event) ;;
     *)
         echo "[soak] ERROR: Unknown scenario '$SCENARIO'"
@@ -261,6 +262,14 @@ case "$SCENARIO" in
                                 # whole-disc ts>0 re-declare through the region-header rung
                                 # (disk.header_hits) instead of a full re-download.
                                 ;;
+    stamp-heal-rejoin)          CLIENT_RUNS=1; EXPECTED_SECONDS=260
+                                # Stamped-up_to_date heal gate (chained phase 2 — run via
+                                # scripts/stamp_heal.sh, which carries the
+                                # warm-rejoin-summary world AND client cache forward):
+                                # phase 1's run-2 up_to_date answers ratcheted the cached
+                                # stamps, so THIS rejoin's summary frame must validate the
+                                # once-stale bulk (stale -> stamped -> clean).
+                                CLIENT_EXTRA_ARGS=("-Psoak.summary=true") ;;
     clearcache-mid-session)     CLIENT_RUNS=1; EXPECTED_SECONDS=280
                                 CLIENT_EXTRA_ARGS=("-Psoak.clientActionAt=60:clearcache") ;;
     store-second-join)
@@ -400,6 +409,14 @@ if [[ -n "${SOAK_WORLD_FROM:-}" ]]; then
 elif [[ " $FRESH_WORLD_SCENARIOS " != *" $SCENARIO "* ]]; then
     cp -r "$BASE_WORLD_DIR"/world* "$SERVER_RUN_DIR"/
 fi
+if [[ "$SCENARIO" == "stamp-heal-rejoin" && -z "${SOAK_WORLD_FROM:-}" ]]; then
+    echo "[soak] ERROR: stamp-heal-rejoin is phase 2 of scripts/stamp_heal.sh"
+    echo "[soak]        (needs the warm-rejoin-summary world carried via SOAK_WORLD_FROM —"
+    echo "[soak]        the heal premise is phase 1's STAMPED client cache against that"
+    echo "[soak]        exact world's headers; tscache and lss-timestamps.bin stay INTACT,"
+    echo "[soak]        unlike the evicted chain)"
+    exit 1
+fi
 if [[ "$SCENARIO" == "evicted-tscache-rejoin" ]]; then
     if [[ -z "${SOAK_WORLD_FROM:-}" ]]; then
         echo "[soak] ERROR: evicted-tscache-rejoin is phase 2 of scripts/summary_evicted.sh"
@@ -447,6 +464,11 @@ case "$SCENARIO" in
         # re-serve stamps — clearing it would turn the run into a cold resync and the
         # header rung would never be consulted (ts<=0 declares skip it by design).
         echo "[soak] Keeping client column cache (carried from warm-rejoin-summary)"
+        ;;
+    stamp-heal-rejoin)
+        # Phase 2 of stamp_heal.sh: the cache carries phase 1's RATCHETED stamps —
+        # the entire heal premise. Clearing it would make the run a cold resync.
+        echo "[soak] Keeping client column cache (carried, ratcheted stamps)"
         ;;
     cold-restart-resync)
         echo "[soak] Restoring client column cache from $BASE_WORLD_DIR/client-cache"

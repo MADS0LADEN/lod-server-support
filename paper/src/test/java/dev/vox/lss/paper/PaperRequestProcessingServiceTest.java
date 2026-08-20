@@ -123,6 +123,14 @@ class PaperRequestProcessingServiceTest {
         }
 
         @Override
+        public void drainSendActions(OffThreadProcessor.BatchSender<PaperPlayerRequestState> sender,
+                                     OffThreadProcessor.StampsSink<PaperPlayerRequestState> sink) {
+            // The service's tick calls the 2-arg drain (stamped up_to_date); this rig
+            // only counts drains, so both arities record identically.
+            sendActionDrains.incrementAndGet();
+        }
+
+        @Override
         public void invalidateTimestamps(String dimension, long[] positions) {
             invalidations.add(new Invalidation(dimension, positions));
         }

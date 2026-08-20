@@ -72,6 +72,11 @@ public final class LSSConstants {
     // same-dimension stale frame is harmless.
     public static final String CHANNEL_REGION_SUMMARY_REQ = "lss:region_summary_req";
     public static final String CHANNEL_REGION_SUMMARY = "lss:region_summary";
+    // Stamped up_to_date (stamped-up-to-date-plan.md): S2C verification-stamp frames,
+    // sent ONLY to sessions that sent a region-summary request this session (the
+    // request is the capability declaration — released clients never request, never
+    // receive). Raw byte[] bodies (ColumnStampsWire), same family as the two above.
+    public static final String CHANNEL_COL_STAMPS = "lss:col_stamps";
 
     // Time conversion constants
     public static final long NANOS_PER_SECOND = 1_000_000_000L;

@@ -127,6 +127,27 @@ class RegionStampTableTest {
     }
 
     @Test
+    void isClaimSuppressedMirrorsTheLatchWithoutIo() throws Exception {
+        // The stamped-up_to_date predicate's half (stamped-up-to-date-plan.md §9.2):
+        // pure memory — an unexamined region has no pending-claim evidence (false),
+        // an armed latch suppresses, the clear-side grace still suppresses, and the
+        // grace's expiry releases. Never creates entries, never stats.
+        assertFalse(table().isClaimSuppressed(DIM, 3, 4), "unexamined region: no evidence");
+        assertFalse(table().isClaimSuppressed("lss:nowhere", 3, 4), "unknown dimension");
+        writeRegion(3, 4, NOW - 100);
+        assertEquals(NOW - 100, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
+        table().bumpLiveSaveMark(DIM, 3, 4, NOW - 10);
+        assertTrue(table().isClaimSuppressed(DIM, 3, 4), "armed latch suppresses stamping");
+        Path mca = writeRegion(3, 4, NOW - 5);
+        Files.setLastModifiedTime(mca, FileTime.fromMillis(System.currentTimeMillis() + 4000));
+        table().expireStatHorizonForTest(DIM, 3, 4);
+        assertEquals(RegionStampTable.NEVER_CLEAN, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
+        assertTrue(table().isClaimSuppressed(DIM, 3, 4), "the clear-side grace still suppresses");
+        table().expireLatchGraceForTest(DIM, 3, 4);
+        assertFalse(table().isClaimSuppressed(DIM, 3, 4), "a landed write releases the predicate");
+    }
+
+    @Test
     void markAtOrBelowTheObservedHeaderDoesNotLatch() throws Exception {
         writeRegion(3, 4, NOW - 100);
         assertEquals(NOW - 100, table().chunkStampSecondsOrUnknown(DIM, 3, 4));

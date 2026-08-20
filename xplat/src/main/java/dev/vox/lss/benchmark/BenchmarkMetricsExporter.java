@@ -385,6 +385,9 @@ public final class BenchmarkMetricsExporter {
         summaryMap.put("tiles_no_region", summary == null ? 0L : summary.getTilesNoRegion());
         summaryMap.put("bytes", summary == null ? 0L : summary.getBytes());
         summaryMap.put("refresh_ms_hw", summary == null ? 0L : summary.getRefreshMsMax());
+        summaryMap.put("stamps_frames", summary == null ? 0L : summary.getStampsFrames());
+        summaryMap.put("stamps_entries", summary == null ? 0L : summary.getStampsEntries());
+        summaryMap.put("stamps_bytes", summary == null ? 0L : summary.getStampsBytes());
         result.put("summary", summaryMap);
 
         // LOD store (docs/planning/lod-store-implementation-plan.md): counters live on the
@@ -561,6 +564,8 @@ public final class BenchmarkMetricsExporter {
         summary.put("tiles_unknown", manager != null ? manager.getSummaryTilesUnknown() : 0L);
         summary.put("tiles_no_region", manager != null ? manager.getSummaryTilesNoRegion() : 0L);
         summary.put("columns_validated", manager != null ? manager.getSummaryColumnsValidated() : 0L);
+        summary.put("stamps_applied", manager != null ? manager.getSummaryStampsApplied() : 0L);
+        summary.put("stamps_ignored", manager != null ? manager.getSummaryStampsIgnored() : 0L);
         result.put("summary", summary);
 
         // Declared-and-unanswered (the awaiting-answer set), replaced per scan.

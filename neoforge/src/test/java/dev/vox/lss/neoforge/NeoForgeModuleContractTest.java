@@ -65,7 +65,7 @@ class NeoForgeModuleContractTest {
         List<String> s2c = List.of("SessionConfigS2CPayload", "BatchResponseS2CPayload",
                 "DirtyColumnsS2CPayload", "VoxelColumnS2CPayload",
                 "FarPlayerRosterS2CPayload", "FarPlayerUpdatesS2CPayload",
-                "RegionSummaryS2CPayload");
+                "RegionSummaryS2CPayload", "ColumnStampsS2CPayload");
         for (String p : c2s) {
             assertTrue(src.contains("playToServer(" + p + ".TYPE, " + p + ".CODEC"),
                     p + " must register playToServer with its shared TYPE+CODEC");
@@ -77,17 +77,17 @@ class NeoForgeModuleContractTest {
         assertEquals(5, count(src, Pattern.compile("playToServer\\(")),
                 "exactly the 5 C2S channels — a new channel must be added to BOTH loaders"
                         + " and both WireParityTest censuses");
-        assertEquals(7, count(src, Pattern.compile("playToClient\\(")),
-                "exactly the 7 S2C channels");
+        assertEquals(8, count(src, Pattern.compile("playToClient\\(")),
+                "exactly the 8 S2C channels");
         // CROSS-LOADER census (N-2 review): the registrar's total must track the shared
         // CHANNEL_* constant count — a fabric-side channel add reds THIS module's build
         // instead of shipping a NeoForge jar that silently lacks the new channel.
         long sharedChannels = Arrays.stream(dev.vox.lss.common.LSSConstants.class.getFields())
                 .filter(f -> f.getName().startsWith("CHANNEL_"))
                 .count();
-        assertEquals(sharedChannels, 5 + 7,
+        assertEquals(sharedChannels, 5 + 8,
                 "LSSConstants declares " + sharedChannels + " CHANNEL_* constants but this"
-                        + " registrar registers 12 — add the new channel to LSSNetworking"
+                        + " registrar registers 13 — add the new channel to LSSNetworking"
                         + " (both loaders) and both WireParityTest censuses");
     }
 
