@@ -69,18 +69,34 @@ public final class RegionSummaryService {
      *  packed chunk anchor. Null anchor = not registered / not yet stamped — retry. */
     public record PlayerAnchor(String dimension, int chunkX, int chunkZ) {}
 
-    /** The platform's send hook, called on the TICK thread (drain). Returns whether
-     *  the frame actually left (a vanished player drops it) — {@code summary.frames}/
-     *  {@code summary.bytes} count only true returns, so the counters mean "put on
-     *  the wire", not "assembled" (P2 review I-m7). */
+    /** The platform's send hook, called on the TICK thread (drain). {@code SENT} =
+     *  the frame left the wire — {@code summary.frames}/{@code summary.bytes} count
+     *  only these, so the counters mean "put on the wire", not "assembled" (P2 review
+     *  I-m7). {@code DROP} = permanently unsendable (the player vanished) — discard.
+     *  {@code RETRY} = a transient refusal (the channel is momentarily unwritable —
+     *  the F2 writability guard): the frame is RETAINED and re-tried next drain, up
+     *  to {@link #FRAME_RETRY_TTL_NANOS}. Retention is load-bearing (live-diagnosed
+     *  2026-08-20 on the rig: reqs=7/frames=5): the client's request is
+     *  fire-and-forget — one per dimension entry, no retry — and the frame drains
+     *  right at the join/portal moment, exactly when the serve flood makes the
+     *  channel most likely to be unwritable, so a drop-on-unwritable loses the whole
+     *  exchange for the session it matters most to. */
+    public enum SendOutcome { SENT, RETRY, DROP }
+
     @FunctionalInterface
     public interface FrameSender {
-        boolean send(UUID player, byte[] frame);
+        SendOutcome send(UUID player, byte[] frame);
     }
+
+    /** How long a RETRY-refused frame is retained before it is dropped as stale —
+     *  generous next to the ~seconds an unwritable join burst lasts, tiny next to
+     *  the stamps' freshness margin, and the belt against a sender that answers
+     *  RETRY forever for a player the vanish path somehow misses. */
+    static final long FRAME_RETRY_TTL_NANOS = 10_000_000_000L;
 
     private record Pending(RegionSummaryWire.Request request, long expiresAtNanos) {}
     private record SweepJob(String dimension, int centerTileX, int centerTileZ, int tileRadius) {}
-    private record ReadyFrame(UUID player, byte[] frame) {}
+    private record ReadyFrame(UUID player, byte[] frame, long expiresAtNanos) {}
 
     private final TileStampSource source;
     private final RegionSummaryDiagnostics diag = new RegionSummaryDiagnostics();
@@ -197,9 +213,18 @@ public final class RegionSummaryService {
         }
         ReadyFrame frame;
         while ((frame = this.ready.poll()) != null) {
-            if (sender.send(frame.player(), frame.frame())) {
+            if (now - frame.expiresAtNanos() >= 0) continue; // retried past the TTL — stale
+            SendOutcome outcome = sender.send(frame.player(), frame.frame());
+            if (outcome == SendOutcome.SENT) {
                 this.diag.recordFrameSent(frame.frame().length);
+            } else if (outcome == SendOutcome.RETRY) {
+                // Transient refusal (unwritable channel): retain for the next drain and
+                // stop — the condition is per-channel and this tick's drain won't
+                // improve it; later frames keep their queue order for next tick.
+                this.ready.add(frame);
+                break;
             }
+            // DROP: the player vanished — discard.
         }
     }
 
@@ -272,7 +297,8 @@ public final class RegionSummaryService {
                 job.dimension(), job.centerTileX(), job.centerTileZ(), r, stamps));
         this.diag.recordTiles(known, neverClean, noRegion);
         this.diag.recordRefreshMillis((System.nanoTime() - t0) / 1_000_000);
-        this.ready.add(new ReadyFrame(player, frame));
+        this.ready.add(new ReadyFrame(player, frame,
+                this.nanoClock.getAsLong() + FRAME_RETRY_TTL_NANOS));
     }
 
     public void shutdown() {

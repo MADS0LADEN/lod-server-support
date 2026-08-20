@@ -1110,16 +1110,23 @@ public class PaperRequestProcessingService {
                         dim, PositionUtil.unpackX(pc), PositionUtil.unpackZ(pc));
             }, (uuid, frame) -> {
                 var player = this.server.getPlayerList().getPlayer(uuid);
-                if (player == null) return false; // disconnected while assembling — uncounted
-                // The far-player lane's writability discipline (final review F2): an
-                // unwritable channel DROPS the frame uncounted — the client falls back
-                // to per-column revalidation, exactly today's behavior.
+                if (player == null) { // disconnected while assembling — unsendable forever
+                    return dev.vox.lss.common.region.RegionSummaryService.SendOutcome.DROP;
+                }
+                // The far-player lane's writability discipline (final review F2), with
+                // RETENTION (live-diagnosed 2026-08-20 — see the Fabric twin): the
+                // frame drains at the join/portal moment, exactly when the serve flood
+                // makes the channel unwritable, and the client never re-requests — so
+                // unwritable answers RETRY (service retains, TTL-bounded) instead of
+                // eating the session's whole exchange.
                 var snap = PaperChannelPressure.forPlayer(player).snapshot();
                 if (snap.writable() == dev.vox.lss.common.processing.ChannelPressureProbe
                         .Writability.NOT_WRITABLE) {
-                    return false;
+                    return dev.vox.lss.common.region.RegionSummaryService.SendOutcome.RETRY;
                 }
-                return PaperPayloadHandler.sendRegionSummary(player, frame);
+                return PaperPayloadHandler.sendRegionSummary(player, frame)
+                        ? dev.vox.lss.common.region.RegionSummaryService.SendOutcome.SENT
+                        : dev.vox.lss.common.region.RegionSummaryService.SendOutcome.DROP;
             });
         } catch (Exception e) {
             if (!this.regionSummaryTickErrorWarned) {

@@ -27,7 +27,8 @@ class RegionSummaryServiceTest {
         final AtomicLong clock = new AtomicLong(1_000_000_000L);
         final ConcurrentLinkedQueue<Sent> sent = new ConcurrentLinkedQueue<>();
         final RegionSummaryService service;
-        volatile boolean senderAccepts = true;
+        volatile RegionSummaryService.SendOutcome senderOutcome =
+                RegionSummaryService.SendOutcome.SENT;
 
         Rig(RegionSummaryService.TileStampSource source) {
             // Max distance: the server window equals the protocol max, so wire-cap
@@ -47,9 +48,9 @@ class RegionSummaryServiceTest {
 
         void pump(Function<UUID, RegionSummaryService.PlayerAnchor> anchors) {
             this.service.pump(anchors, (p, f) -> {
-                if (!this.senderAccepts) return false;
-                this.sent.add(new Sent(p, f));
-                return true;
+                var out = this.senderOutcome;
+                if (out == RegionSummaryService.SendOutcome.SENT) this.sent.add(new Sent(p, f));
+                return out;
             });
         }
 
@@ -247,15 +248,10 @@ class RegionSummaryServiceTest {
         var rig = new Rig((dim, tx, tz) -> NOW);
         try {
             var player = UUID.randomUUID();
-            rig.senderAccepts = false;
+            rig.senderOutcome = RegionSummaryService.SendOutcome.DROP;
             rig.service.offerRequest(player, new RegionSummaryWire.Request(DIM, 0, 0, 0));
             rig.pump(rig.anchorsAt(player, DIM, 0, 0)); // admit
-            long deadline = System.nanoTime() + POLL_DEADLINE_NANOS;
-            // Wait for the sweeper's frame, then drain it through the declining sender.
-            while (rig.service.readyCountForTest() == 0) {
-                if (System.nanoTime() > deadline) fail("timed out waiting for assembly");
-                Thread.sleep(10);
-            }
+            awaitAssembly(rig);
             rig.pump(rig.anchorsAt(player, DIM, 0, 0));
             assertEquals(0, rig.service.readyCountForTest(), "the frame was drained");
             assertEquals(0, rig.service.diagnostics().getFrames(),
@@ -263,6 +259,69 @@ class RegionSummaryServiceTest {
             assertEquals(0, rig.service.diagnostics().getBytes());
         } finally {
             rig.service.shutdown();
+        }
+    }
+
+    /** The retention half of the F2 writability guard (live-diagnosed 2026-08-20:
+     *  rig reqs=7/frames=5 — frames drained at the join flood's unwritable instant
+     *  were being discarded, and the fire-and-forget client never re-asks): a RETRY
+     *  outcome must RETAIN the frame, uncounted, and the next writable drain must
+     *  deliver it. */
+    @Test
+    void aRetriedFrameIsRetainedAndSentByTheNextWritableDrain() throws Exception {
+        var rig = new Rig((dim, tx, tz) -> NOW);
+        try {
+            var player = UUID.randomUUID();
+            rig.senderOutcome = RegionSummaryService.SendOutcome.RETRY;
+            rig.service.offerRequest(player, new RegionSummaryWire.Request(DIM, 0, 0, 0));
+            rig.pump(rig.anchorsAt(player, DIM, 0, 0)); // admit
+            awaitAssembly(rig);
+            rig.pump(rig.anchorsAt(player, DIM, 0, 0)); // unwritable drain
+            assertEquals(1, rig.service.readyCountForTest(),
+                    "a RETRY frame must be retained, not discarded");
+            assertEquals(0, rig.service.diagnostics().getFrames(), "retention is uncounted");
+            rig.senderOutcome = RegionSummaryService.SendOutcome.SENT;
+            rig.pump(rig.anchorsAt(player, DIM, 0, 0)); // writable again
+            var s = rig.sent.poll();
+            assertNotNull(s, "the retained frame must go out on the next writable drain");
+            assertEquals(player, s.player());
+            assertEquals(0, rig.service.readyCountForTest());
+            assertEquals(1, rig.service.diagnostics().getFrames());
+        } finally {
+            rig.service.shutdown();
+        }
+    }
+
+    /** The retention belt: a frame that stays RETRY past FRAME_RETRY_TTL_NANOS is
+     *  dropped as stale (the sender is not even consulted for it) — a permanently
+     *  unwritable channel must not accumulate frames forever. */
+    @Test
+    void aRetriedFrameExpiresAtTheTtl() throws Exception {
+        var rig = new Rig((dim, tx, tz) -> NOW);
+        try {
+            var player = UUID.randomUUID();
+            rig.senderOutcome = RegionSummaryService.SendOutcome.RETRY;
+            rig.service.offerRequest(player, new RegionSummaryWire.Request(DIM, 0, 0, 0));
+            rig.pump(rig.anchorsAt(player, DIM, 0, 0)); // admit
+            awaitAssembly(rig);
+            rig.pump(rig.anchorsAt(player, DIM, 0, 0)); // unwritable — retained
+            assertEquals(1, rig.service.readyCountForTest());
+            rig.clock.addAndGet(RegionSummaryService.FRAME_RETRY_TTL_NANOS + 1);
+            rig.senderOutcome = RegionSummaryService.SendOutcome.SENT; // channel healed too late
+            rig.pump(rig.anchorsAt(player, DIM, 0, 0));
+            assertEquals(0, rig.service.readyCountForTest(), "the expired frame is gone");
+            assertEquals(0, rig.service.diagnostics().getFrames(),
+                    "an expired frame is never sent");
+        } finally {
+            rig.service.shutdown();
+        }
+    }
+
+    private static void awaitAssembly(Rig rig) throws InterruptedException {
+        long deadline = System.nanoTime() + POLL_DEADLINE_NANOS;
+        while (rig.service.readyCountForTest() == 0) {
+            if (System.nanoTime() > deadline) fail("timed out waiting for assembly");
+            Thread.sleep(10);
         }
     }
 

@@ -523,19 +523,24 @@ public class RequestProcessingService {
                         dim, PositionUtil.unpackX(pc), PositionUtil.unpackZ(pc));
             }, (uuid, frame) -> {
                 var player = this.server.getPlayerList().getPlayer(uuid);
-                if (player == null) return false; // disconnected while assembling — uncounted
-                // The far-player lane's writability discipline (final review F2): a frame
-                // is sent at the join/portal moment lodYieldsToVanillaTransport protects,
-                // so an unwritable channel DROPS it uncounted — the client's fallback is
-                // ordinary per-column revalidation, exactly today's behavior.
+                if (player == null) { // disconnected while assembling — unsendable forever
+                    return dev.vox.lss.common.region.RegionSummaryService.SendOutcome.DROP;
+                }
+                // The far-player lane's writability discipline (final review F2), with
+                // RETENTION (live-diagnosed 2026-08-20, rig reqs=7/frames=5): the frame
+                // drains at the join/portal moment lodYieldsToVanillaTransport protects
+                // — exactly when the serve flood makes the channel unwritable — and the
+                // client never re-requests, so an unwritable channel answers RETRY (the
+                // service retains the frame, TTL-bounded) instead of eating the whole
+                // session's exchange.
                 var snap = FabricChannelPressure.forPlayer(player).snapshot();
                 if (snap.writable() == dev.vox.lss.common.processing.ChannelPressureProbe
                         .Writability.NOT_WRITABLE) {
-                    return false;
+                    return dev.vox.lss.common.region.RegionSummaryService.SendOutcome.RETRY;
                 }
                 dev.vox.lss.platform.LoaderServices.get().sendToPlayer(player,
                         new dev.vox.lss.networking.payloads.RegionSummaryS2CPayload(frame));
-                return true;
+                return dev.vox.lss.common.region.RegionSummaryService.SendOutcome.SENT;
             });
         } catch (Exception e) {
             // Containment: a pump/send bug must degrade summaries, never the tick.

@@ -477,7 +477,9 @@ class LodRequestManagerSummaryTest {
             try {
                 service.offerRequest(java.util.UUID.randomUUID(), req);
                 service.pump(u -> new dev.vox.lss.common.region.RegionSummaryService
-                        .PlayerAnchor(req.dimension(), 0, 0), (p, f) -> true);
+                                .PlayerAnchor(req.dimension(), 0, 0),
+                        (p, f) -> dev.vox.lss.common.region.RegionSummaryService
+                                .SendOutcome.SENT);
                 assertEquals(0, service.diagnostics().getRangeFiltered(),
                         "lod " + lod + ": an honest client's request must never clamp");
             } finally {
