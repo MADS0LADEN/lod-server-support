@@ -12,14 +12,47 @@ import java.util.Map;
  * Thread-safe via synchronized blocks.
  */
 public class DirtyColumnTracker {
+
+    /** Notified on EVERY {@link #markDirty} call (re-marks included — the listener's
+     *  consumer is a monotonic max, so duplicates are free). This is the platform-
+     *  neutral change choke point: Fabric's hash-confirmed save hook and Paper's dirty
+     *  Bukkit events both funnel here, which is exactly the population the region stamp
+     *  table's {@code liveSaveMark} must observe (region-summary-sync-plan.md §5). */
+    @FunctionalInterface
+    public interface MarkListener {
+        void onMarkDirty(String dimension, int cx, int cz);
+    }
+
     private final Map<String, LongOpenHashSet> dirtyColumns = new HashMap<>();
     private long totalDrained;
     private long totalMarked;
+    // Volatile, read outside the monitor: markDirty callers arrive on arbitrary threads
+    // (the save hook may run off-main under C2ME/Moonrise; Paper events on region
+    // threads under Folia) and the listener target is itself thread-safe.
+    private volatile MarkListener markListener;
 
-    public synchronized void markDirty(String dimension, int cx, int cz) {
-        long packed = PositionUtil.packPosition(cx, cz);
-        if (dirtyColumns.computeIfAbsent(dimension, k -> new LongOpenHashSet()).add(packed)) {
-            totalMarked++;
+    /** Attach the mark listener (set once at service init, before any producer runs). */
+    public void setMarkListener(MarkListener listener) {
+        this.markListener = listener;
+    }
+
+    public void markDirty(String dimension, int cx, int cz) {
+        synchronized (this) {
+            long packed = PositionUtil.packPosition(cx, cz);
+            if (dirtyColumns.computeIfAbsent(dimension, k -> new LongOpenHashSet()).add(packed)) {
+                totalMarked++;
+            }
+        }
+        // Outside the monitor: the listener does its own (lock-free) synchronization,
+        // and holding this lock through foreign code invites ordering deadlocks.
+        var listener = this.markListener;
+        if (listener != null) {
+            try {
+                listener.onMarkDirty(dimension, cx, cz);
+            } catch (Throwable ignored) {
+                // A freshness bump is advisory armor — it must never take down the
+                // mark path that feeds dirty broadcasts.
+            }
         }
     }
 

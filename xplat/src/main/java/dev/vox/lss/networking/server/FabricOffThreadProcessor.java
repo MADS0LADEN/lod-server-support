@@ -84,7 +84,7 @@ public class FabricOffThreadProcessor extends OffThreadProcessor<PlayerRequestSt
     @Override
     protected boolean submitDiskRead(UUID playerUuid, String dimension,
                                    int cx, int cz,
-                                   long submissionOrder) {
+                                   long submissionOrder, long clientTimestamp) {
         if (this.diskReader == null) return false;
         var level = this.dimensionLevelMap.get(dimension);
         if (level == null) {
@@ -92,7 +92,7 @@ public class FabricOffThreadProcessor extends OffThreadProcessor<PlayerRequestSt
             return false;
         }
         this.diskReader.submitReadDirect(playerUuid, dimension, level,
-                cx, cz, submissionOrder);
+                cx, cz, submissionOrder, clientTimestamp);
         return true;
     }
 

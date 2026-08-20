@@ -74,7 +74,7 @@ class IncomingRequestRouterTest {
         }
 
         @Override
-        protected boolean submitDiskRead(UUID playerUuid, String dimension, int cx, int cz, long order) {
+        protected boolean submitDiskRead(UUID playerUuid, String dimension, int cx, int cz, long order, long clientTimestamp) {
             this.submits.add(new CapturedSubmit(playerUuid, dimension, cx, cz));
             return !this.failSubmits;
         }

@@ -98,7 +98,7 @@ class OffThreadProcessorDiskResultTest {
         }
 
         @Override
-        protected boolean submitDiskRead(UUID playerUuid, String dimension, int cx, int cz, long order) {
+        protected boolean submitDiskRead(UUID playerUuid, String dimension, int cx, int cz, long order, long clientTimestamp) {
             if (throwOnNextSubmit) {
                 throwOnNextSubmit = false;
                 throw new RuntimeException("injected phase-4 routing failure");
@@ -1403,7 +1403,7 @@ class OffThreadProcessorDiskResultTest {
         var state = newPlayer(UUID.randomUUID(), 8, 4);
         state.updatePlayerChunk(0, 0);
         // A far corridor straggler is still in flight at ring 15.
-        assertTrue(state.tryAdmit(new PendingRequest(15, 0, SlotType.GENERATION, false)));
+        assertTrue(state.tryAdmit(new PendingRequest(15, 0, SlotType.GENERATION, 0L)));
         // The client's declaration says the frontier is ring 4.
         state.replaceBacklogWith(new IncomingBatch(new IncomingRequest[]{
                 new IncomingRequest(4, 0, -1L), new IncomingRequest(5, 0, -1L),

@@ -829,7 +829,7 @@ class PaperRequestProcessingServiceTest {
         // A disk read racing the shutdown (async callback shape) must be a no-op:
         // no result queue exists and the submit must not throw into the caller.
         diskReader.setReadOverride((cx, cz) -> CompletableFuture.completedFuture(Optional.empty()));
-        assertDoesNotThrow(() -> diskReader.submitReadDirect(uuid, "minecraft:overworld", level, 1, 1, 1L));
+        assertDoesNotThrow(() -> diskReader.submitReadDirect(uuid, "minecraft:overworld", level, 1, 1, 1L, 0L));
         assertNull(diskReader.getPlayerQueue(uuid));
         assertEquals(0, diskReader.getDiag().getSubmittedCount(),
                 "post-shutdown submits are rejected before they are counted");

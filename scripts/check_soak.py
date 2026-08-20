@@ -354,6 +354,13 @@ SERVER_MONOTONIC = (
     # VIRTUAL not-founds on its left side — each hit is dispositioned exactly like a real
     # miss (gen submit or miss_dropped), so the identity stays exact.
     "disk.memo_hits",
+    # Header freshness rung hits (region-summary-sync-plan.md P1): a ts>0 read answered
+    # up_to_date from the region header's save-second table without region IO. A mechanism
+    # counter like memo_hits — no law consumes it (the answer is an ordinary up_to_date
+    # response in A1; the read never entered the submitted/completed partition, so A5's
+    # identities never see it). Expected ~0 on every current scenario: the rung fires only
+    # on a ts>0 ask that MISSED the tscache, and every scenario keeps its tscache intact.
+    "disk.header_hits",
     "generation.submitted", "generation.completed", "generation.timeouts",
     "generation.removed_in_flight",
     # Ordering observability (miss-memo pacing): gate/pacing refusals + far-before-near
@@ -3251,7 +3258,7 @@ def _srv(wall=1000, seg=0, over=None):
                         "grace_skipped": 0, "miss_dropped": 0},
             "disk": {"submitted": 0, "completed": 0, "not_found": 0, "all_air": 0,
                      "errors": 0, "saturated": 0, "successful": 0, "pending": 0,
-                     "memo_hits": 0, "gated": 0, "gate_stops": 0},
+                     "memo_hits": 0, "header_hits": 0, "gated": 0, "gate_stops": 0},
             "generation": {"submitted": 0, "completed": 0, "timeouts": 0,
                            "removed_in_flight": 0, "active": 0,
                            "order_gated": 0, "inversions": 0},

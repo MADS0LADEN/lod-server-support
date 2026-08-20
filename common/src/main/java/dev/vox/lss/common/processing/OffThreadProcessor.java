@@ -380,11 +380,13 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
      * Submit a disk read for an unloaded chunk (called from processing thread). Returns
      * {@code false} if the read could not be submitted (e.g. no reader, or the dimension's level
      * is not registered yet) so the caller can unwind the pending entry + dedup group instead
-     * of leaking them.
+     * of leaking them. {@code clientTimestamp} is the requesting client's declared stamp
+     * (region-summary-sync-plan.md P1): the reader's header freshness rung consults it
+     * before any region IO; {@code <= 0} (acquisition) leaves the rung inert.
      */
     protected abstract boolean submitDiskRead(UUID playerUuid, String dimension,
                                             int cx, int cz,
-                                            long submissionOrder);
+                                            long submissionOrder, long clientTimestamp);
 
     /** True when the reader pool can accept a submit (see AbstractChunkDiskReader#hasHeadroom).
      *  False when no reader is configured. */
@@ -953,7 +955,19 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                 deliverDiskResult(playerUuid, state, result, columnBytes,
                         result.submissionOrder(), dimension, staleAgainstEdit);
 
-                if (!staleAgainstEdit && !result.saturated() && !result.notFound()) {
+                if (result.headerFresh()) {
+                    // Header freshness rung (P1): no bytes exist — never a deposit (the
+                    // raw==null shape below would normalize to a fabricated ALL-AIR row).
+                    // Refresh the timestamp cache at stamp + 1 so the next re-ask hits
+                    // the router's cheap rung: the non-strict tscache compare
+                    // (cached <= clientTs) then fires exactly iff clientTs > stamp — the
+                    // header rung's own strict margin, preserved. Stale-guarded like
+                    // every stamp write: an overtaking edit means the proof predates it.
+                    if (!staleAgainstEdit) {
+                        this.timestampCache.put(result.dimension(), packed,
+                                result.columnTimestamp() + 1, this.cycleNow);
+                    }
+                } else if (!staleAgainstEdit && !result.saturated() && !result.notFound()) {
                     // Store timestamp so reconnecting clients get up-to-date responses
                     this.timestampCache.put(result.dimension(), packed, result.columnTimestamp(), this.cycleNow);
                     // LOD-store deposit — the delivery-path choke point, ONCE per drained
@@ -1040,10 +1054,44 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
                 LSSLogger.debug("Disk saturated/gated result dropped silently (superseded) for "
                         + playerUuid + ": chunk [" + cx + ", " + cz + "]");
             }
+        } else if (result.headerFresh()) {
+            // Header freshness rung (region-summary-sync-plan.md P1): the region header
+            // proved content unchanged since result.columnTimestamp(). Per-RECIPIENT
+            // verification — the rung fired on the SUBMITTER's stamp, but a dedup-
+            // attached player's stamp may be older (or ts<=0), and for them the proof
+            // says nothing: standard transient drop, re-declared within <=1 s (the next
+            // submit re-runs the ladder against that player's own stamp). A ghost
+            // delivery (pending == null) and an edit-overtaken result (the proof
+            // predates the invalidation) drop the same way — never a stale up_to_date.
+            if (!staleAgainstEdit && pending != null
+                    && pending.clientTimestamp() > result.columnTimestamp()) {
+                state.markDiskReadDone(cx, cz);
+                this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state));
+            } else {
+                this.ctx.diagnostics().addSuperseded(1);
+            }
         } else if (result.notFound()) {
             handleDiskNotFound(playerUuid, state, packed, cx, cz, pending, dimension,
                     result.authoritativeMiss() && !staleAgainstEdit);
         } else {
+            // Store freshness rung (P1's delivery half): a store hit whose STORED
+            // acquisition stamp is <= this recipient's declared stamp makes the bytes
+            // redundant — the client's copy carries the same content claim ("current as
+            // of the stored stamp"), so answer up_to_date instead of re-sending. The
+            // NON-STRICT compare mirrors the router's tscache rung exactly (same
+            // acquisition-stamp currency, same doctrine). Per recipient: an attached
+            // player with an older stamp still gets the bytes below. Stale-guarded: an
+            // overtaking edit voids the stored stamp's claim.
+            if (result.fromStore() && !staleAgainstEdit && pending != null
+                    && pending.clientTimestamp() > 0
+                    && result.columnTimestamp() > 0
+                    && result.columnTimestamp() <= pending.clientTimestamp()
+                    && columnBytes != null) {
+                state.markDiskReadDone(cx, cz);
+                this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state));
+                this.ctx.diagnostics().incrementDiskDrained();
+                return;
+            }
             try {
                 if (!staleAgainstEdit) {
                     state.markDiskReadDone(cx, cz);
@@ -1231,7 +1279,7 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
             this.ctx.sendActions().add(new SendAction.ColumnNotGenerated(playerUuid, packed, state));
             return;
         }
-        escalateMissToGeneration(playerUuid, state, packed, cx, cz, pending.claimsData(),
+        escalateMissToGeneration(playerUuid, state, packed, cx, cz, pending.clientTimestamp(),
                 dimension, "miss");
     }
 
@@ -1272,7 +1320,7 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
      * the sole effective orderer of generation admission.)
      */
     void escalateMissToGeneration(UUID playerUuid, PlayerState state, long packed,
-                                   int cx, int cz, boolean claimsData, String dimension,
+                                   int cx, int cz, long clientTimestamp, String dimension,
                                    String via) {
         if (state.generationOvertakesNearerInFlight(cx, cz,
                 LSSConstants.MAX_GENERATION_COHORT_SPAN)) {
@@ -1296,7 +1344,7 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
             this.ctx.diagnostics().addGenOrderGated(1);
             return;
         }
-        if (state.tryAdmit(new PendingRequest(cx, cz, SlotType.GENERATION, claimsData))) {
+        if (state.tryAdmit(new PendingRequest(cx, cz, SlotType.GENERATION, clientTimestamp))) {
             if (ADMISSION_TRACE) traceAdmission(state, cx, cz, via, "admit");
             addGenerationInFlight(playerUuid, dimension, packed);
             this.ctx.generationTicketRequests().add(new GenerationTicketRequest(

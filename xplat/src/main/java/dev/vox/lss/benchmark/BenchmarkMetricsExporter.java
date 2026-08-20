@@ -276,6 +276,10 @@ public final class BenchmarkMetricsExporter {
             // processing diagnostics; the rung requires a reader, so the no-reader
             // disk-map-empty contract is preserved.
             diskMap.put("memo_hits", diag.getTotalMemoHits());
+            // Header freshness rung hits (region-summary-sync-plan.md P1): ts>0 reads
+            // answered from the region header without region IO. A mechanism counter —
+            // excluded from the submitted/completed partition like store hits.
+            diskMap.put("header_hits", dd.getHeaderHitsCount());
         }
         result.put("disk", diskMap);
 
@@ -614,6 +618,7 @@ public final class BenchmarkMetricsExporter {
             diskReaderMap.put("avg_read_time_ms", avgMs);
             diskReaderMap.put("saturation_events", dd.getSaturationCount());
             diskReaderMap.put("memo_hits", diag.getTotalMemoHits());
+            diskReaderMap.put("header_hits", dd.getHeaderHitsCount());
         }
         result.put("disk_reader", diskReaderMap);
 

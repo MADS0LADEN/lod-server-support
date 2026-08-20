@@ -96,6 +96,10 @@ public abstract class AbstractChunkDiskReader {
     // rung in readAndDeliver before any region IO. Null while lodStore=off. Volatile:
     // attached once at service init (before the first submit) from the server thread.
     private volatile dev.vox.lss.common.store.LodStoreService store;
+    // Region freshness stamps (region-summary-sync-plan.md P1): the header rung's oracle.
+    // Null on bare test rigs — the rung is then inert. Volatile: attached once at service
+    // init (before the first submit) from the server thread.
+    private volatile dev.vox.lss.common.region.RegionStampTable regionStamps;
     // Frame-form store serving (protocol 19): see setServeStoreFrames.
     private volatile boolean serveStoreFrames;
 
@@ -266,6 +270,12 @@ public abstract class AbstractChunkDiskReader {
         this.store = store;
     }
 
+    /** Attach the region stamp table (the P1 header freshness rung's oracle). Must
+     *  happen before the first submit; null (bare test rigs) leaves the rung inert. */
+    public final void attachRegionStamps(dev.vox.lss.common.region.RegionStampTable table) {
+        this.regionStamps = table;
+    }
+
     /**
      * Enable frame-form store serving (protocol 19, plan §3): the rung consults
      * {@code getFrame} instead of {@code get}, delivering the stored zstd frame
@@ -329,6 +339,15 @@ public abstract class AbstractChunkDiskReader {
      */
     protected final void submitRead(UUID playerUuid, int chunkX, int chunkZ, String dimension,
                                      long submissionOrder, ReadOperation operation) {
+        submitRead(playerUuid, chunkX, chunkZ, dimension, submissionOrder, 0L, operation);
+    }
+
+    /** As above with the client's declared stamp (region-summary-sync-plan.md P1): a
+     *  ts&gt;0 submission consults the header freshness rung before any region IO. The
+     *  0-arg overload (ts unknown/none) keeps every rung-indifferent caller unchanged. */
+    protected final void submitRead(UUID playerUuid, int chunkX, int chunkZ, String dimension,
+                                     long submissionOrder, long clientTimestamp,
+                                     ReadOperation operation) {
         if (isShutdown()) return;
 
         try {
@@ -336,7 +355,8 @@ public abstract class AbstractChunkDiskReader {
             this.executor.submit(() -> {
                 try {
                     if (!isShutdown()) {
-                        readAndDeliver(playerUuid, chunkX, chunkZ, dimension, submissionOrder, operation);
+                        readAndDeliver(playerUuid, chunkX, chunkZ, dimension, submissionOrder,
+                                clientTimestamp, operation);
                     }
                 } catch (Throwable t) {
                     // Last-resort containment (Phase 1 review MAJOR-1): every expected
@@ -569,8 +589,35 @@ public abstract class AbstractChunkDiskReader {
     }
 
     private void readAndDeliver(UUID playerUuid, int chunkX, int chunkZ, String dimension,
-                                 long submissionOrder, ReadOperation operation) {
+                                 long submissionOrder, long clientTimestamp,
+                                 ReadOperation operation) {
         if (isShutdown()) return;
+        // Header freshness rung (region-summary-sync-plan.md P1) — FIRST: cheaper than
+        // the store rung once memoized (pure memory vs a b-tree row fetch) and it makes
+        // the store lookup moot when it fires (the client's copy is current; no bytes of
+        // any provenance are needed). ts>0 only — an acquisition ask (ts<=0) has nothing
+        // to validate. STRICT compare: a same-second save may postdate the client's
+        // acquisition, so equality fails toward the read (R1-M2's margin discipline).
+        // UNKNOWN/NEVER_CLEAN fall through — never answer from doubt.
+        if (clientTimestamp > 0) {
+            var rs = this.regionStamps;
+            if (rs != null) {
+                long stamp;
+                try {
+                    stamp = rs.chunkStampSecondsOrUnknown(dimension, chunkX, chunkZ);
+                } catch (Throwable t) {
+                    // Belt: an escaped throw here would strand the pending entry + dedup
+                    // group behind Duplicate.IN_FLIGHT for the session. Doubt = read.
+                    stamp = dev.vox.lss.common.region.RegionStampTable.UNKNOWN;
+                }
+                if (stamp >= 0 && stamp < clientTimestamp) {
+                    this.diag.recordHeaderHit();
+                    addResult(playerUuid, ChunkReadResult.headerFresh(playerUuid, chunkX,
+                            chunkZ, dimension, submissionOrder, stamp));
+                    return;
+                }
+            }
+        }
         if (storeServedHit(playerUuid, chunkX, chunkZ, dimension, submissionOrder)) return;
 
         // The disk-read concurrency gate (disk-read-concurrency-gate-plan.md): the

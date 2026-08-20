@@ -55,6 +55,9 @@ public class RequestProcessingService {
     private final dev.vox.lss.common.store.StoreBackfill storeBackfill;
 
     private final DirtyColumnTracker dirtyTracker;
+    // Region freshness stamps (region-summary-sync-plan.md): the P1 header rung's oracle,
+    // fed by the hoisted region-dir resolver + the save hook's dirty marks. Store-independent.
+    private final dev.vox.lss.common.region.RegionStampTable regionStamps;
     private final DirtyContentFilter dirtyContentFilter = new DirtyContentFilter();
     // Far players (E1, FARP §3.2): subscription identity lives HERE (the dialect-tracker
     // precedent) — subscribed at handshake, dropped only at the network DISCONNECT, and
@@ -226,15 +229,32 @@ public class RequestProcessingService {
                 LSSLogger.info(advice);
             }
         }
+        // Region-dir resolver, HOISTED out of the store branch (region-summary-sync-plan.md
+        // §5 integration M2): the P1 header freshness rung (and P2's summary table) must
+        // work on store-LESS servers — the compiled store default is off, so building this
+        // only store-armed would silently no-op the feature on most servers. Same API the
+        // game uses (getStorageFolder — never hand-derived layouts); shared with the
+        // store env and the backfill below.
+        var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
+        var regionDirs = new HashMap<String, java.nio.file.Path>();
+        for (ServerLevel level : server.getAllLevels()) {
+            regionDirs.put(level.dimension().identifier().toString(),
+                    net.minecraft.world.level.dimension.DimensionType
+                            .getStorageFolder(level.dimension(), worldRoot)
+                            .resolve("region").normalize());
+        }
+        this.regionStamps = new dev.vox.lss.common.region.RegionStampTable(regionDirs::get);
+        this.diskReader.attachRegionStamps(this.regionStamps);
+        // Every hash-confirmed change mark (the save hook) bumps the region's live save
+        // mark, closing the save-submitted-but-write-pending mtime lag before the header
+        // rung can claim freshness across it. May run off-main — the bump is atomic.
+        this.dirtyTracker.setMarkListener((dim, cx, cz) -> this.regionStamps
+                .bumpLiveSaveMark(dim, cx, cz, LSSConstants.epochSeconds()));
+
         if (storeMode != dev.vox.lss.common.store.LodStoreMode.OFF) {
-            var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
-            var regionDirs = new HashMap<String, java.nio.file.Path>();
             var maskFingerprints = new HashMap<String, String>();
             for (ServerLevel level : server.getAllLevels()) {
                 String dim = level.dimension().identifier().toString();
-                regionDirs.put(dim, net.minecraft.world.level.dimension.DimensionType
-                        .getStorageFolder(level.dimension(), worldRoot)
-                        .resolve("region").normalize());
                 var maskEntry = XrayMaskManager.entryForActive(level);
                 String maskFp = maskEntry == null ? "off"
                         : maskEntry.sourceLabel() + ":"
@@ -1228,6 +1248,11 @@ public class RequestProcessingService {
 
     public DirtyColumnTracker getDirtyTracker() {
         return this.dirtyTracker;
+    }
+
+    /** The region freshness stamp table (P1 header rung; P2 summary sweeper). */
+    public dev.vox.lss.common.region.RegionStampTable getRegionStamps() {
+        return this.regionStamps;
     }
 
     /** Phase 5 ops (/lsslod store invalidate all): drop every stored row (batcher-side,

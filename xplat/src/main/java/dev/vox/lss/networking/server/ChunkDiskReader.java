@@ -88,7 +88,8 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
     }
 
     public void submitReadDirect(UUID playerUuid, String dimension, ServerLevel level,
-                                  int chunkX, int chunkZ, long submissionOrder) {
+                                  int chunkX, int chunkZ, long submissionOrder,
+                                  long clientTimestamp) {
         var registryAccess = level.registryAccess();
         var chunkMap = ((AccessorServerChunkCache) level.getChunkSource()).getChunkMap();
         // The mask entry is captured at submit time (the level is in hand here); the read
@@ -100,14 +101,14 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
         // would serve this read; every other rung keeps the ChunkNbtRead ladder unchanged.
         var raw = chooseRawReadOrNull(level, chunkMap);
         if (raw != null) {
-            submitRead(playerUuid, chunkX, chunkZ, dimension, submissionOrder,
+            submitRead(playerUuid, chunkX, chunkZ, dimension, submissionOrder, clientTimestamp,
                     () -> NbtSectionSerializer.readAndSerializeSections(raw, registryAccess, chunkX, chunkZ,
                             maskEntry, minSectionY, maxSectionY, this.useNbtTranscode,
                             this.useSelectiveNbtParse));
             return;
         }
         NbtSectionSerializer.ChunkNbtRead read = chooseReadPath(level, chunkMap);
-        submitRead(playerUuid, chunkX, chunkZ, dimension, submissionOrder,
+        submitRead(playerUuid, chunkX, chunkZ, dimension, submissionOrder, clientTimestamp,
                 () -> NbtSectionSerializer.readAndSerializeSections(read, registryAccess, chunkX, chunkZ,
                         maskEntry, minSectionY, maxSectionY, this.useNbtTranscode));
     }

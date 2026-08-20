@@ -51,6 +51,9 @@ public class PaperRequestProcessingService {
     private final PaperOffThreadProcessor offThreadProcessor;
     // Null while lodStore=off or when the codec native cannot load (degrade, never crash).
     private final dev.vox.lss.common.store.LodStoreService lodStore;
+    // Region freshness stamps (region-summary-sync-plan.md): the P1 header rung's oracle.
+    // Null in pre-region-stamps test wirings (rung inert there).
+    private final dev.vox.lss.common.region.RegionStampTable regionStamps;
     private final DirtyColumnTracker dirtyTracker;
     private final PaperDirtyColumnBroadcaster dirtyBroadcaster;
     // The v16 compat shim's per-player sessions (legacy protocol-16 clients). The pipeline
@@ -290,7 +293,24 @@ public class PaperRequestProcessingService {
                   PaperDirtyColumnBroadcaster dirtyBroadcaster,
                   dev.vox.lss.common.store.LodStoreService lodStore,
                   PaperXrayMaskManager xrayMasks,
-                  boolean wireCompressionLive) {
+                  boolean wireCompressionLive,
+                  dev.vox.lss.common.region.RegionStampTable regionStamps) {
+
+        /** Pre-region-stamps full shape — test wirings that don't exercise the header
+         *  rung (null table = rung inert, exactly the bare-reader behavior). */
+        Wiring(Map<UUID, PaperPlayerRequestState> players,
+               PaperChunkDiskReader diskReader,
+               PaperChunkGenerationService generationService,
+               PaperOffThreadProcessor offThreadProcessor,
+               DirtyColumnTracker dirtyTracker,
+               PaperDirtyColumnBroadcaster dirtyBroadcaster,
+               dev.vox.lss.common.store.LodStoreService lodStore,
+               PaperXrayMaskManager xrayMasks,
+               boolean wireCompressionLive) {
+            this(players, diskReader, generationService, offThreadProcessor,
+                    dirtyTracker, dirtyBroadcaster, lodStore, xrayMasks,
+                    wireCompressionLive, null);
+        }
 
         /** Pre-compression full shape (no wire codec attached) — store-era test wirings. */
         Wiring(Map<UUID, PaperPlayerRequestState> players,
@@ -348,6 +368,7 @@ public class PaperRequestProcessingService {
         this.dirtyTracker = wiring.dirtyTracker();
         this.dirtyBroadcaster = wiring.dirtyBroadcaster();
         this.lodStore = wiring.lodStore();
+        this.regionStamps = wiring.regionStamps();
         // Null in test wiring: the guarded retract at shutdown must clear only a
         // manager this service actually published.
         this.xrayMasks = wiring.xrayMasks();
@@ -430,25 +451,32 @@ public class PaperRequestProcessingService {
                 LSSLogger.info(advice);
             }
         }
+        // Region-dir resolver, HOISTED out of the store branch (region-summary-sync-plan.md
+        // §5 integration M2 — the Fabric twin's comment applies: the P1 header rung must
+        // work store-LESS, and the compiled store default is off).
+        // PER-LINE INVARIANT (surfaces row 17 — Bukkit world layout): Paper 26.x uses the
+        // vanilla UNIFIED layout, so the server worldRoot is the correct getStorageFolder
+        // root, same as Fabric. The 1.21.x lines use Bukkit's legacy SPLIT world dirs and
+        // re-root PER LEVEL via getWorld().getWorldFolder() — the two forms are NOT
+        // interchangeable: R2-9's live probe (2026-08-15) showed 26.2's getWorldFolder()
+        // returns the per-dimension SUBFOLDER (world/dimensions/minecraft/<dim>), so
+        // adopting the per-level form here would break this line's sweep the same way the
+        // unified form broke the 1.21.x port's. Walk row 17 on every port.
+        var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
+        var regionDirs = new java.util.HashMap<String, java.nio.file.Path>();
+        for (ServerLevel level : server.getAllLevels()) {
+            regionDirs.put(level.dimension().identifier().toString(),
+                    net.minecraft.world.level.dimension.DimensionType
+                            .getStorageFolder(level.dimension(), worldRoot)
+                            .resolve("region").normalize());
+        }
+        var regionStamps = new dev.vox.lss.common.region.RegionStampTable(regionDirs::get);
+        diskReader.attachRegionStamps(regionStamps);
+
         if (storeMode != dev.vox.lss.common.store.LodStoreMode.OFF) {
-            var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
-            var regionDirs = new java.util.HashMap<String, java.nio.file.Path>();
             var maskFingerprints = new java.util.HashMap<String, String>();
             for (ServerLevel level : server.getAllLevels()) {
                 String dim = level.dimension().identifier().toString();
-                // PER-LINE INVARIANT (surfaces row 17 — Bukkit world layout): Paper
-                // 26.x uses the vanilla UNIFIED layout, so the server worldRoot is the
-                // correct getStorageFolder root, same as Fabric. The 1.21.x lines use
-                // Bukkit's legacy SPLIT world dirs and re-root PER LEVEL via
-                // getWorld().getWorldFolder() — the two forms are NOT interchangeable:
-                // R2-9's live probe (2026-08-15) showed 26.2's getWorldFolder() returns
-                // the per-dimension SUBFOLDER (world/dimensions/minecraft/<dim>), so
-                // adopting the per-level form here would break this line's sweep the
-                // same way the unified form broke the 1.21.x port's. Walk row 17 on
-                // every port.
-                regionDirs.put(dim, net.minecraft.world.level.dimension.DimensionType
-                        .getStorageFolder(level.dimension(), worldRoot)
-                        .resolve("region").normalize());
                 var maskEntry = PaperXrayMaskManager.entryForActive(level);
                 maskFingerprints.put(dim, maskEntry == null ? "off"
                         : maskEntry.sourceLabel() + ":"
@@ -494,10 +522,17 @@ public class PaperRequestProcessingService {
         offThreadProcessor.start();
 
         var dirtyTracker = new DirtyColumnTracker();
+        // Every dirty mark (Paper's Bukkit events — fired at EDIT time, strictly no
+        // later than the save) bumps the region's live save mark, blocking header-rung
+        // freshness claims across the event->write window. Region threads under Folia —
+        // the bump is atomic.
+        dirtyTracker.setMarkListener((dim, cx, cz) -> regionStamps
+                .bumpLiveSaveMark(dim, cx, cz, LSSConstants.epochSeconds()));
         var dirtyBroadcaster = new PaperDirtyColumnBroadcaster(
                 server, players, dirtyTracker, offThreadProcessor);
         return new Wiring(players, diskReader, generationService, offThreadProcessor,
-                dirtyTracker, dirtyBroadcaster, lodStore, xrayMasks, wireCompressionLive);
+                dirtyTracker, dirtyBroadcaster, lodStore, xrayMasks, wireCompressionLive,
+                regionStamps);
     }
 
     /** Registry identity for the LOD store meta guard (4-agent round R2-M3) — textual
@@ -543,6 +578,12 @@ public class PaperRequestProcessingService {
 
     public DirtyColumnTracker getDirtyTracker() {
         return this.dirtyTracker;
+    }
+
+    /** The region freshness stamp table (P1 header rung; P2 summary sweeper). Null in
+     *  pre-region-stamps test wirings. */
+    public dev.vox.lss.common.region.RegionStampTable getRegionStamps() {
+        return this.regionStamps;
     }
 
     /** Cross-thread lifecycle ingress. On Folia, handshakes and PlayerQuit arrive on region

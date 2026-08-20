@@ -57,7 +57,7 @@ class OffThreadProcessorMailboxTest {
             super(players, reader, false, null, 1, 0);  // memo off (ttl=0): kills only the memo — the pacing rules are ttl-independent
         }
         @Override
-        protected boolean submitDiskRead(UUID playerUuid, String dimension, int cx, int cz, long order) {
+        protected boolean submitDiskRead(UUID playerUuid, String dimension, int cx, int cz, long order, long clientTimestamp) {
             return true; // returning false would unwind the dedup group test 2 depends on
         }
         @Override

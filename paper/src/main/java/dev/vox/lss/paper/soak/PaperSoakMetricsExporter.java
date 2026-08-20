@@ -215,6 +215,9 @@ public final class PaperSoakMetricsExporter {
             // processing diagnostics; the rung requires a reader, so the no-reader
             // disk-map-empty contract is preserved.
             diskMap.put("memo_hits", diag.getTotalMemoHits());
+            // Header freshness rung hits (region-summary-sync-plan.md P1) — the Fabric
+            // exporter's twin (schema parity is contract-pinned).
+            diskMap.put("header_hits", dd.getHeaderHitsCount());
         }
         result.put("disk", diskMap);
 

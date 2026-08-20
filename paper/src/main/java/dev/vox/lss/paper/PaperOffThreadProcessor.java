@@ -78,7 +78,7 @@ public class PaperOffThreadProcessor extends OffThreadProcessor<PaperPlayerReque
     @Override
     protected boolean submitDiskRead(UUID playerUuid, String dimension,
                                     int cx, int cz,
-                                    long submissionOrder) {
+                                    long submissionOrder, long clientTimestamp) {
         if (this.diskReader == null) return false;
         var level = this.dimensionLevelMap.get(dimension);
         if (level == null) {
@@ -86,7 +86,7 @@ public class PaperOffThreadProcessor extends OffThreadProcessor<PaperPlayerReque
             return false;
         }
         this.diskReader.submitReadDirect(playerUuid, dimension, level,
-                cx, cz, submissionOrder);
+                cx, cz, submissionOrder, clientTimestamp);
         return true;
     }
 

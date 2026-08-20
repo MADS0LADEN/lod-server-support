@@ -145,7 +145,7 @@ public class SerializerParityGameTests {
                     // The unload save may still sit in the unload queue; saveAllChunks drains it
                     // and flushes storage so the region state is final before the read.
                     level.save(null, true, false);
-                    reader.submitReadDirect(readerId, LSSConstants.DIM_STR_OVERWORLD, level, cx, cz, 0);
+                    reader.submitReadDirect(readerId, LSSConstants.DIM_STR_OVERWORLD, level, cx, cz, 0, 0L);
                     step.set(1);
                     helper.assertTrue(false, "disk read submitted, awaiting result");
                 }
@@ -239,7 +239,7 @@ public class SerializerParityGameTests {
                     // a throwing submit cannot leave "on" published across ticks.
                     XrayMaskManager.activate(maskedConfig);
                     try {
-                        reader.submitReadDirect(readerId, LSSConstants.DIM_STR_OVERWORLD, level, cx, cz, 0);
+                        reader.submitReadDirect(readerId, LSSConstants.DIM_STR_OVERWORLD, level, cx, cz, 0, 0L);
                     } finally {
                         XrayMaskManager.activate(LSSServerConfig.CONFIG);
                     }
@@ -330,8 +330,8 @@ public class SerializerParityGameTests {
                     helper.assertTrue(chunkSource.getChunkNow(cx, cz) == null,
                             "waiting for the chunk to unload");
                     level.save(null, true, false);
-                    foreground.submitReadDirect(fgId, LSSConstants.DIM_STR_OVERWORLD, level, cx, cz, 0);
-                    background.submitReadDirect(bgId, LSSConstants.DIM_STR_OVERWORLD, level, cx, cz, 0);
+                    foreground.submitReadDirect(fgId, LSSConstants.DIM_STR_OVERWORLD, level, cx, cz, 0, 0L);
+                    background.submitReadDirect(bgId, LSSConstants.DIM_STR_OVERWORLD, level, cx, cz, 0, 0L);
                     step.set(1);
                     helper.assertTrue(false, "foreground + background reads submitted");
                 }
@@ -510,7 +510,7 @@ public class SerializerParityGameTests {
         var reader = new ChunkDiskReader(1, false);
         var readerId = UUID.randomUUID();
         reader.registerPlayer(readerId);
-        reader.submitReadDirect(readerId, LSSConstants.DIM_STR_THE_END, endLevel, cx, cz, 0);
+        reader.submitReadDirect(readerId, LSSConstants.DIM_STR_THE_END, endLevel, cx, cz, 0, 0L);
 
         var result = new AtomicReference<dev.vox.lss.common.processing.ChunkReadResult>();
         helper.succeedWhen(() -> {
@@ -565,7 +565,7 @@ public class SerializerParityGameTests {
             switch (step.get()) {
                 case 0 -> {
                     level.save(null, true, false);
-                    reader.submitReadDirect(readerId, LSSConstants.DIM_STR_OVERWORLD, level, cx, cz, 0);
+                    reader.submitReadDirect(readerId, LSSConstants.DIM_STR_OVERWORLD, level, cx, cz, 0, 0L);
                     step.set(1);
                     helper.assertTrue(false, "baseline read submitted");
                 }
@@ -581,7 +581,7 @@ public class SerializerParityGameTests {
                             ? Blocks.COBBLESTONE : Blocks.STONE;
                     level.setBlock(editPos, edit.defaultBlockState(), 3);
                     level.save(null, true, false);
-                    reader.submitReadDirect(readerId, LSSConstants.DIM_STR_OVERWORLD, level, cx, cz, 1);
+                    reader.submitReadDirect(readerId, LSSConstants.DIM_STR_OVERWORLD, level, cx, cz, 1, 0L);
                     step.set(2);
                     helper.assertTrue(false, "post-edit read submitted");
                 }
@@ -884,7 +884,7 @@ public class SerializerParityGameTests {
                     // First read: the store is empty, so this is the NBT path (the
                     // deposit source in production rides the delivery path; here the
                     // test deposits the same bytes directly).
-                    reader.submitReadDirect(readerId, dim, level, cx, cz, 0);
+                    reader.submitReadDirect(readerId, dim, level, cx, cz, 0, 0L);
                     step.set(1);
                     helper.assertTrue(false, "NBT read submitted, awaiting result");
                 }
@@ -903,7 +903,7 @@ public class SerializerParityGameTests {
                 case 2 -> {
                     helper.assertTrue(store.get(dim, packed) != null,
                             "waiting for the deposit to commit (batcher)");
-                    reader.submitReadDirect(readerId, dim, level, cx, cz, 1);
+                    reader.submitReadDirect(readerId, dim, level, cx, cz, 1, 0L);
                     step.set(3);
                     helper.assertTrue(false, "store-rung read submitted, awaiting result");
                 }

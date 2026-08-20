@@ -11,6 +11,11 @@ import java.util.UUID;
  * counted superseded), and the client's next want-set re-declares it. {@code sectionBytes
  * == null} with {@code !notFound} is an all-air chunk (exists on disk, nothing visible).
  *
+ * <p>{@code headerFresh} marks the header freshness rung's answer (P1, region-summary-
+ * sync-plan.md): no bytes were read — {@code columnTimestamp} carries the proven
+ * last-change second and delivery answers {@code up_to_date} per recipient whose stamp
+ * strictly exceeds it (all other recipients take the standard transient drop).
+ *
  * <p>{@code authoritativeMiss} distinguishes WHY {@code notFound} is set: {@code true}
  * means storage positively answered "no SERVABLE chunk" — the region lookup returned
  * empty, or the chunk exists but cannot serve LOD data (non-FULL proto-chunk, FULL with
@@ -29,7 +34,8 @@ public record ChunkReadResult(UUID playerUuid, int chunkX, int chunkZ,
                               boolean fromStore,
                               long submissionOrder,
                               long srcStampSeconds,
-                              byte[] frameBytes, int frameRawSize) {
+                              byte[] frameBytes, int frameRawSize,
+                              boolean headerFresh) {
 
     /**
      * Pre-store signature (fromStore = false, srcStampSeconds = 0) — the shape every
@@ -54,7 +60,7 @@ public record ChunkReadResult(UUID playerUuid, int chunkX, int chunkZ,
                            boolean authoritativeMiss, long submissionOrder) {
         this(playerUuid, chunkX, chunkZ, sectionBytes, dimension, estimatedBytes,
                 columnTimestamp, notFound, saturated, authoritativeMiss, false,
-                submissionOrder, 0L, null, 0);
+                submissionOrder, 0L, null, 0, false);
     }
 
     /** Pre-frame full signature (frameBytes = null) — the store-era rigs and every
@@ -66,7 +72,36 @@ public record ChunkReadResult(UUID playerUuid, int chunkX, int chunkZ,
                            long submissionOrder, long srcStampSeconds) {
         this(playerUuid, chunkX, chunkZ, sectionBytes, dimension, estimatedBytes,
                 columnTimestamp, notFound, saturated, authoritativeMiss, fromStore,
-                submissionOrder, srcStampSeconds, null, 0);
+                submissionOrder, srcStampSeconds, null, 0, false);
+    }
+
+    /** Pre-headerFresh frame signature — the store-frame production path and its rigs. */
+    public ChunkReadResult(UUID playerUuid, int chunkX, int chunkZ,
+                           byte[] sectionBytes, String dimension, int estimatedBytes,
+                           long columnTimestamp, boolean notFound, boolean saturated,
+                           boolean authoritativeMiss, boolean fromStore,
+                           long submissionOrder, long srcStampSeconds,
+                           byte[] frameBytes, int frameRawSize) {
+        this(playerUuid, chunkX, chunkZ, sectionBytes, dimension, estimatedBytes,
+                columnTimestamp, notFound, saturated, authoritativeMiss, fromStore,
+                submissionOrder, srcStampSeconds, frameBytes, frameRawSize, false);
+    }
+
+    /**
+     * The header freshness rung's answer (region-summary-sync-plan.md P1): the region
+     * header (max'd with the live save mark) proves this chunk's on-disk content last
+     * changed at {@code stampSeconds}, which the submitting client's stamp strictly
+     * exceeds — the read was skipped. {@code columnTimestamp} carries the stamp so the
+     * delivery side can (a) re-verify per dedup recipient (an attached player's stamp
+     * may be older — it takes the standard transient drop and re-declares) and (b)
+     * refresh the timestamp cache at {@code stamp + 1}, preserving the strict margin
+     * through the non-strict tscache compare.
+     */
+    public static ChunkReadResult headerFresh(UUID playerUuid, int chunkX, int chunkZ,
+                                              String dimension, long submissionOrder,
+                                              long stampSeconds) {
+        return new ChunkReadResult(playerUuid, chunkX, chunkZ, null, dimension, 0,
+                stampSeconds, false, false, false, false, submissionOrder, 0L, null, 0, true);
     }
 
     /** An authoritative miss: storage positively answered "no such chunk". */

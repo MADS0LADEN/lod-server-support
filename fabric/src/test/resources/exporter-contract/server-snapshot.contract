@@ -17,6 +17,7 @@ disk.completed=long
 disk.errors=long
 disk.gate_stops=long
 disk.gated=long
+disk.header_hits=long
 disk.memo_hits=long
 disk.not_found=long
 disk.pending=int
