@@ -1135,6 +1135,14 @@ public class PaperRequestProcessingService {
                 if (player == null) { // disconnected while assembling — unsendable forever
                     return dev.vox.lss.common.region.RegionSummaryService.SendOutcome.DROP;
                 }
+                // CURRENT-dialect re-check at the sink (final panel — the stamps
+                // lane's rule, mirrored): a pre-handshake request reads as CURRENT
+                // (untracked UUID) and a session can re-handshake DOWN before the
+                // frame drains; a legacy session must never receive a summary frame.
+                if (this.dialects.dialectOf(uuid)
+                        != dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT) {
+                    return dev.vox.lss.common.region.RegionSummaryService.SendOutcome.DROP;
+                }
                 // The far-player lane's writability discipline (final review F2), with
                 // RETENTION (live-diagnosed 2026-08-20 — see the Fabric twin): the
                 // frame drains at the join/portal moment, exactly when the serve flood

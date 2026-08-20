@@ -544,6 +544,15 @@ public class RequestProcessingService {
                 if (player == null) { // disconnected while assembling — unsendable forever
                     return dev.vox.lss.common.region.RegionSummaryService.SendOutcome.DROP;
                 }
+                // CURRENT-dialect re-check at the sink (final panel — the stamps
+                // lane's rule, mirrored): the ingress guard runs at REQUEST time, but
+                // a pre-handshake request reads as CURRENT (untracked UUID) and a
+                // session can re-handshake DOWN before the frame drains; a legacy
+                // session must never receive a summary frame.
+                if (this.dialects.dialectOf(uuid)
+                        != dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT) {
+                    return dev.vox.lss.common.region.RegionSummaryService.SendOutcome.DROP;
+                }
                 // The far-player lane's writability discipline (final review F2), with
                 // RETENTION (live-diagnosed 2026-08-20, rig reqs=7/frames=5): the frame
                 // drains at the join/portal moment lodYieldsToVanillaTransport protects

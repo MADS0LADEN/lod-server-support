@@ -292,8 +292,24 @@ public abstract class OffThreadProcessor<PlayerState extends AbstractPlayerReque
      *  {@code confirmInvalidated} so the stamping guard's second phase releases
      *  exactly when the stale evidence is gone (plan §9.2, the 3-Opus fold). */
     public void invalidateTimestamps(String dimension, long[] positions, Runnable onApplied) {
+        // ONCE-guard (final panel): a mid-list throw re-queues the whole batch list
+        // (requeueLosslessEvents — re-invalidating IS idempotent), so an already-
+        // applied batch can replay. Its confirm must not fire twice: the tracker's
+        // invalidating guard now COUNTS outstanding batches per position, and a
+        // double confirm would release a later batch's guard early.
+        Runnable once;
+        if (onApplied == null) {
+            once = null;
+        } else {
+            var ran = new java.util.concurrent.atomic.AtomicBoolean();
+            once = () -> {
+                if (ran.compareAndSet(false, true)) {
+                    onApplied.run();
+                }
+            };
+        }
         synchronized (this.mailboxLock) {
-            this.pendingInvalidations.add(new TimestampInvalidation(dimension, positions, onApplied));
+            this.pendingInvalidations.add(new TimestampInvalidation(dimension, positions, once));
         }
     }
 

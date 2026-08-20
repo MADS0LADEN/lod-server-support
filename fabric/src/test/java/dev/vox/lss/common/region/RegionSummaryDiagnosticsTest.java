@@ -37,9 +37,13 @@ class RegionSummaryDiagnosticsTest {
         diag.recordFrameSent(1);
         diag.recordRefreshMillis(12);
         diag.recordRefreshMillis(4); // gauge keeps the high-water
+        // Asymmetric stamps counts (final panel): entries/frames MUST render in that
+        // order — a 0/0 pin could not catch a transposed format string.
+        diag.recordStampsFrame(37, 400);
+        diag.recordStampsFrame(5, 60);
         assertEquals("Summary: reqs=2, frames=2, tiles known=100 never_clean=3"
                         + " no_region=17, range_filtered=1, bytes=4201, refresh_ms_max=12,"
-                        + " stamps=0/0",
+                        + " stamps=42/2",
                 diag.diagLineOrNull());
     }
 }

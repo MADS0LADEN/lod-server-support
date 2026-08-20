@@ -17,12 +17,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * G1): a C2S channel added to {@code LSSConstants} and {@code dispatchPluginMessage}
  * but forgotten in {@code registerChannels} compiles, boots, and then silently never
  * receives a frame — Bukkit's Messenger drops unregistered incoming channels with no
- * error anywhere. The five-pin census chain (both WireParityTests, the NeoForge
- * registrar census, the Fabric receiver census) covered every link EXCEPT this one:
- * {@code LSSPaperPluginGlueTest} stubs {@code registerChannels} to a no-op, so the real
- * registration set had no automated pin. Source-scan (the contract-test idiom): the
- * incoming registrations, the dispatch cases, and the wire constants must be the SAME
- * set.
+ * error anywhere. The census chain (both WireParityTests, the NeoForge registrar
+ * census, the Fabric receiver censuses S2C AND C2S — the C2S half added by the final
+ * panel) covers the other links; THIS one exists because {@code LSSPaperPluginGlueTest}
+ * stubs {@code registerChannels} to a no-op, so the real registration set had no
+ * automated pin. Source-scan (the contract-test idiom) over {@code LSSPaperPlugin}:
+ * the incoming registrations and the dispatch cases must be the SAME set (scope note:
+ * both sides derive from that one file — a C2S constant neither registered nor
+ * dispatched is the Paper WireParityTest census's catch, not this one's).
  */
 class PaperChannelCensusTest {
 

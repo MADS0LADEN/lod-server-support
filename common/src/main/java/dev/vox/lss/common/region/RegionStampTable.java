@@ -243,6 +243,12 @@ public final class RegionStampTable {
             // "delete to regenerate" repair) — a client validating its old stamps there
             // would keep the deleted terrain forever. Only never-observed absence is
             // honestly "nothing on disk to validate against".
+            // Scope note (final panel): this predicate is NARROWER than the full
+            // deleted-after-observed doctrine — a region listed-but-never-examined,
+            // or examined with all-absent headers (maxHeaderSecond == 0), still
+            // answers NO_REGION after deletion. Sound only because BOTH sentinels
+            // are pinned client-side skips (no validation either way); the residual
+            // is counter attribution (tiles_no_region vs tiles_unknown).
             boolean everObserved = known != null && known.maxHeaderSecond > 0;
             return (mark > 0 || everObserved)
                     ? NEVER_CLEAN : RegionSummaryWire.STAMP_NO_REGION;
@@ -419,8 +425,9 @@ public final class RegionStampTable {
                             + " full reads (logged once)");
                 }
                 // Cached like any other doubt: one resolver probe per horizon.
-                entry.statDeadlineNanos = now + STAT_HORIZON_NANOS;
+                // (Header before deadline — the publish-order rule below.)
                 setHeader(entry, UNREADABLE, h);
+                entry.statDeadlineNanos = now + STAT_HORIZON_NANOS;
                 return UNREADABLE;
             }
             Path mca = dir.resolve("r." + rx + "." + rz + ".mca");
@@ -429,8 +436,9 @@ public final class RegionStampTable {
                 mtime = Files.getLastModifiedTime(mca).toMillis();
             } catch (Exception e) {
                 // Missing (or unstattable) region file — cache the absence for a horizon.
-                entry.statDeadlineNanos = now + STAT_HORIZON_NANOS;
+                // (Header before deadline — the publish-order rule below.)
                 setHeader(entry, ABSENT, h);
+                entry.statDeadlineNanos = now + STAT_HORIZON_NANOS;
                 return ABSENT;
             }
             boolean examined = h != null && h != ABSENT && h != UNREADABLE;
@@ -441,10 +449,15 @@ public final class RegionStampTable {
                 return h;
             }
             NormalizedHeader read = readNormalizedHeader(mca);
-            entry.statDeadlineNanos = now + STAT_HORIZON_NANOS;
+            // Publish ORDER (final panel): the new snapshot must land BEFORE the new
+            // stat deadline. The lock-free fast path reads (header, deadline) without
+            // the monitor — a deadline pushed ahead of setHeader let a concurrent
+            // reader serve the PREVIOUS horizon's stale header as fresh for the whole
+            // IO duration of this refresh. Deadline writes below follow setHeader.
             if (read == null) {
                 // Unreadable header: no honest claim; retry after the horizon.
                 setHeader(entry, UNREADABLE, h);
+                entry.statDeadlineNanos = now + STAT_HORIZON_NANOS;
                 return UNREADABLE;
             }
             int[] seconds = read.saveSeconds();
@@ -470,6 +483,7 @@ public final class RegionStampTable {
             }
             var fresh = new HeaderSnapshot(mtime, settled, keepArray ? seconds : null);
             setHeader(entry, fresh, h);
+            entry.statDeadlineNanos = now + STAT_HORIZON_NANOS;
             return fresh;
         }
     }

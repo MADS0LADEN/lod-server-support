@@ -96,7 +96,7 @@ public final class RegionSummaryService {
 
     private record Pending(RegionSummaryWire.Request request, long expiresAtNanos) {}
     private record SweepJob(String dimension, int centerTileX, int centerTileZ, int tileRadius) {}
-    private record ReadyFrame(UUID player, byte[] frame, long expiresAtNanos) {}
+    private record ReadyFrame(byte[] frame, long expiresAtNanos) {}
 
     private final TileStampSource source;
     private final RegionSummaryDiagnostics diag = new RegionSummaryDiagnostics();
@@ -109,7 +109,19 @@ public final class RegionSummaryService {
     /** Stamps eligibility (plan §9.4): players that sent a summary request this session. */
     private final java.util.Set<UUID> requestedThisSession =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
-    private final ConcurrentLinkedQueue<ReadyFrame> ready = new ConcurrentLinkedQueue<>();
+    /** Ready frames, PER-PLAYER FIFO (final-panel MAJOR, 2026-08-20): the client's
+     *  apply has no recency guard — its correctness argument is that a stale frame
+     *  can only be corrected by a later fresh one, never applied after it. A single
+     *  shared queue broke that under RETRY (the retained frame re-added at the TAIL
+     *  could send AFTER a fresher frame for the same player, re-validating positions
+     *  the fresh frame's revocation just cleared). Per-player queues keep each
+     *  player's frames in assembly order unconditionally: RETRY leaves the frame at
+     *  its queue's HEAD and stops only THAT player's drain (no head-of-line blocking
+     *  across players). Entries are swept at {@link #removePlayer}; an empty queue
+     *  left behind by a drain is retained until then (removing it would race the
+     *  sweeper's computeIfAbsent-add and orphan a frame). */
+    private final ConcurrentHashMap<UUID, ConcurrentLinkedQueue<ReadyFrame>> ready =
+            new ConcurrentHashMap<>();
     private final Object sweeperWake = new Object();
     private final Thread sweeper;
     private volatile boolean shutdown;
@@ -173,6 +185,7 @@ public final class RegionSummaryService {
         this.jobs.remove(player);
         this.lastSweepNanos.remove(player);
         this.requestedThisSession.remove(player);
+        this.ready.remove(player); // retained frames die with the connection
     }
 
     /**
@@ -209,10 +222,15 @@ public final class RegionSummaryService {
             int playerTileX = anchor.chunkX() >> 5;
             int playerTileZ = anchor.chunkZ() >> 5;
             int radius = Math.min(p.request().tileRadius(), maxTiles);
+            // Clamp the WINDOW EDGES, not just the center (final panel): the emitted
+            // span is [c - radius, c + radius], so the center's bound is
+            // maxTiles - radius — a crafted off-center max-radius request must not
+            // reach ~2x as far as an honest one (the class-javadoc invariant).
+            int centerBound = maxTiles - radius;
             int cx = Math.clamp(p.request().centerTileX(),
-                    playerTileX - maxTiles, playerTileX + maxTiles);
+                    playerTileX - centerBound, playerTileX + centerBound);
             int cz = Math.clamp(p.request().centerTileZ(),
-                    playerTileZ - maxTiles, playerTileZ + maxTiles);
+                    playerTileZ - centerBound, playerTileZ + centerBound);
             if (radius != p.request().tileRadius()
                     || cx != p.request().centerTileX() || cz != p.request().centerTileZ()) {
                 this.diag.recordRangeFiltered();
@@ -226,20 +244,53 @@ public final class RegionSummaryService {
                 this.sweeperWake.notifyAll();
             }
         }
-        ReadyFrame frame;
-        while ((frame = this.ready.poll()) != null) {
-            if (now - frame.expiresAtNanos() >= 0) continue; // retried past the TTL — stale
-            SendOutcome outcome = sender.send(frame.player(), frame.frame());
-            if (outcome == SendOutcome.SENT) {
-                this.diag.recordFrameSent(frame.frame().length);
-            } else if (outcome == SendOutcome.RETRY) {
-                // Transient refusal (unwritable channel): retain for the next drain and
-                // stop — the condition is per-channel and this tick's drain won't
-                // improve it; later frames keep their queue order for next tick.
-                this.ready.add(frame);
-                break;
+        // Anchor-less eligibility sweep (final panel — the Folia quit race): on Folia
+        // a region-thread offerRequest can land AFTER the tick thread's removePlayer,
+        // resurrecting requestedThisSession with no other sweep — the mark (and any
+        // orphaned ready queue) would persist for the server's life. A marked UUID
+        // with no anchor AND no pending/queued work is either quit (sweep correct) or
+        // mid-portal (dimension briefly null — safe: the client re-requests AT entry,
+        // which re-arms the mark before it matters); a mid-registration request is
+        // protected by its pending entry.
+        for (UUID marked : this.requestedThisSession) {
+            if (anchors.apply(marked) == null && !this.pending.containsKey(marked)
+                    && !this.jobs.containsKey(marked)) {
+                this.requestedThisSession.remove(marked);
+                this.lastSweepNanos.remove(marked);
+                this.ready.remove(marked);
             }
-            // DROP: the player vanished — discard.
+        }
+        for (var entry : this.ready.entrySet()) {
+            UUID player = entry.getKey();
+            var queue = entry.getValue();
+            ReadyFrame frame;
+            while ((frame = queue.peek()) != null) {
+                if (now - frame.expiresAtNanos() >= 0) { // retried past the TTL — stale
+                    queue.poll();
+                    continue;
+                }
+                SendOutcome outcome;
+                try {
+                    outcome = sender.send(player, frame.frame());
+                } catch (Throwable t) {
+                    // A torn-down connection can throw between the sender's own
+                    // player-null check and the send — treat as the vanished belt
+                    // (DROP) rather than losing every later frame in the drain.
+                    outcome = SendOutcome.DROP;
+                }
+                if (outcome == SendOutcome.SENT) {
+                    queue.poll();
+                    this.diag.recordFrameSent(frame.frame().length);
+                } else if (outcome == SendOutcome.RETRY) {
+                    // Transient refusal (unwritable channel): the frame stays at the
+                    // HEAD of this player's queue — assembly order preserved (the
+                    // client-side stale-then-fresh invariant) — and only THIS
+                    // player's drain stops; other players' channels are independent.
+                    break;
+                } else {
+                    queue.poll(); // DROP: the player vanished — discard.
+                }
+            }
         }
     }
 
@@ -312,8 +363,8 @@ public final class RegionSummaryService {
                 job.dimension(), job.centerTileX(), job.centerTileZ(), r, stamps));
         this.diag.recordTiles(known, neverClean, noRegion);
         this.diag.recordRefreshMillis((System.nanoTime() - t0) / 1_000_000);
-        this.ready.add(new ReadyFrame(player, frame,
-                this.nanoClock.getAsLong() + FRAME_RETRY_TTL_NANOS));
+        this.ready.computeIfAbsent(player, k -> new ConcurrentLinkedQueue<>())
+                .add(new ReadyFrame(frame, this.nanoClock.getAsLong() + FRAME_RETRY_TTL_NANOS));
     }
 
     public void shutdown() {
@@ -336,6 +387,10 @@ public final class RegionSummaryService {
     }
 
     int readyCountForTest() {
-        return this.ready.size();
+        int n = 0;
+        for (var q : this.ready.values()) {
+            n += q.size();
+        }
+        return n;
     }
 }

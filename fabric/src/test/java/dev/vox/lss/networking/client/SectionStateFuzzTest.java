@@ -61,6 +61,7 @@ class SectionStateFuzzTest {
         long[] pool = positionPool();
 
         boolean probeFired = false;
+        boolean ratchetFired = false;
         for (int op = 0; op < 4_000; op++) {
             long p = pool[rng.nextInt(pool.length)];
             int kind = rng.nextInt(101); // 100 = the ratchet op (3-Opus fold: added by WIDENING, not by halving prune)
@@ -72,8 +73,11 @@ class SectionStateFuzzTest {
                 // (positive/dirty/retry/sessionSatisfied precedence) and the ts value
                 // flowing into later classify/tile-validation ops identically.
                 long second = 1L + rng.nextInt(12_000);
-                assertEquals(ref.ratchetStamp(p, second), impl.ratchetStamp(p, second),
+                boolean refMoved = ref.ratchetStamp(p, second);
+                boolean implMoved = impl.ratchetStamp(p, second);
+                assertEquals(refMoved, implMoved,
                         "ratchetStamp divergence at op " + op + " seed " + seed);
+                ratchetFired |= implMoved;
                 continue;
             }
             if (kind < 28) {
@@ -233,6 +237,10 @@ class SectionStateFuzzTest {
         assertTrue(probeFired, "the ringNeedsFree soundness probe's TRUE branch must fire"
                 + " at least once per seed (the converge-leaf op guarantees territory;"
                 + " a never-firing probe pins nothing — review round 2)");
+        assertTrue(ratchetFired, "the ratchet op must actually MOVE a stamp at least"
+                + " once per seed — a shared guard bug returning false in both"
+                + " implementations would otherwise pass the differential while the"
+                + " feature is dead (final panel; the probeFired discipline mirrored)");
     }
 
     @Test
@@ -288,6 +296,13 @@ class SectionStateFuzzTest {
             assertEquals(ref.classify(p), impl.classify(p), "classify sweep" + at);
             assertEquals(ref.timestampFor(p), impl.timestampFor(p), "timestamp sweep" + at);
             assertEquals(ref.isSessionSatisfied(p), impl.isSessionSatisfied(p), "sessionSatisfied sweep" + at);
+            // The needs invariant DIRECTLY, bit-for-bit (final panel): needs bit ⇔
+            // classify != SATISFIED. The aggregated ringNeedsFree probes cannot see a
+            // stuck-OFF bit (the dangerous direction — the fast path would skip a
+            // needing position) while any sibling bit legitimately holds the leaf's
+            // aggregate up.
+            assertEquals(impl.classify(p) != ColumnStateMap.SATISFIED, impl.needsBitForTest(p),
+                    "needs bit diverges from classify at " + p + at);
         }
         assertEquals(ref.receivedCount(), impl.receivedCount(), "receivedCount" + at);
         assertEquals(ref.emptyCount(), impl.emptyCount(), "emptyCount" + at);

@@ -439,6 +439,16 @@ class ColumnStateMap {
         return this.leaves.size();
     }
 
+    /** Test seam: the raw per-position needs bit (no leaf = a -1 first ask = needs).
+     *  The fuzz differential asserts this bit-for-bit against classify — the
+     *  aggregated ringNeedsFree probes alone could not see a stuck-OFF bit while any
+     *  sibling bit in the leaf legitimately held the aggregate up (final panel). */
+    boolean needsBitForTest(long packed) {
+        Leaf leaf = leafFor(packed);
+        if (leaf == null) return true;
+        return (leaf.needs & (1L << bitIndexFor(packed))) != 0;
+    }
+
     void markSessionSatisfied(long packed) {
         Leaf leaf = leafForCreate(packed);
         setSessionSatisfied(leaf, 1L << bitIndexFor(packed));

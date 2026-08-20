@@ -1222,10 +1222,12 @@ def summary_inert_violations(snapshots, scenario=None, client_runs=None):
     gate), so every summary counter must read zero on every scenario except the
     explicit opt-ins. A nonzero elsewhere means the gate broke: suppression removes
     client asks, so every requested_total/up_to_date baseline silently shifted.
-    CLIENT counters are scanned too (harness review m4): a scenario that disables the
-    SERVER switch (evicted-tscache-rejoin) drops requests before any server counter
-    moves, so the server side alone cannot see a broken client gate — a client that
-    APPLIED anything on a non-opt-in run is the belt for that shape.
+    CLIENT counters are scanned too (harness review m4): evicted-tscache-rejoin's
+    client is harness-gated OFF summaries (no -Dlss.soak.summary opt-in), so it
+    never requests at all — its disabled SERVER switch is a second, independent
+    belt, not the mechanism — and the server side alone cannot see a broken client
+    gate; a client that APPLIED anything on a non-opt-in run is the belt for that
+    shape.
     Presence-tolerant: pre-summary recordings pass vacuously."""
     if scenario in SUMMARY_OPT_IN_SCENARIOS:
         return []
@@ -1362,6 +1364,12 @@ def check_warm_rejoin_summary(ctx):
     never-generated — the client counts those 9 as tiles_no_region (no evidence,
     validates nothing; the final honesty review's deleted-region doctrine), so
     tiles_clean can reach at most 16 and the floor of 12 demands the real bulk.
+    CALIBRATION honesty (final panel): only ~9 of the 16 region-backed tiles carry
+    client STAMPS on this geometry — a tile where the client holds no stamped
+    positions counts clean VACUOUSLY (applyTileValidation never falsifies an empty
+    tile), so the floor of 12 really demands a stamped-tile majority; the
+    columns_validated floor below carries the bulk proof. Re-derive BOTH if the
+    geometry changes — do not read 12/16 as "12 of 16 validated".
     The suppression pin is SELF-SCALING (harness review MAJOR-2): requested_total
     must stay below columns.known — a whole-disc re-declare is impossible when
     validation suppresses, even across the frame-vs-cache-load race (one scan is
@@ -1629,7 +1637,7 @@ def check_dirty_while_offline_summary(ctx):
 
 @named_check("evicted-tscache-rejoin",
              ["server.disk.header_hits", "client.responses.up_to_date",
-              "client.responses.columns"])
+              "client.responses.columns", "server.tscache.size_per_dimension"])
 def check_evicted_tscache_rejoin(ctx):
     """The P1 header rung's live gate (the P1 review's MAJOR-5; phase 2 of
     scripts/summary_evicted.sh): a fresh server boot with the persisted timestamp
@@ -1686,7 +1694,7 @@ def check_evicted_tscache_rejoin(ctx):
 
 @named_check("stamp-heal-prime",
              ["client.summary.tiles_stale", "client.summary.stamps_applied",
-              "server.summary.stamps_entries", "client.requested_total"])
+              "server.summary.stamps_entries"])
 def check_stamp_heal_prime(ctx):
     """Phase 1 of scripts/stamp_heal.sh — the heal gate's BEFORE-pin (3-Opus fold:
     an after-threshold with no pinned before proves nothing; warm-rejoin-summary's
@@ -3428,7 +3436,8 @@ CHECKS = {
                                make_disc_completeness("evicted-tscache-rejoin")],
     "stamp-heal-prime": [check_stamp_heal_prime,
                          make_handshake_check("stamp-heal-prime"),
-                         make_disc_completeness("stamp-heal-prime")],
+                         make_disc_completeness("stamp-heal-prime", run=1),
+                         make_disc_completeness("stamp-heal-prime", run=2)],
     "stamp-heal-rejoin": [check_stamp_heal_rejoin,
                           make_handshake_check("stamp-heal-rejoin"),
                           make_disc_completeness("stamp-heal-rejoin")],
@@ -4681,6 +4690,18 @@ def selftest():
         shr_ctx(req=2300))), "stamp-heal-rejoin")
     hits("stamp-heal-rejoin cache never carried", list(check_stamp_heal_rejoin(
         shr_ctx(known=300))), "stamp-heal-rejoin")
+    # ISOLATING cases (final panel: every leg above was proven only by adjacency —
+    # each composite case tripped >= 2 legs, so any single leg could be deleted with
+    # the selftest green; hits() cannot distinguish which leg fired). Each case below
+    # trips EXACTLY ONE leg, so deleting that leg turns its violation list empty.
+    hits("stamp-heal-rejoin carry premise alone", list(check_stamp_heal_rejoin(
+        shr_ctx(known=300, req=100))), "stamp-heal-rejoin")
+    hits("stamp-heal-rejoin clean floor alone", list(check_stamp_heal_rejoin(
+        shr_ctx(clean=6))), "stamp-heal-rejoin")
+    hits("stamp-heal-rejoin req>=known alone", list(check_stamp_heal_rejoin(
+        shr_ctx(req=2000, known=1900))), "stamp-heal-rejoin")
+    hits("stamp-heal-rejoin req ceiling alone", list(check_stamp_heal_rejoin(
+        shr_ctx(req=2100, known=3000))), "stamp-heal-rejoin")
 
     # --- summary-inert: the client-side belt (harness review m4) ---
     hits("summary moved CLIENT-side only on a gated run", summary_inert_violations(

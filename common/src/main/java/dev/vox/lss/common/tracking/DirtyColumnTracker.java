@@ -24,8 +24,15 @@ public class DirtyColumnTracker {
     }
 
     private final Map<String, LongOpenHashSet> dirtyColumns = new HashMap<>();
-    /** Drained-but-invalidation-not-yet-applied (the stamping guard's second phase). */
-    private final Map<String, LongOpenHashSet> invalidating = new HashMap<>();
+    /** Drained-but-invalidation-not-yet-applied (the stamping guard's second phase).
+     *  Position -> COUNT of pending invalidation batches (final panel: a plain set
+     *  let a stale confirm release a LATER batch's guard — drain1 moves P, P re-marks
+     *  and drain2 re-moves it, confirm1 lands and P read released while
+     *  invalidation2 was still queued; with dirtyBroadcastIntervalSeconds up to 300
+     *  that window is a stamped seal). Each drain increments, each confirm
+     *  decrements; the guard holds until EVERY outstanding batch has applied. */
+    private final Map<String, it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap> invalidating =
+            new HashMap<>();
     private long totalDrained;
     private long totalMarked;
     // Volatile, read outside the monitor: markDirty callers arrive on arbitrary threads
@@ -75,17 +82,22 @@ public class DirtyColumnTracker {
         var set = dirtyColumns.get(dimension);
         if (set != null && set.contains(packedPosition)) return true;
         var inv = invalidating.get(dimension);
-        return inv != null && inv.contains(packedPosition);
+        return inv != null && inv.containsKey(packedPosition);
     }
 
     /** Phase-two release (the invalidation APPLY calls this right after the
      *  tscache/store invalidation lands — see OffThreadProcessor.applyInvalidations'
-     *  onApplied callback): the positions' evidence is actually gone now, so the
-     *  stamping predicate may trust a fresh compare again. */
+     *  onApplied callback): ONE batch's evidence is gone — the guard releases only
+     *  when the position's LAST outstanding batch confirms (the count, see the
+     *  invalidating field). */
     public synchronized void confirmInvalidated(String dimension, long[] positions) {
         var inv = invalidating.get(dimension);
         if (inv == null) return;
-        for (long p : positions) inv.remove(p);
+        for (long p : positions) {
+            int n = inv.get(p);
+            if (n <= 1) inv.remove(p);
+            else inv.put(p, n - 1);
+        }
         if (inv.isEmpty()) invalidating.remove(dimension);
     }
 
@@ -95,7 +107,9 @@ public class DirtyColumnTracker {
         long[] result = set.toLongArray();
         // Phase handoff BEFORE the clear (same monitor): isPending must never observe
         // a gap between "drained" and "invalidation applied".
-        invalidating.computeIfAbsent(dimension, k -> new LongOpenHashSet()).addAll(set);
+        var inv = invalidating.computeIfAbsent(dimension,
+                k -> new it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap());
+        for (long p : result) inv.addTo(p, 1);
         set.clear();
         totalDrained += result.length;
         return result;
@@ -109,8 +123,13 @@ public class DirtyColumnTracker {
      */
     public synchronized Map<String, long[]> drainAll() {
         Map<String, long[]> out = new HashMap<>();
-        // Shutdown path: the invalidating handoff is moot (no stamping after
-        // shutdown), but keep the phases consistent anyway.
+        // SHUTDOWN-ONLY contract (final panel — the old comment claimed the phases
+        // were "kept consistent anyway", which was false and a trap): this drain
+        // deliberately SKIPS the invalidating handoff, so isPending goes false the
+        // moment it returns. That is sound only because both callers run at service
+        // shutdown, where no stamping predicate will ever consult the guard again.
+        // A future non-shutdown caller MUST use drainDirty (per dimension) instead,
+        // or it re-opens the drain-to-apply seal window §10.2 closed.
         for (var entry : dirtyColumns.entrySet()) {
             if (entry.getValue().isEmpty()) continue;
             long[] positions = entry.getValue().toLongArray();

@@ -67,15 +67,18 @@ FOLIA_SCENARIOS=("${PAPER_SCENARIOS[@]}")
 # means the Folia set could not exercise a store SERVE at all.
 STORE_STANDALONE_SCENARIOS=(store-second-join)
 # Phases of scripts/store_offline_edit.sh (populate -> offline mutate -> verify, chained
-# via SOAK_WORLD_FROM). Valid standalone invocations on fabric AND paper, but excluded
-# from every 'all' list: mutate/verify are meaningless without the carried world.
-# evicted-tscache-rejoin is likewise phase 2 of scripts/summary_evicted.sh (the P1
-# header-rung live gate) — it hard-requires the warm-rejoin-summary carried world.
-PHASE_SCENARIOS=(store-offline-populate store-offline-mutate store-offline-verify
-                 evicted-tscache-rejoin stamp-heal-rejoin)
-# stamp-heal-prime is phase 1 of scripts/stamp_heal.sh — standalone-runnable (its own
-# named check pins the UNHEALED before-state) but kept out of 'all' with its chain.
-STAMP_HEAL_SCENARIOS=(stamp-heal-prime)
+# via SOAK_WORLD_FROM). The store-offline trio is valid standalone on fabric AND
+# paper, but excluded from every 'all' list: mutate/verify are meaningless without
+# the carried world.
+PHASE_SCENARIOS=(store-offline-populate store-offline-mutate store-offline-verify)
+# FABRIC-ONLY phase-2 scenarios (final panel: these must NOT inherit the Paper
+# allowance PHASE_SCENARIOS carries — their wrapper chains refuse non-fabric, the
+# eviction rm targets the Fabric world layout, and Bukkit's split world dirs break
+# the world-carry): evicted-tscache-rejoin is phase 2 of scripts/summary_evicted.sh;
+# stamp-heal-rejoin is phase 2 of scripts/stamp_heal.sh. stamp-heal-prime (phase 1)
+# is standalone-runnable — its own named check pins the UNHEALED before-state — but
+# stays out of 'all' with its chain.
+FABRIC_PHASE_SCENARIOS=(evicted-tscache-rejoin stamp-heal-rejoin stamp-heal-prime)
 # Paper-only, AFTER the Folia copy above so Folia does not inherit it (the store is
 # unvalidated on Folia): console setblock fires no Bukkit event, so only the store's
 # periodic resweep (lodStoreResweepSeconds) can catch the edit — the unfired-event
@@ -186,6 +189,11 @@ esac
 # Platform gating: the Paper port covers a validated subset; the falling-block scenario is
 # Paper-native (setblock fires no Bukkit event, and Fabric's save-hook detection would need
 # a save-all the timeline deliberately omits).
+if [[ "$SOAK_PLATFORM" != "fabric" && " ${FABRIC_PHASE_SCENARIOS[*]} " == *" $SCENARIO "* ]]; then
+    echo "[soak] ERROR: '$SCENARIO' is a Fabric-only chain phase (its wrapper script and"
+    echo "        world-carry paths assume the Fabric world layout) — run its chain on fabric"
+    exit 1
+fi
 if [[ "$SOAK_PLATFORM" == "paper" && " ${PAPER_SCENARIOS[*]} ${PHASE_SCENARIOS[*]} ${STORE_STANDALONE_SCENARIOS[*]} " != *" $SCENARIO "* ]]; then
     echo "[soak] ERROR: Scenario '$SCENARIO' is not ported to SOAK_PLATFORM=paper"
     usage

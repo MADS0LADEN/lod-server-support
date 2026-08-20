@@ -1,11 +1,14 @@
 package dev.vox.lss.common.processing;
 
 /**
- * The stamped-up_to_date stamping predicate (stamped-up-to-date-plan.md §9.1/§9.2).
- * Consulted by the three COMPARE-BACKED up_to_date rungs (the router's tscache rung,
- * the header-fresh delivery, the store-stamp delivery) at DISPOSITION time; every
- * other up_to_date producer uses the never-stamp {@code ColumnUpToDate} form
- * unconditionally.
+ * The stamped-up_to_date stamping predicate (stamped-up-to-date-plan.md §9.1/§9.2 as
+ * narrowed by §10.1). Consulted by exactly the TWO compare-backed up_to_date rungs —
+ * the router's tscache rung and the header-fresh delivery — at DISPOSITION time; the
+ * store-stamp conversion deliberately never stamps (its own delivery-honesty
+ * doctrine: a re-serve hands the STORED acquisition second, so a "verified now"
+ * stamp would claim more than the bytes it declined to send), and every other
+ * up_to_date producer uses the never-stamp {@code ColumnUpToDate} form
+ * unconditionally ({@code stampedSiteCensusHoldsTheNarrowing} pins the site count).
  *
  * <p>The stamping doctrine: a rung may be stamped only if its staleness bound at
  * disposition is provably inside {@code FRESH_CLAIM_MARGIN_SECONDS}. The platform

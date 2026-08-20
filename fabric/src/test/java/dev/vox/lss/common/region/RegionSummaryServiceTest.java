@@ -181,7 +181,10 @@ class RegionSummaryServiceTest {
     void radiusAndCenterClampToTheServerWindowNotTheProtocolMax() throws Exception {
         // The I-M1 amplification fix: lodDistance 64 -> ceil(64/32)+1 = 3 tiles. A
         // radius-65 protocol-max request must shrink to the server's own window, and
-        // the hostile center clamps against the SAME bound.
+        // the hostile center clamps so the WINDOW EDGES stay inside playerTile +-
+        // maxTiles (final panel: an independent center clamp let a crafted
+        // off-center max-radius request reach ~2x as far as an honest one) — at the
+        // full window radius the center pins to the player's own tile.
         var rig = new Rig((dim, tx, tz) -> NOW, 64);
         try {
             var player = UUID.randomUUID();
@@ -190,8 +193,9 @@ class RegionSummaryServiceTest {
             var sent = rig.pumpUntilFrame(rig.anchorsAt(player, DIM, 0, 0));
             var summary = RegionSummaryWire.decodeSummary(sent.frame());
             assertEquals(3, summary.tileRadius(), "radius clamped to the server window");
-            assertEquals(3, summary.centerTileX(), "center clamped to playerTile + window");
-            assertEquals(-3, summary.centerTileZ());
+            assertEquals(0, summary.centerTileX(),
+                    "window-edge clamp: full radius pins the center to the player tile");
+            assertEquals(0, summary.centerTileZ());
             assertEquals(49, summary.stampSeconds().length, "(2*3+1)^2 tiles, not 131^2");
             assertEquals(1, rig.service.diagnostics().getRangeFiltered());
         } finally {
@@ -287,6 +291,73 @@ class RegionSummaryServiceTest {
             assertEquals(player, s.player());
             assertEquals(0, rig.service.readyCountForTest());
             assertEquals(1, rig.service.diagnostics().getFrames());
+        } finally {
+            rig.service.shutdown();
+        }
+    }
+
+    /** The ordering half of retention (final-panel MAJOR, 2026-08-20): the client's
+     *  summary apply has NO recency guard — its correctness argument is that a stale
+     *  frame is always corrected by a later fresh one, never applied after it. So a
+     *  RETRY-retained frame must send BEFORE any fresher frame assembled for the
+     *  same player meanwhile (the old shared-queue tail re-add sent fresh-then-stale,
+     *  letting the stale frame's lower tile stamps re-validate positions the fresh
+     *  frame's revocation had just cleared — a false-clean seal beyond dirty range). */
+    @Test
+    void retainedFramesSendInAssemblyOrderPerPlayer() throws Exception {
+        var rig = new Rig((dim, tx, tz) -> NOW);
+        try {
+            var player = UUID.randomUUID();
+            var anchors = rig.anchorsAt(player, DIM, 0, 0);
+            rig.senderOutcome = RegionSummaryService.SendOutcome.RETRY;
+            rig.service.offerRequest(player, new RegionSummaryWire.Request(DIM, 0, 0, 1));
+            rig.pump(anchors); // admit F1
+            awaitAssembly(rig);
+            rig.pump(anchors); // unwritable drain — F1 retained at its queue head
+            assertEquals(1, rig.service.readyCountForTest());
+            rig.clock.addAndGet(RegionSummaryService.RESWEEP_COOLDOWN_NANOS + 1);
+            rig.service.offerRequest(player, new RegionSummaryWire.Request(DIM, 0, 0, 2));
+            rig.pump(anchors); // admit F2 (channel still unwritable)
+            // awaitAssembly waits for nonzero, which F1's retention already satisfies —
+            // wait for the SECOND frame explicitly.
+            long deadline = System.nanoTime() + java.time.Duration.ofSeconds(30).toNanos();
+            while (rig.service.readyCountForTest() < 2) {
+                if (System.nanoTime() > deadline) fail("timed out waiting for F2 assembly");
+                Thread.sleep(10);
+            }
+            assertEquals(2, rig.service.readyCountForTest(), "both frames retained");
+            rig.senderOutcome = RegionSummaryService.SendOutcome.SENT;
+            rig.pump(anchors); // writable: both drain, IN ASSEMBLY ORDER
+            var first = rig.sent.poll();
+            var second = rig.sent.poll();
+            assertNotNull(first);
+            assertNotNull(second);
+            assertEquals(1, RegionSummaryWire.decodeSummary(first.frame()).tileRadius(),
+                    "the RETAINED (older) frame must send first");
+            assertEquals(2, RegionSummaryWire.decodeSummary(second.frame()).tileRadius(),
+                    "the fresher frame sends after the retained one");
+            assertEquals(0, rig.service.readyCountForTest());
+        } finally {
+            rig.service.shutdown();
+        }
+    }
+
+    /** removePlayer sweeps retained frames (final panel): a rejoin inside the RETRY
+     *  TTL must not receive a dead session's frame. */
+    @Test
+    void removePlayerSweepsRetainedFrames() throws Exception {
+        var rig = new Rig((dim, tx, tz) -> NOW);
+        try {
+            var player = UUID.randomUUID();
+            rig.senderOutcome = RegionSummaryService.SendOutcome.RETRY;
+            rig.service.offerRequest(player, new RegionSummaryWire.Request(DIM, 0, 0, 0));
+            rig.pump(rig.anchorsAt(player, DIM, 0, 0)); // admit
+            awaitAssembly(rig);
+            rig.pump(rig.anchorsAt(player, DIM, 0, 0)); // unwritable — retained
+            assertEquals(1, rig.service.readyCountForTest());
+            rig.service.removePlayer(player);
+            assertEquals(0, rig.service.readyCountForTest(),
+                    "retained frames die with the connection");
         } finally {
             rig.service.shutdown();
         }

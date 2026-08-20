@@ -161,8 +161,12 @@ public final class ClientCommandActions {
 
         // Region summaries (§6 attributability): rendered once any summary applied —
         // why the want-set skipped revalidating the clean bulk after this rejoin.
+        // Stamps counters included in the gate (final panel): a session whose summary
+        // frame was lost but whose stamps flowed would otherwise hide its only
+        // instrument for the applied/ignored counts.
         if (manager.getSummaryTilesClean() + manager.getSummaryTilesStale()
-                + manager.getSummaryTilesUnknown() + manager.getSummaryTilesNoRegion() > 0) {
+                + manager.getSummaryTilesUnknown() + manager.getSummaryTilesNoRegion()
+                + manager.getSummaryStampsApplied() + manager.getSummaryStampsIgnored() > 0) {
             feedback.accept(Component.literal(String.format(
                     "Summary: tiles clean=%d stale=%d unknown=%d no_region=%d, columns_validated=%d, stamps applied=%d ignored=%d",
                     manager.getSummaryTilesClean(), manager.getSummaryTilesStale(),

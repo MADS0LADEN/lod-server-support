@@ -1,8 +1,8 @@
 # Plan: stamped up_to_date — healing the permanent summary-stale set
 
-**Status:** v1.2 2026-08-20 — v1.1 + the 3-Opus IMPLEMENTATION review fold (§10,
-normative where it tightens §9; the three lenses converged on four MAJORs, all
-landed). The review
+**Status:** v1.3 2026-08-20 — v1.2 + the final whole-branch panel fold (§11: the
+2-Fable + 3-Opus panel over the entire branch diff; one co-found ordering MAJOR +
+three pin-fidelity MAJORs, all landed). The review
 falsified v1.0's central claim ("the stamp adds no new claim") via three verified
 mechanisms and prescribed a NARROWING, not a redesign; §9 is normative where it
 tightens §2-§7. Follow-up to region-summary-sync-plan.md, targets
@@ -350,3 +350,86 @@ version bump, no config surface.
    below `up_to_date` with no error); server-clock-ahead-of-client beyond the
    3600 s skew silently drops every frame client-side (diagnosable cross-exporter:
    server entries > 0, client applied == 0 — the wrs floors' exact shape).
+
+## 11. v1.3 — the final whole-branch panel fold (2-Fable + 3-Opus)
+
+Landed fixes:
+
+1. **Per-player FIFO ready queues in `RegionSummaryService`** (co-found MAJOR —
+   concurrency + server-honesty lenses): the RETRY retention's tail re-add on the
+   shared queue could send a FRESHER frame before the retained stale one; the
+   client apply has no recency guard (deliberate — §2's honesty argument assumes
+   stale-then-fresh), so the stale frame's lower margined tile stamps re-set
+   `summaryValidated` on positions the fresh frame's revocation just cleared — a
+   false-clean seal, permanent for tiles beyond dirty-push range. Now: one FIFO
+   per player (assembly order unconditional; RETRY leaves the frame at ITS queue's
+   head and stops only that player's drain — the head-of-line blocking across
+   players is gone too), `removePlayer` sweeps the queue, the sender is
+   per-frame Throwable-contained (throw = the vanished DROP belt), and the sink
+   re-checks CURRENT dialect (the stamps lane's rule mirrored — a pre-handshake
+   request reads as CURRENT on an untracked UUID, and a session can re-handshake
+   DOWN before the frame drains). Pinned by
+   `retainedFramesSendInAssemblyOrderPerPlayer` + `removePlayerSweepsRetainedFrames`.
+2. **The two-phase guard is BATCH-COUNTED** (concurrency lens): `invalidating` is
+   now position → outstanding-batch COUNT (a stale confirm from a slow first
+   invalidation released a later batch's guard early under overlapping drains —
+   reachable at `dirtyBroadcastIntervalSeconds` ≥ the store-invalidate latency),
+   and the broadcaster callback is once-guarded in `invalidateTimestamps` (the
+   requeue-after-throw path replays applied batches; a double confirm must not
+   decrement a later batch's count). `drainAll`'s comment now states its real
+   contract: shutdown-only, deliberately NO handoff — a future non-shutdown
+   caller must use `drainDirty`. Pinned by
+   `overlappingInvalidationBatchesHoldTheGuardUntilTheLastConfirms`.
+3. **The site census enforces arity, not idiom** (pins MAJOR): recursive scan of
+   ALL FIVE modules' production sources, balanced-paren top-level-comma count
+   (== 4 ⇒ 5-arg construction) plus an arg-taking `.stampSecond(` call census —
+   the old one-directory regex was evadable by hoisting the second into a local,
+   relocating the site, or a third site in a matching file.
+4. **The rejoin gate's four adjacency-proven legs got isolating doctored cases**
+   (pins MAJOR — mutation-verified: each leg's deletion now reds the selftest);
+   `stamp-heal-prime` also gained run-2 disc completeness (the only 2-run
+   scenario without it) and dropped its unread `client.requested_total`
+   declaration; `evicted-tscache-rejoin` declares
+   `server.tscache.size_per_dimension` (its eviction-premise belt's field).
+5. **The Fabric C2S receiver census exists now** (pins MAJOR — the census
+   family's one unpinned link): `everyRegisteredC2SPayloadHasAServerReceiver`,
+   the identical silent-drop mode the S2C half was created for.
+6. **Hardening batch**: `ColumnStampsWire.encode` refuses null/empty/over-cap
+   dimensions (the sibling codec's producer-guard rule — a bad dimension shipped
+   frames every client rejected WHOLE while counters said sent);
+   `RegionStampTable.refreshedHeader` publishes the new snapshot BEFORE the new
+   stat deadline (the lock-free fast path could serve the previous horizon's
+   header as fresh for the whole refresh-IO duration); the summary window clamps
+   its EDGES (center bound = maxTiles − radius — an off-center max-radius request
+   reached ~2× the honest window; `radiusAndCenterClampToTheServerWindowNotTheProtocolMax`
+   re-pinned); the pump sweeps anchor-less eligibility marks (the Folia
+   quit-race could resurrect `requestedThisSession` after `removePlayer`, with no
+   other sweep for the server's life); the client `/lss diag` Summary line also
+   renders when only stamps counters moved; the fuzz ratchet op carries a
+   fired-at-least-once premise AND the needs⇔classify invariant is asserted
+   BIT-FOR-BIT per pool position (`needsBitForTest` — the aggregated ring probes
+   could not see a stuck-OFF needs bit behind a needing sibling);
+   `enableQuadtreeScan` gained the sibling config round-trip pin; the
+   entries/frames diag order is pinned with asymmetric counts; soak.sh refuses
+   the Fabric-only chain phases on other platforms and the dead
+   `STAMP_HEAL_SCENARIOS` variable is gone.
+
+Accepted-open (recorded, deliberately not machined):
+
+- **The client summary apply is an unbounded trusted-server surface**: a hostile
+  server can send repeated max-radius frames costing ~2-5 ms of render thread
+  each (17k tiles × 16 leaf lookups) plus a revocation-driven ring-reopen walk.
+  Not rate-limited: the client already extends the server far deeper trust (raw
+  column ingest), and every legit flow is one frame per dimension entry.
+- **`everObserved` is narrower than the deleted-after-observed doctrine**
+  (listed-but-never-examined and all-absent-header regions read NO_REGION after
+  deletion): sound because BOTH sentinels are pinned client-side skips; the
+  residual is counter attribution. Commented at the predicate.
+- **The sweeper holds a region-entry monitor across its header read** (~one 8 KiB
+  read + two stats): a reader-pool thread wanting the SAME region can block
+  behind it ahead of the disk-read gate. Bounded (per-region, ms-scale, and the
+  chunk rung usually rides the tscache instead); the fix (IO outside the
+  monitor + CAS) is real machinery for a stall no live gate has ever surfaced.
+- **Fabric's `handleRegionSummaryRequest` hostile-decode containment is
+  unexercised by a dedicated test** (Paper's twin pin covers the shared logic;
+  Fabric's extra branch is the throttled decode WARN).

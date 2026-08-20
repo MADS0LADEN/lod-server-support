@@ -27,6 +27,10 @@ class ClientReceiverCensusTest {
             "clientboundPlay\\(\\)\\.register\\(\\s*(?:[\\w.]*\\bpayloads\\.)?(\\w+S2CPayload)\\.TYPE");
     private static final Pattern RECEIVER = Pattern.compile(
             "registerGlobalReceiver\\(\\s*(?:[\\w.]*\\bpayloads\\.)?(\\w+S2CPayload)\\.TYPE");
+    private static final Pattern C2S_REGISTRATION = Pattern.compile(
+            "serverboundPlay\\(\\)\\.register\\(\\s*(?:[\\w.]*\\bpayloads\\.)?(\\w+C2SPayload)\\.TYPE");
+    private static final Pattern SERVER_RECEIVER = Pattern.compile(
+            "registerGlobalReceiver\\(\\s*(?:[\\w.]*\\bpayloads\\.)?(\\w+C2SPayload)\\.TYPE");
 
     private static Path source(String moduleRelative) {
         var p = Path.of(moduleRelative);
@@ -44,7 +48,7 @@ class ClientReceiverCensusTest {
         Set<String> registered = collect(S2C_REGISTRATION.matcher(networking));
         Set<String> handled = collect(RECEIVER.matcher(client));
 
-        assertTrue(registered.size() >= 7,
+        assertTrue(registered.size() >= 8,
                 "expected the full S2C payload surface in LSSNetworking, found only "
                         + registered);
         // Growth guard (P2 integration review m5): the name-extracting regex must
@@ -59,6 +63,37 @@ class ClientReceiverCensusTest {
         assertEquals(registered, handled,
                 "every S2C payload TYPE needs a registerGlobalReceiver in "
                         + "LSSClientNetworking (an unhandled type silently drops frames), "
+                        + "and a receiver without a registration is an orphan");
+    }
+
+    /** The C2S twin (final panel — this was the census family's one unpinned link):
+     *  every serverboundPlay registration needs a ServerPlayNetworking
+     *  registerGlobalReceiver in LSSServerNetworking, or the server silently drops
+     *  every frame that client sends on the channel — the identical failure mode the
+     *  S2C half was created for, on the one platform where it stayed possible
+     *  (NeoForge binds the handler AT registration; Paper's messenger census covers
+     *  its own ingress). */
+    @Test
+    void everyRegisteredC2SPayloadHasAServerReceiver() throws Exception {
+        String networking = Files.readString(source(
+                "src/main/java/dev/vox/lss/networking/LSSNetworking.java"));
+        String server = Files.readString(source(
+                "src/main/java/dev/vox/lss/networking/server/LSSServerNetworking.java"));
+
+        Set<String> registered = collect(C2S_REGISTRATION.matcher(networking));
+        Set<String> handled = collect(SERVER_RECEIVER.matcher(server));
+
+        assertTrue(registered.size() >= 5,
+                "expected the full C2S payload surface in LSSNetworking, found only "
+                        + registered);
+        int c2sCalls = networking.split("serverboundPlay\\(\\)\\s*\\.register\\(", -1).length - 1;
+        assertEquals(c2sCalls, registered.size(),
+                "every serverboundPlay().register call must parse into a payload name "
+                        + "this census recognizes — got " + c2sCalls + " calls vs "
+                        + registered);
+        assertEquals(registered, handled,
+                "every C2S payload TYPE needs a registerGlobalReceiver in "
+                        + "LSSServerNetworking (an unhandled type silently drops frames), "
                         + "and a receiver without a registration is an orphan");
     }
 

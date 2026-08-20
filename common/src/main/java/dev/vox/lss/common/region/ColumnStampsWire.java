@@ -53,6 +53,16 @@ public final class ColumnStampsWire {
             throw new WireFormatException("stamps count " + count + " outside [1, "
                     + MAX_STAMP_ENTRIES + "]");
         }
+        // Encode-side dimension guard (final panel — RegionSummaryWire's own rule:
+        // "the decode cap alone would let a local bug emit a frame the twin then
+        // rejects"): an over-cap/empty dimension would ship frames every client
+        // silently discards WHOLE while the server counts them sent.
+        if (dimension == null || dimension.isEmpty()
+                || dimension.getBytes(java.nio.charset.StandardCharsets.UTF_8).length
+                        > RegionSummaryWire.MAX_DIMENSION_UTF_BYTES) {
+            throw new WireFormatException("stamps dimension null/empty or over "
+                    + RegionSummaryWire.MAX_DIMENSION_UTF_BYTES + " UTF bytes");
+        }
         long base = stampSeconds[0];
         if (base <= 0) throw new WireFormatException("stamps base second " + base + " <= 0");
         // Producer-side upper bound (3-Opus fold): the client rejects out-of-bound

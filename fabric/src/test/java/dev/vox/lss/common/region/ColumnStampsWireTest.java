@@ -84,11 +84,31 @@ class ColumnStampsWireTest {
 
     @Test
     void oversizedDimensionDrops() {
+        // Hand-crafted: encode itself now refuses an over-cap dimension (the
+        // producer-side guard, pinned below) — the hostile frame must be built raw.
         String longDim = "lss:" + "d".repeat(300);
+        var w = new WireBytes.Writer(512);
+        w.writeByte(ColumnStampsWire.VERSION);
+        w.writeUtf(longDim);
+        RegionSummaryWire.writeZigVarLong(w, NOW);
+        w.writeVarInt(1);
+        w.writeLong(PositionUtil.packPosition(1, 1));
+        RegionSummaryWire.writeZigVarLong(w, 0);
+        assertThrows(WireFormatException.class,
+                () -> ColumnStampsWire.decode(w.toByteArray(), NOW + 10));
+    }
+
+    @Test
+    void encodeRefusesAnOversizedOrEmptyDimension() {
+        // The encode-side guard (final panel — RegionSummaryWire's rule mirrored):
+        // the client rejects the frame WHOLE, so a bad dimension must fail loudly at
+        // the server, not ship frames every client silently discards.
         long[] pos = {PositionUtil.packPosition(1, 1)};
         long[] sec = {NOW};
-        byte[] f = ColumnStampsWire.encode(longDim, pos, sec, 1);
-        assertThrows(WireFormatException.class, () -> ColumnStampsWire.decode(f, NOW + 10));
+        assertThrows(WireFormatException.class, () -> ColumnStampsWire.encode(
+                "lss:" + "d".repeat(300), pos, sec, 1));
+        assertThrows(WireFormatException.class, () -> ColumnStampsWire.encode(
+                "", pos, sec, 1));
     }
 
     @Test

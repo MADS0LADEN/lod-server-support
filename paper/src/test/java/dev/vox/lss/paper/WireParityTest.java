@@ -321,8 +321,10 @@ class WireParityTest {
                 // Paper's carrier is the same NMS DiscardedPayload send).
                 "lss:col_stamps");
         assertEquals(covered, declared,
-                "every LSS channel must have a reference frame in this suite — a new payload"
-                + " requires frames in BOTH WireParityTests");
+                "every LSS channel must be accounted for in this census — raw-byte[]"
+                + " channels are enumerated with their codec-owning suite named in the"
+                + " comment above (frames live there); a FriendlyByteBuf payload needs"
+                + " reference frames in BOTH WireParityTests");
     }
 
     @Test

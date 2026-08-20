@@ -381,30 +381,92 @@ class StampedUpToDateFlowTest {
 
     @Test
     void stampedSiteCensusHoldsTheNarrowing() throws Exception {
-        // The §9.1 narrowing's enforcement (3-Opus fold: "the least-pinned thing in
-        // the change"): exactly TWO 5-arg ColumnUpToDate construction sites may exist
-        // in the processing package, and only in the two compare-backed methods. A
-        // third stamped site (or one moved elsewhere) must red HERE, not in review.
-        var dir = java.nio.file.Path.of("../common/src/main/java/dev/vox/lss/common/processing");
-        if (!java.nio.file.Files.isDirectory(dir)) {
-            dir = java.nio.file.Path.of("common/src/main/java/dev/vox/lss/common/processing");
+        // The §9.1 narrowing's enforcement (3-Opus fold; REBUILT by the final panel,
+        // whose review showed the old one-directory idiom-regex could be evaded three
+        // ways: hoisting the stampSecond call into a local, moving the site to
+        // another module, or a third site in an already-matching file). Two layers,
+        // both across ALL FIVE modules' production sources:
+        //   (a) exactly TWO 5-arg ColumnUpToDate construction sites exist (balanced-
+        //       paren argument extraction, top-level comma count == 4 — arity, not
+        //       idiom), and they live in the two compare-backed rungs' files;
+        //   (b) exactly THREE arg-taking .stampSecond( call sites exist (the source
+        //       interface is the only honest second — a hoisted local still calls
+        //       it): the two rungs plus the ctor's context-plumbing adapter that
+        //       forwards to the volatile field. Zero-arg matches are the SendAction
+        //       ACCESSOR, not a source consult, and are excluded.
+        // A third stamped site — hoisted, relocated, or in-file — must red HERE.
+        var roots = new java.util.ArrayList<java.nio.file.Path>();
+        for (String m : new String[]{"common", "xplat", "fabric", "paper", "neoforge"}) {
+            var p = java.nio.file.Path.of("../" + m + "/src/main/java");
+            if (!java.nio.file.Files.isDirectory(p)) {
+                p = java.nio.file.Path.of(m + "/src/main/java");
+            }
+            if (java.nio.file.Files.isDirectory(p)) roots.add(p);
         }
-        var pattern = java.util.regex.Pattern.compile(
-                "new SendAction\\.ColumnUpToDate\\([^;]*?stampSource\\(\\)", java.util.regex.Pattern.DOTALL);
-        int stamped = 0;
+        assertEquals(5, roots.size(), "census must see all five modules: " + roots);
+        int fiveArg = 0, sourceCalls = 0;
         StringBuilder where = new StringBuilder();
-        try (var files = java.nio.file.Files.list(dir)) {
-            for (var f : files.filter(x -> x.toString().endsWith(".java")).toList()) {
-                String src = java.nio.file.Files.readString(f);
-                var m = pattern.matcher(src);
-                while (m.find()) {
-                    stamped++;
-                    where.append(f.getFileName()).append(' ');
+        for (var root : roots) {
+            try (var files = java.nio.file.Files.walk(root)) {
+                for (var f : files.filter(x -> x.toString().endsWith(".java")).toList()) {
+                    String src = java.nio.file.Files.readString(f);
+                    int at = 0;
+                    while ((at = src.indexOf("ColumnUpToDate(", at)) >= 0) {
+                        int start = at;
+                        at = start + 1;
+                        // Census counts CONSTRUCTIONS — skip the record declaration
+                        // and ctor declarations in SendAction.java itself.
+                        String before = src.substring(Math.max(0, start - 8), start);
+                        if (before.endsWith("record ") || before.endsWith("public ")) {
+                            continue;
+                        }
+                        int args = topLevelCommas(src, start + "ColumnUpToDate(".length());
+                        if (args == 4) {
+                            fiveArg++;
+                            where.append(f.getFileName()).append("(5-arg) ");
+                        }
+                    }
+                    var callPattern = java.util.regex.Pattern
+                            .compile("\\.stampSecond\\(\\s*[^)\\s]");
+                    var cm = callPattern.matcher(src);
+                    while (cm.find()) {
+                        sourceCalls++;
+                        where.append(f.getFileName()).append("(call) ");
+                    }
                 }
             }
         }
-        assertEquals(2, stamped, "exactly the two compare-backed rungs may stamp "
-                + "(router tscache + header-fresh delivery); found in: " + where);
+        assertEquals(2, fiveArg, "exactly the two compare-backed rungs may construct "
+                + "a 5-arg (stamped) ColumnUpToDate; found: " + where);
+        assertEquals(3, sourceCalls, "exactly three arg-taking stampSecond call sites "
+                + "(router tscache rung + header-fresh delivery + the ctor's context "
+                + "adapter); found: " + where);
+        assertTrue(where.toString().contains("IncomingRequestRouter.java(5-arg)")
+                        && where.toString().contains("OffThreadProcessor.java(5-arg)"),
+                "the two stamped sites must be the router rung and the header-fresh "
+                + "delivery: " + where);
+    }
+
+    /** Count top-level commas of the argument list opening at {@code open} (the char
+     *  right after the '('); -1 when unbalanced/braces run out. String/char literals
+     *  are skipped so a comma inside a literal never counts. */
+    private static int topLevelCommas(String src, int open) {
+        int depth = 1, commas = 0;
+        for (int i = open; i < src.length(); i++) {
+            char c = src.charAt(i);
+            if (c == '"' || c == '\'') {
+                char q = c;
+                for (i++; i < src.length(); i++) {
+                    if (src.charAt(i) == '\\') i++;
+                    else if (src.charAt(i) == q) break;
+                }
+            } else if (c == '(' || c == '[' || c == '{') depth++;
+            else if (c == ')' || c == ']' || c == '}') {
+                depth--;
+                if (depth == 0) return commas;
+            } else if (c == ',' && depth == 1) commas++;
+        }
+        return -1;
     }
 
     @Test
@@ -473,5 +535,34 @@ class StampedUpToDateFlowTest {
         tracker.confirmInvalidated(DIM, drained);
         assertFalse(tracker.isPending(DIM, packed),
                 "the applied invalidation releases the guard — the evidence is gone");
+    }
+
+    @Test
+    void overlappingInvalidationBatchesHoldTheGuardUntilTheLastConfirms() {
+        // BATCH-SCOPED release (final panel): with a plain set, a slow first
+        // invalidation's confirm arriving AFTER a re-mark + second drain released the
+        // guard while the SECOND batch was still queued — at
+        // dirtyBroadcastIntervalSeconds up to 300 that window was a stamped seal.
+        // The invalidating structure counts outstanding batches per position.
+        var tracker = new DirtyColumnTracker();
+        long packed = PositionUtil.packPosition(4, 4);
+        tracker.markDirty(DIM, 4, 4);
+        long[] batch1 = tracker.drainDirty(DIM);
+        tracker.markDirty(DIM, 4, 4);          // re-marked while batch1's apply is slow
+        long[] batch2 = tracker.drainDirty(DIM); // second drain overlaps
+        tracker.confirmInvalidated(DIM, batch1); // the STALE confirm lands first
+        assertTrue(tracker.isPending(DIM, packed),
+                "batch2's invalidation is still queued — the guard must hold");
+        tracker.confirmInvalidated(DIM, batch2);
+        assertFalse(tracker.isPending(DIM, packed),
+                "the last outstanding batch's confirm releases the guard");
+        // Over-confirm armor (the requeue-replay door is closed by the processor's
+        // once-guard, but a stray extra confirm must not underflow into a future hold).
+        tracker.confirmInvalidated(DIM, batch2);
+        tracker.markDirty(DIM, 4, 4);
+        long[] batch3 = tracker.drainDirty(DIM);
+        assertTrue(tracker.isPending(DIM, packed));
+        tracker.confirmInvalidated(DIM, batch3);
+        assertFalse(tracker.isPending(DIM, packed));
     }
 }

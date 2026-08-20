@@ -749,6 +749,26 @@ class ConfigValidationTest {
     }
 
     @Test
+    void quadtreeScanDefaultsOnAndRoundTripsThroughJson() {
+        // The third sibling (final panel: the one new client kill switch with no
+        // config pin) — same hazard as its siblings: a silent default-off revert
+        // would pass CI green while quietly reverting reset walks to the 30-90 ms
+        // per-position shape in the field.
+        var c = clientConfig();
+        assertTrue(c.enableQuadtreeScan, "quadtree scan must default ON");
+        c.validate();
+        assertTrue(c.enableQuadtreeScan, "validate() must not touch the boolean");
+        var gson = new com.google.gson.Gson();
+        String saved = gson.toJson(clientConfig());
+        assertTrue(saved.contains("\"enableQuadtreeScan\":true"),
+                "a fresh config must persist the default under the exact key: " + saved);
+        var loaded = gson.fromJson(saved.replace(
+                "\"enableQuadtreeScan\":true", "\"enableQuadtreeScan\":false"),
+                dev.vox.lss.config.LSSClientConfig.class);
+        assertFalse(loaded.enableQuadtreeScan, "a saved false must bind back as false");
+    }
+
+    @Test
     void scanPrefixRetentionDefaultsOnAndRoundTripsThroughJson() {
         // Scan prefix retention (docs/planning/scanner-reopened-rings-plan.md) ships ON —
         // a silent default-off revert would pass CI green (unit rigs set the seam
