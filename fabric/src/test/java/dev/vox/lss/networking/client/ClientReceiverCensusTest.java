@@ -47,6 +47,15 @@ class ClientReceiverCensusTest {
         assertTrue(registered.size() >= 7,
                 "expected the full S2C payload surface in LSSNetworking, found only "
                         + registered);
+        // Growth guard (P2 integration review m5): the name-extracting regex must
+        // account for EVERY clientboundPlay registration — an 8th payload named
+        // outside the *S2CPayload convention (or moved out of a payloads package)
+        // would otherwise hide from both scans and stay green while unhandled.
+        int s2cCalls = networking.split("clientboundPlay\\(\\)\\s*\\.register\\(", -1).length - 1;
+        assertEquals(s2cCalls, registered.size(),
+                "every clientboundPlay().register call must parse into a payload name "
+                        + "this census recognizes — got " + s2cCalls + " calls vs "
+                        + registered);
         assertEquals(registered, handled,
                 "every S2C payload TYPE needs a registerGlobalReceiver in "
                         + "LSSClientNetworking (an unhandled type silently drops frames), "

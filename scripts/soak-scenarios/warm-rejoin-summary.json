@@ -39,6 +39,21 @@
     },
     {
       "anchor": 1,
+      "at": 130,
+      "cmd": "save-all"
+    },
+    {
+      "anchor": 1,
+      "at": 195,
+      "cmd": "setblock 264 310 264 minecraft:stone"
+    },
+    {
+      "anchor": 1,
+      "at": 200,
+      "cmd": "save-all"
+    },
+    {
+      "anchor": 1,
       "at": 210,
       "cmd": "kick @a soak-phase-end"
     }

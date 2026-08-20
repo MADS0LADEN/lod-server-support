@@ -37,6 +37,13 @@ public final class RegionSummaryWire {
     /** ceil(MAX_LOD_DISTANCE / 32) + 1 = ceil(2048/32) + 1 — one ring of margin over
      *  the largest configurable LOD disc, checked at DECODE on both sides. */
     public static final int MAX_SUMMARY_TILE_RADIUS = 65;
+    /** Center-coordinate domain (P2 client review MAJOR-1): far beyond the world
+     *  border's ~59k-tile reach, but small enough that {@code center ± radius} and the
+     *  consumers' tile→leaf shifts can never overflow int — an unbounded hostile
+     *  center made the client's window walk wrap (demonstrated AIOOBE) and alias
+     *  {@code tileX << 2} onto REAL leaves. Bounding the DOMAIN kills the whole class
+     *  on both sides instead of patching each walk. */
+    public static final int MAX_SUMMARY_TILE_ABS = 2_000_000;
     public static final int MAX_DIMENSION_UTF_BYTES = 256;
 
     /** No region file: nothing on disk to validate against. */
@@ -51,6 +58,8 @@ public final class RegionSummaryWire {
     public record Request(String dimension, int centerTileX, int centerTileZ, int tileRadius) {
         public Request {
             requireDimension(dimension);
+            boundedCenter(centerTileX);
+            boundedCenter(centerTileZ);
             boundedRadius(tileRadius);
         }
     }
@@ -64,6 +73,8 @@ public final class RegionSummaryWire {
                           int tileRadius, long[] stampSeconds) {
         public Summary {
             requireDimension(dimension);
+            boundedCenter(centerTileX);
+            boundedCenter(centerTileZ);
             long side = 2L * boundedRadius(tileRadius) + 1;
             if (stampSeconds == null || stampSeconds.length != side * side) {
                 throw new WireFormatException("summary stamps length "
@@ -163,6 +174,13 @@ public final class RegionSummaryWire {
                     + MAX_SUMMARY_TILE_RADIUS + "]");
         }
         return radius;
+    }
+
+    private static void boundedCenter(int center) {
+        if (center < -MAX_SUMMARY_TILE_ABS || center > MAX_SUMMARY_TILE_ABS) {
+            throw new WireFormatException("tile center " + center + " outside ±"
+                    + MAX_SUMMARY_TILE_ABS);
+        }
     }
 
     /** Both records' dimension guard — encode-side too (the decode cap alone would let

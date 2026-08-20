@@ -74,6 +74,16 @@ class LodRequestManagerSummaryTest {
         manager.tickWithContext(cx, cz, d, 0, 0, 0L, -1, () -> 0);
     }
 
+    /** The codec's zigzag-varlong shape (its own writer is package-private). */
+    private static void zigVarLong(dev.vox.lss.common.wire.WireBytes.Writer w, long value) {
+        long z = (value << 1) ^ (value >> 63);
+        while ((z & ~0x7FL) != 0) {
+            w.writeByte((int) ((z & 0x7F) | 0x80));
+            z >>>= 7;
+        }
+        w.writeByte((int) z);
+    }
+
     /** A radius-0 frame for POS's tile carrying one stamp. */
     private static byte[] frame(String dimension, long stamp) {
         return RegionSummaryWire.encodeSummary(new RegionSummaryWire.Summary(
@@ -256,6 +266,114 @@ class LodRequestManagerSummaryTest {
                 "the frame must not seal a rejected column validated");
         assertEquals(-1L, manager.columnsForTest().classify(POS),
                 "the rejected column re-declares as a first serve");
+    }
+
+    @Test
+    void aHostileCenterFrameIsContainedAndWritesNothing() {
+        // The MAJOR-1 shape end to end: a frame whose center would overflow the tile
+        // walk must be rejected at decode (the wire domain bound) and contained here —
+        // no throw into the client tick, no leaf state written.
+        seedStamped(dim("overworld"), 7000L);
+        var w = new dev.vox.lss.common.wire.WireBytes.Writer(64);
+        w.writeByte(RegionSummaryWire.VERSION);
+        w.writeUtf("lss_test:overworld");
+        zigVarLong(w, Integer.MAX_VALUE);
+        zigVarLong(w, Integer.MAX_VALUE);
+        w.writeVarInt(0);
+        zigVarLong(w, 0);
+        assertDoesNotThrow(() -> manager.onRegionSummaryFrame(w.toByteArray()));
+        assertEquals(0, manager.getSummaryColumnsValidated());
+        assertEquals(0, manager.getSummaryTilesClean() + manager.getSummaryTilesStale()
+                + manager.getSummaryTilesUnknown(), "a rejected frame counts nothing");
+        assertEquals(7000L, manager.columnsForTest().classify(POS), "state untouched");
+    }
+
+    @Test
+    void flushCacheDropsABufferedFrame() {
+        // /lss clearcache (or reset) mid-load: a frame buffered for the pre-flush
+        // state must die with it, never apply against the post-flush map.
+        var overworld = dim("overworld");
+        manager.markCacheLoadedForTest();
+        manager.setLastDimensionForTest(overworld);
+        manager.setPendingCacheLoadForTest(new CompletableFuture<>());
+        manager.onRegionSummaryFrame(frame("lss_test:overworld", 6000L));
+
+        manager.flushCache();
+
+        manager.setLastDimensionForTest(overworld);
+        var loaded = new Long2LongOpenHashMap();
+        loaded.put(POS, 7000L);
+        manager.setPendingCacheLoadForTest(CompletableFuture.completedFuture(loaded));
+        assertTrue(manager.tickCacheGatePhase());
+        assertEquals(0, manager.getSummaryColumnsValidated(),
+                "the pre-flush frame must not validate the post-flush map");
+    }
+
+    @Test
+    void productionHarnessGateReadsTheSystemProperties() {
+        // The gate seam's PRODUCTION default (the productionDefaultEnablesSlowStart
+        // idiom): every other test overrides it, so a refactor could silently neuter
+        // the soak-baseline protection without this pin.
+        var fresh = new LodRequestManager();
+        String[] props = {"lss.soak", "lss.benchmark", "lss.soak.summary"};
+        String[] saved = new String[props.length];
+        for (int i = 0; i < props.length; i++) saved[i] = System.getProperty(props[i]);
+        try {
+            for (String p : props) System.clearProperty(p);
+            assertFalse(fresh.summaryHarnessGate.getAsBoolean(),
+                    "production clients are ungated");
+            System.setProperty("lss.soak", "true");
+            assertTrue(fresh.summaryHarnessGate.getAsBoolean(),
+                    "soak clients are gated off requesting");
+            System.setProperty("lss.soak.summary", "true");
+            assertFalse(fresh.summaryHarnessGate.getAsBoolean(),
+                    "the summary scenarios opt back in");
+            System.clearProperty("lss.soak.summary");
+            System.clearProperty("lss.soak");
+            System.setProperty("lss.benchmark", "true");
+            assertTrue(fresh.summaryHarnessGate.getAsBoolean(),
+                    "benchmark clients are gated off requesting");
+        } finally {
+            for (int i = 0; i < props.length; i++) {
+                if (saved[i] == null) System.clearProperty(props[i]);
+                else System.setProperty(props[i], saved[i]);
+            }
+        }
+    }
+
+    @Test
+    void theClientRadiusNeverTripsTheServerWindowClamp() {
+        // Cross-module inequality (the WantSetBudgetInvariantTest idiom, exercised
+        // through REAL code both sides): the radius the real manager requests at a
+        // given session distance must clear the real service's admission clamp with
+        // zero range_filtered — a future client-side "+ buffer" would silently start
+        // charging every honest client.
+        for (int lod : new int[]{1, 24, 512, 2048}) {
+            var mgr = new LodRequestManager();
+            mgr.joinSlowStartEnabled = () -> false;
+            mgr.onSessionConfig(new SessionConfigS2CPayload(
+                    LSSConstants.PROTOCOL_VERSION, true, lod, true), "lss-radius-" + lod);
+            mgr.summaryHarnessGate = () -> false;
+            mgr.summarySessionVersion = () -> LSSConstants.PROTOCOL_VERSION;
+            mgr.setBatchSenderForTest(p -> { });
+            var captured = new ArrayList<byte[]>();
+            mgr.setSummarySenderForTest(captured::add);
+            mgr.tickWithContext(0, 0, dim("overworld"), 0, 0, 0L, -1, () -> 0);
+            assertEquals(1, captured.size(), "lod " + lod + ": one request at entry");
+            var req = RegionSummaryWire.decodeRequest(captured.get(0));
+
+            var service = new dev.vox.lss.common.region.RegionSummaryService(
+                    (d, tx, tz) -> RegionSummaryWire.STAMP_NO_REGION, () -> lod);
+            try {
+                service.offerRequest(java.util.UUID.randomUUID(), req);
+                service.pump(u -> new dev.vox.lss.common.region.RegionSummaryService
+                        .PlayerAnchor(req.dimension(), 0, 0), (p, f) -> true);
+                assertEquals(0, service.diagnostics().getRangeFiltered(),
+                        "lod " + lod + ": an honest client's request must never clamp");
+            } finally {
+                service.shutdown();
+            }
+        }
     }
 
     @Test

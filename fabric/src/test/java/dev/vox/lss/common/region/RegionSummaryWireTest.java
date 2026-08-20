@@ -204,6 +204,35 @@ class RegionSummaryWireTest {
     }
 
     @Test
+    void hostileCenterOutsideTheDomainThrowsOnBothRecords() {
+        // P2 client review MAJOR-1: an unbounded center made the client's window walk
+        // wrap int (center=MAX_VALUE, r=0: tx++ overflows, the loop runs off the stamp
+        // array) and aliased tileX<<2 onto REAL leaves. The domain bound in the compact
+        // ctors kills the class on BOTH sides — a frame carrying such a center must
+        // not decode into an applicable object at all.
+        var w = new WireBytes.Writer(48);
+        w.writeByte(RegionSummaryWire.VERSION);
+        w.writeUtf("minecraft:overworld");
+        RegionSummaryWire.writeZigVarLong(w, Integer.MAX_VALUE);
+        RegionSummaryWire.writeZigVarLong(w, Integer.MAX_VALUE);
+        w.writeVarInt(0);
+        RegionSummaryWire.writeZigVarLong(w, 0); // one stamp for the radius-0 window
+        assertThrows(WireFormatException.class,
+                () -> RegionSummaryWire.decodeSummary(w.toByteArray()));
+        assertThrows(WireFormatException.class, () -> new RegionSummaryWire.Request(
+                "minecraft:overworld", Integer.MAX_VALUE, 0, 1));
+        assertThrows(WireFormatException.class, () -> new RegionSummaryWire.Summary(
+                "minecraft:overworld", 0, -RegionSummaryWire.MAX_SUMMARY_TILE_ABS - 1, 0,
+                new long[]{0}));
+        // The full legal domain still round-trips (the world border sits ~59k tiles out
+        // — the bound must never reject an honest center).
+        var legal = new RegionSummaryWire.Request("minecraft:overworld",
+                RegionSummaryWire.MAX_SUMMARY_TILE_ABS,
+                -RegionSummaryWire.MAX_SUMMARY_TILE_ABS, 1);
+        assertEquals(legal, RegionSummaryWire.decodeRequest(RegionSummaryWire.encodeRequest(legal)));
+    }
+
+    @Test
     void craftedMaxLongStampAliasesToNeverCleanFailSafe() {
         // A crafted wire value of Long.MAX_VALUE (not the -1 sentinel form) decodes
         // EQUAL to STAMP_NEVER_CLEAN — the alias direction is fail-safe (the client

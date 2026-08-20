@@ -969,6 +969,36 @@ class ColumnStateMapTest {
     }
 
     @Test
+    void tileValidationIsTwoDirectionalAFresherFrameRevokesAStalerOnes() {
+        // P2 client review MAJOR-2: frames can land out of order (dimension excursion,
+        // mid-session manager rebuild), and the dirty-broadcast heal channel does not
+        // reach a player who was elsewhere at drain time — so a failing compare must
+        // REVOKE, or the first (staler) frame's over-validation is permanent.
+        var loaded = new Long2LongOpenHashMap();
+        loaded.put(POS, 7000L);
+        map.loadFrom(loaded);
+        map.applyTileValidation(POS_TILE_X, POS_TILE_Z, 0L); // stale frame: validates
+        assertEquals(SATISFIED, map.classify(POS));
+        var fresher = map.applyTileValidation(POS_TILE_X, POS_TILE_Z, 8000L);
+        assertEquals(0, fresher.newlyValidated());
+        assertFalse(fresher.fullyValidated());
+        assertEquals(7000L, map.classify(POS),
+                "the fresher frame's failing compare must revoke — fail toward serving");
+    }
+
+    @Test
+    void tileValidationSkipsLegacyZeroStamps() {
+        // A released client's cached 0-stamp (the legacy NOT_GENERATED marker) declares
+        // "I have nothing" — it must never be validated into SATISFIED by a frame.
+        var loaded = new Long2LongOpenHashMap();
+        loaded.put(POS, 0L);
+        map.loadFrom(loaded);
+        var outcome = map.applyTileValidation(POS_TILE_X, POS_TILE_Z, 0L);
+        assertEquals(0, outcome.newlyValidated());
+        assertEquals(-1L, map.classify(POS), "still re-declares as a first serve");
+    }
+
+    @Test
     void tileValidationIsEquivalentToUpToDateForMarkFreeStampedPositions() {
         // The §6 differential: for MARK-FREE stamped positions, validating via a tile
         // stamp M must classify exactly like the per-column up_to_date answer the

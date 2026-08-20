@@ -545,9 +545,11 @@ public class LodRequestManager {
                 this.failuresDuringCacheLoad.clear();
             }
             if (this.pendingSummaryFrame != null) {
-                // The buffered summary applies strictly AFTER the failure re-applies:
-                // an unstamped position has no candidate bit, so a failure can never be
-                // sealed validated by a frame that raced the load.
+                // The buffered summary applies strictly AFTER the failure re-applies.
+                // Lost-CONTENT failures unstamp (no candidate bit at all); lost-CLEAR
+                // failures stay stamped but carry a retry mark, which outranks
+                // validated in classify — either way a rejected column re-declares
+                // instead of being sealed validated by a frame that raced the load.
                 byte[] frame = this.pendingSummaryFrame;
                 this.pendingSummaryFrame = null;
                 onRegionSummaryFrame(frame);
@@ -728,28 +730,31 @@ public class LodRequestManager {
     /**
      * Region-summary S2C frame (region-summary-sync-plan.md §6). Kill switch checked at
      * APPLY too (never request, never apply — a mid-session flip stops both halves);
-     * malformed frames drop contained; a frame for another dimension drops (the entire
-     * anti-stale binding — a same-dimension stale frame is harmless because stamps are
-     * only ever COMPARED, never ratcheted); a frame racing this dimension's cache load
-     * is BUFFERED (latest wins) and applied right after {@code adoptLoaded} — validating
-     * before the stamps exist would be a silent no-op and lose the whole exchange.
+     * malformed frames drop contained, and the APPLY is inside the same containment
+     * (P2 client review MAJOR-1 — the FarPlayerClientSupport bar: a decode that passes
+     * the wire guards must still not let an apply-time surprise escape into the client
+     * tick); a frame for another dimension drops (the anti-stale binding); a
+     * same-dimension STALE frame is safe because validation is two-directional — it
+     * can only revoke validations and cause redundant re-asks, never seal a false
+     * clean (see {@code ColumnStateMap.applyTileValidation}); a frame racing this
+     * dimension's cache load is BUFFERED (latest wins) and applied right after
+     * {@code adoptLoaded} — validating before the stamps exist would be a silent
+     * no-op and lose the whole exchange.
      */
     public void onRegionSummaryFrame(byte[] body) {
         if (!LSSClientConfig.CONFIG.enableRegionSummarySync) return;
         if (this.lastDimension == null) return;
-        dev.vox.lss.common.region.RegionSummaryWire.Summary summary;
         try {
-            summary = dev.vox.lss.common.region.RegionSummaryWire.decodeSummary(body);
+            var summary = dev.vox.lss.common.region.RegionSummaryWire.decodeSummary(body);
+            if (!this.lastDimension.identifier().toString().equals(summary.dimension())) return;
+            if (this.pendingCacheLoad != null) {
+                this.pendingSummaryFrame = body;
+                return;
+            }
+            applySummary(summary);
         } catch (Exception e) {
-            LSSLogger.debug("Malformed region summary dropped: " + e.getMessage());
-            return;
+            LSSLogger.debug("Region summary dropped: " + e.getMessage());
         }
-        if (!this.lastDimension.identifier().toString().equals(summary.dimension())) return;
-        if (this.pendingCacheLoad != null) {
-            this.pendingSummaryFrame = body;
-            return;
-        }
-        applySummary(summary);
     }
 
     /** Decoded-and-dimension-checked apply: per-tile, per-column validation. */
@@ -772,7 +777,7 @@ public class LodRequestManager {
         }
         this.summaryColumnsValidated += validatedTotal;
         if (ClientTraceLog.enabled()) {
-            ClientTraceLog.event("summary", "\"tiles\":" + (i)
+            ClientTraceLog.event("summary", "\"tiles\":" + i
                     + ",\"validated\":" + validatedTotal);
         }
     }
@@ -1045,6 +1050,7 @@ public class LodRequestManager {
             ColumnCacheStore.clearForServer(this.serverAddress);
         }
         this.pendingCacheLoad = null; // drop any in-flight load — its pre-clear result would resurrect flushed timestamps
+        this.pendingSummaryFrame = null; // a frame buffered for the pre-flush state dies with it
         this.failuresDuringCacheLoad.clear();
         resetRequestState();
         this.scanner.reset();

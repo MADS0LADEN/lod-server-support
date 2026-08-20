@@ -228,21 +228,30 @@ case "$SCENARIO" in
     warm-rejoin-summary)        CLIENT_RUNS=2; EXPECTED_SECONDS=470
                                 # Region summaries (region-summary-sync-plan.md §8): run 1
                                 # generates the 9-tile disc around mid-tile chunk (16,16),
-                                # then the 150s clearcache re-serves it so the cached stamps
-                                # CLEAR the freshness margin over every already-settled
-                                # region header (a serve-then-save stamp never can). Run 2
-                                # (too short for the action to re-fire) validates the disc
-                                # off one summary frame; only the player's own tile — the
-                                # kick-save — may stay stale.
+                                # a t130 save-all settles EVERY pending header (Paper's
+                                # distributed autosave otherwise trickles gen saves past
+                                # the re-stamp window — 6 stale tiles on the first Paper
+                                # run; Folia maps save-all to a no-op but its 100-tick
+                                # autosave settles the same way), then the 160s clearcache
+                                # re-serves the disc so the cached stamps CLEAR the
+                                # freshness margin (a serve-then-save stamp never can).
+                                # Run 2 (too short for the action to re-fire) validates
+                                # the disc off one summary frame; the t195 setblock in
+                                # the player tile is the EXPLICIT poison for the honesty
+                                # leg — Fabric's kick re-saves inhabitedTime-dirty chunks
+                                # but Paper's kick writes nothing after the save-all
+                                # (recorded: the whole disc validated, stale=0), so the
+                                # stale tile must come from a real edit, not from
+                                # platform save behavior.
                                 CLIENT_EXTRA_ARGS=("-Psoak.summary=true"
-                                                   "-Psoak.clientActionAt=150:clearcache") ;;
+                                                   "-Psoak.clientActionAt=160:clearcache") ;;
     dirty-while-offline-summary) CLIENT_RUNS=2; EXPECTED_SECONDS=480
                                 # The false-clean canary: warm-rejoin-summary's shape plus
                                 # an offline edit in chunk (36,-4) (tile (1,-1)). The edited
                                 # tile must NOT validate (probe 36:-4 rises) while the
                                 # control tile does (probe -4:36 stays exactly equal).
                                 CLIENT_EXTRA_ARGS=("-Psoak.summary=true"
-                                                   "-Psoak.clientActionAt=150:clearcache"
+                                                   "-Psoak.clientActionAt=160:clearcache"
                                                    "-Psoak.probes=36:-4,-4:36") ;;
     evicted-tscache-rejoin)     CLIENT_RUNS=1; EXPECTED_SECONDS=260
                                 # P1 header-rung live gate (chained phase 2 — run via

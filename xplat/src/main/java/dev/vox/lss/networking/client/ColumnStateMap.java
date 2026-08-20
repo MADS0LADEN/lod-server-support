@@ -251,10 +251,12 @@ class ColumnStateMap {
         // No data: absent (-1) or a LEGACY not-generated 0-stamp loaded from a released
         // client's cache — both declare -1 ("I have nothing"); the client never emits 0.
         if (stored <= 0L) return -1L;
-        // Ingest-failure retry. Defence-in-depth: onIngestFailed always clears `validated`
-        // alongside the mark, so the revalidation rung below would return the same stored
-        // value — this rung keeps the request flowing even if a future path ever leaves a
-        // retry-marked position validated.
+        // Ingest-failure retry. LOAD-BEARING for the region-summary path (P2 client
+        // review minor-2): the lost-CLEAR failure flavour re-stamps with a positive
+        // clearPreStamp, so applyTileValidation can legitimately set `validated` on a
+        // retry-marked position — this rung outranking `validated` is the ONLY thing
+        // keeping such a rejected column re-asking. Do not demote it back to
+        // defence-in-depth.
         if ((leaf.retry & m) != 0) return stored;
         if ((leaf.validated & m) == 0) return stored; // Cached but not validated this session
         return SATISFIED;
@@ -298,22 +300,32 @@ class ColumnStateMap {
      * position in the 32×32-chunk tile at ({@code tileX}, {@code tileZ}), set
      * {@code validated} iff its stamp is STRICTLY above the reported tile stamp
      * {@code stampM} (the wire value already carries the server's serve-latency
-     * margin, so this compare inherits the raced-read protection). Load-bearing
-     * properties, each pinned:
+     * margin, so this compare inherits the raced-read protection) — and CLEAR it
+     * otherwise. Load-bearing properties, each pinned:
      * <ul>
+     *   <li><b>Two-directional</b> (P2 client review MAJOR-2): a failing compare
+     *       REVOKES a previously-set validated bit, so a fresher frame corrects a
+     *       staler one's over-validation instead of being ratcheted out by it (frames
+     *       can land out of order across a dimension excursion or a mid-session
+     *       manager rebuild, and the dirty-broadcast heal channel does not reach a
+     *       player who was elsewhere at drain time). The cost direction is the
+     *       doctrine's: a stale frame can only cause redundant re-asks (which resolve
+     *       up_to_date off the warm tscache), never a false clean.</li>
      *   <li><b>Mark-preserving</b>: touches ONLY {@code validated} bits — dirty and
      *       retry marks survive, and dirty outranks validated in {@link #classify},
      *       so a dirty notice racing the summary in either order still re-asks.</li>
      *   <li><b>Never creates leaves</b>: a hostile/stale frame must not allocate;
      *       unstamped positions (all-air 0-stamps, session-satisfied, pruned, fresh
      *       installs) are untouchable by construction — they classify exactly as
-     *       today.</li>
+     *       today. Session-satisfied positions are excluded even when they retain a
+     *       positive stamp (their validated bit is never read, and counting them
+     *       would inflate {@code columns_validated}).</li>
      *   <li><b>Sentinel handling is the CALLER's job</b>: pass only real margined
      *       stamps or {@code 0} (no region — every positive stamp validates); a
      *       NEVER_CLEAN tile must be skipped before this call.</li>
      * </ul>
      * A 32×32 tile is exactly 4×4 leaves; the walk is mask math + one array scan per
-     * candidate-bearing leaf.
+     * stamped-position-bearing leaf.
      */
     TileValidation applyTileValidation(int tileX, int tileZ, long stampM) {
         int validated = 0;
@@ -323,21 +335,23 @@ class ColumnStateMap {
             for (int lx = lx0; lx < lx0 + 4; lx++) {
                 Leaf leaf = this.leaves.get(PositionUtil.packPosition(lx, lz));
                 if (leaf == null) continue;
-                long candidates = leaf.positiveTs & ~leaf.validated;
-                if (candidates == 0) continue;
-                long newly = 0;
-                for (long m = candidates; m != 0; m &= m - 1) {
+                long stamped = leaf.positiveTs & ~leaf.sessionSatisfied;
+                if (stamped == 0) continue;
+                long setBits = 0, clearBits = 0;
+                for (long m = stamped; m != 0; m &= m - 1) {
                     int bit = Long.numberOfTrailingZeros(m);
+                    long b = 1L << bit;
                     if (leaf.ts[bit] > stampM) {
-                        newly |= 1L << bit;
+                        if ((leaf.validated & b) == 0) setBits |= b;
                     } else {
                         fully = false;
+                        if ((leaf.validated & b) != 0) clearBits |= b;
                     }
                 }
-                if (newly != 0) {
-                    leaf.validated |= newly;
+                if (setBits != 0 || clearBits != 0) {
+                    leaf.validated = (leaf.validated | setBits) & ~clearBits;
                     leaf.recomputeNeeds();
-                    validated += Long.bitCount(newly);
+                    validated += Long.bitCount(setBits);
                 }
             }
         }
