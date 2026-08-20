@@ -200,6 +200,91 @@ class RegionStampTableTest {
         assertEquals(NOW - 100, table().chunkStampSecondsOrUnknown(DIM, 3, 4));
     }
 
+    // ---- tile stamps (the P2 summary sweeper's question) ----
+
+    @Test
+    void tileStampReportsTheRegionMaxHeaderSecond() throws Exception {
+        // Two present chunks; the tile stamp is the max save second.
+        Path mca = this.dir.resolve("r.0.0.mca");
+        var buf = ByteBuffer.allocate(8192);
+        int idxA = (3 & 31) + ((4 & 31) << 5);
+        int idxB = (10 & 31) + ((20 & 31) << 5);
+        buf.putInt(idxA * 4, 0x0000_0201);
+        buf.putInt(4096 + idxA * 4, (int) (NOW - 500));
+        buf.putInt(idxB * 4, 0x0000_0401);
+        buf.putInt(4096 + idxB * 4, (int) (NOW - 100));
+        Files.write(mca, buf.array());
+        assertEquals(NOW - 100, table().tileStampSeconds(DIM, 0, 0));
+    }
+
+    @Test
+    void tileStampNoRegionIsZeroAndMarkedNoRegionIsNeverClean() {
+        assertEquals(0, table().tileStampSeconds(DIM, 5, 5),
+                "no region file = nothing on disk to validate against");
+        // A mark aimed at a region that does not exist yet = a change in flight.
+        table().bumpLiveSaveMark(DIM, 6 << 5, 6 << 5, NOW - 1);
+        assertEquals(RegionStampTable.NEVER_CLEAN, table().tileStampSeconds(DIM, 6, 6));
+    }
+
+    @Test
+    void tileStampUnresolvableDimensionIsNeverClean() {
+        assertEquals(RegionStampTable.NEVER_CLEAN,
+                table().tileStampSeconds("minecraft:the_end", 0, 0));
+    }
+
+    @Test
+    void tileStampLatchesBehindAPendingMark() throws Exception {
+        writeRegion(3, 4, NOW - 100);
+        assertEquals(NOW - 100, table().tileStampSeconds(DIM, 0, 0));
+        table().bumpLiveSaveMark(DIM, 3, 4, NOW - 10);
+        assertEquals(RegionStampTable.NEVER_CLEAN, table().tileStampSeconds(DIM, 0, 0));
+        // The write lands: header re-read at/above the mark clears the latch.
+        Path mca = writeRegion(3, 4, NOW - 5);
+        Files.setLastModifiedTime(mca, FileTime.fromMillis(System.currentTimeMillis() + 4000));
+        table().expireStatHorizonForTest(DIM, 3, 4);
+        assertEquals(NOW - 5, table().tileStampSeconds(DIM, 0, 0));
+    }
+
+    @Test
+    void tileStampDegenerateSecondPoisonsTheWholeRegion() throws Exception {
+        // One good chunk + one EXISTING chunk with a garbage save second: the garbage
+        // chunk can change without moving maxHeaderSecond, so the tile must go NEVER
+        // (per-chunk absence via location 0 does NOT poison — pinned by the no-region
+        // and max tests above).
+        Path mca = this.dir.resolve("r.0.0.mca");
+        var buf = ByteBuffer.allocate(8192);
+        int idxA = (3 & 31) + ((4 & 31) << 5);
+        int idxB = (10 & 31) + ((20 & 31) << 5);
+        buf.putInt(idxA * 4, 0x0000_0201);
+        buf.putInt(4096 + idxA * 4, (int) (NOW - 500));
+        buf.putInt(idxB * 4, 0x0000_0401);
+        buf.putInt(4096 + idxB * 4, 0); // present chunk, zero second — damage
+        Files.write(mca, buf.array());
+        assertEquals(RegionStampTable.NEVER_CLEAN, table().tileStampSeconds(DIM, 0, 0));
+    }
+
+    @Test
+    void newRegionAppearsInTheListingAfterAHorizon() throws Exception {
+        assertEquals(0, table().tileStampSeconds(DIM, 0, 0));
+        writeRegion(3, 4, NOW - 100);
+        // Within the listing horizon the absence is still cached...
+        assertEquals(0, table().tileStampSeconds(DIM, 0, 0));
+        // ...and after it, the new file is seen (the readdir is the detector).
+        table().expireListingHorizonForTest(DIM);
+        assertEquals(NOW - 100, table().tileStampSeconds(DIM, 0, 0));
+    }
+
+    @Test
+    void hostileRegionFileNamesAreSkipped() throws Exception {
+        Files.write(this.dir.resolve("r.99999999999.0.mca"), new byte[]{1}); // int overflow
+        Files.write(this.dir.resolve("r.x.0.mca"), new byte[]{1});           // non-numeric
+        Files.write(this.dir.resolve("r.1.2.3.mca"), new byte[]{1});         // extra segment
+        writeRegion(3, 4, NOW - 100);
+        assertEquals(NOW - 100, table().tileStampSeconds(DIM, 0, 0),
+                "malformed names must be skipped, never crash the listing");
+        assertEquals(0, table().tileStampSeconds(DIM, 99, 99));
+    }
+
     @Test
     void memoServesWithoutRereadWithinHorizon() throws Exception {
         Path mca = writeRegion(3, 4, NOW - 100);

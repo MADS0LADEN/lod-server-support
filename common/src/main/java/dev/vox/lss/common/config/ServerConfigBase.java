@@ -153,6 +153,16 @@ public abstract class ServerConfigBase extends JsonConfig {
      * Runtime-mutable via {@code /lsslod set enableSendPacing} (the live A/B lever).
      */
     public boolean enableSendPacing = true;
+    /**
+     * Region summaries (region-summary-sync-plan.md §5/§9): answer client
+     * {@code lss:region_summary_req} frames with per-region freshness stamp windows so
+     * an upgraded client validates the clean bulk of its cached disc in one exchange
+     * instead of re-declaring ~1M positions over minutes. Checked in the HANDLER (not
+     * just channel advertisement), so a runtime flip applies to connected clients: off
+     * = requests are silently dropped and clients fall back to per-column
+     * revalidation (exactly the pre-summary behavior).
+     */
+    public boolean enableRegionSummaries = true;
 
     /**
      * Transport yield (vanilla-first-lod-yield-plan.md v2.1, v0.10.0 stage A2): while the

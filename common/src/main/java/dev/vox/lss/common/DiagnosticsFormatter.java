@@ -43,8 +43,29 @@ public final class DiagnosticsFormatter {
             String moveTraceLine,
             String yieldLine,
             String farPlayersLine,
+            String summaryLine,
             long wireTotal, long colsZstd, long colsRaw
     ) {
+        /** Pre-region-summary full shape (no Summary line) — keeps existing
+         *  constructions/tests intact. */
+        public DiagData(boolean enabled, int lodDist, long bwPerPlayer, long bwGlobal,
+                        long uptimeSec, long totalSent, long totalBytes,
+                        long cumInMem, long cumUtd, long cumGen, long cumReResolved,
+                        long cumGraceSkipped,
+                        long diskCompleted, String tickDiagnostics, String diskReaderDiagnostics,
+                        String generationDiagnostics, boolean generationEnabled,
+                        long genOrderGated, long genInversions,
+                        long bwTotal, long bwWindowRate, List<PlayerDiag> players,
+                        String v16Line, String v18Line, String xrayLine,
+                        String moveTraceLine, String yieldLine, String farPlayersLine,
+                        long wireTotal, long colsZstd, long colsRaw) {
+            this(enabled, lodDist, bwPerPlayer, bwGlobal, uptimeSec, totalSent, totalBytes,
+                    cumInMem, cumUtd, cumGen, cumReResolved, cumGraceSkipped, diskCompleted,
+                    tickDiagnostics, diskReaderDiagnostics, generationDiagnostics,
+                    generationEnabled, genOrderGated, genInversions, bwTotal, bwWindowRate,
+                    players, v16Line, v18Line, xrayLine, moveTraceLine, yieldLine,
+                    farPlayersLine, null, wireTotal, colsZstd, colsRaw);
+        }
         /** Pre-move-tracer full shape (no MoveTrace line) — keeps existing
          *  constructions/tests intact. */
         public DiagData(boolean enabled, int lodDist, long bwPerPlayer, long bwGlobal,
@@ -105,7 +126,7 @@ public final class DiagnosticsFormatter {
                     totalBytes, cumInMem, cumUtd, cumGen, cumReResolved, cumGraceSkipped,
                     diskCompleted, tickDiagnostics, diskReaderDiagnostics, generationDiagnostics,
                     generationEnabled, genOrderGated, genInversions, bwTotal, bwWindowRate,
-                    players, line, v18Line, xrayLine, moveTraceLine, yieldLine, farPlayersLine, wireTotal, colsZstd, colsRaw);
+                    players, line, v18Line, xrayLine, moveTraceLine, yieldLine, farPlayersLine, summaryLine, wireTotal, colsZstd, colsRaw);
         }
 
         /** Attach the v18 compat rung's one-line summary (null when the rung is untouched —
@@ -115,7 +136,7 @@ public final class DiagnosticsFormatter {
                     totalBytes, cumInMem, cumUtd, cumGen, cumReResolved, cumGraceSkipped,
                     diskCompleted, tickDiagnostics, diskReaderDiagnostics, generationDiagnostics,
                     generationEnabled, genOrderGated, genInversions, bwTotal, bwWindowRate,
-                    players, v16Line, line, xrayLine, moveTraceLine, yieldLine, farPlayersLine, wireTotal, colsZstd, colsRaw);
+                    players, v16Line, line, xrayLine, moveTraceLine, yieldLine, farPlayersLine, summaryLine, wireTotal, colsZstd, colsRaw);
         }
 
         /** Attach the x-ray masking one-line summary (always shown when non-null — the off
@@ -126,7 +147,7 @@ public final class DiagnosticsFormatter {
                     diskCompleted, tickDiagnostics, diskReaderDiagnostics,
                     generationDiagnostics, generationEnabled, genOrderGated, genInversions,
                     bwTotal, bwWindowRate, players, v16Line, v18Line, line, moveTraceLine,
-                    yieldLine, farPlayersLine, wireTotal, colsZstd, colsRaw);
+                    yieldLine, farPlayersLine, summaryLine, wireTotal, colsZstd, colsRaw);
         }
 
         /** Attach the move-desync tracer's one-line summary (null while the tracer is
@@ -138,7 +159,7 @@ public final class DiagnosticsFormatter {
                     diskCompleted, tickDiagnostics, diskReaderDiagnostics,
                     generationDiagnostics, generationEnabled, genOrderGated, genInversions,
                     bwTotal, bwWindowRate, players, v16Line, v18Line, xrayLine, line,
-                    yieldLine, farPlayersLine, wireTotal, colsZstd, colsRaw);
+                    yieldLine, farPlayersLine, summaryLine, wireTotal, colsZstd, colsRaw);
         }
 
         /** Attach the transport yield's one-line summary (null while the gate is unarmed
@@ -150,7 +171,7 @@ public final class DiagnosticsFormatter {
                     diskCompleted, tickDiagnostics, diskReaderDiagnostics,
                     generationDiagnostics, generationEnabled, genOrderGated, genInversions,
                     bwTotal, bwWindowRate, players, v16Line, v18Line, xrayLine, moveTraceLine,
-                    line, farPlayersLine, wireTotal, colsZstd, colsRaw);
+                    line, farPlayersLine, summaryLine, wireTotal, colsZstd, colsRaw);
         }
 
         /** Attach the far-player one-line summary (E1 — null while the feature is inert
@@ -162,7 +183,19 @@ public final class DiagnosticsFormatter {
                     diskCompleted, tickDiagnostics, diskReaderDiagnostics,
                     generationDiagnostics, generationEnabled, genOrderGated, genInversions,
                     bwTotal, bwWindowRate, players, v16Line, v18Line, xrayLine, moveTraceLine,
-                    yieldLine, line, wireTotal, colsZstd, colsRaw);
+                    yieldLine, line, summaryLine, wireTotal, colsZstd, colsRaw);
+        }
+
+        /** Attach the region-summary one-line counter group (null while the feature is
+         *  untouched — no request ever arrived; the line is omitted, so soak/benchmark
+         *  diag output is byte-unchanged). Renders after the far-players slot. */
+        public DiagData withSummaryLine(String line) {
+            return new DiagData(enabled, lodDist, bwPerPlayer, bwGlobal, uptimeSec, totalSent,
+                    totalBytes, cumInMem, cumUtd, cumGen, cumReResolved, cumGraceSkipped,
+                    diskCompleted, tickDiagnostics, diskReaderDiagnostics,
+                    generationDiagnostics, generationEnabled, genOrderGated, genInversions,
+                    bwTotal, bwWindowRate, players, v16Line, v18Line, xrayLine, moveTraceLine,
+                    yieldLine, farPlayersLine, line, wireTotal, colsZstd, colsRaw);
         }
     }
 
@@ -243,6 +276,11 @@ public final class DiagnosticsFormatter {
         }
         if (d.farPlayersLine != null) {
             lines.add(d.farPlayersLine);
+        }
+        // Region summaries (present only once a request has arrived — soak/benchmark
+        // clients are property-gated off, so harness diag output is byte-unchanged).
+        if (d.summaryLine != null) {
+            lines.add(d.summaryLine);
         }
 
         // Bandwidth. total = the RAW-denominated counted volume (the limiter's charge —

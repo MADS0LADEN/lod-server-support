@@ -300,6 +300,21 @@ public final class PaperSoakMetricsExporter {
         farMap.put("bytes", farPlayers.bytesSent());
         result.put("far_players", farMap);
 
+        // Region summaries — verbatim twin of the Fabric exporter's group (same keys,
+        // same order; the shared server-snapshot.contract pins parity). All-zero on
+        // every soak run (harness clients never request — property gate).
+        var summary = service.getRegionSummaries() == null ? null
+                : service.getRegionSummaries().diagnostics();
+        var summaryMap = new LinkedHashMap<String, Object>();
+        summaryMap.put("requests", summary == null ? 0L : summary.getRequests());
+        summaryMap.put("range_filtered", summary == null ? 0L : summary.getRangeFiltered());
+        summaryMap.put("frames", summary == null ? 0L : summary.getFrames());
+        summaryMap.put("tiles_known", summary == null ? 0L : summary.getTilesKnown());
+        summaryMap.put("tiles_never_clean", summary == null ? 0L : summary.getTilesNeverClean());
+        summaryMap.put("bytes", summary == null ? 0L : summary.getBytes());
+        summaryMap.put("refresh_ms_hw", summary == null ? 0L : summary.getRefreshMsMax());
+        result.put("summary", summaryMap);
+
         // LOD store — verbatim twin of the Fabric exporter's group (same keys, same
         // order; the shared server-snapshot.contract pins parity). All-zero while
         // lodStore=off.

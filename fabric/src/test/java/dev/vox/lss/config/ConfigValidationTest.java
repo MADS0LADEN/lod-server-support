@@ -71,6 +71,13 @@ class ConfigValidationTest {
      *  client governor paces itself against every released v17+ server. Each has its
      *  own kill switch. */
     @Test
+    void regionSummariesDefaultOn() {
+        assertTrue(serverConfig().enableRegionSummaries,
+                "region summaries must ship enabled (region-summary-sync-plan.md §9 — "
+                + "the HANDLER-checked kill switch is the off ramp)");
+    }
+
+    @Test
     void adaptiveTransferRateMechanismsDefaultOn() {
         assertTrue(serverConfig().enablePingBackstop,
                 "the ping backstop must ship enabled");

@@ -54,6 +54,8 @@ public class PaperRequestProcessingService {
     // Region freshness stamps (region-summary-sync-plan.md): the P1 header rung's oracle.
     // Null in pre-region-stamps test wirings (rung inert there).
     private final dev.vox.lss.common.region.RegionStampTable regionStamps;
+    // Region summaries (P2): null iff regionStamps is null.
+    private final dev.vox.lss.common.region.RegionSummaryService regionSummaries;
     private final DirtyColumnTracker dirtyTracker;
     private final PaperDirtyColumnBroadcaster dirtyBroadcaster;
     // The v16 compat shim's per-player sessions (legacy protocol-16 clients). The pipeline
@@ -369,6 +371,12 @@ public class PaperRequestProcessingService {
         this.dirtyBroadcaster = wiring.dirtyBroadcaster();
         this.lodStore = wiring.lodStore();
         this.regionStamps = wiring.regionStamps();
+        // Region summaries (P2, plan §5): sweeper + mailboxes over the stamp table.
+        // Null table (pre-region-stamps test wirings) = feature inert. Disconnect
+        // cleanup is TTL-based (see the Fabric twin's field comment).
+        this.regionSummaries = this.regionStamps == null ? null
+                : new dev.vox.lss.common.region.RegionSummaryService(
+                        this.regionStamps::tileStampSeconds);
         // Null in test wiring: the guarded retract at shutdown must clear only a
         // manager this service actually published.
         this.xrayMasks = wiring.xrayMasks();
@@ -1075,7 +1083,53 @@ public class PaperRequestProcessingService {
         flushSendQueues(lifecycle.activeCount);
         this.dirtyBroadcaster.tick(this.config);
         tickFarPlayers();
+        tickRegionSummaries();
         tickDiagnosticsLog();
+    }
+
+    /** Region summaries (P2, plan §5) — the Fabric twin's pump: admit dimension-matched
+     *  requests into sweep jobs and drain ready frames onto the dedicated send lane.
+     *  Player state is only read HERE (the pump thread); ingress stored pure data. */
+    private void tickRegionSummaries() {
+        if (this.regionSummaries == null) return; // pre-region-stamps test wirings
+        try {
+            this.regionSummaries.pump(uuid -> {
+                var state = this.players.get(uuid);
+                if (state == null || !state.hasCompletedHandshake()) return null;
+                String dim = state.registeredDimension();
+                long pc = state.playerChunkPackedOrSentinel();
+                if (dim == null || pc == Long.MIN_VALUE) return null;
+                return new dev.vox.lss.common.region.RegionSummaryService.PlayerAnchor(
+                        dim, PositionUtil.unpackX(pc), PositionUtil.unpackZ(pc));
+            }, (uuid, frame) -> {
+                var player = this.server.getPlayerList().getPlayer(uuid);
+                if (player == null) return; // disconnected while the frame was assembling
+                PaperPayloadHandler.sendRegionSummary(player, frame);
+            });
+        } catch (Exception e) {
+            if (!this.regionSummaryTickErrorWarned) {
+                this.regionSummaryTickErrorWarned = true;
+                LSSLogger.error("Region-summary pump failed — contained (once per session)", e);
+            }
+        }
+    }
+
+    private boolean regionSummaryTickErrorWarned;
+
+    /** Ingress for {@code lss:region_summary_req} (messenger/region thread — stores
+     *  pure data, no entity access). The HANDLER-checked kill switch (plan §5). */
+    public void handleRegionSummaryRequest(UUID player, byte[] body) throws Exception {
+        if (this.regionSummaries == null) return;
+        if (!this.config.enabled || !this.config.enableRegionSummaries) return;
+        // A malformed frame throws out into dispatchPluginMessage's hostile-frame
+        // containment (throttled) — the Fabric twin contains at its own receiver.
+        var request = dev.vox.lss.common.region.RegionSummaryWire.decodeRequest(body);
+        this.regionSummaries.offerRequest(player, request);
+    }
+
+    /** The region-summary service (diag + tests); null in pre-region-stamps wirings. */
+    public dev.vox.lss.common.region.RegionSummaryService getRegionSummaries() {
+        return this.regionSummaries;
     }
 
     /** The v16 shim's 1 Hz declare pass (PUMP): the SOLE declarer for legacy sessions. A
@@ -1615,6 +1669,7 @@ public class PaperRequestProcessingService {
             for (var entry : this.dirtyTracker.drainAll().entrySet()) {
                 this.offThreadProcessor.invalidateTimestamps(entry.getKey(), entry.getValue());
             }
+            if (this.regionSummaries != null) this.regionSummaries.shutdown();
             this.offThreadProcessor.shutdown();
         } catch (Exception e) {
             LSSLogger.error("Error shutting down off-thread processor", e);

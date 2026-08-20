@@ -132,4 +132,13 @@ public class LSSServerNetworking {
             ServerReceiverGlue.onFarPlayerPrefs(requestService, player, payload.body());
         }
     }
+
+    public static void handleRegionSummaryRequestPayload(
+            dev.vox.lss.networking.payloads.RegionSummaryRequestC2SPayload payload,
+            IPayloadContext context) {
+        var service = requestService;
+        if (service != null && context.player() instanceof ServerPlayer player) {
+            service.handleRegionSummaryRequest(player, payload.body());
+        }
+    }
 }

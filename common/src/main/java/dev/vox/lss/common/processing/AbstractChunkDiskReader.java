@@ -34,13 +34,10 @@ public abstract class AbstractChunkDiskReader {
     private static final AtomicInteger THREAD_COUNTER = new AtomicInteger();
     private static final int QUEUE_CAPACITY_PER_THREAD = 32;
 
-    /** The header rung's serve-latency margin (P1 review MAJOR): a client's stamp is
-     *  issued at read COMPLETION, so a read that raced a pending region write hands out
-     *  a stamp up to one read duration (bounded by the read timeout) NEWER than the
-     *  change's header second while carrying the PRE-change bytes. Claims must clear
-     *  the header second by this margin; the cost is nil for the rung's target regime
-     *  (warm-rejoin stamps beat static terrain's last save by hours, not seconds). */
-    static final long HEADER_FRESH_MARGIN_SECONDS = LSSConstants.DISK_READ_TIMEOUT_SECONDS + 5;
+    /** The header rung's serve-latency margin — the shared freshness-claim doctrine
+     *  (see {@code RegionStampTable.FRESH_CLAIM_MARGIN_SECONDS}'s javadoc). */
+    static final long HEADER_FRESH_MARGIN_SECONDS =
+            dev.vox.lss.common.region.RegionStampTable.FRESH_CLAIM_MARGIN_SECONDS;
 
     // Saturation is a normal, self-healing path: the result is dropped silently and the
     // client's next want-set re-declares the position (v17 — nothing is bounced back). Since

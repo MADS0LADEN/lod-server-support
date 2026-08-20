@@ -684,6 +684,14 @@ public class LodRequestManager {
         return true;
     }
 
+    /** Region-summary S2C frame (region-summary-sync-plan.md §6). Wiring stub for the
+     *  server changeset: the client never REQUESTS yet, so no frame arrives in
+     *  production; the full client half (decode, dimension check, per-column
+     *  mark-preserving validation, buffered apply behind the cache load) lands with
+     *  the P2 client changeset. */
+    public void onRegionSummaryFrame(byte[] body) {
+    }
+
     public void onDirtyColumns(long[] dirtyPositions) {
         if (ClientTraceLog.enabled() && dirtyPositions.length > 0) {
             ClientTraceLog.event("dirty", "\"n\":" + dirtyPositions.length

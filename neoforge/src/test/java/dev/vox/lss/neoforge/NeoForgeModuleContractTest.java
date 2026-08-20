@@ -60,10 +60,12 @@ class NeoForgeModuleContractTest {
     void registrarCensusCoversAllTenChannels() throws IOException {
         String src = read("neoforge/src/main/java/dev/vox/lss/networking/LSSNetworking.java");
         List<String> c2s = List.of("HandshakeC2SPayload", "BatchChunkRequestC2SPayload",
-                "ClientInfoC2SPayload", "FarPlayerPrefsC2SPayload");
+                "ClientInfoC2SPayload", "FarPlayerPrefsC2SPayload",
+                "RegionSummaryRequestC2SPayload");
         List<String> s2c = List.of("SessionConfigS2CPayload", "BatchResponseS2CPayload",
                 "DirtyColumnsS2CPayload", "VoxelColumnS2CPayload",
-                "FarPlayerRosterS2CPayload", "FarPlayerUpdatesS2CPayload");
+                "FarPlayerRosterS2CPayload", "FarPlayerUpdatesS2CPayload",
+                "RegionSummaryS2CPayload");
         for (String p : c2s) {
             assertTrue(src.contains("playToServer(" + p + ".TYPE, " + p + ".CODEC"),
                     p + " must register playToServer with its shared TYPE+CODEC");
@@ -72,20 +74,20 @@ class NeoForgeModuleContractTest {
             assertTrue(src.contains("playToClient(" + p + ".TYPE, " + p + ".CODEC"),
                     p + " must register playToClient with its shared TYPE+CODEC");
         }
-        assertEquals(4, count(src, Pattern.compile("playToServer\\(")),
-                "exactly the 4 C2S channels — a new channel must be added to BOTH loaders"
+        assertEquals(5, count(src, Pattern.compile("playToServer\\(")),
+                "exactly the 5 C2S channels — a new channel must be added to BOTH loaders"
                         + " and both WireParityTest censuses");
-        assertEquals(6, count(src, Pattern.compile("playToClient\\(")),
-                "exactly the 6 S2C channels");
+        assertEquals(7, count(src, Pattern.compile("playToClient\\(")),
+                "exactly the 7 S2C channels");
         // CROSS-LOADER census (N-2 review): the registrar's total must track the shared
         // CHANNEL_* constant count — a fabric-side channel add reds THIS module's build
         // instead of shipping a NeoForge jar that silently lacks the new channel.
         long sharedChannels = Arrays.stream(dev.vox.lss.common.LSSConstants.class.getFields())
                 .filter(f -> f.getName().startsWith("CHANNEL_"))
                 .count();
-        assertEquals(sharedChannels, 4 + 6,
+        assertEquals(sharedChannels, 5 + 7,
                 "LSSConstants declares " + sharedChannels + " CHANNEL_* constants but this"
-                        + " registrar registers 10 — add the new channel to LSSNetworking"
+                        + " registrar registers 12 — add the new channel to LSSNetworking"
                         + " (both loaders) and both WireParityTest censuses");
     }
 

@@ -62,6 +62,16 @@ public final class RegionStampTable {
 
     /** No honest answer available — the caller must fall through to the real read. */
     public static final long UNKNOWN = -1L;
+    /** The serve-latency margin every freshness CLAIM must clear (P1 review MAJOR):
+     *  client stamps are issued at read COMPLETION, so a read that raced a pending
+     *  region write hands out a stamp up to one read duration (bounded by the disk
+     *  read timeout) NEWER than the change's header second while carrying the
+     *  PRE-change bytes. Shared by the header rung (the reader adds it to the carried
+     *  bound) and the P2 summary assembly (added to reported tile stamps) — one
+     *  constant, one doctrine. Nil cost in the target regime: warm-rejoin stamps beat
+     *  static terrain's last save by hours, not seconds. */
+    public static final long FRESH_CLAIM_MARGIN_SECONDS =
+            dev.vox.lss.common.LSSConstants.DISK_READ_TIMEOUT_SECONDS + 5;
     /** The position can never be validated from header knowledge (absent chunk,
      *  degenerate stamp, latched pending write): reported as a stamp no client
      *  timestamp can exceed. */
@@ -95,11 +105,25 @@ public final class RegionStampTable {
         volatile HeaderSnapshot header;          // null = never examined / stripped
         volatile long statDeadlineNanos;         // consulted only while header != null
         volatile long maxHeaderSecond;           // monotonic; the latch's disk-visible bound
+        // Sticky: some examined header slot carried a degenerate second (garbage
+        // timestamps on an EXISTING chunk). The per-chunk path answers NEVER for that
+        // slot already; the TILE stamp must go NEVER for the whole region — a chunk
+        // whose save time is unreadable can change without moving maxHeaderSecond,
+        // and a tile claim would validate stamps the header cannot vouch for.
+        volatile boolean degenerateStamps;
     }
+
+    /** One dimension's region-directory listing (P2 tile stamps): which region files
+     *  EXIST, refreshed by ONE readdir per horizon — never N per-tile stat probes
+     *  (sparse worlds pay for what exists; a post-listing new region is visible within
+     *  a horizon, and marked changes arm the latch instantly regardless). Null present
+     *  set = the directory was unlistable (unresolvable dimension) — every tile NEVER. */
+    private record DirListing(java.util.Set<Long> presentRegions, long deadlineNanos) {}
 
     private final Function<String, Path> regionDirResolver;
     private final ConcurrentHashMap<String, ConcurrentHashMap<Long, RegionEntry>> byDimension =
             new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, DirListing> dirListings = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> unresolvableWarned = new ConcurrentHashMap<>();
     // FIFO of entries holding a retained header array; strip-and-relearn beyond the cap.
     // Mutated ONLY under the owning entry's monitor (setHeader) or in enforceCap, which
@@ -153,6 +177,95 @@ public final class RegionStampTable {
         // layout): transposing here reads the wrong chunk's stamp.
         int headerSecond = h.saveSeconds()[(cx & 31) + ((cz & 31) << 5)];
         return headerSecond == NEVER_SECOND ? NEVER_CLEAN : headerSecond;
+    }
+
+    /**
+     * The P2 summary sweeper's question (region-summary-sync-plan.md §5): the second
+     * at/before which ANY content in this 32×32 tile last changed —
+     * {@link RegionSummaryWire#STAMP_NO_REGION} (0) when no region file exists (nothing
+     * on disk to validate against), {@link #NEVER_CLEAN} on any doubt (unlistable
+     * directory, unreadable header, degenerate stamps, the mark latch, a marked change
+     * to a not-yet-created region). Existence comes from ONE readdir per dimension per
+     * horizon, never per-tile stat probes. Sweeper thread (may do IO).
+     */
+    public long tileStampSeconds(String dimension, int tileX, int tileZ) {
+        var listing = refreshedListing(dimension);
+        if (listing.presentRegions() == null) return NEVER_CLEAN; // unlistable/unresolved
+        long regionKey = PositionUtil.packPosition(tileX, tileZ);
+        var dims = this.byDimension.get(dimension);
+        var known = dims == null ? null : dims.get(regionKey);
+        long mark = known == null ? 0 : known.liveSaveMarkSeconds.get();
+        if (!listing.presentRegions().contains(regionKey)) {
+            // No region file. A mark without a file = a change in flight to a region
+            // that does not exist yet — NEVER until the listing sees it land.
+            return mark > 0 ? NEVER_CLEAN : RegionSummaryWire.STAMP_NO_REGION;
+        }
+        var entry = entryFor(dimension, regionKey);
+        HeaderSnapshot h = refreshedHeader(dimension, entry, tileX, tileZ);
+        enforceHeaderCap();
+        if (h == null || h == UNREADABLE) return NEVER_CLEAN;
+        if (h == ABSENT) {
+            // Raced delete between the listing and the stat — doubt, not a claim.
+            return NEVER_CLEAN;
+        }
+        if (entry.degenerateStamps) return NEVER_CLEAN;
+        if (entry.liveSaveMarkSeconds.get() > entry.maxHeaderSecond) {
+            return NEVER_CLEAN; // the latch (class javadoc)
+        }
+        return entry.maxHeaderSecond;
+    }
+
+    /** One readdir per dimension per horizon: which region files exist. Racy duplicate
+     *  listings are benign (both honest); a null present set = unlistable. */
+    private DirListing refreshedListing(String dimension) {
+        long now = System.nanoTime();
+        var l = this.dirListings.get(dimension);
+        if (l != null && now - l.deadlineNanos() < 0) return l;
+        Path dir;
+        try {
+            dir = this.regionDirResolver == null ? null : this.regionDirResolver.apply(dimension);
+        } catch (Throwable t) {
+            dir = null;
+        }
+        DirListing fresh;
+        if (dir == null) {
+            fresh = new DirListing(null, now + STAT_HORIZON_NANOS);
+        } else if (!Files.isDirectory(dir)) {
+            // No directory yet (dimension never generated a region): zero regions —
+            // honestly "nothing on disk", not doubt.
+            fresh = new DirListing(java.util.Set.of(), now + STAT_HORIZON_NANOS);
+        } else {
+            var present = new java.util.HashSet<Long>();
+            try (var stream = Files.newDirectoryStream(dir, "r.*.mca")) {
+                for (Path p : stream) {
+                    long key = parseRegionFileName(p.getFileName().toString());
+                    if (key != Long.MIN_VALUE) present.add(key);
+                }
+                fresh = new DirListing(java.util.Set.copyOf(present), now + STAT_HORIZON_NANOS);
+            } catch (Exception e) {
+                fresh = new DirListing(null, now + STAT_HORIZON_NANOS);
+            }
+        }
+        this.dirListings.put(dimension, fresh);
+        return fresh;
+    }
+
+    /** Strict {@code r.<int>.<int>.mca} parse (adversarial m5: int-formatted,
+     *  range-checked — parse failure/overflow skips the file). Long.MIN_VALUE = reject. */
+    private static long parseRegionFileName(String name) {
+        if (!name.startsWith("r.") || !name.endsWith(".mca")) return Long.MIN_VALUE;
+        String core = name.substring(2, name.length() - 4);
+        int dot = core.indexOf('.');
+        if (dot <= 0 || dot == core.length() - 1 || core.indexOf('.', dot + 1) >= 0) {
+            return Long.MIN_VALUE;
+        }
+        try {
+            int rx = Integer.parseInt(core.substring(0, dot));
+            int rz = Integer.parseInt(core.substring(dot + 1));
+            return PositionUtil.packPosition(rx, rz);
+        } catch (NumberFormatException e) {
+            return Long.MIN_VALUE;
+        }
     }
 
     /**
@@ -217,13 +330,15 @@ public final class RegionStampTable {
                 entry.statDeadlineNanos = now + STAT_HORIZON_NANOS;
                 return h;
             }
-            int[] seconds = readNormalizedHeader(mca);
+            NormalizedHeader read = readNormalizedHeader(mca);
             entry.statDeadlineNanos = now + STAT_HORIZON_NANOS;
-            if (seconds == null) {
+            if (read == null) {
                 // Unreadable header: no honest claim; retry after the horizon.
                 setHeader(entry, UNREADABLE, h);
                 return UNREADABLE;
             }
+            int[] seconds = read.saveSeconds();
+            if (read.degenerate()) entry.degenerateStamps = true;
             long maxSecond = 0;
             for (int s : seconds) {
                 if (s != NEVER_SECOND && s > maxSecond) maxSecond = s;
@@ -297,14 +412,18 @@ public final class RegionStampTable {
         }
     }
 
+    private record NormalizedHeader(int[] saveSeconds, boolean degenerate) {}
+
     /**
      * The store sweep's header shape ({@code SqliteLodStore.readHeaderTimestamps}),
      * normalized for freshness claims: location 0 (chunk absent from a present region)
      * and degenerate seconds (non-positive, or implausibly far in the future — a u32
      * read as a negative int, tool-damaged headers) become {@link #NEVER_SECOND}, so
-     * the compare can only ever fail toward serving. Null = unreadable.
+     * the compare can only ever fail toward serving. {@code degenerate} marks the
+     * garbage-second-on-EXISTING-chunk shape (never plain absence) — the tile stamp's
+     * whole-region poison. Null = unreadable.
      */
-    private static int[] readNormalizedHeader(Path mca) {
+    private static NormalizedHeader readNormalizedHeader(Path mca) {
         long nowSec = System.currentTimeMillis() / 1000L;
         long ceiling = nowSec + FUTURE_SKEW_ALLOWANCE_SECONDS;
         try (FileChannel ch = FileChannel.open(mca)) {
@@ -316,6 +435,7 @@ public final class RegionStampTable {
                 read += n;
             }
             int[] stamps = new int[1024];
+            boolean degenerate = false;
             for (int i = 0; i < 1024; i++) {
                 int loc = buf.getInt(i * 4);
                 if (loc == 0) {
@@ -323,9 +443,14 @@ public final class RegionStampTable {
                     continue;
                 }
                 long sec = buf.getInt(4096 + i * 4) & 0xFFFF_FFFFL;
-                stamps[i] = (sec <= 0 || sec > ceiling) ? NEVER_SECOND : (int) sec;
+                if (sec <= 0 || sec > ceiling) {
+                    stamps[i] = NEVER_SECOND;
+                    degenerate = true;
+                } else {
+                    stamps[i] = (int) sec;
+                }
             }
-            return stamps;
+            return new NormalizedHeader(stamps, degenerate);
         } catch (Exception e) {
             return null;
         }
@@ -342,6 +467,15 @@ public final class RegionStampTable {
         if (dims == null) return 0;
         var entry = dims.get(PositionUtil.packRegionOf(PositionUtil.packPosition(cx, cz)));
         return entry == null ? 0 : entry.liveSaveMarkSeconds.get();
+    }
+
+    /** Collapse the directory-listing horizon so tests observe new-region detection. */
+    void expireListingHorizonForTest(String dimension) {
+        var l = this.dirListings.get(dimension);
+        if (l != null) {
+            this.dirListings.put(dimension,
+                    new DirListing(l.presentRegions(), System.nanoTime()));
+        }
     }
 
     /** Collapse the stat horizon so tests observe mtime-driven re-reads immediately.

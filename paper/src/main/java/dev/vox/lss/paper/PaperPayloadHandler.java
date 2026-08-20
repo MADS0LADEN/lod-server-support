@@ -31,6 +31,7 @@ public final class PaperPayloadHandler {
     private static final Identifier ID_DIRTY_COLUMNS = Identifier.parse(LSSConstants.CHANNEL_DIRTY_COLUMNS);
     static final Identifier ID_VOXEL_COLUMN = Identifier.parse(LSSConstants.CHANNEL_VOXEL_COLUMN);
     private static final Identifier ID_BATCH_RESPONSE = Identifier.parse(LSSConstants.CHANNEL_BATCH_RESPONSE);
+    private static final Identifier ID_REGION_SUMMARY = Identifier.parse(LSSConstants.CHANNEL_REGION_SUMMARY);
 
     // ---- S2C Encoding ----
 
@@ -332,5 +333,15 @@ public final class PaperPayloadHandler {
         if (nmsPlayer.connection == null) return;
         nmsPlayer.connection.send(new ClientboundCustomPayloadPacket(
                 new DiscardedPayload(channelId, data)));
+    }
+
+    /** Region-summary S2C frame (P2 §5): the dedicated send lane's carrier — the raw
+     *  RegionSummaryWire body on the NMS connection (DiscardedPayload, like every LSS
+     *  S2C). Takes the NMS player directly — the pump looks players up by UUID. */
+    public static void sendRegionSummary(net.minecraft.server.level.ServerPlayer nmsPlayer,
+                                         byte[] body) {
+        if (nmsPlayer.connection == null) return;
+        nmsPlayer.connection.send(new ClientboundCustomPayloadPacket(
+                new DiscardedPayload(ID_REGION_SUMMARY, body)));
     }
 }

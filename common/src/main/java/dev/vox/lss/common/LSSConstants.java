@@ -62,6 +62,17 @@ public final class LSSConstants {
     public static final String CHANNEL_FAR_PLAYER_ROSTER = "lss:far_player_roster";
     public static final String CHANNEL_FAR_PLAYER_UPDATES = "lss:far_player_updates";
 
+    // Region summaries (region-summary-sync-plan.md §4): two OPTIONAL channels with
+    // version-neutral RegionSummaryWire byte[] bodies — the far-player pattern. NO
+    // capability bit and NO canSend discovery: the REQUEST is the capability
+    // declaration, sent fire-and-forget on a CURRENT-dialect session (legacy servers
+    // silently discard the unregistered channel; legacy clients never send). The
+    // explicit dimension echoed both ways + drop-on-mismatch is the entire anti-stale
+    // binding — stamps are only ever COMPARED client-side, never ratcheted, so a
+    // same-dimension stale frame is harmless.
+    public static final String CHANNEL_REGION_SUMMARY_REQ = "lss:region_summary_req";
+    public static final String CHANNEL_REGION_SUMMARY = "lss:region_summary";
+
     // Time conversion constants
     public static final long NANOS_PER_SECOND = 1_000_000_000L;
     public static final long NANOS_PER_MS = 1_000_000L;

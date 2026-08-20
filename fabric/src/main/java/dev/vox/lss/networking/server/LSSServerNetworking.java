@@ -145,6 +145,16 @@ public class LSSServerNetworking {
         );
 
         ServerPlayNetworking.registerGlobalReceiver(
+                dev.vox.lss.networking.payloads.RegionSummaryRequestC2SPayload.TYPE,
+                (payload, context) -> {
+                    var service = requestService;
+                    if (service != null) {
+                        service.handleRegionSummaryRequest(context.player(), payload.body());
+                    }
+                }
+        );
+
+        ServerPlayNetworking.registerGlobalReceiver(
                 BatchChunkRequestC2SPayload.TYPE,
                 (payload, context) -> {
                     var service = requestService;

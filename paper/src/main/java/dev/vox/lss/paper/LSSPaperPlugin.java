@@ -135,6 +135,8 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                         LSSPaperPlugin.this, LSSConstants.CHANNEL_CLIENT_INFO, LSSPaperPlugin.this);
                 getServer().getMessenger().registerIncomingPluginChannel(
                         LSSPaperPlugin.this, LSSConstants.CHANNEL_FAR_PLAYER_PREFS, LSSPaperPlugin.this);
+                getServer().getMessenger().registerIncomingPluginChannel(
+                        LSSPaperPlugin.this, LSSConstants.CHANNEL_REGION_SUMMARY_REQ, LSSPaperPlugin.this);
             }
 
             @Override
@@ -238,7 +240,12 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                     var uuid = nmsPlayer.getUUID();
                     service.enqueueRuntimeTask(
                             () -> service.getFarPlayerService().onPrefs(uuid, prefs));
-                });
+                },
+                // Region summaries (P2 §5): decode on the messenger thread (pure — a
+                // Folia region thread is fine, no entity access), offer into the
+                // latest-wins mailbox; the pump reads player state at admission. The
+                // kill switch is HANDLER-checked (flips apply to connected clients).
+                data -> service.handleRegionSummaryRequest(nmsPlayer.getUUID(), data));
     }
 
     /** Test seam: a per-channel message handler; hostile-frame decodes may throw. */
@@ -266,13 +273,15 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                                       PluginMessageHandler handshakeHandler,
                                       PluginMessageHandler chunkRequestHandler,
                                       PluginMessageHandler clientInfoHandler,
-                                      PluginMessageHandler farPlayerPrefsHandler) {
+                                      PluginMessageHandler farPlayerPrefsHandler,
+                                      PluginMessageHandler regionSummaryReqHandler) {
         try {
             switch (channel) {
                 case LSSConstants.CHANNEL_HANDSHAKE -> handshakeHandler.handle(message);
                 case LSSConstants.CHANNEL_CHUNK_REQUEST -> chunkRequestHandler.handle(message);
                 case LSSConstants.CHANNEL_CLIENT_INFO -> clientInfoHandler.handle(message);
                 case LSSConstants.CHANNEL_FAR_PLAYER_PREFS -> farPlayerPrefsHandler.handle(message);
+                case LSSConstants.CHANNEL_REGION_SUMMARY_REQ -> regionSummaryReqHandler.handle(message);
             }
         } catch (Exception e) {
             long released = hostileFrameLog.recordAndTryAcquire(System.nanoTime() / 1_000_000);

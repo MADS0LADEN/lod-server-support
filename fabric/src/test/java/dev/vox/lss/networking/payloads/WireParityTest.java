@@ -533,11 +533,41 @@ class WireParityTest {
                 BatchResponseS2CPayload.TYPE.id().toString(),
                 dev.vox.lss.networking.payloads.FarPlayerPrefsC2SPayload.TYPE.id().toString(),
                 dev.vox.lss.networking.payloads.FarPlayerRosterS2CPayload.TYPE.id().toString(),
-                dev.vox.lss.networking.payloads.FarPlayerUpdatesS2CPayload.TYPE.id().toString());
+                dev.vox.lss.networking.payloads.FarPlayerUpdatesS2CPayload.TYPE.id().toString(),
+                dev.vox.lss.networking.payloads.RegionSummaryRequestC2SPayload.TYPE.id().toString(),
+                dev.vox.lss.networking.payloads.RegionSummaryS2CPayload.TYPE.id().toString());
         assertEquals(covered, declared,
                 "every LSS channel must map to exactly one payload with a reference frame in "
                 + "this suite — a new payload requires frames in BOTH WireParityTests");
-        assertEquals(10, declared.size());
+        assertEquals(12, declared.size());
+    }
+
+    // ---- Region summaries (P2): the carriers add NO framing — the FriendlyByteBuf
+    // ---- body IS the RegionSummaryWire byte[] verbatim, in both directions (the
+    // ---- far-player pattern; parity with Paper holds by construction).
+
+    @Test
+    void regionSummaryCarriersShipTheSharedCodecBytesVerbatim() {
+        var req = dev.vox.lss.common.region.RegionSummaryWire.encodeRequest(
+                new dev.vox.lss.common.region.RegionSummaryWire.Request(
+                        "minecraft:overworld", -3, 7, 17));
+        assertArrayEquals(req, encode(
+                dev.vox.lss.networking.payloads.RegionSummaryRequestC2SPayload.CODEC,
+                new dev.vox.lss.networking.payloads.RegionSummaryRequestC2SPayload(req)),
+                "the C2S carrier must add zero framing around the shared body");
+
+        var summary = dev.vox.lss.common.region.RegionSummaryWire.encodeSummary(
+                new dev.vox.lss.common.region.RegionSummaryWire.Summary(
+                        "minecraft:overworld", -3, 7, 1, new long[]{
+                                0L, 1_750_000_000L,
+                                dev.vox.lss.common.region.RegionSummaryWire.STAMP_NEVER_CLEAN,
+                                1_750_000_100L, 0L, 1_750_000_050L,
+                                1_750_000_000L, 0L,
+                                dev.vox.lss.common.region.RegionSummaryWire.STAMP_NEVER_CLEAN}));
+        assertArrayEquals(summary, encode(
+                dev.vox.lss.networking.payloads.RegionSummaryS2CPayload.CODEC,
+                new dev.vox.lss.networking.payloads.RegionSummaryS2CPayload(summary)),
+                "the S2C carrier must add zero framing around the shared body");
     }
 
     // ---- Far players (E1): the carriers add NO framing — the FriendlyByteBuf body IS

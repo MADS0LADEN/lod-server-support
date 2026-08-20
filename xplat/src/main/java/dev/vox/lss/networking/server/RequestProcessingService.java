@@ -58,6 +58,12 @@ public class RequestProcessingService {
     // Region freshness stamps (region-summary-sync-plan.md): the P1 header rung's oracle,
     // fed by the hoisted region-dir resolver + the save hook's dirty marks. Store-independent.
     private final dev.vox.lss.common.region.RegionStampTable regionStamps;
+    // Region summaries (P2): sweeper + mailboxes; requests offered by the payload
+    // handler, admissions/sends pumped from tick(). Disconnect cleanup is TTL-based
+    // (a gone player's pending request expires in seconds; a ready frame for a gone
+    // player fails the send lookup) — deliberately NOT swept in removePlayer, which
+    // also fires on dimension change and would race the client's at-entry request.
+    private final dev.vox.lss.common.region.RegionSummaryService regionSummaries;
     private final DirtyContentFilter dirtyContentFilter = new DirtyContentFilter();
     // Far players (E1, FARP §3.2): subscription identity lives HERE (the dialect-tracker
     // precedent) — subscribed at handshake, dropped only at the network DISCONNECT, and
@@ -255,6 +261,11 @@ public class RequestProcessingService {
         }
         this.regionStamps = new dev.vox.lss.common.region.RegionStampTable(regionDirs::get);
         this.diskReader.attachRegionStamps(this.regionStamps);
+        // Region summaries (P2, plan §5): the sweeper daemon + per-player mailboxes over
+        // the same stamp table. The tick pumps admissions/sends; ingress is the payload
+        // handler (kill switch checked there).
+        this.regionSummaries = new dev.vox.lss.common.region.RegionSummaryService(
+                this.regionStamps::tileStampSeconds);
         // Every hash-confirmed change mark (the save hook) bumps the region's live save
         // mark, closing the save-submitted-but-write-pending mtime lag before the header
         // rung can claim freshness across it. May run off-main — the bump is atomic.
@@ -491,7 +502,69 @@ public class RequestProcessingService {
         flushSendQueues(lifecycle.activeCount, config);
         tickDirtyBroadcast(config);
         tickFarPlayers(config);
+        tickRegionSummaries();
         tickDiagnosticsLog(config);
+    }
+
+    /** Region summaries (P2, plan §5): admit dimension-matched requests into sweep jobs
+     *  and drain ready frames onto the dedicated send lane. Player state is only read
+     *  HERE (the tick thread) — ingress stores pure data. */
+    private void tickRegionSummaries() {
+        try {
+            this.regionSummaries.pump(uuid -> {
+                var state = this.players.get(uuid);
+                if (state == null || !state.hasCompletedHandshake()) return null;
+                String dim = state.registeredDimension();
+                long pc = state.playerChunkPackedOrSentinel();
+                if (dim == null || pc == Long.MIN_VALUE) return null;
+                return new dev.vox.lss.common.region.RegionSummaryService.PlayerAnchor(
+                        dim, PositionUtil.unpackX(pc), PositionUtil.unpackZ(pc));
+            }, (uuid, frame) -> {
+                var player = this.server.getPlayerList().getPlayer(uuid);
+                if (player == null) return; // disconnected while the frame was assembling
+                dev.vox.lss.platform.LoaderServices.get().sendToPlayer(player,
+                        new dev.vox.lss.networking.payloads.RegionSummaryS2CPayload(frame));
+            });
+        } catch (Exception e) {
+            // Containment: a pump/send bug must degrade summaries, never the tick.
+            if (!this.regionSummaryTickErrorWarned) {
+                this.regionSummaryTickErrorWarned = true;
+                LSSLogger.error("Region-summary pump failed — contained (once per session)", e);
+            }
+        }
+    }
+
+    private boolean regionSummaryTickErrorWarned;
+
+    /** Ingress for {@code lss:region_summary_req} (any thread — stores pure data). The
+     *  HANDLER-checked kill switch (plan §5): flips apply to connected clients. */
+    public void handleRegionSummaryRequest(ServerPlayer player, byte[] body) {
+        if (!LSSServerConfig.CONFIG.enabled || !LSSServerConfig.CONFIG.enableRegionSummaries) {
+            return;
+        }
+        dev.vox.lss.common.region.RegionSummaryWire.Request request;
+        try {
+            request = dev.vox.lss.common.region.RegionSummaryWire.decodeRequest(body);
+        } catch (Exception e) {
+            // Hostile/malformed frame: contained drop (throttled — any authenticated
+            // client can spam these at packet rate).
+            long n = SUMMARY_REQ_DECODE_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+            if (n > 0) {
+                LSSLogger.warn("Malformed region-summary request from "
+                        + player.getName().getString() + " — ignored (" + n
+                        + " since the last report): " + e);
+            }
+            return;
+        }
+        this.regionSummaries.offerRequest(player.getUUID(), request);
+    }
+
+    private static final dev.vox.lss.common.LogThrottle SUMMARY_REQ_DECODE_WARN =
+            new dev.vox.lss.common.LogThrottle(60_000);
+
+    /** The region-summary service (diag + tests). */
+    public dev.vox.lss.common.region.RegionSummaryService getRegionSummaries() {
+        return this.regionSummaries;
     }
 
     /** Far players (E1): one broadcast pass every {@code farPlayersUpdateIntervalTicks}
@@ -1307,6 +1380,7 @@ public class RequestProcessingService {
                 this.offThreadProcessor.invalidateTimestamps(entry.getKey(), entry.getValue());
             }
             if (this.storeBackfill != null) this.storeBackfill.shutdown();
+            this.regionSummaries.shutdown();
             this.offThreadProcessor.shutdown();
         } catch (Exception e) {
             LSSLogger.error("Error shutting down off-thread processor", e);

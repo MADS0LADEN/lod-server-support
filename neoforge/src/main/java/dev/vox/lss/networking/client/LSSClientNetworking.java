@@ -119,4 +119,10 @@ public class LSSClientNetworking {
                                                      IPayloadContext context) {
         ClientNetGlue.onFarPlayerUpdatesFrame(payload.body());
     }
+
+    public static void handleRegionSummaryPayload(
+            dev.vox.lss.networking.payloads.RegionSummaryS2CPayload payload,
+            IPayloadContext context) {
+        ClientNetGlue.onRegionSummaryFrame(payload.body());
+    }
 }

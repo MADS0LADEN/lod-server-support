@@ -202,7 +202,12 @@ SERVER_CONFIG_BOOL_KEYS = frozenset({"enabled", "enableChunkGeneration", "useBac
                                      # Far players (E1, FARP §3.4) — registered with the
                                      # knobs (the R4 lesson). E1 soaks stay mode-off;
                                      # the E2/E3 coexist scenarios arm these.
-                                     "farPlayersSendSpectators"})
+                                     "farPlayersSendSpectators",
+                                     # Region summaries (region-summary-sync-plan.md §9)
+                                     # — listed at introduction per the same-commit
+                                     # allowlist rule so the summary scenarios and their
+                                     # kill-switch A/B arm can pin it.
+                                     "enableRegionSummaries"})
 SERVER_CONFIG_INT_KEYS = frozenset({
     "lodDistanceChunks", "bytesPerSecondLimitPerPlayer", "diskReaderThreads",
     # Disk-read concurrency gate K (disk-read-concurrency-gate-plan.md; 0 = AUTO,
@@ -390,6 +395,13 @@ SERVER_MONOTONIC = (
     "store.deposit_skips",
     "store.errors", "store.sweep_drops",
     "store.backfill_reads", "store.backfill_deposits", "store.backfill_skips",
+    # Region summaries (region-summary-sync-plan.md §8): the dedicated send lane's own
+    # counter family — deliberately NOT part of service.bytes_sent/wire_bytes (the
+    # far-player lane precedent, cross-identity audits stay exact). All-zero on every
+    # current scenario (harness clients never request — the property gate; the
+    # summary-inert check mirrors far-players'). refresh_ms_hw is a GAUGE, absent here.
+    "summary.requests", "summary.range_filtered", "summary.frames",
+    "summary.tiles_known", "summary.tiles_never_clean", "summary.bytes",
 )
 CLIENT_MONOTONIC = (
     "received_columns", "received_bytes", "dropped",
@@ -411,7 +423,7 @@ KNOWN_SERVER_KEYS = {
     # JVM runs with -Dlss.soak.probes. All are observational — no law requires their presence.
     "snapshot": {"event", "wallMs", "tick", "service", "disk", "generation", "dirty",
                  "bandwidth", "players", "dedup", "jvm", "tscache", "store", "far_players",
-                 "mailbox_depth_hw", "mspt_avg_window", "probe_hashes"},
+                 "summary", "mailbox_depth_hw", "mspt_avg_window", "probe_hashes"},
     # mapped appears only on Folia runs, only when true: the driver acknowledged a timeline
     # command Folia unregisters (save-all) as a deliberate no-op instead of executing it.
     "command": {"event", "wallMs", "tick", "cmd", "anchor", "at", "ok", "mapped"},
@@ -3266,6 +3278,9 @@ def _srv(wall=1000, seg=0, over=None):
                       "suppressed_total": 0},
             "far_players": {"subscribers": 0, "roster_frames": 0, "update_frames": 0,
                             "entries": 0, "suppressed": 0, "bytes": 0},
+            "summary": {"requests": 0, "range_filtered": 0, "frames": 0,
+                        "tiles_known": 0, "tiles_never_clean": 0, "bytes": 0,
+                        "refresh_ms_hw": 0},
             "store": {"hits": 0, "misses": 0, "deposits": 0, "deposit_drops": 0,
                       "deposit_skips": 0,
                       "errors": 0, "sweep_drops": 0,

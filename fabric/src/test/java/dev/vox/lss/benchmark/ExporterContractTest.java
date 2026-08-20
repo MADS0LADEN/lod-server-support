@@ -105,6 +105,9 @@ class ExporterContractTest {
         @Override public dev.vox.lss.common.farplayers.FarPlayerBroadcastService farPlayerService() {
             return new dev.vox.lss.common.farplayers.FarPlayerBroadcastService(null);
         }
+        @Override public dev.vox.lss.common.region.RegionSummaryDiagnostics summaryDiagnostics() {
+            return new dev.vox.lss.common.region.RegionSummaryDiagnostics();
+        }
         @Override public SharedBandwidthLimiter bandwidthLimiter() { return this.bandwidthLimiter; }
         @Override public Collection<? extends AbstractPlayerRequestState<?>> players() {
             return this.players.values();

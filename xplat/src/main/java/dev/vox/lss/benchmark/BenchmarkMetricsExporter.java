@@ -66,6 +66,8 @@ public final class BenchmarkMetricsExporter {
         SharedBandwidthLimiter bandwidthLimiter();
         Collection<? extends AbstractPlayerRequestState<?>> players();
         dev.vox.lss.common.farplayers.FarPlayerBroadcastService farPlayerService();
+        /** Null only in partial rigs; the summary group zero-fills then. */
+        dev.vox.lss.common.region.RegionSummaryDiagnostics summaryDiagnostics();
     }
 
     static ServerSource asSource(RequestProcessingService service) {
@@ -79,6 +81,10 @@ public final class BenchmarkMetricsExporter {
             @Override public SharedBandwidthLimiter bandwidthLimiter() { return service.getBandwidthLimiter(); }
             @Override public dev.vox.lss.common.farplayers.FarPlayerBroadcastService farPlayerService() {
                 return service.getFarPlayerService();
+            }
+            @Override public dev.vox.lss.common.region.RegionSummaryDiagnostics summaryDiagnostics() {
+                var rs = service.getRegionSummaries();
+                return rs == null ? null : rs.diagnostics();
             }
             @Override public Collection<? extends AbstractPlayerRequestState<?>> players() {
                 return service.getPlayers().values();
@@ -363,6 +369,22 @@ public final class BenchmarkMetricsExporter {
         farMap.put("suppressed", farPlayers.suppressedUnchanged());
         farMap.put("bytes", farPlayers.bytesSent());
         result.put("far_players", farMap);
+
+        // Region summaries (P2 §8): OWN counter group on the dedicated send lane —
+        // deliberately NOT part of service.bytes_sent/wire_bytes (the far-player lane
+        // precedent). All-zero on every soak/benchmark run by construction (harness
+        // clients are property-gated off requesting — the summary-inert check mirrors
+        // the far-players one). refresh_ms_hw is a GAUGE (high-water), not monotonic.
+        var summary = src.summaryDiagnostics();
+        var summaryMap = new LinkedHashMap<String, Object>();
+        summaryMap.put("requests", summary == null ? 0L : summary.getRequests());
+        summaryMap.put("range_filtered", summary == null ? 0L : summary.getRangeFiltered());
+        summaryMap.put("frames", summary == null ? 0L : summary.getFrames());
+        summaryMap.put("tiles_known", summary == null ? 0L : summary.getTilesKnown());
+        summaryMap.put("tiles_never_clean", summary == null ? 0L : summary.getTilesNeverClean());
+        summaryMap.put("bytes", summary == null ? 0L : summary.getBytes());
+        summaryMap.put("refresh_ms_hw", summary == null ? 0L : summary.getRefreshMsMax());
+        result.put("summary", summaryMap);
 
         // LOD store (docs/planning/lod-store-implementation-plan.md): counters live on the
         // processor unconditionally (all-zero while lodStore=off) so this group's shape is

@@ -376,6 +376,12 @@ public abstract class AbstractPlayerRequestState<T> {
         this.playerChunkPacked = PositionUtil.packPosition(cx, cz);
     }
 
+    /** The packed player chunk, or {@code Long.MIN_VALUE} before the first lifecycle
+     *  stamp (the region-summary pump's anchor read — a not-yet-stamped state retries). */
+    public long playerChunkPackedOrSentinel() {
+        return this.playerChunkPacked;
+    }
+
     // The LIVE frontier: ring (from the player chunk) of the first unsatisfied
     // ACQUISITION entry (ts<=0) of the drain pass — stamped by the router every pass
     // (~20 Hz); a pass with only unsatisfied REVALIDATION entries (ts>0) stamps its first
