@@ -169,4 +169,54 @@ class RegionSummaryWireTest {
         assertThrows(WireFormatException.class, () -> RegionSummaryWire.encodeSummary(
                 new RegionSummaryWire.Summary("minecraft:overworld", 0, 0, 1, new long[]{NOW})));
     }
+
+    @Test
+    void underAllocatedFrameThrowsBeforeStampAllocation() {
+        // W-M3: a max-radius header with NO stamp bytes must be rejected by the
+        // remaining-bytes floor (each stamp costs >= 1 byte) BEFORE the ~137 KB
+        // stamp-array allocation — a byte-cheap hostile frame buys no memory.
+        var w = new WireBytes.Writer(32);
+        w.writeByte(RegionSummaryWire.VERSION);
+        w.writeUtf("minecraft:overworld");
+        RegionSummaryWire.writeZigVarLong(w, 0);
+        RegionSummaryWire.writeZigVarLong(w, 0);
+        w.writeVarInt(RegionSummaryWire.MAX_SUMMARY_TILE_RADIUS);
+        var e = assertThrows(WireFormatException.class,
+                () -> RegionSummaryWire.decodeSummary(w.toByteArray()));
+        assertTrue(e.getMessage().contains("remaining"),
+                "must fail the remaining-bytes floor, not a read underflow: " + e.getMessage());
+    }
+
+    @Test
+    void recordConstructionValidatesWireBounds() {
+        // Compact-ctor validation: a Request/Summary that EXISTS is wire-legal, so a
+        // local bug cannot assemble a frame the twin then rejects.
+        assertThrows(WireFormatException.class, () -> new RegionSummaryWire.Request(
+                "minecraft:overworld", 0, 0, RegionSummaryWire.MAX_SUMMARY_TILE_RADIUS + 1));
+        assertThrows(WireFormatException.class,
+                () -> new RegionSummaryWire.Request(null, 0, 0, 1));
+        assertThrows(WireFormatException.class, () -> new RegionSummaryWire.Request(
+                "minecraft:" + "x".repeat(300), 0, 0, 1));
+        assertThrows(WireFormatException.class, () -> new RegionSummaryWire.Summary(
+                "minecraft:overworld", 0, 0, 0, null));
+        assertThrows(WireFormatException.class, () -> new RegionSummaryWire.Summary(
+                "minecraft:" + "x".repeat(300), 0, 0, 0, new long[]{NOW}));
+    }
+
+    @Test
+    void craftedMaxLongStampAliasesToNeverCleanFailSafe() {
+        // A crafted wire value of Long.MAX_VALUE (not the -1 sentinel form) decodes
+        // EQUAL to STAMP_NEVER_CLEAN — the alias direction is fail-safe (the client
+        // validates NOTHING there), and no honest stamp can reach it (margined epoch
+        // seconds). Pinned so a future re-encode never flips the alias direction.
+        var w = new WireBytes.Writer(48);
+        w.writeByte(RegionSummaryWire.VERSION);
+        w.writeUtf("minecraft:overworld");
+        RegionSummaryWire.writeZigVarLong(w, 0);
+        RegionSummaryWire.writeZigVarLong(w, 0);
+        w.writeVarInt(0);
+        RegionSummaryWire.writeZigVarLong(w, Long.MAX_VALUE); // delta from prev=0
+        var decoded = RegionSummaryWire.decodeSummary(w.toByteArray());
+        assertEquals(RegionSummaryWire.STAMP_NEVER_CLEAN, decoded.stampSeconds()[0]);
+    }
 }

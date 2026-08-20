@@ -220,7 +220,7 @@ class RegionStampTableTest {
     @Test
     void tileStampNoRegionIsZeroAndMarkedNoRegionIsNeverClean() {
         assertEquals(0, table().tileStampSeconds(DIM, 5, 5),
-                "no region file = nothing on disk to validate against");
+                "NEVER-observed absence = genuinely nothing on disk to validate against");
         // A mark aimed at a region that does not exist yet = a change in flight.
         table().bumpLiveSaveMark(DIM, 6 << 5, 6 << 5, NOW - 1);
         assertEquals(RegionStampTable.NEVER_CLEAN, table().tileStampSeconds(DIM, 6, 6));
@@ -230,6 +230,69 @@ class RegionStampTableTest {
     void tileStampUnresolvableDimensionIsNeverClean() {
         assertEquals(RegionStampTable.NEVER_CLEAN,
                 table().tileStampSeconds("minecraft:the_end", 0, 0));
+    }
+
+    @Test
+    void deletedRegionAfterObservationIsNeverClean() throws Exception {
+        // The "delete to regenerate" repair (P2 review H-M2): a region observed present
+        // in this server life that later vanishes is DOUBT — a client validating its
+        // old stamps there would keep the deleted terrain forever.
+        Path mca = writeRegion(3, 4, NOW - 100);
+        assertEquals(NOW - 100, table().tileStampSeconds(DIM, 0, 0));
+        Files.delete(mca);
+        table().expireListingHorizonForTest(DIM);
+        assertEquals(RegionStampTable.NEVER_CLEAN, table().tileStampSeconds(DIM, 0, 0),
+                "absence-after-presence must not report the never-observed 0");
+    }
+
+    @Test
+    void notADirectoryRegionPathIsNeverCleanForEveryTile() throws Exception {
+        // H-M1c: a resolver pointing at a wrong/missing path (the Paper custom-world
+        // hazard) must degrade to doubt, never to "zero regions = validate everything".
+        Path file = this.dir.resolve("not-a-directory");
+        Files.write(file, new byte[] {1});
+        var broken = new RegionStampTable(d -> file);
+        assertEquals(RegionStampTable.NEVER_CLEAN, broken.tileStampSeconds(DIM, 0, 0));
+        assertEquals(RegionStampTable.NEVER_CLEAN, broken.tileStampSeconds(DIM, 7, -7));
+    }
+
+    @Test
+    void allAbsentHeaderIsNeverCleanNotNoRegion() throws Exception {
+        // H-M1a: a PRESENT region file whose header holds no valid save second (the
+        // residue of a chunk-delete pass) is zero positive evidence — and its
+        // maxHeaderSecond of 0 must not alias STAMP_NO_REGION's "validate everything".
+        Files.write(this.dir.resolve("r.0.0.mca"), new byte[8192]);
+        assertEquals(RegionStampTable.NEVER_CLEAN, table().tileStampSeconds(DIM, 0, 0));
+    }
+
+    @Test
+    void headerRereadWithLowerSecondsKeepsTheMonotonicBound() throws Exception {
+        // A clock-rewind rewrite (backup restore, tool damage) must fail STALE: the
+        // tile bound never decreases, so claims keep being judged against the highest
+        // second any examined header carried.
+        Path mca = writeRegion(3, 4, NOW - 100);
+        Files.setLastModifiedTime(mca, FileTime.fromMillis((NOW - 5000) * 1000L));
+        assertEquals(NOW - 100, table().tileStampSeconds(DIM, 0, 0));
+        writeRegion(3, 4, NOW - 900); // rewrite with an OLDER second (mtime changes)
+        Files.setLastModifiedTime(mca, FileTime.fromMillis((NOW - 4000) * 1000L));
+        table().expireStatHorizonForTest(DIM, 3, 4);
+        table().expireListingHorizonForTest(DIM);
+        assertEquals(NOW - 100, table().tileStampSeconds(DIM, 0, 0),
+                "maxHeaderSecond is monotonic across re-reads");
+    }
+
+    @Test
+    void tileSweepsDoNotRetainHeaderArraysButChunkAsksDo() throws Exception {
+        // W-M1: a summary window must never evict the P1 chunk rung's retained
+        // arrays — tile examinations store a "lite" snapshot (bound only), and the
+        // next chunk ask upgrades it to a full one.
+        writeRegion(3, 4, NOW - 100);
+        assertEquals(NOW - 100, table().tileStampSeconds(DIM, 0, 0));
+        assertEquals(0, table().retainedHeaderCountForTest(),
+                "the tile path must not count against the snapshot cap");
+        assertEquals(NOW - 100, table().chunkStampSecondsOrUnknown(DIM, 3, 4),
+                "the chunk ask upgrades the lite snapshot and answers the header second");
+        assertEquals(1, table().retainedHeaderCountForTest());
     }
 
     @Test

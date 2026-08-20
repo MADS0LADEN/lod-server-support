@@ -96,5 +96,6 @@ summary.refresh_ms_hw=long
 summary.requests=long
 summary.tiles_known=long
 summary.tiles_never_clean=long
+summary.tiles_no_region=long
 tscache.evictions=long
 tscache.size_per_dimension.minecraft:overworld=int

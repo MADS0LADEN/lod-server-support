@@ -382,6 +382,7 @@ public final class BenchmarkMetricsExporter {
         summaryMap.put("frames", summary == null ? 0L : summary.getFrames());
         summaryMap.put("tiles_known", summary == null ? 0L : summary.getTilesKnown());
         summaryMap.put("tiles_never_clean", summary == null ? 0L : summary.getTilesNeverClean());
+        summaryMap.put("tiles_no_region", summary == null ? 0L : summary.getTilesNoRegion());
         summaryMap.put("bytes", summary == null ? 0L : summary.getBytes());
         summaryMap.put("refresh_ms_hw", summary == null ? 0L : summary.getRefreshMsMax());
         result.put("summary", summaryMap);

@@ -1349,4 +1349,42 @@ class PaperRequestProcessingServiceTest {
         assertEquals(boot + 5, state.getGenSlotCap(),
                 "the per-player cap must follow config on the next tick for EXISTING states");
     }
+
+    /** The HANDLER-checked region-summary kill switch (P2 review I-m5): the plan's
+     *  adversarial-m1 asked for a drop at the HANDLER, and this is the only pin
+     *  distinguishing "handler-checked" from "advertisement-gated" — both the
+     *  dedicated key and the master {@code enabled} must drop the request before
+     *  the service's ingress counter can move. */
+    @Test
+    void regionSummaryKillSwitchDropsAtTheHandler() throws Exception {
+        var tracker = new DirtyColumnTracker();
+        var wired = new PaperRequestProcessingService(server, config,
+                new PaperRequestProcessingService.Wiring(
+                        players, diskReader, genService, processor, tracker, broadcaster,
+                        null, null, false,
+                        new dev.vox.lss.common.region.RegionStampTable(d -> null)));
+        try {
+            byte[] body = dev.vox.lss.common.region.RegionSummaryWire.encodeRequest(
+                    new dev.vox.lss.common.region.RegionSummaryWire.Request(
+                            "minecraft:overworld", 0, 0, 1));
+            var uuid = UUID.randomUUID();
+            config.enableRegionSummaries = false;
+            wired.handleRegionSummaryRequest(uuid, body);
+            assertEquals(0, wired.getRegionSummaries().diagnostics().getRequests(),
+                    "enableRegionSummaries=false must drop at the handler");
+            config.enableRegionSummaries = true;
+            config.enabled = false;
+            wired.handleRegionSummaryRequest(uuid, body);
+            assertEquals(0, wired.getRegionSummaries().diagnostics().getRequests(),
+                    "the master enabled=false gate must drop too");
+            config.enabled = true;
+            wired.handleRegionSummaryRequest(uuid, body);
+            assertEquals(1, wired.getRegionSummaries().diagnostics().getRequests(),
+                    "with both gates open the request reaches the service");
+        } finally {
+            config.enabled = true;
+            config.enableRegionSummaries = true;
+            wired.shutdown();
+        }
+    }
 }

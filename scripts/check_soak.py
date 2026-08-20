@@ -401,7 +401,8 @@ SERVER_MONOTONIC = (
     # current scenario (harness clients never request — the property gate; the
     # summary-inert check mirrors far-players'). refresh_ms_hw is a GAUGE, absent here.
     "summary.requests", "summary.range_filtered", "summary.frames",
-    "summary.tiles_known", "summary.tiles_never_clean", "summary.bytes",
+    "summary.tiles_known", "summary.tiles_never_clean", "summary.tiles_no_region",
+    "summary.bytes",
 )
 CLIENT_MONOTONIC = (
     "received_columns", "received_bytes", "dropped",
@@ -3279,8 +3280,8 @@ def _srv(wall=1000, seg=0, over=None):
             "far_players": {"subscribers": 0, "roster_frames": 0, "update_frames": 0,
                             "entries": 0, "suppressed": 0, "bytes": 0},
             "summary": {"requests": 0, "range_filtered": 0, "frames": 0,
-                        "tiles_known": 0, "tiles_never_clean": 0, "bytes": 0,
-                        "refresh_ms_hw": 0},
+                        "tiles_known": 0, "tiles_never_clean": 0, "tiles_no_region": 0,
+                        "bytes": 0, "refresh_ms_hw": 0},
             "store": {"hits": 0, "misses": 0, "deposits": 0, "deposit_drops": 0,
                       "deposit_skips": 0,
                       "errors": 0, "sweep_drops": 0,

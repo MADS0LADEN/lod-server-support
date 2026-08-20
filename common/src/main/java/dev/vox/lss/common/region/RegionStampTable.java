@@ -94,7 +94,10 @@ public final class RegionStampTable {
 
     /** Examined state of one region file. {@code saveSeconds == null} marks the two
      *  no-data sentinels ({@link #ABSENT}, {@link #UNREADABLE}) — BOTH horizon-cached,
-     *  so doubt never becomes per-ask IO. */
+     *  so doubt never becomes per-ask IO — or (with a real mtime) a "lite" snapshot:
+     *  a tile-path examination whose LONG results live in the entry
+     *  ({@code maxHeaderSecond}/{@code degenerateStamps}) with the array dropped, so
+     *  summary sweeps never count against the retained-array cap. */
     private record HeaderSnapshot(long mtimeMillis, boolean mtimeSettled, int[] saveSeconds) {}
 
     private static final HeaderSnapshot ABSENT = new HeaderSnapshot(Long.MIN_VALUE, true, null);
@@ -125,6 +128,7 @@ public final class RegionStampTable {
             new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, DirListing> dirListings = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> unresolvableWarned = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Boolean> unlistableWarned = new ConcurrentHashMap<>();
     // FIFO of entries holding a retained header array; strip-and-relearn beyond the cap.
     // Mutated ONLY under the owning entry's monitor (setHeader) or in enforceCap, which
     // takes one victim monitor at a time with no other monitor held.
@@ -158,7 +162,7 @@ public final class RegionStampTable {
     public long chunkStampSecondsOrUnknown(String dimension, int cx, int cz) {
         long packed = PositionUtil.packPosition(cx, cz);
         var entry = entryFor(dimension, PositionUtil.packRegionOf(packed));
-        HeaderSnapshot h = refreshedHeader(dimension, entry, cx >> 5, cz >> 5);
+        HeaderSnapshot h = refreshedHeader(dimension, entry, cx >> 5, cz >> 5, true);
         enforceHeaderCap();
         if (h == null || h == UNREADABLE) return UNKNOWN;
         if (h == ABSENT) {
@@ -196,12 +200,20 @@ public final class RegionStampTable {
         var known = dims == null ? null : dims.get(regionKey);
         long mark = known == null ? 0 : known.liveSaveMarkSeconds.get();
         if (!listing.presentRegions().contains(regionKey)) {
-            // No region file. A mark without a file = a change in flight to a region
-            // that does not exist yet — NEVER until the listing sees it land.
-            return mark > 0 ? NEVER_CLEAN : RegionSummaryWire.STAMP_NO_REGION;
+            // No region file NOW. Doubt, not a claim, in two shapes (P2 review): a mark
+            // without a file = a change in flight to a region that does not exist yet;
+            // a region OBSERVED present earlier this server life = deleted since (the
+            // "delete to regenerate" repair) — a client validating its old stamps there
+            // would keep the deleted terrain forever. Only never-observed absence is
+            // honestly "nothing on disk to validate against".
+            boolean everObserved = known != null && known.maxHeaderSecond > 0;
+            return (mark > 0 || everObserved)
+                    ? NEVER_CLEAN : RegionSummaryWire.STAMP_NO_REGION;
         }
         var entry = entryFor(dimension, regionKey);
-        HeaderSnapshot h = refreshedHeader(dimension, entry, tileX, tileZ);
+        // retainArray=false: tile sweeps memoize only the LONG bound (maxHeaderSecond)
+        // — a summary window must never evict the P1 chunk rung's retained arrays.
+        HeaderSnapshot h = refreshedHeader(dimension, entry, tileX, tileZ, false);
         enforceHeaderCap();
         if (h == null || h == UNREADABLE) return NEVER_CLEAN;
         if (h == ABSENT) {
@@ -212,7 +224,10 @@ public final class RegionStampTable {
         if (entry.liveSaveMarkSeconds.get() > entry.maxHeaderSecond) {
             return NEVER_CLEAN; // the latch (class javadoc)
         }
-        return entry.maxHeaderSecond;
+        // A header whose slots carried NO valid second (all chunks absent — the residue
+        // of a chunk-delete pass) is zero positive evidence, and 0 would collide with
+        // STAMP_NO_REGION's "validate everything" on the wire (P2 review H-M1a).
+        return entry.maxHeaderSecond == 0 ? NEVER_CLEAN : entry.maxHeaderSecond;
     }
 
     /** One readdir per dimension per horizon: which region files exist. Racy duplicate
@@ -228,12 +243,15 @@ public final class RegionStampTable {
             dir = null;
         }
         DirListing fresh;
-        if (dir == null) {
+        if (dir == null || !Files.isDirectory(dir)) {
+            // Missing or unresolvable region directory: DOUBT for every tile, never
+            // "zero regions" (P2 review H-M1c: a resolver pointing at a wrong or
+            // missing path — the Paper custom-world hazard — must not silently
+            // validate the dimension's whole cached disc; the client just falls back
+            // to per-column revalidation there).
+            warnUnlistableOnce(dimension, dir == null
+                    ? "region directory unresolved" : "not a directory: " + dir);
             fresh = new DirListing(null, now + STAT_HORIZON_NANOS);
-        } else if (!Files.isDirectory(dir)) {
-            // No directory yet (dimension never generated a region): zero regions —
-            // honestly "nothing on disk", not doubt.
-            fresh = new DirListing(java.util.Set.of(), now + STAT_HORIZON_NANOS);
         } else {
             var present = new java.util.HashSet<Long>();
             try (var stream = Files.newDirectoryStream(dir, "r.*.mca")) {
@@ -243,11 +261,22 @@ public final class RegionStampTable {
                 }
                 fresh = new DirListing(java.util.Set.copyOf(present), now + STAT_HORIZON_NANOS);
             } catch (Exception e) {
+                warnUnlistableOnce(dimension, "unlistable: " + e);
                 fresh = new DirListing(null, now + STAT_HORIZON_NANOS);
             }
         }
         this.dirListings.put(dimension, fresh);
         return fresh;
+    }
+
+    /** Once-per-dimension warn when tile stamps degrade to never-clean (the summary
+     *  win is lost there but nothing is wrong on the wire — attributability only). */
+    private void warnUnlistableOnce(String dimension, String why) {
+        if (this.unlistableWarned.putIfAbsent(dimension, Boolean.TRUE) == null) {
+            LSSLogger.info("Region summaries unavailable for dimension " + dimension
+                    + " (" + why + ") — tiles report never-clean, clients fall back to"
+                    + " per-column revalidation (logged once)");
+        }
     }
 
     /** Strict {@code r.<int>.<int>.mca} parse (adversarial m5: int-formatted,
@@ -289,15 +318,27 @@ public final class RegionStampTable {
     }
 
     /** The entry's examined state, statted/re-read when the horizon lapsed. Null only
-     *  before the first examination completes. */
-    private HeaderSnapshot refreshedHeader(String dimension, RegionEntry entry, int rx, int rz) {
+     *  before the first examination completes. {@code retainArray} is the P1/P2 split
+     *  (P2 review W-M1): the chunk rung (true) memoizes the {@code int[1024]} snapshot
+     *  (cap-tracked); the tile sweep (false) memoizes only the LONG bound already
+     *  folded into {@code entry.maxHeaderSecond}/{@code degenerateStamps}, storing an
+     *  array-free "lite" snapshot (real mtime, null array) — so a summary window can
+     *  never evict the header rung's arrays. A lite snapshot upgrades to a full one on
+     *  the next chunk ask (one 8 KiB re-read), and a full one is KEPT full on tile-path
+     *  re-reads (the array is in hand either way). */
+    private HeaderSnapshot refreshedHeader(String dimension, RegionEntry entry, int rx, int rz,
+                                           boolean retainArray) {
         long now = System.nanoTime();
         HeaderSnapshot h = entry.header;
-        if (h != null && now - entry.statDeadlineNanos < 0) return h;
+        if (h != null && now - entry.statDeadlineNanos < 0 && arraySatisfies(h, retainArray)) {
+            return h;
+        }
         synchronized (entry) {
             h = entry.header;
             now = System.nanoTime();
-            if (h != null && now - entry.statDeadlineNanos < 0) return h;
+            if (h != null && now - entry.statDeadlineNanos < 0 && arraySatisfies(h, retainArray)) {
+                return h;
+            }
             Path dir;
             try {
                 dir = this.regionDirResolver == null ? null : this.regionDirResolver.apply(dimension);
@@ -325,7 +366,9 @@ public final class RegionStampTable {
                 setHeader(entry, ABSENT, h);
                 return ABSENT;
             }
-            if (h != null && h.saveSeconds() != null && h.mtimeSettled() && h.mtimeMillis() == mtime) {
+            boolean examined = h != null && h != ABSENT && h != UNREADABLE;
+            if (examined && h.mtimeSettled() && h.mtimeMillis() == mtime
+                    && arraySatisfies(h, retainArray)) {
                 // Unchanged since the last examined read: keep the memo, push the horizon.
                 entry.statDeadlineNanos = now + STAT_HORIZON_NANOS;
                 return h;
@@ -344,6 +387,9 @@ public final class RegionStampTable {
                 if (s != NEVER_SECOND && s > maxSecond) maxSecond = s;
             }
             if (maxSecond > entry.maxHeaderSecond) entry.maxHeaderSecond = maxSecond;
+            // Keep an already-full entry full even on a tile-path re-read (the array is
+            // in hand; dropping it would cost the chunk rung a relearn for nothing).
+            boolean keepArray = retainArray || (examined && h.saveSeconds() != null);
             // The store sweep's raced-mtime discipline (its R1 review): only trust an
             // mtime as "this header was examined at this stamp" when a post-read re-stat
             // matches AND the stamp's second is strictly past — on 1 s-granularity
@@ -355,10 +401,17 @@ public final class RegionStampTable {
                         && mtime / 1000L < System.currentTimeMillis() / 1000L;
             } catch (Exception ignored) {
             }
-            var fresh = new HeaderSnapshot(mtime, settled, seconds);
+            var fresh = new HeaderSnapshot(mtime, settled, keepArray ? seconds : null);
             setHeader(entry, fresh, h);
             return fresh;
         }
+    }
+
+    /** True when the snapshot carries what THIS caller needs: the tile path accepts
+     *  any examined state; the chunk path must not be handed a lite (array-free)
+     *  snapshot — it upgrades under the monitor instead. */
+    private static boolean arraySatisfies(HeaderSnapshot h, boolean retainArray) {
+        return !retainArray || h.saveSeconds() != null || h == ABSENT || h == UNREADABLE;
     }
 
     /** Swap the entry's header, maintaining the retained-array queue/count for THIS

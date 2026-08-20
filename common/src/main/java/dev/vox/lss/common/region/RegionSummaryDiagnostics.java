@@ -13,6 +13,7 @@ public final class RegionSummaryDiagnostics {
     private final AtomicLong rangeFiltered = new AtomicLong();
     private final AtomicLong tilesKnown = new AtomicLong();
     private final AtomicLong tilesNeverClean = new AtomicLong();
+    private final AtomicLong tilesNoRegion = new AtomicLong();
     private final AtomicLong bytes = new AtomicLong();
     private final AtomicLong frames = new AtomicLong();
     private final AtomicLong refreshMsMax = new AtomicLong();
@@ -25,14 +26,20 @@ public final class RegionSummaryDiagnostics {
      *  because they can only select in-window table reads, but they are counted). */
     public void recordRangeFiltered() { this.rangeFiltered.incrementAndGet(); }
 
-    /** Tile dispositions of one assembled frame. */
-    public void recordTiles(long known, long neverClean) {
+    /** Tile dispositions of one assembled frame. {@code noRegion} is counted APART
+     *  from known (P2 review H-m3): a whole-window no_region count is the
+     *  resolver-gone-wrong / world-replaced signal, and folding it into known would
+     *  render the pathological shape as the healthiest-looking line possible. */
+    public void recordTiles(long known, long neverClean, long noRegion) {
         this.tilesKnown.addAndGet(known);
         this.tilesNeverClean.addAndGet(neverClean);
+        this.tilesNoRegion.addAndGet(noRegion);
     }
 
-    /** One S2C frame sent on the dedicated lane (NOT part of service.bytes_sent —
-     *  the far-player lane precedent; cross-identity audits stay exact). */
+    /** One S2C frame actually put on the wire (the sender confirmed — assembled-but-
+     *  dropped frames for vanished players are NOT counted; NOT part of
+     *  service.bytes_sent — the far-player lane precedent; cross-identity audits stay
+     *  exact). */
     public void recordFrameSent(int frameBytes) {
         this.frames.incrementAndGet();
         this.bytes.addAndGet(frameBytes);
@@ -50,15 +57,17 @@ public final class RegionSummaryDiagnostics {
         long reqs = this.requests.get();
         if (reqs == 0) return null;
         return String.format(
-                "Summary: reqs=%d, frames=%d, tiles known=%d never_clean=%d, range_filtered=%d, bytes=%d, refresh_ms_max=%d",
+                "Summary: reqs=%d, frames=%d, tiles known=%d never_clean=%d no_region=%d, range_filtered=%d, bytes=%d, refresh_ms_max=%d",
                 reqs, this.frames.get(), this.tilesKnown.get(), this.tilesNeverClean.get(),
-                this.rangeFiltered.get(), this.bytes.get(), this.refreshMsMax.get());
+                this.tilesNoRegion.get(), this.rangeFiltered.get(), this.bytes.get(),
+                this.refreshMsMax.get());
     }
 
     public long getRequests() { return this.requests.get(); }
     public long getRangeFiltered() { return this.rangeFiltered.get(); }
     public long getTilesKnown() { return this.tilesKnown.get(); }
     public long getTilesNeverClean() { return this.tilesNeverClean.get(); }
+    public long getTilesNoRegion() { return this.tilesNoRegion.get(); }
     public long getBytes() { return this.bytes.get(); }
     public long getFrames() { return this.frames.get(); }
     public long getRefreshMsMax() { return this.refreshMsMax.get(); }

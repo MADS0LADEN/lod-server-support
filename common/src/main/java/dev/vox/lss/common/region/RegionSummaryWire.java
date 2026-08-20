@@ -16,12 +16,13 @@ import dev.vox.lss.common.wire.WireFormatException;
  *            stamp[(2r+1)^2]:zigzag-delta-varlong   (row-major: x fastest within z rows)
  * </pre>
  * Stamps are server-clock epoch SECONDS with two reserved sentinels:
- * {@link #STAMP_NO_REGION} (0 — no region file: nothing on disk to validate against;
- * the client validates every stamped position there, mirroring the header rung's
- * absent-region UNKNOWN→serve fallthrough being about DISK reads, not client claims)
- * and {@link #STAMP_NEVER_CLEAN} (-1 pre-delta — unknown/unresolvable: the client
- * validates NOTHING in the tile). The delta chain runs over the raw values including
- * sentinels (zigzag absorbs the sign).
+ * {@link #STAMP_NO_REGION} (0 — a region file that has NEVER been observed in this
+ * server life: nothing was ever on disk to validate against, so the client validates
+ * its stamped positions there; the table answers NEVER_CLEAN instead for every
+ * doubt-shaped absence — deleted-after-observed, unlistable directory, empty header —
+ * see {@code RegionStampTable.tileStampSeconds}) and {@link #STAMP_NEVER_CLEAN} (-1
+ * pre-delta — unknown/unresolvable: the client validates NOTHING in the tile). The
+ * delta chain runs over the raw values including sentinels (zigzag absorbs the sign).
  *
  * <p>Hostile-decode discipline (the FarPlayerWire bar): version mismatch, negative or
  * over-{@link #MAX_SUMMARY_TILE_RADIUS} radii, oversized dimension strings, trailing
@@ -45,25 +46,43 @@ public final class RegionSummaryWire {
     public static final long STAMP_NEVER_CLEAN = Long.MAX_VALUE;
     private static final long WIRE_NEVER_CLEAN = -1L;
 
-    /** C2S: "send me the stamp window for this dimension around this tile center". */
-    public record Request(String dimension, int centerTileX, int centerTileZ, int tileRadius) {}
+    /** C2S: "send me the stamp window for this dimension around this tile center".
+     *  Compact-ctor validated: a Request that EXISTS is wire-legal. */
+    public record Request(String dimension, int centerTileX, int centerTileZ, int tileRadius) {
+        public Request {
+            requireDimension(dimension);
+            boundedRadius(tileRadius);
+        }
+    }
 
     /** S2C: the stamp window. {@code stampSeconds} is row-major over the square
      *  {@code [centerX-r..centerX+r] x [centerZ-r..centerZ+r]}, x fastest within z
      *  rows; values are epoch seconds, {@link #STAMP_NO_REGION}, or
-     *  {@link #STAMP_NEVER_CLEAN} (already normalized from the wire form). */
+     *  {@link #STAMP_NEVER_CLEAN} (already normalized from the wire form).
+     *  Compact-ctor validated: a Summary that EXISTS is wire-legal. */
     public record Summary(String dimension, int centerTileX, int centerTileZ,
-                          int tileRadius, long[] stampSeconds) {}
+                          int tileRadius, long[] stampSeconds) {
+        public Summary {
+            requireDimension(dimension);
+            long side = 2L * boundedRadius(tileRadius) + 1;
+            if (stampSeconds == null || stampSeconds.length != side * side) {
+                throw new WireFormatException("summary stamps length "
+                        + (stampSeconds == null ? "null" : stampSeconds.length)
+                        + " != (2r+1)^2 = " + (side * side));
+            }
+        }
+    }
 
     // ---- request ----
 
     public static byte[] encodeRequest(Request req) {
+        // Bounds guaranteed by the record's compact ctor.
         var w = new WireBytes.Writer(16 + req.dimension().length());
         w.writeByte(VERSION);
         w.writeUtf(req.dimension());
         writeZigVarLong(w, req.centerTileX());
         writeZigVarLong(w, req.centerTileZ());
-        w.writeVarInt(boundedRadius(req.tileRadius()));
+        w.writeVarInt(req.tileRadius());
         return w.toByteArray();
     }
 
@@ -81,12 +100,7 @@ public final class RegionSummaryWire {
     // ---- summary ----
 
     public static byte[] encodeSummary(Summary s) {
-        long side = 2L * boundedRadius(s.tileRadius()) + 1;
-        long tiles = side * side;
-        if (s.stampSeconds().length != tiles) {
-            throw new WireFormatException("summary stamps length " + s.stampSeconds().length
-                    + " != (2r+1)^2 = " + tiles);
-        }
+        // Bounds + length guaranteed by the record's compact ctor.
         var w = new WireBytes.Writer(32 + s.stampSeconds().length * 2);
         w.writeByte(VERSION);
         w.writeUtf(s.dimension());
@@ -114,6 +128,12 @@ public final class RegionSummaryWire {
         int radius = boundedRadius(r.readVarInt());
         long side = 2L * radius + 1;
         long tiles = side * side; // long arithmetic — a hostile radius must not wrap
+        if (r.remaining() < tiles) {
+            // Every stamp costs at least one varlong byte: a frame shorter than its own
+            // tile count is hostile/truncated — reject BEFORE the ~137 KB allocation.
+            throw new WireFormatException("summary frame has " + r.remaining()
+                    + " bytes remaining for " + tiles + " tiles");
+        }
         long[] stamps = new long[(int) tiles];
         long prev = 0;
         for (int i = 0; i < stamps.length; i++) {
@@ -143,6 +163,17 @@ public final class RegionSummaryWire {
                     + MAX_SUMMARY_TILE_RADIUS + "]");
         }
         return radius;
+    }
+
+    /** Both records' dimension guard — encode-side too (the decode cap alone would let
+     *  a local bug emit a frame the twin then rejects). */
+    private static void requireDimension(String dimension) {
+        if (dimension == null
+                || dimension.getBytes(java.nio.charset.StandardCharsets.UTF_8).length
+                        > MAX_DIMENSION_UTF_BYTES) {
+            throw new WireFormatException("dimension null or over "
+                    + MAX_DIMENSION_UTF_BYTES + " UTF bytes");
+        }
     }
 
     private static int zigToInt(long v, String what) {

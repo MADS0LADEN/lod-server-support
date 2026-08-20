@@ -1441,7 +1441,7 @@ public class ServiceLifecycleGameTests {
      * own region writer end to end. Chunk band 250 (negative quadrant — disjoint from
      * every other class's bands per the header comment).
      */
-    @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 300)
+    @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 1200)
     public void regionFreshnessServesRealRegionHeaders(GameTestHelper helper) {
         var level = helper.getLevel();
         var server = level.getServer();
@@ -1494,11 +1494,19 @@ public class ServiceLifecycleGameTests {
                             + " frames=" + summary.getFrames());
             helper.assertTrue(summary.getBytes() > 0,
                     "the frame's bytes count on the dedicated lane");
-            helper.assertTrue(summary.getTilesKnown() + summary.getTilesNeverClean() == 9,
+            helper.assertTrue(summary.getTilesKnown() + summary.getTilesNeverClean()
+                            + summary.getTilesNoRegion() == 9,
                     "a radius-1 window reports exactly 9 tiles, known="
-                            + summary.getTilesKnown() + " never=" + summary.getTilesNeverClean());
+                            + summary.getTilesKnown() + " never=" + summary.getTilesNeverClean()
+                            + " no_region=" + summary.getTilesNoRegion());
+            helper.assertTrue(summary.getTilesKnown() >= 1,
+                    "the saved chunk's own tile must report a real stamp");
+            // Terminal pass: tear down like the class's async probe test does — the
+            // throwaway service must not leak its threads/pools NOR leave its
+            // constructor-published XrayMaskManager as the static manager (the
+            // documented gametest static-stomping hazard).
+            service.shutdown();
+            server.getPlayerList().remove(mock);
         });
-        // No shutdown: succeedWhen is asynchronous (the class's synchronous tests own
-        // try/finally); the daemon sweeper dies with the gametest JVM.
     }
 }

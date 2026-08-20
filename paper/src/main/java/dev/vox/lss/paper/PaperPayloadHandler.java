@@ -338,10 +338,13 @@ public final class PaperPayloadHandler {
     /** Region-summary S2C frame (P2 §5): the dedicated send lane's carrier — the raw
      *  RegionSummaryWire body on the NMS connection (DiscardedPayload, like every LSS
      *  S2C). Takes the NMS player directly — the pump looks players up by UUID. */
-    public static void sendRegionSummary(net.minecraft.server.level.ServerPlayer nmsPlayer,
-                                         byte[] body) {
-        if (nmsPlayer.connection == null) return;
+    /** Returns whether the frame was actually handed to the connection — the
+     *  summary counters mean "put on the wire", not "assembled". */
+    public static boolean sendRegionSummary(net.minecraft.server.level.ServerPlayer nmsPlayer,
+                                            byte[] body) {
+        if (nmsPlayer.connection == null) return false;
         nmsPlayer.connection.send(new ClientboundCustomPayloadPacket(
                 new DiscardedPayload(ID_REGION_SUMMARY, body)));
+        return true;
     }
 }

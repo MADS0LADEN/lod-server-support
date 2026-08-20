@@ -59,10 +59,11 @@ public class RequestProcessingService {
     // fed by the hoisted region-dir resolver + the save hook's dirty marks. Store-independent.
     private final dev.vox.lss.common.region.RegionStampTable regionStamps;
     // Region summaries (P2): sweeper + mailboxes; requests offered by the payload
-    // handler, admissions/sends pumped from tick(). Disconnect cleanup is TTL-based
-    // (a gone player's pending request expires in seconds; a ready frame for a gone
-    // player fails the send lookup) — deliberately NOT swept in removePlayer, which
-    // also fires on dimension change and would race the client's at-entry request.
+    // handler, admissions/sends pumped from tick(). Cleanup rides the NETWORK
+    // disconnect (removePlayer on the summary service — the far-player precedent),
+    // deliberately NOT this service's removePlayer, which also fires on dimension
+    // change and would race the client's at-entry request; TTL + vanished-send
+    // checks are the belt for a missed disconnect.
     private final dev.vox.lss.common.region.RegionSummaryService regionSummaries;
     private final DirtyContentFilter dirtyContentFilter = new DirtyContentFilter();
     // Far players (E1, FARP §3.2): subscription identity lives HERE (the dialect-tracker
@@ -265,7 +266,8 @@ public class RequestProcessingService {
         // the same stamp table. The tick pumps admissions/sends; ingress is the payload
         // handler (kill switch checked there).
         this.regionSummaries = new dev.vox.lss.common.region.RegionSummaryService(
-                this.regionStamps::tileStampSeconds);
+                this.regionStamps::tileStampSeconds,
+                () -> LSSServerConfig.CONFIG.lodDistanceChunks);
         // Every hash-confirmed change mark (the save hook) bumps the region's live save
         // mark, closing the save-submitted-but-write-pending mtime lag before the header
         // rung can claim freshness across it. May run off-main — the bump is atomic.
@@ -521,9 +523,10 @@ public class RequestProcessingService {
                         dim, PositionUtil.unpackX(pc), PositionUtil.unpackZ(pc));
             }, (uuid, frame) -> {
                 var player = this.server.getPlayerList().getPlayer(uuid);
-                if (player == null) return; // disconnected while the frame was assembling
+                if (player == null) return false; // disconnected while assembling — uncounted
                 dev.vox.lss.platform.LoaderServices.get().sendToPlayer(player,
                         new dev.vox.lss.networking.payloads.RegionSummaryS2CPayload(frame));
+                return true;
             });
         } catch (Exception e) {
             // Containment: a pump/send bug must degrade summaries, never the tick.
@@ -537,7 +540,9 @@ public class RequestProcessingService {
     private boolean regionSummaryTickErrorWarned;
 
     /** Ingress for {@code lss:region_summary_req} (any thread — stores pure data). The
-     *  HANDLER-checked kill switch (plan §5): flips apply to connected clients. */
+     *  HANDLER-checked kill switch (plan §5): checked per request, though the key is
+     *  boot-set in practice (not in the {@code /lsslod set} registry — a flip needs a
+     *  restart). */
     public void handleRegionSummaryRequest(ServerPlayer player, byte[] body) {
         if (!LSSServerConfig.CONFIG.enabled || !LSSServerConfig.CONFIG.enableRegionSummaries) {
             return;
@@ -1372,6 +1377,14 @@ public class RequestProcessingService {
 
     public void shutdown() {
         try {
+            // Own containment, FIRST (P2 review I-m2): no ordering dependency on the
+            // dirty drain, and a throw there must not leak the sweeper daemon (which
+            // holds the stamp table's header snapshots) across /reload or world swaps.
+            this.regionSummaries.shutdown();
+        } catch (Exception e) {
+            LSSLogger.error("Error shutting down region-summary sweeper", e);
+        }
+        try {
             // Marks accumulated since the last broadcast interval must still invalidate the
             // timestamp cache BEFORE its final save (the invalidations ride the shutdown
             // sentinel take) — otherwise the persisted stamps answer false up_to_date for
@@ -1380,7 +1393,6 @@ public class RequestProcessingService {
                 this.offThreadProcessor.invalidateTimestamps(entry.getKey(), entry.getValue());
             }
             if (this.storeBackfill != null) this.storeBackfill.shutdown();
-            this.regionSummaries.shutdown();
             this.offThreadProcessor.shutdown();
         } catch (Exception e) {
             LSSLogger.error("Error shutting down off-thread processor", e);

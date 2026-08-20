@@ -195,17 +195,30 @@ marshalled exactly like the handshake, via the lifecycle-mailbox pattern) into a
 **latest-wins per-player mailbox slot** (the want-set's own shape — natural
 coalescing, no rate limiter, no limiter-lifecycle questions; portal spam collapses
 to one pending request). The pump hands it to the sweeper; the sweeper windows the
-table (clamping the CENTER to the player's own chunk position ± prune radius — the
-`range_filtered` rule applied to tiles; hostile centers are clamped, counted, and
-harmless because they can only select in-window table reads), refreshes stale
-tiles, assembles the frame, and sends it on a **dedicated send lane with its own
-byte counter** (`summary.bytes` — the far-player lane precedent; NOT the column
+table (clamping the RADIUS AND CENTER to the server's own window —
+`ceil(lodDistanceChunks/32)+1` tiles around the player's tile, never the protocol
+max: the changeset-2 review's I-M1, a ~30-byte request must not buy a 17k-tile
+sweep — the `range_filtered` rule applied to tiles; hostile centers/radii are
+clamped, counted, and harmless because they can only select the same window an
+honest client gets), refreshes stale tiles, assembles the frame, and sends it on a
+**dedicated send lane with its own byte counter** (`summary.bytes` — the far-player lane precedent; NOT the column
 queue, NOT under the join slow-start budget, NOT in `bytes_sent`'s law term without
 the audit note). Restart thundering herd: N joins share one table — the first
 requests pay the seeding once, the rest are memory reads.
 
 Server kill switch `enableRegionSummaries` (default true) is checked in the
-HANDLER (not just channel advertisement — flips apply to connected clients).
+HANDLER (not just channel advertisement); boot-set in practice — the key is not in
+the `/lsslod set` registry, so a flip needs a restart.
+
+The flood bound is admission-side, in three layers (the changeset-2 review's I-M1 —
+mailbox coalescing bounds CONCURRENCY, not rate): latest-wins pending, the window
+clamp above (one sweep costs at most the server's own configured disc), and a
+per-player re-sweep cooldown equal to the stamp table's stat horizon (5 s — inside
+it a re-sweep reads identical memos; a cooldown-held request is RETAINED and admits
+when it lapses). Frame bytes stay outside `SharedBandwidthLimiter` by design: the
+clamped, cooled bound is a few KB per player per cooldown, counted in the
+`summary.bytes` lane. Tile sweeps store array-FREE header memos (the long bound
+only), so a summary window can never evict the P1 chunk rung's retained arrays.
 
 ## 6. P2 client side — per-column comparison, ZERO new persistence
 
@@ -277,6 +290,24 @@ upgraded pairs instead of reading it as breakage.
   reverts the chunk on disk; the client's stamp may postdate the reverted content.
   Today's path has the same hole via the tscache (its stamp also predates the
   crash). Equivalent, documented.
+- **No-evidence states are DOUBT, never claims** (changeset-2 review, H-M1/H-M2):
+  the tile path answers `STAMP_NO_REGION` (0 = "validate your stamps") ONLY for a
+  region never observed present in this server life on a listable directory.
+  Everything else fails to NEVER_CLEAN: an unlistable/not-a-directory region path
+  (the Paper custom-world resolver hazard — once-logged), a region file that
+  VANISHED after being observed (the "delete to regenerate" repair — a client
+  validating old stamps there would keep deleted terrain forever), and a present
+  region whose header carries no valid save second (all-absent chunks — the
+  residue of a chunk-delete pass; its `maxHeaderSecond == 0` would otherwise alias
+  the sentinel on the wire). Residuals accepted and stated: absence-after-presence
+  detection is server-lifetime-scoped (a region deleted while the server is OFF
+  reads as never-observed on the next boot — same as today's tscache, which also
+  dies with the restart... today heals via the read path's not-found → generation,
+  and so does this, because the client re-asks whatever it cannot validate); and a
+  single chunk deleted INSIDE a surviving region is invisible at tile granularity
+  (poisoning on any absent slot would kill the feature — sparse regions are mostly
+  absent slots). The per-CHUNK rung is unaffected: an absent chunk's header slot
+  answers NEVER_CLEAN and the real read's authoritative-miss ladder owns it.
 
 ## 8. Observability, laws, harness (P2)
 

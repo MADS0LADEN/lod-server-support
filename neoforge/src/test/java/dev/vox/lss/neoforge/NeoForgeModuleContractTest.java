@@ -57,7 +57,7 @@ class NeoForgeModuleContractTest {
     }
 
     @Test
-    void registrarCensusCoversAllTenChannels() throws IOException {
+    void registrarCensusCoversAllChannels() throws IOException {
         String src = read("neoforge/src/main/java/dev/vox/lss/networking/LSSNetworking.java");
         List<String> c2s = List.of("HandshakeC2SPayload", "BatchChunkRequestC2SPayload",
                 "ClientInfoC2SPayload", "FarPlayerPrefsC2SPayload",

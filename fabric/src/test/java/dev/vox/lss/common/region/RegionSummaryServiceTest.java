@@ -27,9 +27,17 @@ class RegionSummaryServiceTest {
         final AtomicLong clock = new AtomicLong(1_000_000_000L);
         final ConcurrentLinkedQueue<Sent> sent = new ConcurrentLinkedQueue<>();
         final RegionSummaryService service;
+        volatile boolean senderAccepts = true;
 
         Rig(RegionSummaryService.TileStampSource source) {
-            this.service = new RegionSummaryService(source, this.clock::get);
+            // Max distance: the server window equals the protocol max, so wire-cap
+            // pins stay meaningful. Clamp tests use the explicit-distance ctor.
+            this(source, 2048);
+        }
+
+        Rig(RegionSummaryService.TileStampSource source, int lodDistanceChunks) {
+            this.service = new RegionSummaryService(source, () -> lodDistanceChunks,
+                    this.clock::get);
         }
 
         Function<UUID, RegionSummaryService.PlayerAnchor> anchorsAt(UUID player, String dim,
@@ -38,7 +46,11 @@ class RegionSummaryServiceTest {
         }
 
         void pump(Function<UUID, RegionSummaryService.PlayerAnchor> anchors) {
-            this.service.pump(anchors, (p, f) -> this.sent.add(new Sent(p, f)));
+            this.service.pump(anchors, (p, f) -> {
+                if (!this.senderAccepts) return false;
+                this.sent.add(new Sent(p, f));
+                return true;
+            });
         }
 
         Sent pumpUntilFrame(Function<UUID, RegionSummaryService.PlayerAnchor> anchors)
@@ -159,6 +171,114 @@ class RegionSummaryServiceTest {
             rig.service.offerRequest(player, new RegionSummaryWire.Request(DIM, 0, 0, 1));
             rig.service.removePlayer(player);
             assertFalse(rig.service.hasPendingForTest(player));
+        } finally {
+            rig.service.shutdown();
+        }
+    }
+
+    @Test
+    void radiusAndCenterClampToTheServerWindowNotTheProtocolMax() throws Exception {
+        // The I-M1 amplification fix: lodDistance 64 -> ceil(64/32)+1 = 3 tiles. A
+        // radius-65 protocol-max request must shrink to the server's own window, and
+        // the hostile center clamps against the SAME bound.
+        var rig = new Rig((dim, tx, tz) -> NOW, 64);
+        try {
+            var player = UUID.randomUUID();
+            rig.service.offerRequest(player, new RegionSummaryWire.Request(
+                    DIM, 1_000_000, -1_000_000, RegionSummaryWire.MAX_SUMMARY_TILE_RADIUS));
+            var sent = rig.pumpUntilFrame(rig.anchorsAt(player, DIM, 0, 0));
+            var summary = RegionSummaryWire.decodeSummary(sent.frame());
+            assertEquals(3, summary.tileRadius(), "radius clamped to the server window");
+            assertEquals(3, summary.centerTileX(), "center clamped to playerTile + window");
+            assertEquals(-3, summary.centerTileZ());
+            assertEquals(49, summary.stampSeconds().length, "(2*3+1)^2 tiles, not 131^2");
+            assertEquals(1, rig.service.diagnostics().getRangeFiltered());
+        } finally {
+            rig.service.shutdown();
+        }
+    }
+
+    @Test
+    void resweepCooldownRetainsThenAdmits() throws Exception {
+        var rig = new Rig((dim, tx, tz) -> NOW);
+        try {
+            var player = UUID.randomUUID();
+            var anchors = rig.anchorsAt(player, DIM, 0, 0);
+            rig.service.offerRequest(player, new RegionSummaryWire.Request(DIM, 0, 0, 0));
+            rig.pumpUntilFrame(anchors);
+            // A second request inside the cooldown is RETAINED (not dropped, not swept):
+            // the stamp table's memos cannot have changed inside its stat horizon.
+            rig.service.offerRequest(player, new RegionSummaryWire.Request(DIM, 0, 0, 0));
+            rig.pump(anchors);
+            assertTrue(rig.service.hasPendingForTest(player),
+                    "cooldown-held request must be retained");
+            assertNull(rig.sent.poll(), "no second frame inside the cooldown");
+            // Past the cooldown the retained request admits without a re-send.
+            rig.clock.addAndGet(RegionSummaryService.RESWEEP_COOLDOWN_NANOS + 1);
+            var sent = rig.pumpUntilFrame(anchors);
+            assertEquals(player, sent.player());
+            assertEquals(2, rig.service.diagnostics().getFrames());
+        } finally {
+            rig.service.shutdown();
+        }
+    }
+
+    @Test
+    void removePlayerClearsTheCooldownMark() throws Exception {
+        var rig = new Rig((dim, tx, tz) -> NOW);
+        try {
+            var player = UUID.randomUUID();
+            var anchors = rig.anchorsAt(player, DIM, 0, 0);
+            rig.service.offerRequest(player, new RegionSummaryWire.Request(DIM, 0, 0, 0));
+            rig.pumpUntilFrame(anchors);
+            // Disconnect sweeps the cooldown: a same-UUID rejoin's at-entry request
+            // must not inherit the dead session's rate mark.
+            rig.service.removePlayer(player);
+            rig.service.offerRequest(player, new RegionSummaryWire.Request(DIM, 0, 0, 0));
+            var sent = rig.pumpUntilFrame(anchors);
+            assertEquals(player, sent.player(), "post-disconnect request admits immediately");
+        } finally {
+            rig.service.shutdown();
+        }
+    }
+
+    @Test
+    void aDeclinedSendIsNotCountedAsAFrame() throws Exception {
+        var rig = new Rig((dim, tx, tz) -> NOW);
+        try {
+            var player = UUID.randomUUID();
+            rig.senderAccepts = false;
+            rig.service.offerRequest(player, new RegionSummaryWire.Request(DIM, 0, 0, 0));
+            rig.pump(rig.anchorsAt(player, DIM, 0, 0)); // admit
+            long deadline = System.nanoTime() + POLL_DEADLINE_NANOS;
+            // Wait for the sweeper's frame, then drain it through the declining sender.
+            while (rig.service.readyCountForTest() == 0) {
+                if (System.nanoTime() > deadline) fail("timed out waiting for assembly");
+                Thread.sleep(10);
+            }
+            rig.pump(rig.anchorsAt(player, DIM, 0, 0));
+            assertEquals(0, rig.service.readyCountForTest(), "the frame was drained");
+            assertEquals(0, rig.service.diagnostics().getFrames(),
+                    "frames/bytes mean PUT ON THE WIRE — a vanished-player drop is uncounted");
+            assertEquals(0, rig.service.diagnostics().getBytes());
+        } finally {
+            rig.service.shutdown();
+        }
+    }
+
+    @Test
+    void noRegionTilesCountApartFromKnown() throws Exception {
+        // H-m3: "everything is clean" and "no region files at all" must be
+        // distinguishable — a whole-window no_region count is the resolver signal.
+        var rig = new Rig((dim, tx, tz) -> tx == 0 && tz == 0
+                ? NOW : RegionSummaryWire.STAMP_NO_REGION);
+        try {
+            var player = UUID.randomUUID();
+            rig.service.offerRequest(player, new RegionSummaryWire.Request(DIM, 0, 0, 1));
+            rig.pumpUntilFrame(rig.anchorsAt(player, DIM, 0, 0));
+            assertEquals(1, rig.service.diagnostics().getTilesKnown());
+            assertEquals(8, rig.service.diagnostics().getTilesNoRegion());
+            assertEquals(0, rig.service.diagnostics().getTilesNeverClean());
         } finally {
             rig.service.shutdown();
         }

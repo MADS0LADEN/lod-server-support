@@ -376,7 +376,8 @@ public class PaperRequestProcessingService {
         // cleanup is TTL-based (see the Fabric twin's field comment).
         this.regionSummaries = this.regionStamps == null ? null
                 : new dev.vox.lss.common.region.RegionSummaryService(
-                        this.regionStamps::tileStampSeconds);
+                        this.regionStamps::tileStampSeconds,
+                        () -> this.config.lodDistanceChunks);
         // Null in test wiring: the guarded retract at shutdown must clear only a
         // manager this service actually published.
         this.xrayMasks = wiring.xrayMasks();
@@ -812,6 +813,9 @@ public class PaperRequestProcessingService {
                         // identity-survives-dim-change contract.
                         this.dialects.onDisconnect(r.uuid());
                         this.farPlayerService.removeViewer(r.uuid());
+                        // Region summaries: quit-originated only, same as above —
+                        // connection-scoped cleanup, never the dim-change cycle.
+                        if (this.regionSummaries != null) this.regionSummaries.removePlayer(r.uuid());
                     }
                 }
             } catch (Exception e) {
@@ -1068,6 +1072,9 @@ public class PaperRequestProcessingService {
                 // the other two identities, or a swept viewer's roster state leaks and
                 // keeps charging the broadcast loop until a same-UUID rejoin.
                 this.farPlayerService.removeViewer(uuid);
+                // Region summaries: same connection-scoped cleanup (pending request,
+                // queued job, re-sweep cooldown mark).
+                if (this.regionSummaries != null) this.regionSummaries.removePlayer(uuid);
             }
         }
 
@@ -1103,8 +1110,8 @@ public class PaperRequestProcessingService {
                         dim, PositionUtil.unpackX(pc), PositionUtil.unpackZ(pc));
             }, (uuid, frame) -> {
                 var player = this.server.getPlayerList().getPlayer(uuid);
-                if (player == null) return; // disconnected while the frame was assembling
-                PaperPayloadHandler.sendRegionSummary(player, frame);
+                if (player == null) return false; // disconnected while assembling — uncounted
+                return PaperPayloadHandler.sendRegionSummary(player, frame);
             });
         } catch (Exception e) {
             if (!this.regionSummaryTickErrorWarned) {
@@ -1662,6 +1669,14 @@ public class PaperRequestProcessingService {
         // in-flight tick (runtime disables are documented best-effort on Folia).
         this.shuttingDown = true;
         try {
+            // Own containment, FIRST (P2 review I-m2): no ordering dependency on the
+            // dirty drain, and a throw there must not leak the sweeper daemon across
+            // /reload cycles (each would hold the old stamp table + world resolver).
+            if (this.regionSummaries != null) this.regionSummaries.shutdown();
+        } catch (Exception e) {
+            LSSLogger.error("Error shutting down region-summary sweeper", e);
+        }
+        try {
             // Marks accumulated since the last broadcast interval must still invalidate the
             // timestamp cache BEFORE its final save (the invalidations ride the shutdown
             // sentinel take) — otherwise the persisted stamps answer false up_to_date for
@@ -1669,7 +1684,6 @@ public class PaperRequestProcessingService {
             for (var entry : this.dirtyTracker.drainAll().entrySet()) {
                 this.offThreadProcessor.invalidateTimestamps(entry.getKey(), entry.getValue());
             }
-            if (this.regionSummaries != null) this.regionSummaries.shutdown();
             this.offThreadProcessor.shutdown();
         } catch (Exception e) {
             LSSLogger.error("Error shutting down off-thread processor", e);
