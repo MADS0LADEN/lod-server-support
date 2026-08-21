@@ -111,6 +111,20 @@ public class TwoPlayerGameTests {
             }
             service.tick();
             var diskDiag = service.getDiskReader().getDiag();
+            if (stateA.getTotalSectionsSent() < 3 || stateB.getTotalSectionsSent() < 3) {
+                // Wall-denominate the wait (the same fix as the fan-out step below): an
+                // unthrottled gametest server burns all 1200 timeout ticks in ~0.3-0.5 s
+                // of WALL time, but this wait is on three REAL disk reads + fan-out —
+                // wall-bound work a loaded box can push past half a second (sighted
+                // 2026-08-21 as A=0 B=0 under box contention). >=50 ms per waiting tick
+                // keeps the ceiling tick-rate-independent; the passing path sleeps only
+                // for the handful of ticks the reads actually take.
+                try {
+                    Thread.sleep(50L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
             helper.assertTrue(stateA.getTotalSectionsSent() == 3 && stateB.getTotalSectionsSent() == 3,
                     "waiting for BOTH players to receive all three columns (fan-out delivery), A="
                             + stateA.getTotalSectionsSent() + " B=" + stateB.getTotalSectionsSent());

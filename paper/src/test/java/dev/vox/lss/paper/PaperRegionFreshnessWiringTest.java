@@ -71,16 +71,17 @@ class PaperRegionFreshnessWiringTest {
         // change WITH the resolver form — see the class javadoc.
         assertEquals(root.resolve("dimensions/minecraft/overworld/region").normalize(), ow,
                 "overworld = worldRoot/dimensions/minecraft/overworld/region on 26.x");
-        assertTrue(ne.toString().endsWith("region"), "nether path targets a region dir: " + ne);
-        assertTrue(en.toString().endsWith("region"), "end path targets a region dir: " + en);
+        // EXACT nether/end pins (Phase C cross-line carry-back): the overworld pin
+        // already discriminates the drop-getStorageFolder shape on this layout, but
+        // startsWith/endsWith left folder-swap and mis-target shapes green. The paths
+        // are deterministic given the mocked root, so pin them outright.
+        assertEquals(root.resolve("dimensions/minecraft/the_nether/region").normalize(), ne,
+                "nether = worldRoot/dimensions/minecraft/the_nether/region on 26.x: " + ne);
+        assertEquals(root.resolve("dimensions/minecraft/the_end/region").normalize(), en,
+                "end = worldRoot/dimensions/minecraft/the_end/region on 26.x: " + en);
         assertEquals(3, java.util.Set.of(ow, ne, en).size(),
                 "the three dimensions' region dirs must be DISTINCT — a resolver that"
                 + " collapses them serves cross-dimension freshness claims");
-        // The vanilla storage-folder derivation must keep nether/end under the root
-        // (the unified layout's invariant — a resolver re-rooted per-level on this
-        // line would escape the worldRoot, the R2-9 probe's failure shape inverted).
-        assertTrue(ne.startsWith(root), "nether dir under the world root: " + ne);
-        assertTrue(en.startsWith(root), "end dir under the world root: " + en);
     }
 
     @Test
