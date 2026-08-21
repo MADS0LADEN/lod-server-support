@@ -218,6 +218,10 @@ class SpiralScanner {
     // Last scan budget tracking
     private int lastBudget;
     private int lastQueued;
+    /** Did the burst-cap clamp SET the last walk's final budget (below the constant,
+     *  un-reduced by the taper)? The governed window-limit's provenance half —
+     *  see the maybeScan recording site (ramp-window-limited-credit-plan.md §3.2). */
+    private boolean lastBudgetCapClamped;
 
     // Cached Voxy view distance — refreshed every 20th getEffectiveLodDistance()
     // INVOCATION, and the walk is not the dominant caller: getPruneDistance() reads it per
@@ -433,6 +437,16 @@ class SpiralScanner {
         // for /lss diag and the trace — as a diagnostic, not a lever.
         // The want-set must fit one wire batch: replace semantics tear across frames.
         budget = Math.min(budget, Math.min(LSSConstants.MAX_BATCH_CHUNK_REQUESTS, posOut.length));
+
+        // Latch provenance for the governor's window-limited bypass
+        // (ramp-window-limited-credit-plan.md §3.2, 1-Fable fold MAJOR-1): true iff
+        // the burst-cap clamp SET the final budget — the cap actually clamped below
+        // the constant AND neither the pressure taper nor the wire-batch min reduced
+        // it further. A taper-reduced budget (the CPU-weak client between 25% and
+        // halt) must never read as governor-window-limited.
+        this.lastBudgetCapClamped = burstCap > 0
+                && burstCap < LSSConstants.WANT_SET_BUDGET
+                && budget == burstCap;
 
         if (budget <= 0) return -1;
 
@@ -1013,6 +1027,14 @@ class SpiralScanner {
     int getScanRing() { return this.scanRing; }
     int getMissingVanillaChunks() { return this.missingVanillaChunks; }
     int getLastBudget() { return this.lastBudget; }
+
+    /** Did the last walk stop early because the budget filled? (The truncation half
+     *  of the governor's window-limited latch — see {@link #lastWalkTruncated}.) */
+    boolean wasLastWalkTruncated() { return this.lastWalkTruncated; }
+
+    /** Was the burst cap the binding, taper-free clamp on the last walk's budget?
+     *  (The provenance half — see the maybeScan recording site.) */
+    boolean wasLastBudgetCapClamped() { return this.lastBudgetCapClamped; }
     int getLastQueued() { return this.lastQueued; }
     boolean wasLastScanFast() { return this.lastScanWasFast; }
     long getFastScans() { return this.fastScans; }

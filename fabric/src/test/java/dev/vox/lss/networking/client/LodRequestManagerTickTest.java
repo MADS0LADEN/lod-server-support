@@ -922,4 +922,58 @@ class LodRequestManagerTickTest {
         assertEquals(5, manager.getConfirmedRing(),
                 "a d=3 crossing decrements by 3 — the REAL delta reaches the scanner");
     }
+
+    // ---- Window-limited latch wiring (ramp-window-limited-credit-plan.md §3.2) ----
+
+    @Test
+    void truncatedGovernedWalkLatchesTheWindowLimit() {
+        // A RAMP-fresh governor's burst budget is 1 (64 KB/s over the 32 KB seed,
+        // quartered) — the lod-8 disc truncates against it, the send succeeds, the
+        // governed rate is the binding half (manual knob off) → the latch sets.
+        setupManager(config(8, true));
+        manager.joinSlowStartEnabled = () -> true;
+        manager.transferGovernorEnabled = () -> true;
+        enableAdaptiveSeam();
+        plainTick(dim("overworld"));
+        assertEquals(1, sent.size(), "the primed first scan shipped");
+        assertEquals(1, sent.get(0).count(), "the governed burst budget clamped the walk to 1");
+        assertTrue(manager.governor.windowLimitedLatchedForTest(),
+                "a successfully-sent governed-cap-truncated walk latches the window limit");
+    }
+
+    @Test
+    void failedSendNeverLatchesTheWindowLimit() {
+        setupManager(config(8, true));
+        manager.joinSlowStartEnabled = () -> true;
+        manager.transferGovernorEnabled = () -> true;
+        enableAdaptiveSeam();
+        manager.setBatchSenderForTest(payload -> {
+            throw new RuntimeException("transport down");
+        });
+        plainTick(dim("overworld"));
+        assertFalse(manager.governor.windowLimitedLatchedForTest(),
+                "nothing was offered — a failed send must not latch");
+    }
+
+    @Test
+    void manualCapBindingNeverLatchesTheWindowLimit() {
+        // The min-compose's manual half as the binder (governed burst 0 — slow start
+        // off): the walk truncates against the MANUAL knob, and the latch's
+        // governed-binding conjunct must refuse (a manually-capped loop never claims
+        // to be governor-window-limited).
+        int prior = LSSClientConfig.CONFIG.lodColumnsPerSecondLimit;
+        LSSClientConfig.CONFIG.lodColumnsPerSecondLimit = 10;
+        try {
+            setupManager(config(8, true)); // joinSlowStartEnabled=false in setupManager
+            manager.transferGovernorEnabled = () -> true;
+            enableAdaptiveSeam();
+            plainTick(dim("overworld"));
+            assertEquals(1, sent.size());
+            assertTrue(sent.get(0).count() <= 10, "the manual cap clamped the walk");
+            assertFalse(manager.governor.windowLimitedLatchedForTest(),
+                    "the manual knob was the binder — no governed window-limit claim");
+        } finally {
+            LSSClientConfig.CONFIG.lodColumnsPerSecondLimit = prior;
+        }
+    }
 }

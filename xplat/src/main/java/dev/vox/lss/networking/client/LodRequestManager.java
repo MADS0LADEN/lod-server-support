@@ -626,8 +626,24 @@ public class LodRequestManager {
             // (a 0-count converged walk disarms; sendRequests' catch re-disarms a
             // failed send before the next tick's predicate can read it).
             this.scanner.noteDeclared(scanned);
-            if (scanned > 0) {
-                sendRequests(this.sendPositionBuffer, this.sendTimestampBuffer, scanned);
+            if (scanned > 0 && sendRequests(this.sendPositionBuffer,
+                    this.sendTimestampBuffer, scanned)) {
+                // The governor's window-limited latch (ramp-window-limited-credit-
+                // plan.md §3.2): a SUCCESSFULLY-SENT walk that the GOVERNED burst
+                // cap truncated — the cap was the binding, taper-free clamp
+                // (scanner provenance) AND the governed rate is the binding half
+                // of the min-compose (a manually-capped loop must not claim to be
+                // governor-window-limited). Tick order puts governor.tick() before
+                // this phase, so the latch lands in the interval this declaration
+                // counts toward.
+                int governedBurst = this.governor.burstColumnsPerSecond();
+                int manual = LSSClientConfig.CONFIG.lodColumnsPerSecondLimit;
+                if (this.scanner.wasLastWalkTruncated()
+                        && this.scanner.wasLastBudgetCapClamped()
+                        && governedBurst > 0
+                        && (manual <= 0 || governedBurst <= manual)) {
+                    this.governor.noteWindowLimited();
+                }
             }
         }
         return scanned;
@@ -642,7 +658,10 @@ public class LodRequestManager {
 
     private BatchSender batchSender = payload -> dev.vox.lss.platform.LoaderServices.get().sendToServer(payload);
 
-    private void sendRequests(long[] positionBuffer, long[] timestampBuffer, int count) {
+    /** @return true iff the batch reached the transport (the same condition that
+     *          bumps {@code declaredColumnsCumulative}) — the window-limited latch's
+     *          send-success conjunct. */
+    private boolean sendRequests(long[] positionBuffer, long[] timestampBuffer, int count) {
         // Snapshot to exact-length arrays: BatchChunkRequestC2SPayload's StreamCodec reads
         // these lazily when the connection encodes on the netty event loop, which races the
         // next scan overwriting the reused sendPositionBuffer/sendTimestampBuffer. The
@@ -660,8 +679,10 @@ public class LodRequestManager {
                 if (timestamps[i] <= 0) timestamps[i] = 0;
             }
         }
+        boolean sent = false;
         try {
             this.batchSender.send(new BatchChunkRequestC2SPayload(positions, timestamps, count));
+            sent = true;
             this.declaredColumnsCumulative += count; // the governor's offer-backing input
             long nowMs = System.currentTimeMillis();
             for (int i = 0; i < count; i++) {
@@ -683,6 +704,7 @@ public class LodRequestManager {
             this.scanner.noteDeclared(0);
         }
         this.metrics.recordSendCycle(count); // counts attempts — a failed batch still counts
+        return sent;
     }
 
     public boolean onColumnReceived(long packed, long columnTimestamp, ResourceKey<Level> dimension) {
