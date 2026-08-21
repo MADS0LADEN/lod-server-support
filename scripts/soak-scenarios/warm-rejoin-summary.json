@@ -1,0 +1,65 @@
+{
+  "snapshotIntervalSeconds": 5,
+  "joinTimeoutSeconds": 240,
+  "steps": [
+    {
+      "anchor": 1,
+      "at": 2,
+      "cmd": "gamerule randomTickSpeed 0"
+    },
+    {
+      "anchor": 1,
+      "at": 2,
+      "cmd": "gamerule doMobSpawning false"
+    },
+    {
+      "anchor": 1,
+      "at": 2,
+      "cmd": "gamerule mobGriefing false"
+    },
+    {
+      "anchor": 1,
+      "at": 3,
+      "cmd": "gamerule doFireTick false"
+    },
+    {
+      "anchor": 1,
+      "at": 3,
+      "cmd": "gamerule doDaylightCycle false"
+    },
+    {
+      "anchor": 1,
+      "at": 3,
+      "cmd": "gamerule spawnChunkRadius 0"
+    },
+    {
+      "anchor": 1,
+      "at": 4,
+      "cmd": "tp @a 264 150 264"
+    },
+    {
+      "anchor": 1,
+      "at": 130,
+      "cmd": "save-all"
+    },
+    {
+      "anchor": 1,
+      "at": 195,
+      "cmd": "setblock 264 310 264 minecraft:stone"
+    },
+    {
+      "anchor": 1,
+      "at": 200,
+      "cmd": "save-all"
+    },
+    {
+      "anchor": 1,
+      "at": 210,
+      "cmd": "kick @a soak-phase-end"
+    }
+  ],
+  "end": {
+    "anchor": 2,
+    "at": 120
+  }
+}

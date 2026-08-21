@@ -281,7 +281,7 @@ public final class LSSNeoGameTests {
                             "waiting for the chunk to unload");
                     level.save(null, true, false);
                     reader.submitReadDirect(readerId, LSSConstants.DIM_STR_OVERWORLD,
-                            level, cx, cz, 0);
+                            level, cx, cz, 0, 0L);
                     step.set(1);
                     helper.assertTrue(false, "disk read submitted, awaiting result");
                 }

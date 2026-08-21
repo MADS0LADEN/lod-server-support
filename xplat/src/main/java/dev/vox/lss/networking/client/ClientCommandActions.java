@@ -159,6 +159,23 @@ public final class ClientCommandActions {
                 manager.getQuadRingSkips(), manager.getValveTrips()
         )).withStyle(ChatFormatting.GRAY));
 
+        // Region summaries (§6 attributability): rendered once any summary applied —
+        // why the want-set skipped revalidating the clean bulk after this rejoin.
+        // Stamps counters included in the gate (final panel): a session whose summary
+        // frame was lost but whose stamps flowed would otherwise hide its only
+        // instrument for the applied/ignored counts.
+        if (manager.getSummaryTilesClean() + manager.getSummaryTilesStale()
+                + manager.getSummaryTilesUnknown() + manager.getSummaryTilesNoRegion()
+                + manager.getSummaryStampsApplied() + manager.getSummaryStampsIgnored() > 0) {
+            feedback.accept(Component.literal(String.format(
+                    "Summary: tiles clean=%d stale=%d unknown=%d no_region=%d, columns_validated=%d, stamps applied=%d ignored=%d",
+                    manager.getSummaryTilesClean(), manager.getSummaryTilesStale(),
+                    manager.getSummaryTilesUnknown(), manager.getSummaryTilesNoRegion(),
+                    manager.getSummaryColumnsValidated(), manager.getSummaryStampsApplied(),
+                    manager.getSummaryStampsIgnored()
+            )).withStyle(ChatFormatting.GRAY));
+        }
+
         // Budget line (ingest_backlog: the consumer-reported pending sections driving the
         // #71 taper/halt; -1 = no consumer reports. rate_cap: the manual column-rate cap,
         // 0=off; rate_gated: TICKS the cap's spacing gate held a would-be fast fire back

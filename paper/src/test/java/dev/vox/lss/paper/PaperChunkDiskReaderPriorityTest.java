@@ -45,7 +45,7 @@ class PaperChunkDiskReaderPriorityTest {
             // mock level suffices — and reaching the assertion at all proves the override, not the
             // Moonrise path, served this read (Moonrise would explode on a mock level).
             reader.setReadOverride((cx, cz) -> CompletableFuture.completedFuture(Optional.<CompoundTag>empty()));
-            reader.submitReadDirect(uuid, "minecraft:overworld", mock(ServerLevel.class), 10, 10, 0L);
+            reader.submitReadDirect(uuid, "minecraft:overworld", mock(ServerLevel.class), 10, 10, 0L, 0L);
 
             ChunkReadResult result = awaitResult(reader, uuid);
             assertTrue(result.notFound(), "empty override tag resolves as not-found with the flag on");

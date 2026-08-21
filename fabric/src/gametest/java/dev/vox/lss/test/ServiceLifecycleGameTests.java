@@ -630,7 +630,7 @@ public class ServiceLifecycleGameTests {
 
         // Seed live work: a held pending slot, a done-bit, and a declared want-set.
         helper.assertTrue(state.tryAdmit(new PendingRequest(pcx - 148, pcz - 12,
-                        SlotType.SYNC_ON_LOAD, false)),
+                        SlotType.SYNC_ON_LOAD, 0L)),
                 "premise: pending seeded");
         state.markDiskReadDone(pcx - 148, pcz - 13);
         GameTestSeeding.seedRequest(state, PositionUtil.packPosition(pcx - 149, pcz - 12), -1L);
@@ -1056,7 +1056,7 @@ public class ServiceLifecycleGameTests {
 
         var state = service.registerPlayer(mock, LSSConstants.CAPABILITY_VOXEL_COLUMNS);
         helper.assertTrue(state.tryAdmit(new PendingRequest(pcx - 144, pcz - 8,
-                        SlotType.SYNC_ON_LOAD, false)),
+                        SlotType.SYNC_ON_LOAD, 0L)),
                 "premise: pending seeded before the respawn");
         state.markDiskReadDone(pcx - 144, pcz - 9);
 
@@ -1430,5 +1430,92 @@ public class ServiceLifecycleGameTests {
             service.shutdown();
         }
         helper.succeed();
+    }
+
+    /**
+     * Region freshness against REAL game-written region files (region-summary-sync-
+     * plan.md P1/P2 — the review's live-coverage gap): every Tier-1 pin reads headers
+     * the tests themselves crafted, so this is the one place the z-major header layout,
+     * the margined header rung, the tile stamps, and the summary pipeline (ingress →
+     * pump admission → sweeper assembly → dedicated-lane send) run against the game's
+     * own region writer end to end. Chunk band 250 (negative quadrant — disjoint from
+     * every other class's bands per the header comment).
+     */
+    @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 1200)
+    public void regionFreshnessServesRealRegionHeaders(GameTestHelper helper) {
+        var level = helper.getLevel();
+        var server = level.getServer();
+        var mock = placeMockServerPlayer(helper);
+        var service = new RequestProcessingService(server);
+        String dim = level.dimension().identifier().toString();
+        int pcx = mock.getBlockX() >> 4;
+        int pcz = mock.getBlockZ() >> 4;
+        int cx = pcx - 250;
+        int cz = pcz - 14;
+        level.getChunk(cx, cz); // force-generate so the save writes a real header entry
+        level.save(null, true, false);
+
+        long stamp = service.getRegionStamps().chunkStampSecondsOrUnknown(dim, cx, cz);
+        long nowSec = System.currentTimeMillis() / 1000L;
+        helper.assertTrue(stamp > 0
+                        && stamp != dev.vox.lss.common.region.RegionStampTable.NEVER_CLEAN
+                        && stamp <= nowSec + 3600,
+                "a REAL region header must yield a plausible save second (the z-major"
+                        + " layout against the game's own writer), got " + stamp);
+        long tile = service.getRegionStamps().tileStampSeconds(dim, cx >> 5, cz >> 5);
+        helper.assertTrue(tile >= stamp
+                        && tile != dev.vox.lss.common.region.RegionStampTable.NEVER_CLEAN,
+                "the tile stamp must cover the chunk's save second, got " + tile);
+
+        var state = service.registerPlayer(mock, LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+        long clientTs = stamp
+                + dev.vox.lss.common.region.RegionStampTable.FRESH_CLAIM_MARGIN_SECONDS + 10;
+        helper.assertTrue(state.tryAdmit(new PendingRequest(cx, cz,
+                        SlotType.SYNC_ON_LOAD, clientTs)),
+                "premise: pending admitted (the router's admission shape)");
+        service.getDiskReader().submitReadDirect(mock.getUUID(), dim, level, cx, cz,
+                1L, clientTs);
+
+        service.handleRegionSummaryRequest(mock,
+                dev.vox.lss.common.region.RegionSummaryWire.encodeRequest(
+                        new dev.vox.lss.common.region.RegionSummaryWire.Request(
+                                dim, cx >> 5, cz >> 5, 1)));
+
+        helper.succeedWhen(() -> {
+            service.tick();
+            helper.assertTrue(service.getDiskReader().getDiag().getHeaderHitsCount() >= 1,
+                    "the header rung must intercept the margined-fresh read against the"
+                            + " real region file");
+            helper.assertTrue(state.hasDiskReadDone(cx, cz),
+                    "the intercepted ask resolves up_to_date (done-bit)");
+            var summary = service.getRegionSummaries().diagnostics();
+            helper.assertTrue(summary.getFrames() >= 1,
+                    "one summary frame must assemble and send, reqs=" + summary.getRequests()
+                            + " frames=" + summary.getFrames());
+            helper.assertTrue(summary.getBytes() > 0,
+                    "the frame's bytes count on the dedicated lane");
+            helper.assertTrue(summary.getTilesKnown() + summary.getTilesNeverClean()
+                            + summary.getTilesNoRegion() == 9,
+                    "a radius-1 window reports exactly 9 tiles, known="
+                            + summary.getTilesKnown() + " never=" + summary.getTilesNeverClean()
+                            + " no_region=" + summary.getTilesNoRegion());
+            helper.assertTrue(summary.getTilesKnown() >= 1,
+                    "the saved chunk's own tile must report a real stamp");
+            // Stamped up_to_date (the whole server lane's ONE real-server pin, per the
+            // 3-Opus fold): the summary request armed eligibility, the header rung's
+            // margined-fresh interception is a compare-backed disposition, so its
+            // up_to_date must ship a verification-stamp frame on lss:col_stamps.
+            helper.assertTrue(summary.getStampsFrames() >= 1
+                            && summary.getStampsEntries() >= 1,
+                    "the compare-backed up_to_date must stamp (frames="
+                            + summary.getStampsFrames() + " entries="
+                            + summary.getStampsEntries() + ")");
+            // Terminal pass: tear down like the class's async probe test does — the
+            // throwaway service must not leak its threads/pools NOR leave its
+            // constructor-published XrayMaskManager as the static manager (the
+            // documented gametest static-stomping hazard).
+            service.shutdown();
+            server.getPlayerList().remove(mock);
+        });
     }
 }

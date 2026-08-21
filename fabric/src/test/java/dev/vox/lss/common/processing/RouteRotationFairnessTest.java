@@ -48,7 +48,7 @@ class RouteRotationFairnessTest {
             return this.headroomBudget.get() > 0;
         }
         @Override
-        protected boolean submitDiskRead(UUID playerUuid, String dimension, int cx, int cz, long order) {
+        protected boolean submitDiskRead(UUID playerUuid, String dimension, int cx, int cz, long order, long clientTimestamp) {
             this.headroomBudget.decrementAndGet();
             this.submitters.add(playerUuid);
             return true;

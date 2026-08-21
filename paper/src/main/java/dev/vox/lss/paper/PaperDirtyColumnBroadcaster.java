@@ -73,7 +73,9 @@ class PaperDirtyColumnBroadcaster {
             long[] dirty = this.dirtyTracker.drainDirty(dimensionStr);
             if (dirty == null || dirty.length == 0) continue;
 
-            this.offThreadProcessor.invalidateTimestamps(dimensionStr, dirty);
+            // Second-phase release for the stamping guard — see the Fabric twin.
+            this.offThreadProcessor.invalidateTimestamps(dimensionStr, dirty,
+                    () -> this.dirtyTracker.confirmInvalidated(dimensionStr, dirty));
 
             int bufLen = Math.min(dirty.length, MAX_POSITIONS);
             if (this.positionFilterBuffer == null || this.positionFilterBuffer.length < bufLen) {

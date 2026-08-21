@@ -207,6 +207,8 @@ public class PaperCommands implements CommandExecutor, TabCompleter {
         ).withV16Line(service.getV16CompatManager().diagLineOrNull())
                 .withV18Line(service.getDialectTracker().diagLine())
                 .withFarPlayersLine(farPlayersDiagLineOrNull(service))
+                .withSummaryLine(service.getRegionSummaries() == null ? null
+                        : service.getRegionSummaries().diagnostics().diagLineOrNull())
                 .withYieldLine(DiagnosticsFormatter.yieldDiagLineOrNull(
                         config.lodYieldsToVanillaTransport, service.getTickDiag()))
                 .withXrayLine(xrayDiagLine());

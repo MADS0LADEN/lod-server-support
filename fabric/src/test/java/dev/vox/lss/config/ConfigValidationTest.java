@@ -71,6 +71,13 @@ class ConfigValidationTest {
      *  client governor paces itself against every released v17+ server. Each has its
      *  own kill switch. */
     @Test
+    void regionSummariesDefaultOn() {
+        assertTrue(serverConfig().enableRegionSummaries,
+                "region summaries must ship enabled (region-summary-sync-plan.md §9 — "
+                + "the HANDLER-checked kill switch is the off ramp)");
+    }
+
+    @Test
     void adaptiveTransferRateMechanismsDefaultOn() {
         assertTrue(serverConfig().enablePingBackstop,
                 "the ping backstop must ship enabled");
@@ -719,6 +726,46 @@ class ConfigValidationTest {
         assertTrue(c.enableAdaptiveScanCadence, "adaptive scan cadence must default ON");
         c.validate();
         assertTrue(c.enableAdaptiveScanCadence, "validate() must not touch the boolean");
+    }
+
+    @Test
+    void regionSummarySyncDefaultsOnAndRoundTripsThroughJson() {
+        // The client half of region summaries (region-summary-sync-plan.md §9) ships ON,
+        // and the GSON leg pins the exact key + a saved false binding back as false —
+        // the enableScanPrefixRetention precedent (a silent default-off revert would
+        // pass CI green while quietly killing the warm-rejoin suppression in the field).
+        var c = clientConfig();
+        assertTrue(c.enableRegionSummarySync, "region summary sync must default ON");
+        c.validate();
+        assertTrue(c.enableRegionSummarySync, "validate() must not touch the boolean");
+        var gson = new com.google.gson.Gson();
+        String saved = gson.toJson(clientConfig());
+        assertTrue(saved.contains("\"enableRegionSummarySync\":true"),
+                "a fresh config must persist the default under the exact key: " + saved);
+        var loaded = gson.fromJson(saved.replace(
+                "\"enableRegionSummarySync\":true", "\"enableRegionSummarySync\":false"),
+                dev.vox.lss.config.LSSClientConfig.class);
+        assertFalse(loaded.enableRegionSummarySync, "a saved false must bind back as false");
+    }
+
+    @Test
+    void quadtreeScanDefaultsOnAndRoundTripsThroughJson() {
+        // The third sibling (final panel: the one new client kill switch with no
+        // config pin) — same hazard as its siblings: a silent default-off revert
+        // would pass CI green while quietly reverting reset walks to the 30-90 ms
+        // per-position shape in the field.
+        var c = clientConfig();
+        assertTrue(c.enableQuadtreeScan, "quadtree scan must default ON");
+        c.validate();
+        assertTrue(c.enableQuadtreeScan, "validate() must not touch the boolean");
+        var gson = new com.google.gson.Gson();
+        String saved = gson.toJson(clientConfig());
+        assertTrue(saved.contains("\"enableQuadtreeScan\":true"),
+                "a fresh config must persist the default under the exact key: " + saved);
+        var loaded = gson.fromJson(saved.replace(
+                "\"enableQuadtreeScan\":true", "\"enableQuadtreeScan\":false"),
+                dev.vox.lss.config.LSSClientConfig.class);
+        assertFalse(loaded.enableQuadtreeScan, "a saved false must bind back as false");
     }
 
     @Test

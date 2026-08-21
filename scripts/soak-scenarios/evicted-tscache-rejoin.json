@@ -1,0 +1,15 @@
+{
+  "snapshotIntervalSeconds": 5,
+  "joinTimeoutSeconds": 240,
+  "steps": [
+    {
+      "anchor": 1,
+      "at": 2,
+      "cmd": "gamerule doDaylightCycle false"
+    }
+  ],
+  "end": {
+    "anchor": 1,
+    "at": 150
+  }
+}

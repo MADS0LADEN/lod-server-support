@@ -215,6 +215,9 @@ public final class PaperSoakMetricsExporter {
             // processing diagnostics; the rung requires a reader, so the no-reader
             // disk-map-empty contract is preserved.
             diskMap.put("memo_hits", diag.getTotalMemoHits());
+            // Header freshness rung hits (region-summary-sync-plan.md P1) — the Fabric
+            // exporter's twin (schema parity is contract-pinned).
+            diskMap.put("header_hits", dd.getHeaderHitsCount());
         }
         result.put("disk", diskMap);
 
@@ -296,6 +299,25 @@ public final class PaperSoakMetricsExporter {
         farMap.put("suppressed", farPlayers.suppressedUnchanged());
         farMap.put("bytes", farPlayers.bytesSent());
         result.put("far_players", farMap);
+
+        // Region summaries — verbatim twin of the Fabric exporter's group (same keys,
+        // same order; the shared server-snapshot.contract pins parity). All-zero on
+        // every soak run (harness clients never request — property gate).
+        var summary = service.getRegionSummaries() == null ? null
+                : service.getRegionSummaries().diagnostics();
+        var summaryMap = new LinkedHashMap<String, Object>();
+        summaryMap.put("requests", summary == null ? 0L : summary.getRequests());
+        summaryMap.put("range_filtered", summary == null ? 0L : summary.getRangeFiltered());
+        summaryMap.put("frames", summary == null ? 0L : summary.getFrames());
+        summaryMap.put("tiles_known", summary == null ? 0L : summary.getTilesKnown());
+        summaryMap.put("tiles_never_clean", summary == null ? 0L : summary.getTilesNeverClean());
+        summaryMap.put("tiles_no_region", summary == null ? 0L : summary.getTilesNoRegion());
+        summaryMap.put("bytes", summary == null ? 0L : summary.getBytes());
+        summaryMap.put("refresh_ms_hw", summary == null ? 0L : summary.getRefreshMsMax());
+        summaryMap.put("stamps_frames", summary == null ? 0L : summary.getStampsFrames());
+        summaryMap.put("stamps_entries", summary == null ? 0L : summary.getStampsEntries());
+        summaryMap.put("stamps_bytes", summary == null ? 0L : summary.getStampsBytes());
+        result.put("summary", summaryMap);
 
         // LOD store — verbatim twin of the Fabric exporter's group (same keys, same
         // order; the shared server-snapshot.contract pins parity). All-zero while

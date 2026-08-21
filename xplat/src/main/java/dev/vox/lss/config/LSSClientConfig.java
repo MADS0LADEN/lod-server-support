@@ -79,6 +79,13 @@ public class LSSClientConfig extends JsonConfig {
     // enableScanPrefixRetention (the prefix/reopened-ring machinery runs identically in
     // both modes).
     public boolean enableQuadtreeScan = true;
+    // Region-summary sync (region-summary-sync-plan.md §6): one ~6 KB exchange at
+    // dimension entry validates the clean bulk of the cached disc (validated bits set
+    // per-column against the server's per-region freshness stamps), so a warm rejoin
+    // stops re-declaring ~1M positions over minutes. false = never request, never apply
+    // — exactly the pre-summary per-column revalidation. There is no persisted client
+    // state, so a flip can poison nothing.
+    public boolean enableRegionSummarySync = true;
     // Ingest-pressure request pacing (issue #71, docs/planning/ingest-backpressure-design.md):
     // scale the want-set budget down — and halt declarations entirely at a threshold — when a
     // registered LOD consumer reports a pending ingest backlog (Voxy's ingest queue depth via

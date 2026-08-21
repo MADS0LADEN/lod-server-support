@@ -51,6 +51,11 @@ public class PaperRequestProcessingService {
     private final PaperOffThreadProcessor offThreadProcessor;
     // Null while lodStore=off or when the codec native cannot load (degrade, never crash).
     private final dev.vox.lss.common.store.LodStoreService lodStore;
+    // Region freshness stamps (region-summary-sync-plan.md): the P1 header rung's oracle.
+    // Null in pre-region-stamps test wirings (rung inert there).
+    private final dev.vox.lss.common.region.RegionStampTable regionStamps;
+    // Region summaries (P2): null iff regionStamps is null.
+    private final dev.vox.lss.common.region.RegionSummaryService regionSummaries;
     private final DirtyColumnTracker dirtyTracker;
     private final PaperDirtyColumnBroadcaster dirtyBroadcaster;
     // The v16 compat shim's per-player sessions (legacy protocol-16 clients). The pipeline
@@ -290,7 +295,24 @@ public class PaperRequestProcessingService {
                   PaperDirtyColumnBroadcaster dirtyBroadcaster,
                   dev.vox.lss.common.store.LodStoreService lodStore,
                   PaperXrayMaskManager xrayMasks,
-                  boolean wireCompressionLive) {
+                  boolean wireCompressionLive,
+                  dev.vox.lss.common.region.RegionStampTable regionStamps) {
+
+        /** Pre-region-stamps full shape — test wirings that don't exercise the header
+         *  rung (null table = rung inert, exactly the bare-reader behavior). */
+        Wiring(Map<UUID, PaperPlayerRequestState> players,
+               PaperChunkDiskReader diskReader,
+               PaperChunkGenerationService generationService,
+               PaperOffThreadProcessor offThreadProcessor,
+               DirtyColumnTracker dirtyTracker,
+               PaperDirtyColumnBroadcaster dirtyBroadcaster,
+               dev.vox.lss.common.store.LodStoreService lodStore,
+               PaperXrayMaskManager xrayMasks,
+               boolean wireCompressionLive) {
+            this(players, diskReader, generationService, offThreadProcessor,
+                    dirtyTracker, dirtyBroadcaster, lodStore, xrayMasks,
+                    wireCompressionLive, null);
+        }
 
         /** Pre-compression full shape (no wire codec attached) — store-era test wirings. */
         Wiring(Map<UUID, PaperPlayerRequestState> players,
@@ -348,6 +370,14 @@ public class PaperRequestProcessingService {
         this.dirtyTracker = wiring.dirtyTracker();
         this.dirtyBroadcaster = wiring.dirtyBroadcaster();
         this.lodStore = wiring.lodStore();
+        this.regionStamps = wiring.regionStamps();
+        // Region summaries (P2, plan §5): sweeper + mailboxes over the stamp table.
+        // Null table (pre-region-stamps test wirings) = feature inert. Disconnect
+        // cleanup is TTL-based (see the Fabric twin's field comment).
+        this.regionSummaries = this.regionStamps == null ? null
+                : new dev.vox.lss.common.region.RegionSummaryService(
+                        this.regionStamps::tileStampSeconds,
+                        () -> this.config.lodDistanceChunks);
         // Null in test wiring: the guarded retract at shutdown must clear only a
         // manager this service actually published.
         this.xrayMasks = wiring.xrayMasks();
@@ -356,6 +386,28 @@ public class PaperRequestProcessingService {
         // legacy (v19/v18/v16) column bodies to the native layout at build time.
         if (this.offThreadProcessor != null) {
             this.offThreadProcessor.attachDialectTracker(this.dialects);
+        }
+        // Stamped up_to_date (stamped-up-to-date-plan.md §9.2, the Fabric twin's
+        // wiring): compare-backed rungs stamp "verified now" unless the position's
+        // change is marked-but-undrained or the region latch is armed. Null table
+        // (pre-region-stamps test wirings) keeps the NEVER default — no stamps.
+        // Paper residual (plan §9.3, accepted-with-eyes-open): an event-blind content
+        // change (the unfired-event class) is invisible to BOTH guards; its stamp
+        // seals until the chunk's next save — the store resweep bounds the store-rung
+        // arm, and paper-store-unfired-event's probe legs canary the class.
+        if (this.offThreadProcessor != null && this.regionStamps != null
+                && this.dirtyTracker != null) {
+            this.offThreadProcessor.setUpToDateStampSource((player, dim, packed) -> {
+                // Eligibility FIRST (3-Opus fold — see the Fabric twin).
+                var s = this.regionSummaries;
+                if (s == null || !s.hasRequestedThisSession(player)) return -1L;
+                if (this.dirtyTracker.isPending(dim, packed)) return -1L;
+                if (this.regionStamps.isClaimSuppressed(dim,
+                        PositionUtil.unpackX(packed), PositionUtil.unpackZ(packed))) {
+                    return -1L;
+                }
+                return LSSConstants.epochSeconds();
+            });
         }
     }
 
@@ -430,25 +482,52 @@ public class PaperRequestProcessingService {
                 LSSLogger.info(advice);
             }
         }
+        // Region-dir resolver, HOISTED out of the store branch (region-summary-sync-plan.md
+        // §5 integration M2 — the Fabric twin's comment applies: the P1 header rung must
+        // work store-LESS, and the compiled store default is off).
+        // PER-LINE INVARIANT (surfaces row 17 — Bukkit world layout): Paper 26.x uses the
+        // vanilla UNIFIED layout, so the server worldRoot is the correct getStorageFolder
+        // root, same as Fabric. The 1.21.x lines use Bukkit's legacy SPLIT world dirs and
+        // re-root PER LEVEL via getWorld().getWorldFolder() — the two forms are NOT
+        // interchangeable: R2-9's live probe (2026-08-15) showed 26.2's getWorldFolder()
+        // returns the per-dimension SUBFOLDER (world/dimensions/minecraft/<dim>), so
+        // adopting the per-level form here would break this line's sweep the same way the
+        // unified form broke the 1.21.x port's. Walk row 17 on every port.
+        var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
+        var regionDirs = new java.util.HashMap<String, java.nio.file.Path>();
+        for (ServerLevel level : server.getAllLevels()) {
+            // Per-level belt: this loop now runs on STORE-LESS servers too, where the
+            // storage-folder API was never touched before — an exotic dimension key
+            // must degrade that one dimension to UNKNOWN (the table's designed
+            // fail-safe), never take down service start.
+            try {
+                regionDirs.put(level.dimension().identifier().toString(),
+                        net.minecraft.world.level.dimension.DimensionType
+                                .getStorageFolder(level.dimension(), worldRoot)
+                                .resolve("region").normalize());
+            } catch (Throwable t) {
+                LSSLogger.warn("Could not resolve the region directory for "
+                        + level.dimension().identifier() + " — region freshness there"
+                        + " falls through to full reads", t);
+            }
+        }
+        var regionStamps = new dev.vox.lss.common.region.RegionStampTable(regionDirs::get);
+        diskReader.attachRegionStamps(regionStamps);
+        // Tracker + mark listener BEFORE the processor starts (the Fabric twin's
+        // ordering): every dirty mark from the first tick onward must bump the region's
+        // live save mark. Paper's Bukkit events register later either way; this keeps
+        // the two platforms' wiring order identical.
+        var dirtyTracker = new DirtyColumnTracker();
+        // Marks fire at EDIT time on Paper — strictly no later than the save, so the
+        // latch arms before the write can lag the header. Region threads under Folia —
+        // the bump is atomic.
+        dirtyTracker.setMarkListener((dim, cx, cz) -> regionStamps
+                .bumpLiveSaveMark(dim, cx, cz, LSSConstants.epochSeconds()));
+
         if (storeMode != dev.vox.lss.common.store.LodStoreMode.OFF) {
-            var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
-            var regionDirs = new java.util.HashMap<String, java.nio.file.Path>();
             var maskFingerprints = new java.util.HashMap<String, String>();
             for (ServerLevel level : server.getAllLevels()) {
                 String dim = level.dimension().identifier().toString();
-                // PER-LINE INVARIANT (surfaces row 17 — Bukkit world layout): Paper
-                // 26.x uses the vanilla UNIFIED layout, so the server worldRoot is the
-                // correct getStorageFolder root, same as Fabric. The 1.21.x lines use
-                // Bukkit's legacy SPLIT world dirs and re-root PER LEVEL via
-                // getWorld().getWorldFolder() — the two forms are NOT interchangeable:
-                // R2-9's live probe (2026-08-15) showed 26.2's getWorldFolder() returns
-                // the per-dimension SUBFOLDER (world/dimensions/minecraft/<dim>), so
-                // adopting the per-level form here would break this line's sweep the
-                // same way the unified form broke the 1.21.x port's. Walk row 17 on
-                // every port.
-                regionDirs.put(dim, net.minecraft.world.level.dimension.DimensionType
-                        .getStorageFolder(level.dimension(), worldRoot)
-                        .resolve("region").normalize());
                 var maskEntry = PaperXrayMaskManager.entryForActive(level);
                 maskFingerprints.put(dim, maskEntry == null ? "off"
                         : maskEntry.sourceLabel() + ":"
@@ -493,11 +572,11 @@ public class PaperRequestProcessingService {
 
         offThreadProcessor.start();
 
-        var dirtyTracker = new DirtyColumnTracker();
         var dirtyBroadcaster = new PaperDirtyColumnBroadcaster(
                 server, players, dirtyTracker, offThreadProcessor);
         return new Wiring(players, diskReader, generationService, offThreadProcessor,
-                dirtyTracker, dirtyBroadcaster, lodStore, xrayMasks, wireCompressionLive);
+                dirtyTracker, dirtyBroadcaster, lodStore, xrayMasks, wireCompressionLive,
+                regionStamps);
     }
 
     /** Registry identity for the LOD store meta guard (4-agent round R2-M3) — textual
@@ -543,6 +622,12 @@ public class PaperRequestProcessingService {
 
     public DirtyColumnTracker getDirtyTracker() {
         return this.dirtyTracker;
+    }
+
+    /** The region freshness stamp table (P1 header rung; P2 summary sweeper). Null in
+     *  pre-region-stamps test wirings. */
+    public dev.vox.lss.common.region.RegionStampTable getRegionStamps() {
+        return this.regionStamps;
     }
 
     /** Cross-thread lifecycle ingress. On Folia, handshakes and PlayerQuit arrive on region
@@ -750,6 +835,9 @@ public class PaperRequestProcessingService {
                         // identity-survives-dim-change contract.
                         this.dialects.onDisconnect(r.uuid());
                         this.farPlayerService.removeViewer(r.uuid());
+                        // Region summaries: quit-originated only, same as above —
+                        // connection-scoped cleanup, never the dim-change cycle.
+                        if (this.regionSummaries != null) this.regionSummaries.removePlayer(r.uuid());
                     }
                 }
             } catch (Exception e) {
@@ -1006,6 +1094,9 @@ public class PaperRequestProcessingService {
                 // the other two identities, or a swept viewer's roster state leaks and
                 // keeps charging the broadcast loop until a same-UUID rejoin.
                 this.farPlayerService.removeViewer(uuid);
+                // Region summaries: same connection-scoped cleanup (pending request,
+                // queued job, re-sweep cooldown mark).
+                if (this.regionSummaries != null) this.regionSummaries.removePlayer(uuid);
             }
         }
 
@@ -1021,7 +1112,82 @@ public class PaperRequestProcessingService {
         flushSendQueues(lifecycle.activeCount);
         this.dirtyBroadcaster.tick(this.config);
         tickFarPlayers();
+        tickRegionSummaries();
         tickDiagnosticsLog();
+    }
+
+    /** Region summaries (P2, plan §5) — the Fabric twin's pump: admit dimension-matched
+     *  requests into sweep jobs and drain ready frames onto the dedicated send lane.
+     *  Player state is only read HERE (the pump thread); ingress stored pure data. */
+    private void tickRegionSummaries() {
+        if (this.regionSummaries == null) return; // pre-region-stamps test wirings
+        try {
+            this.regionSummaries.pump(uuid -> {
+                var state = this.players.get(uuid);
+                if (state == null || !state.hasCompletedHandshake()) return null;
+                String dim = state.registeredDimension();
+                long pc = state.playerChunkPackedOrSentinel();
+                if (dim == null || pc == Long.MIN_VALUE) return null;
+                return new dev.vox.lss.common.region.RegionSummaryService.PlayerAnchor(
+                        dim, PositionUtil.unpackX(pc), PositionUtil.unpackZ(pc));
+            }, (uuid, frame) -> {
+                var player = this.server.getPlayerList().getPlayer(uuid);
+                if (player == null) { // disconnected while assembling — unsendable forever
+                    return dev.vox.lss.common.region.RegionSummaryService.SendOutcome.DROP;
+                }
+                // CURRENT-dialect re-check at the sink (final panel — the stamps
+                // lane's rule, mirrored): a pre-handshake request reads as CURRENT
+                // (untracked UUID) and a session can re-handshake DOWN before the
+                // frame drains; a legacy session must never receive a summary frame.
+                if (this.dialects.dialectOf(uuid)
+                        != dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT) {
+                    return dev.vox.lss.common.region.RegionSummaryService.SendOutcome.DROP;
+                }
+                // The far-player lane's writability discipline (final review F2), with
+                // RETENTION (live-diagnosed 2026-08-20 — see the Fabric twin): the
+                // frame drains at the join/portal moment, exactly when the serve flood
+                // makes the channel unwritable, and the client never re-requests — so
+                // unwritable answers RETRY (service retains, TTL-bounded) instead of
+                // eating the session's whole exchange.
+                var snap = PaperChannelPressure.forPlayer(player).snapshot();
+                if (snap.writable() == dev.vox.lss.common.processing.ChannelPressureProbe
+                        .Writability.NOT_WRITABLE) {
+                    return dev.vox.lss.common.region.RegionSummaryService.SendOutcome.RETRY;
+                }
+                return PaperPayloadHandler.sendRegionSummary(player, frame)
+                        ? dev.vox.lss.common.region.RegionSummaryService.SendOutcome.SENT
+                        : dev.vox.lss.common.region.RegionSummaryService.SendOutcome.DROP;
+            });
+        } catch (Exception e) {
+            if (!this.regionSummaryTickErrorWarned) {
+                this.regionSummaryTickErrorWarned = true;
+                LSSLogger.error("Region-summary pump failed — contained (once per session)", e);
+            }
+        }
+    }
+
+    private boolean regionSummaryTickErrorWarned;
+
+    /** Ingress for {@code lss:region_summary_req} (messenger/region thread — stores
+     *  pure data, no entity access). The HANDLER-checked kill switch (plan §5). */
+    public void handleRegionSummaryRequest(UUID player, byte[] body) throws Exception {
+        if (this.regionSummaries == null) return;
+        if (!this.config.enabled || !this.config.enableRegionSummaries) return;
+        // A malformed frame throws out into dispatchPluginMessage's hostile-frame
+        // containment (throttled) — the Fabric twin contains at its own receiver.
+        var request = dev.vox.lss.common.region.RegionSummaryWire.decodeRequest(body);
+        // CURRENT dialect only (plan §9.4 — the far-player subscription discipline):
+        // a legacy-dialect session must not become stamps-eligible.
+        if (this.dialects.dialectOf(player)
+                != dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT) {
+            return;
+        }
+        this.regionSummaries.offerRequest(player, request);
+    }
+
+    /** The region-summary service (diag + tests); null in pre-region-stamps wirings. */
+    public dev.vox.lss.common.region.RegionSummaryService getRegionSummaries() {
+        return this.regionSummaries;
     }
 
     /** The v16 shim's 1 Hz declare pass (PUMP): the SOLE declarer for legacy sessions. A
@@ -1396,6 +1562,30 @@ public class PaperRequestProcessingService {
             this.v16Compat.observeBatchResponse(state.getPlayerUUID(), types, positions, count);
             PaperPayloadHandler.sendBatchResponse(state.getPlayer().getBukkitEntity(),
                     types, positions, count);
+        }, new OffThreadProcessor.StampsSink<>() {
+            // Stamped up_to_date (plan §3): the summary request is the eligibility
+            // declaration; fire-and-forget, counted on a completed send only.
+            @Override public boolean eligible(UUID uuid) {
+                // CURRENT dialect conjunct (3-Opus fold — see the Fabric twin).
+                var s = PaperRequestProcessingService.this.regionSummaries;
+                return s != null
+                        && PaperRequestProcessingService.this.dialects.dialectOf(uuid)
+                                == dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT
+                        && s.hasRequestedThisSession(uuid);
+            }
+            @Override public void send(PaperPlayerRequestState state, byte[] frame, int entries) {
+                // Writability drop (3-Opus fold — see the Fabric twin): uncounted, no
+                // retry; loss is the designed-tolerant case.
+                var snap = PaperChannelPressure.forPlayer(state.getPlayer()).snapshot();
+                if (snap.writable() == dev.vox.lss.common.processing.ChannelPressureProbe
+                        .Writability.NOT_WRITABLE) {
+                    return;
+                }
+                if (PaperPayloadHandler.sendColumnStamps(state.getPlayer(), frame)) {
+                    PaperRequestProcessingService.this.regionSummaries.diagnostics()
+                            .recordStampsFrame(entries, frame.length);
+                }
+            }
         });
     }
 
@@ -1553,6 +1743,14 @@ public class PaperRequestProcessingService {
         // region thread — this flag shrinks the tick-vs-shutdown overlap to at most the one
         // in-flight tick (runtime disables are documented best-effort on Folia).
         this.shuttingDown = true;
+        try {
+            // Own containment, FIRST (P2 review I-m2): no ordering dependency on the
+            // dirty drain, and a throw there must not leak the sweeper daemon across
+            // /reload cycles (each would hold the old stamp table + world resolver).
+            if (this.regionSummaries != null) this.regionSummaries.shutdown();
+        } catch (Exception e) {
+            LSSLogger.error("Error shutting down region-summary sweeper", e);
+        }
         try {
             // Marks accumulated since the last broadcast interval must still invalidate the
             // timestamp cache BEFORE its final save (the invalidations ride the shutdown

@@ -9,6 +9,9 @@ import dev.vox.lss.networking.payloads.FarPlayerPrefsC2SPayload;
 import dev.vox.lss.networking.payloads.FarPlayerRosterS2CPayload;
 import dev.vox.lss.networking.payloads.FarPlayerUpdatesS2CPayload;
 import dev.vox.lss.networking.payloads.HandshakeC2SPayload;
+import dev.vox.lss.networking.payloads.RegionSummaryRequestC2SPayload;
+import dev.vox.lss.networking.payloads.ColumnStampsS2CPayload;
+import dev.vox.lss.networking.payloads.RegionSummaryS2CPayload;
 import dev.vox.lss.networking.payloads.SessionConfigS2CPayload;
 import dev.vox.lss.networking.payloads.VoxelColumnS2CPayload;
 import dev.vox.lss.networking.server.LSSServerNetworking;
@@ -17,7 +20,7 @@ import net.neoforged.neoforge.network.registration.HandlerThread;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
 /**
- * NeoForge payload registration — the fabric {@code LSSNetworking} twin, all 10
+ * NeoForge payload registration — the fabric {@code LSSNetworking} twin, all 13
  * {@code lss:*} channels. Two loader-bound invariants (plan §1.2, both fatal if
  * violated): every registration rides an {@code .optional()} registrar — a
  * MANDATORY payload refuses vanilla/Fabric clients at login (the community
@@ -47,6 +50,8 @@ public final class LSSNetworking {
                 LSSServerNetworking::handleClientInfoPayload);
         registrar.playToServer(FarPlayerPrefsC2SPayload.TYPE, FarPlayerPrefsC2SPayload.CODEC,
                 LSSServerNetworking::handleFarPlayerPrefsPayload);
+        registrar.playToServer(RegionSummaryRequestC2SPayload.TYPE, RegionSummaryRequestC2SPayload.CODEC,
+                LSSServerNetworking::handleRegionSummaryRequestPayload);
 
         // Server -> Client (handlers run on physical clients only; the client half
         // wires real behavior at N-3 — see LSSClientNetworking).
@@ -62,5 +67,9 @@ public final class LSSNetworking {
                 LSSClientNetworking::handleFarPlayerRosterPayload);
         registrar.playToClient(FarPlayerUpdatesS2CPayload.TYPE, FarPlayerUpdatesS2CPayload.CODEC,
                 LSSClientNetworking::handleFarPlayerUpdatesPayload);
+        registrar.playToClient(RegionSummaryS2CPayload.TYPE, RegionSummaryS2CPayload.CODEC,
+                LSSClientNetworking::handleRegionSummaryPayload);
+        registrar.playToClient(ColumnStampsS2CPayload.TYPE, ColumnStampsS2CPayload.CODEC,
+                LSSClientNetworking::handleColumnStampsPayload);
     }
 }

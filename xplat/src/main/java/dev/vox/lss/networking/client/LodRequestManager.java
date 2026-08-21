@@ -76,12 +76,51 @@ public class LodRequestManager {
     // after the load lands. Main client thread only.
     private final it.unimi.dsi.fastutil.longs.LongOpenHashSet failuresDuringCacheLoad =
             new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+    // Dirty notices arriving DURING the load (final honesty review minor-3): the leaf map
+    // is empty then, so markDirtyIfKnown drops them — and a summary frame assembled
+    // BEFORE the edit's mark could otherwise validate the edited position right after
+    // adoptLoaded, sealing it until the next dimension entry. Re-marked after the load
+    // lands, strictly BEFORE the buffered frame applies. Main client thread only.
+    private final it.unimi.dsi.fastutil.longs.LongOpenHashSet dirtyDuringCacheLoad =
+            new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
 
     // Metrics tracking (counters + rolling rates)
     private final RequestMetrics metrics = new RequestMetrics();
 
     // Edge-trigger for the decode-backpressure clear: exactly one empty batch per halt episode.
     private boolean backpressureClearSent = false;
+
+    // --- Region summaries (region-summary-sync-plan.md §6) ---
+    /** Send seam for the fire-and-forget C2S request (the lss:client_info doctrine:
+     *  legacy servers discard the unregistered channel; a send failure never matters). */
+    interface SummarySender {
+        void send(byte[] requestBody) throws Exception;
+    }
+
+    private SummarySender summarySender = body -> dev.vox.lss.platform.LoaderServices.get()
+            .sendToServer(new dev.vox.lss.networking.payloads.RegionSummaryRequestC2SPayload(body));
+    /** The S2C frame buffered while this dimension's cache load is in flight (LATEST
+     *  wins — a re-entered dimension's fresh frame replaces a stale one). Applied right
+     *  after {@code adoptLoaded} + the buffered ingest-failure re-applies. */
+    private byte[] pendingSummaryFrame;
+    // Attributability counters (§6/§8): why re_resolved/up_to_date collapse on upgraded
+    // pairs. Main client thread only; exported as the client summary.* group.
+    private long summaryTilesClean;
+    private long summaryTilesStale;
+    private long summaryTilesUnknown;
+    private long summaryTilesNoRegion;
+    private long summaryColumnsValidated;
+    private long summaryStampsApplied;
+    private long summaryStampsIgnored;
+    /** Harness gate (the far-player capability precedent): soak/benchmark clients never
+     *  request, so no scenario baseline can shift; the summary scenarios opt back in
+     *  via -Dlss.soak.summary. Seam for tests. */
+    java.util.function.BooleanSupplier summaryHarnessGate = () ->
+            (Boolean.getBoolean("lss.soak") || Boolean.getBoolean("lss.benchmark"))
+                    && !Boolean.getBoolean("lss.soak.summary");
+    /** CURRENT-dialect gate (the far-player/fast-cadence v16 doctrine): only a v20
+     *  session requests. Seam for tests. */
+    IntSupplier summarySessionVersion = ClientNetGlue::getSessionVersion;
 
     // Tier B v16 backward-compat (docs/planning/v16-client-compat-design.md §4). When true, the
     // egress rewrites a first-serve request stamp (<=0) to 0 — v16's generate-on-miss trigger —
@@ -315,7 +354,7 @@ public class LodRequestManager {
                          int viewDistance, int columnQueueSize, long columnQueueBytes,
                          int ingestBacklogSections, IntSupplier missingVanilla) {
         this.lastIngestBacklog = ingestBacklogSections;
-        tickDimensionAndCachePhase(currentDim);
+        tickDimensionAndCachePhase(currentDim, playerCx, playerCz);
         tickMovementPhase(playerCx, playerCz);
         this.metrics.updateRollingRates();
         boolean halted = haltedByBackpressure(columnQueueSize, columnQueueBytes,
@@ -402,13 +441,17 @@ public class LodRequestManager {
         }
     }
 
-    /** Dimension change: flush state, reload cache. First tick starts the initial load. */
-    void tickDimensionAndCachePhase(ResourceKey<Level> currentDim) {
+    /** Dimension change: flush state, reload cache, and fire the region-summary request
+     *  in parallel with the load (§6 — the position is this tick's, so a portal's 8×
+     *  coordinate scale centers the window correctly). First tick starts the initial load. */
+    void tickDimensionAndCachePhase(ResourceKey<Level> currentDim, int playerCx, int playerCz) {
         if (this.lastDimension != null && !currentDim.equals(this.lastDimension)) {
             this.onDimensionChange(currentDim);
+            sendRegionSummaryRequest(currentDim, playerCx, playerCz);
         } else if (!this.cacheLoaded) {
             this.cacheLoaded = true;
             startAsyncCacheLoad(currentDim);
+            sendRegionSummaryRequest(currentDim, playerCx, playerCz);
         }
         this.lastDimension = currentDim;
     }
@@ -510,6 +553,31 @@ public class LodRequestManager {
                     this.columns.onIngestFailed(failed);
                 }
                 this.failuresDuringCacheLoad.clear();
+            }
+            if (!this.dirtyDuringCacheLoad.isEmpty()) {
+                // Dirty notices dropped while the leaf map was empty: re-mark against the
+                // adopted stamps (and reopen their rings) BEFORE the buffered frame can
+                // validate the edited positions off their pre-edit loaded stamps.
+                int reopenLod = this.scanner.currentReopenLod();
+                for (long packed : this.dirtyDuringCacheLoad) {
+                    if (this.columns.markDirtyIfKnown(packed)) {
+                        this.scanner.reopenRing(Math.max(
+                                Math.abs(PositionUtil.unpackX(packed) - this.lastChunkX),
+                                Math.abs(PositionUtil.unpackZ(packed) - this.lastChunkZ)),
+                                reopenLod);
+                    }
+                }
+                this.dirtyDuringCacheLoad.clear();
+            }
+            if (this.pendingSummaryFrame != null) {
+                // The buffered summary applies strictly AFTER the failure re-applies.
+                // Lost-CONTENT failures unstamp (no candidate bit at all); lost-CLEAR
+                // failures stay stamped but carry a retry mark, which outranks
+                // validated in classify — either way a rejected column re-declares
+                // instead of being sealed validated by a frame that raced the load.
+                byte[] frame = this.pendingSummaryFrame;
+                this.pendingSummaryFrame = null;
+                onRegionSummaryFrame(frame);
             }
         }
         return true;
@@ -684,6 +752,165 @@ public class LodRequestManager {
         return true;
     }
 
+    /**
+     * Region-summary S2C frame (region-summary-sync-plan.md §6). Kill switch checked at
+     * APPLY too (never request, never apply — a mid-session flip stops both halves);
+     * malformed frames drop contained, and the APPLY is inside the same containment
+     * (P2 client review MAJOR-1 — the FarPlayerClientSupport bar: a decode that passes
+     * the wire guards must still not let an apply-time surprise escape into the client
+     * tick); a frame for another dimension drops (the anti-stale binding). Frame
+     * ORDERING (final review, honesty lens): a STALE frame carries a LOWER stamp and
+     * can only OVER-validate — the safe delivery order (fresh-then-stale) is
+     * unreachable in-session (one MIN_PRIORITY sweeper assembling in admission order,
+     * a FIFO ready queue, TCP, latest-wins buffering here), and the reachable order
+     * (stale-then-fresh) is corrected by the fresher frame's provenance-scoped
+     * revocation, with classify's dirty rung outranking validation meanwhile (see
+     * {@code ColumnStateMap.applyTileValidation}). A frame racing this dimension's
+     * cache load is BUFFERED (latest wins) and applied right after {@code adoptLoaded}
+     * — validating before the stamps exist would be a silent no-op and lose the whole
+     * exchange.
+     */
+    public void onRegionSummaryFrame(byte[] body) {
+        if (!LSSClientConfig.CONFIG.enableRegionSummarySync) return;
+        if (this.lastDimension == null) return;
+        try {
+            var summary = dev.vox.lss.common.region.RegionSummaryWire.decodeSummary(body);
+            if (!this.lastDimension.identifier().toString().equals(summary.dimension())) return;
+            if (this.pendingCacheLoad != null) {
+                this.pendingSummaryFrame = body;
+                return;
+            }
+            applySummary(summary);
+        } catch (Exception e) {
+            LSSLogger.debug("Region summary dropped: " + e.getMessage());
+        }
+    }
+
+    /** Decoded-and-dimension-checked apply: per-tile, per-column validation. */
+    private void applySummary(dev.vox.lss.common.region.RegionSummaryWire.Summary summary) {
+        int r = summary.tileRadius();
+        long validatedTotal = 0;
+        int i = 0;
+        // Hoisted once per frame (the onDirtyColumns batch discipline) for the
+        // revocation reopens below.
+        int reopenLod = this.scanner.currentReopenLod();
+        java.util.function.LongConsumer revokedOut = packed ->
+                // A revoked position may sit below the scanner's confirmed prefix —
+                // reopen its OWN ring (the dirty-batch idiom, cadence-neutral) so it
+                // re-declares at the NEXT scheduled scan instead of being orphaned
+                // until a full scanner reset (final review, client lens MAJOR-1).
+                this.scanner.reopenRing(Math.max(
+                        Math.abs(PositionUtil.unpackX(packed) - this.lastChunkX),
+                        Math.abs(PositionUtil.unpackZ(packed) - this.lastChunkZ)), reopenLod);
+        for (int tz = summary.centerTileZ() - r; tz <= summary.centerTileZ() + r; tz++) {
+            for (int tx = summary.centerTileX() - r; tx <= summary.centerTileX() + r; tx++) {
+                long stamp = summary.stampSeconds()[i++];
+                if (stamp == dev.vox.lss.common.region.RegionSummaryWire.STAMP_NO_REGION) {
+                    // NO_REGION is NO EVIDENCE, not a claim (final honesty review
+                    // MAJOR-1): the table's never-observed scope is server-lifetime
+                    // only, so a region deleted while the server was OFF also reads
+                    // "never observed" — validating cached stamps against it would
+                    // seal the deleted terrain forever (the client would never re-ask,
+                    // so it would never even trigger the regeneration). Both sentinels
+                    // validate nothing; stamped residue re-declares and heals. Own
+                    // counter (mirrors the server's tiles_no_region disposition) so
+                    // the harness honesty legs on tiles_unknown stay sharp — a summary
+                    // window legitimately covers many never-generated regions.
+                    this.summaryTilesNoRegion++;
+                    continue;
+                }
+                if (stamp == dev.vox.lss.common.region.RegionSummaryWire.STAMP_NEVER_CLEAN) {
+                    this.summaryTilesUnknown++;
+                    continue;
+                }
+                var outcome = this.columns.applyTileValidation(tx, tz, stamp, revokedOut);
+                validatedTotal += outcome.newlyValidated();
+                if (outcome.fullyValidated()) this.summaryTilesClean++;
+                else this.summaryTilesStale++;
+            }
+        }
+        this.summaryColumnsValidated += validatedTotal;
+        if (ClientTraceLog.enabled()) {
+            ClientTraceLog.event("summary", "\"tiles\":" + i
+                    + ",\"validated\":" + validatedTotal);
+        }
+    }
+
+    /**
+     * Fire the summary request at dimension entry, in PARALLEL with the async cache
+     * load (§6: the RTT hides in the merge-save → load dead window; the response, if it
+     * beats the load, is buffered). Fire-and-forget: no gating, no timeout, no retry —
+     * a lost frame = today's per-column behavior. Gated on the client kill switch, the
+     * CURRENT dialect, and the harness property gate.
+     */
+    private void sendRegionSummaryRequest(ResourceKey<Level> dimension, int playerCx, int playerCz) {
+        this.pendingSummaryFrame = null; // a new dimension invalidates any buffered frame
+        if (!LSSClientConfig.CONFIG.enableRegionSummarySync) return;
+        if (this.summaryHarnessGate.getAsBoolean()) return;
+        if (this.summarySessionVersion.getAsInt() != LSSConstants.PROTOCOL_VERSION) return;
+        int lod = this.scanner.getEffectiveLodDistance();
+        int radius = Math.min(dev.vox.lss.common.region.RegionSummaryWire.MAX_SUMMARY_TILE_RADIUS,
+                (lod + 31) / 32 + 1);
+        try {
+            this.summarySender.send(dev.vox.lss.common.region.RegionSummaryWire.encodeRequest(
+                    new dev.vox.lss.common.region.RegionSummaryWire.Request(
+                            dimension.identifier().toString(),
+                            playerCx >> 5, playerCz >> 5, radius)));
+            if (ClientTraceLog.enabled()) {
+                ClientTraceLog.event("summary_req", "\"r\":" + radius);
+            }
+        } catch (Exception e) {
+            LSSLogger.debug("Region-summary request send failed: " + e.getMessage());
+        }
+    }
+
+    public long getSummaryTilesClean() { return this.summaryTilesClean; }
+    public long getSummaryTilesStale() { return this.summaryTilesStale; }
+    public long getSummaryTilesUnknown() { return this.summaryTilesUnknown; }
+    public long getSummaryTilesNoRegion() { return this.summaryTilesNoRegion; }
+    public long getSummaryColumnsValidated() { return this.summaryColumnsValidated; }
+    public long getSummaryStampsApplied() { return this.summaryStampsApplied; }
+    public long getSummaryStampsIgnored() { return this.summaryStampsIgnored; }
+
+    /**
+     * Stamped up_to_date S2C frame (stamped-up-to-date-plan.md §4): ratchet cached
+     * acquisition stamps forward to the server's verification second, so the next
+     * summary frame validates the columns a header write once passed. Kill-switch
+     * gated like the summary apply (the ratchet's only consumer is tile validation);
+     * dimension mismatch drops (the anti-stale binding — overworld/End coords
+     * overlap); decode is contained WITH the semantic stamp bounds (a hostile huge
+     * second would seal a position against offline edits permanently — the ratchet
+     * is monotonic and revocation only touches summary provenance). No cache-load
+     * buffering: answers only flow after declarations, which only flow after the
+     * cache gate, so a frame racing a load can only be a stale prior-session frame —
+     * absent leaves make it a no-op.
+     */
+    public void onColumnStamps(byte[] body) {
+        if (!LSSClientConfig.CONFIG.enableRegionSummarySync) return;
+        if (this.lastDimension == null) return;
+        try {
+            var stamps = dev.vox.lss.common.region.ColumnStampsWire.decode(
+                    body, System.currentTimeMillis() / 1000L);
+            if (!this.lastDimension.identifier().toString().equals(stamps.dimension())) return;
+            long[] positions = stamps.packedPositions();
+            long[] seconds = stamps.stampSeconds();
+            for (int i = 0; i < positions.length; i++) {
+                if (this.columns.ratchetStamp(positions[i], seconds[i])) {
+                    this.summaryStampsApplied++;
+                } else {
+                    this.summaryStampsIgnored++;
+                }
+            }
+            if (ClientTraceLog.enabled()) {
+                ClientTraceLog.event("stamps", "\"n\":" + positions.length);
+            }
+        } catch (Exception e) {
+            LSSLogger.debug("Column-stamps frame dropped: " + e.getMessage());
+        }
+    }
+
+    void setSummarySenderForTest(SummarySender sender) { this.summarySender = sender; }
+
     public void onDirtyColumns(long[] dirtyPositions) {
         if (ClientTraceLog.enabled() && dirtyPositions.length > 0) {
             ClientTraceLog.event("dirty", "\"n\":" + dirtyPositions.length
@@ -695,6 +922,12 @@ public class LodRequestManager {
         // cache ~51 times inside one network drain.
         int reopenLod = this.scanner.currentReopenLod();
         for (long packed : dirtyPositions) {
+            if (this.pendingCacheLoad != null) {
+                // The leaf map is empty mid-load, so the mark below would drop — queue
+                // for the post-adopt re-mark (must land before any buffered summary
+                // frame validates the edited position; see tickCacheGatePhase).
+                this.dirtyDuringCacheLoad.add(packed);
+            }
             if (this.columns.markDirtyIfKnown(packed)) {
                 // Cadence-NEUTRAL: only re-open the position's OWN ring so it (which may
                 // sit below the confirmed prefix) is reachable at the NEXT scheduled scan
@@ -869,6 +1102,7 @@ public class LodRequestManager {
 
     private void startAsyncCacheLoad(ResourceKey<Level> dimension) {
         this.failuresDuringCacheLoad.clear(); // per-dimension buffer; a new load starts clean
+        this.dirtyDuringCacheLoad.clear();     // same scope — old-dimension notices are stale
         this.pendingCacheLoad = ColumnCacheStore.loadStateAsync(this.serverAddress, dimension);
     }
 
@@ -917,7 +1151,9 @@ public class LodRequestManager {
             ColumnCacheStore.clearForServer(this.serverAddress);
         }
         this.pendingCacheLoad = null; // drop any in-flight load — its pre-clear result would resurrect flushed timestamps
+        this.pendingSummaryFrame = null; // a frame buffered for the pre-flush state dies with it
         this.failuresDuringCacheLoad.clear();
+        this.dirtyDuringCacheLoad.clear();
         resetRequestState();
         this.scanner.reset();
     }

@@ -123,6 +123,14 @@ class PaperRequestProcessingServiceTest {
         }
 
         @Override
+        public void drainSendActions(OffThreadProcessor.BatchSender<PaperPlayerRequestState> sender,
+                                     OffThreadProcessor.StampsSink<PaperPlayerRequestState> sink) {
+            // The service's tick calls the 2-arg drain (stamped up_to_date); this rig
+            // only counts drains, so both arities record identically.
+            sendActionDrains.incrementAndGet();
+        }
+
+        @Override
         public void invalidateTimestamps(String dimension, long[] positions) {
             invalidations.add(new Invalidation(dimension, positions));
         }
@@ -829,7 +837,7 @@ class PaperRequestProcessingServiceTest {
         // A disk read racing the shutdown (async callback shape) must be a no-op:
         // no result queue exists and the submit must not throw into the caller.
         diskReader.setReadOverride((cx, cz) -> CompletableFuture.completedFuture(Optional.empty()));
-        assertDoesNotThrow(() -> diskReader.submitReadDirect(uuid, "minecraft:overworld", level, 1, 1, 1L));
+        assertDoesNotThrow(() -> diskReader.submitReadDirect(uuid, "minecraft:overworld", level, 1, 1, 1L, 0L));
         assertNull(diskReader.getPlayerQueue(uuid));
         assertEquals(0, diskReader.getDiag().getSubmittedCount(),
                 "post-shutdown submits are rejected before they are counted");
@@ -1348,5 +1356,55 @@ class PaperRequestProcessingServiceTest {
         service.tick();
         assertEquals(boot + 5, state.getGenSlotCap(),
                 "the per-player cap must follow config on the next tick for EXISTING states");
+    }
+
+    /** The HANDLER-checked region-summary kill switch (P2 review I-m5): the plan's
+     *  adversarial-m1 asked for a drop at the HANDLER, and this is the only pin
+     *  distinguishing "handler-checked" from "advertisement-gated" — both the
+     *  dedicated key and the master {@code enabled} must drop the request before
+     *  the service's ingress counter can move. */
+    @Test
+    void regionSummaryKillSwitchDropsAtTheHandler() throws Exception {
+        var tracker = new DirtyColumnTracker();
+        var wired = new PaperRequestProcessingService(server, config,
+                new PaperRequestProcessingService.Wiring(
+                        players, diskReader, genService, processor, tracker, broadcaster,
+                        null, null, false,
+                        new dev.vox.lss.common.region.RegionStampTable(d -> null)));
+        try {
+            byte[] body = dev.vox.lss.common.region.RegionSummaryWire.encodeRequest(
+                    new dev.vox.lss.common.region.RegionSummaryWire.Request(
+                            "minecraft:overworld", 0, 0, 1));
+            var uuid = UUID.randomUUID();
+            config.enableRegionSummaries = false;
+            wired.handleRegionSummaryRequest(uuid, body);
+            assertEquals(0, wired.getRegionSummaries().diagnostics().getRequests(),
+                    "enableRegionSummaries=false must drop at the handler");
+            config.enableRegionSummaries = true;
+            config.enabled = false;
+            wired.handleRegionSummaryRequest(uuid, body);
+            assertEquals(0, wired.getRegionSummaries().diagnostics().getRequests(),
+                    "the master enabled=false gate must drop too");
+            config.enabled = true;
+            wired.handleRegionSummaryRequest(uuid, body);
+            assertEquals(1, wired.getRegionSummaries().diagnostics().getRequests(),
+                    "with both gates open the request reaches the service");
+            // Legacy-never-eligible (stamped-up-to-date-plan.md §9.4, the pin the
+            // 3-Opus fold found missing — dialectOf defaults CURRENT for unknown
+            // UUIDs, so only an explicitly legacy-marked session exercises the guard):
+            // a v18 session's request must neither admit NOR arm stamps eligibility.
+            var legacy = UUID.randomUUID();
+            wired.getDialectTracker().onHandshake(legacy,
+                    dev.vox.lss.common.HandshakeGate.WireDialect.V18);
+            wired.handleRegionSummaryRequest(legacy, body);
+            assertEquals(1, wired.getRegionSummaries().diagnostics().getRequests(),
+                    "a legacy-dialect request drops at the CURRENT-only guard");
+            assertFalse(wired.getRegionSummaries().hasRequestedThisSession(legacy),
+                    "and never becomes stamps-eligible");
+        } finally {
+            config.enabled = true;
+            config.enableRegionSummaries = true;
+            wired.shutdown();
+        }
     }
 }

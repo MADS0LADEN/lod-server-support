@@ -66,6 +66,8 @@ public final class BenchmarkMetricsExporter {
         SharedBandwidthLimiter bandwidthLimiter();
         Collection<? extends AbstractPlayerRequestState<?>> players();
         dev.vox.lss.common.farplayers.FarPlayerBroadcastService farPlayerService();
+        /** Null only in partial rigs; the summary group zero-fills then. */
+        dev.vox.lss.common.region.RegionSummaryDiagnostics summaryDiagnostics();
     }
 
     static ServerSource asSource(RequestProcessingService service) {
@@ -79,6 +81,10 @@ public final class BenchmarkMetricsExporter {
             @Override public SharedBandwidthLimiter bandwidthLimiter() { return service.getBandwidthLimiter(); }
             @Override public dev.vox.lss.common.farplayers.FarPlayerBroadcastService farPlayerService() {
                 return service.getFarPlayerService();
+            }
+            @Override public dev.vox.lss.common.region.RegionSummaryDiagnostics summaryDiagnostics() {
+                var rs = service.getRegionSummaries();
+                return rs == null ? null : rs.diagnostics();
             }
             @Override public Collection<? extends AbstractPlayerRequestState<?>> players() {
                 return service.getPlayers().values();
@@ -276,6 +282,10 @@ public final class BenchmarkMetricsExporter {
             // processing diagnostics; the rung requires a reader, so the no-reader
             // disk-map-empty contract is preserved.
             diskMap.put("memo_hits", diag.getTotalMemoHits());
+            // Header freshness rung hits (region-summary-sync-plan.md P1): ts>0 reads
+            // answered from the region header without region IO. A mechanism counter —
+            // excluded from the submitted/completed partition like store hits.
+            diskMap.put("header_hits", dd.getHeaderHitsCount());
         }
         result.put("disk", diskMap);
 
@@ -359,6 +369,26 @@ public final class BenchmarkMetricsExporter {
         farMap.put("suppressed", farPlayers.suppressedUnchanged());
         farMap.put("bytes", farPlayers.bytesSent());
         result.put("far_players", farMap);
+
+        // Region summaries (P2 §8): OWN counter group on the dedicated send lane —
+        // deliberately NOT part of service.bytes_sent/wire_bytes (the far-player lane
+        // precedent). All-zero on every soak/benchmark run by construction (harness
+        // clients are property-gated off requesting — the summary-inert check mirrors
+        // the far-players one). refresh_ms_hw is a GAUGE (high-water), not monotonic.
+        var summary = src.summaryDiagnostics();
+        var summaryMap = new LinkedHashMap<String, Object>();
+        summaryMap.put("requests", summary == null ? 0L : summary.getRequests());
+        summaryMap.put("range_filtered", summary == null ? 0L : summary.getRangeFiltered());
+        summaryMap.put("frames", summary == null ? 0L : summary.getFrames());
+        summaryMap.put("tiles_known", summary == null ? 0L : summary.getTilesKnown());
+        summaryMap.put("tiles_never_clean", summary == null ? 0L : summary.getTilesNeverClean());
+        summaryMap.put("tiles_no_region", summary == null ? 0L : summary.getTilesNoRegion());
+        summaryMap.put("bytes", summary == null ? 0L : summary.getBytes());
+        summaryMap.put("refresh_ms_hw", summary == null ? 0L : summary.getRefreshMsMax());
+        summaryMap.put("stamps_frames", summary == null ? 0L : summary.getStampsFrames());
+        summaryMap.put("stamps_entries", summary == null ? 0L : summary.getStampsEntries());
+        summaryMap.put("stamps_bytes", summary == null ? 0L : summary.getStampsBytes());
+        result.put("summary", summaryMap);
 
         // LOD store (docs/planning/lod-store-implementation-plan.md): counters live on the
         // processor unconditionally (all-zero while lodStore=off) so this group's shape is
@@ -524,6 +554,20 @@ public final class BenchmarkMetricsExporter {
         scan.put("valve_trips", manager != null ? manager.getValveTrips() : 0L);
         result.put("scan", scan);
 
+        // Region summaries (region-summary-sync-plan.md §6/§8): the client half's
+        // attributability counters — tiles by disposition + columns validated. Additive
+        // top-level group (check_soak treats unknown client keys as an aggregated
+        // warning until registered; the KNOWN set carries it).
+        var summary = new LinkedHashMap<String, Object>();
+        summary.put("tiles_clean", manager != null ? manager.getSummaryTilesClean() : 0L);
+        summary.put("tiles_stale", manager != null ? manager.getSummaryTilesStale() : 0L);
+        summary.put("tiles_unknown", manager != null ? manager.getSummaryTilesUnknown() : 0L);
+        summary.put("tiles_no_region", manager != null ? manager.getSummaryTilesNoRegion() : 0L);
+        summary.put("columns_validated", manager != null ? manager.getSummaryColumnsValidated() : 0L);
+        summary.put("stamps_applied", manager != null ? manager.getSummaryStampsApplied() : 0L);
+        summary.put("stamps_ignored", manager != null ? manager.getSummaryStampsIgnored() : 0L);
+        result.put("summary", summary);
+
         // Declared-and-unanswered (the awaiting-answer set), replaced per scan.
         result.put("tracker_in_flight", manager != null ? manager.getPendingCount() : 0);
 
@@ -614,6 +658,7 @@ public final class BenchmarkMetricsExporter {
             diskReaderMap.put("avg_read_time_ms", avgMs);
             diskReaderMap.put("saturation_events", dd.getSaturationCount());
             diskReaderMap.put("memo_hits", diag.getTotalMemoHits());
+            diskReaderMap.put("header_hits", dd.getHeaderHitsCount());
         }
         result.put("disk_reader", diskReaderMap);
 

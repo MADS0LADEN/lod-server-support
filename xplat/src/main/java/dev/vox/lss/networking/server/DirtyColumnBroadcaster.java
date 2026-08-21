@@ -101,7 +101,11 @@ class DirtyColumnBroadcaster {
             long[] dirty = this.dirtyTracker.drainDirty(dimensionStr);
             if (dirty == null || dirty.length == 0) continue;
 
-            this.offThreadProcessor.invalidateTimestamps(dimensionStr, dirty);
+            // The callback releases the stamping guard's second phase exactly when
+            // the tscache/store invalidation has APPLIED on the processing thread
+            // (stamped-up-to-date-plan.md §9.2 — the drain-to-apply window).
+            this.offThreadProcessor.invalidateTimestamps(dimensionStr, dirty,
+                    () -> this.dirtyTracker.confirmInvalidated(dimensionStr, dirty));
 
             int bufLen = Math.min(dirty.length, DirtyColumnsS2CPayload.MAX_POSITIONS);
             if (this.positionFilterBuffer == null || this.positionFilterBuffer.length < bufLen) {

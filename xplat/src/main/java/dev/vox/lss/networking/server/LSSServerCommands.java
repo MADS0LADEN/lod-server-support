@@ -268,6 +268,7 @@ public class LSSServerCommands {
         ).withV16Line(service.getV16CompatManager().diagLineOrNull())
                 .withV18Line(service.getDialectTracker().diagLine())
                 .withFarPlayersLine(farPlayersDiagLineOrNull(service))
+                .withSummaryLine(summaryDiagLineOrNull(service))
                 .withXrayLine(xrayDiagLine())
                 .withMoveTraceLine(moveTraceDiagLineOrNull())
                 .withYieldLine(DiagnosticsFormatter.yieldDiagLineOrNull(
@@ -299,5 +300,11 @@ public class LSSServerCommands {
         var fp = service.getFarPlayerService();
         if (fp == null) return null; // partial rigs (mocked service seams)
         return fp.subscriberCount() > 0 || fp.rosterFramesSent() > 0 ? fp.diagLine() : null;
+    }
+
+    /** Region summaries (P2 §6 attributability): present only once a request arrived. */
+    private static String summaryDiagLineOrNull(RequestProcessingService service) {
+        var rs = service.getRegionSummaries();
+        return rs == null ? null : rs.diagnostics().diagLineOrNull();
     }
 }

@@ -22,10 +22,12 @@ import java.util.LinkedHashMap;
  * <p>Activation: {@code -Dlss.moveTrace=true} OR the marker file
  * {@code config/lss-move-trace.enable} (content ignored; it exists because the only
  * guaranteed channels to the live host are SFTP and RCON — review U-9). Read ONCE at
- * SERVER_STARTING (Fable F2-11: the config dir is absolute by then, the static gate is
- * set strictly before any {@code handleMovePlayer} can run, and the upload-then-restart
- * deploy makes the check race-free by operation). Default absent → fully off: no file, no
- * thread, hook bodies no-op after one static boolean check.
+ * SERVER_STARTING (Fable F2-11: the config dir is absolute by then, and the static gate
+ * is set strictly before any {@code handleMovePlayer} can run). Default absent → fully
+ * off: no file, no thread, hook bodies no-op after one static boolean check — and no
+ * hook body may reference {@code MoveTraceTelemetry} without that check first (a lazy
+ * classload from a hook is exposed to the jar-swapped-under-a-running-server race —
+ * the 2026-08-20 shutdown ZipException).
  */
 public final class MoveTraceBootstrap {
 
@@ -39,7 +41,15 @@ public final class MoveTraceBootstrap {
     public static void init() {
         ServerLifecycleEvents.SERVER_STARTING.register(MoveTraceBootstrap::onServerStarting);
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
-            MoveTraceTelemetry.clearAll();
+            // Gated like the sibling hooks — and deliberately so even though clearAll()
+            // on an inactive tracer is a no-op: an inactive session never classloaded
+            // MoveTraceTelemetry, and an ungated reference here makes SHUTDOWN the
+            // first load. Live sighting 2026-08-20: a jar uploaded over the running
+            // server left the classloader's zip offsets stale, and this line's lazy
+            // load threw ZipException out of SERVER_STOPPING at the head of
+            // stopServer, skipping the orderly shutdown. When the tracer WAS active
+            // the class is long since loaded and the clear is real work.
+            if (MoveDesyncTracer.enabled()) MoveTraceTelemetry.clearAll();
             MoveDesyncTracer.deactivate();
         });
         ServerTickEvents.END_SERVER_TICK.register(server -> {

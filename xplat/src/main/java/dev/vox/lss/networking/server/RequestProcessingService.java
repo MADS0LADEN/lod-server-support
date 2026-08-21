@@ -55,6 +55,16 @@ public class RequestProcessingService {
     private final dev.vox.lss.common.store.StoreBackfill storeBackfill;
 
     private final DirtyColumnTracker dirtyTracker;
+    // Region freshness stamps (region-summary-sync-plan.md): the P1 header rung's oracle,
+    // fed by the hoisted region-dir resolver + the save hook's dirty marks. Store-independent.
+    private final dev.vox.lss.common.region.RegionStampTable regionStamps;
+    // Region summaries (P2): sweeper + mailboxes; requests offered by the payload
+    // handler, admissions/sends pumped from tick(). Cleanup rides the NETWORK
+    // disconnect (removePlayer on the summary service — the far-player precedent),
+    // deliberately NOT this service's removePlayer, which also fires on dimension
+    // change and would race the client's at-entry request; TTL + vanished-send
+    // checks are the belt for a missed disconnect.
+    private final dev.vox.lss.common.region.RegionSummaryService regionSummaries;
     private final DirtyContentFilter dirtyContentFilter = new DirtyContentFilter();
     // Far players (E1, FARP §3.2): subscription identity lives HERE (the dialect-tracker
     // precedent) — subscribed at handshake, dropped only at the network DISCONNECT, and
@@ -226,15 +236,66 @@ public class RequestProcessingService {
                 LSSLogger.info(advice);
             }
         }
+        // Region-dir resolver, HOISTED out of the store branch (region-summary-sync-plan.md
+        // §5 integration M2): the P1 header freshness rung (and P2's summary table) must
+        // work on store-LESS servers — the compiled store default is off, so building this
+        // only store-armed would silently no-op the feature on most servers. Same API the
+        // game uses (getStorageFolder — never hand-derived layouts); shared with the
+        // store env and the backfill below.
+        var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
+        var regionDirs = new HashMap<String, java.nio.file.Path>();
+        for (ServerLevel level : server.getAllLevels()) {
+            // Per-level belt: this loop now runs on STORE-LESS servers too, where the
+            // storage-folder API was never touched before — an exotic dimension key
+            // must degrade that one dimension to UNKNOWN (the table's designed
+            // fail-safe), never take down service start.
+            try {
+                regionDirs.put(level.dimension().identifier().toString(),
+                        net.minecraft.world.level.dimension.DimensionType
+                                .getStorageFolder(level.dimension(), worldRoot)
+                                .resolve("region").normalize());
+            } catch (Throwable t) {
+                LSSLogger.warn("Could not resolve the region directory for "
+                        + level.dimension().identifier() + " — region freshness there"
+                        + " falls through to full reads", t);
+            }
+        }
+        this.regionStamps = new dev.vox.lss.common.region.RegionStampTable(regionDirs::get);
+        this.diskReader.attachRegionStamps(this.regionStamps);
+        // Region summaries (P2, plan §5): the sweeper daemon + per-player mailboxes over
+        // the same stamp table. The tick pumps admissions/sends; ingress is the payload
+        // handler (kill switch checked there).
+        this.regionSummaries = new dev.vox.lss.common.region.RegionSummaryService(
+                this.regionStamps::tileStampSeconds,
+                () -> LSSServerConfig.CONFIG.lodDistanceChunks);
+        // Every hash-confirmed change mark (the save hook) bumps the region's live save
+        // mark, closing the save-submitted-but-write-pending mtime lag before the header
+        // rung can claim freshness across it. May run off-main — the bump is atomic.
+        this.dirtyTracker.setMarkListener((dim, cx, cz) -> this.regionStamps
+                .bumpLiveSaveMark(dim, cx, cz, LSSConstants.epochSeconds()));
+        // Stamped up_to_date (stamped-up-to-date-plan.md §9.2): the compare-backed
+        // rungs stamp "verified now" UNLESS the position's change is marked-but-
+        // undrained or the region latch is armed — a stamp issued inside the
+        // save-to-drain window would launder invalidation latency into a permanent
+        // cross-session seal (the drain interval, up to 300 s, is not pinned inside
+        // the 15 s freshness margin).
+        this.offThreadProcessor.setUpToDateStampSource((player, dim, packed) -> {
+            // Eligibility FIRST (3-Opus fold): on a server with no summary-requesting
+            // session the predicate must not put the dirty tracker's monitor (shared
+            // with the save hook) on the router's hot path for discarded work.
+            if (!this.regionSummaries.hasRequestedThisSession(player)) return -1L;
+            if (this.dirtyTracker.isPending(dim, packed)) return -1L;
+            if (this.regionStamps.isClaimSuppressed(dim,
+                    PositionUtil.unpackX(packed), PositionUtil.unpackZ(packed))) {
+                return -1L;
+            }
+            return LSSConstants.epochSeconds();
+        });
+
         if (storeMode != dev.vox.lss.common.store.LodStoreMode.OFF) {
-            var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
-            var regionDirs = new HashMap<String, java.nio.file.Path>();
             var maskFingerprints = new HashMap<String, String>();
             for (ServerLevel level : server.getAllLevels()) {
                 String dim = level.dimension().identifier().toString();
-                regionDirs.put(dim, net.minecraft.world.level.dimension.DimensionType
-                        .getStorageFolder(level.dimension(), worldRoot)
-                        .resolve("region").normalize());
                 var maskEntry = XrayMaskManager.entryForActive(level);
                 String maskFp = maskEntry == null ? "off"
                         : maskEntry.sourceLabel() + ":"
@@ -461,7 +522,103 @@ public class RequestProcessingService {
         flushSendQueues(lifecycle.activeCount, config);
         tickDirtyBroadcast(config);
         tickFarPlayers(config);
+        tickRegionSummaries();
         tickDiagnosticsLog(config);
+    }
+
+    /** Region summaries (P2, plan §5): admit dimension-matched requests into sweep jobs
+     *  and drain ready frames onto the dedicated send lane. Player state is only read
+     *  HERE (the tick thread) — ingress stores pure data. */
+    private void tickRegionSummaries() {
+        try {
+            this.regionSummaries.pump(uuid -> {
+                var state = this.players.get(uuid);
+                if (state == null || !state.hasCompletedHandshake()) return null;
+                String dim = state.registeredDimension();
+                long pc = state.playerChunkPackedOrSentinel();
+                if (dim == null || pc == Long.MIN_VALUE) return null;
+                return new dev.vox.lss.common.region.RegionSummaryService.PlayerAnchor(
+                        dim, PositionUtil.unpackX(pc), PositionUtil.unpackZ(pc));
+            }, (uuid, frame) -> {
+                var player = this.server.getPlayerList().getPlayer(uuid);
+                if (player == null) { // disconnected while assembling — unsendable forever
+                    return dev.vox.lss.common.region.RegionSummaryService.SendOutcome.DROP;
+                }
+                // CURRENT-dialect re-check at the sink (final panel — the stamps
+                // lane's rule, mirrored): the ingress guard runs at REQUEST time, but
+                // a pre-handshake request reads as CURRENT (untracked UUID) and a
+                // session can re-handshake DOWN before the frame drains; a legacy
+                // session must never receive a summary frame.
+                if (this.dialects.dialectOf(uuid)
+                        != dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT) {
+                    return dev.vox.lss.common.region.RegionSummaryService.SendOutcome.DROP;
+                }
+                // The far-player lane's writability discipline (final review F2), with
+                // RETENTION (live-diagnosed 2026-08-20, rig reqs=7/frames=5): the frame
+                // drains at the join/portal moment lodYieldsToVanillaTransport protects
+                // — exactly when the serve flood makes the channel unwritable — and the
+                // client never re-requests, so an unwritable channel answers RETRY (the
+                // service retains the frame, TTL-bounded) instead of eating the whole
+                // session's exchange.
+                var snap = FabricChannelPressure.forPlayer(player).snapshot();
+                if (snap.writable() == dev.vox.lss.common.processing.ChannelPressureProbe
+                        .Writability.NOT_WRITABLE) {
+                    return dev.vox.lss.common.region.RegionSummaryService.SendOutcome.RETRY;
+                }
+                dev.vox.lss.platform.LoaderServices.get().sendToPlayer(player,
+                        new dev.vox.lss.networking.payloads.RegionSummaryS2CPayload(frame));
+                return dev.vox.lss.common.region.RegionSummaryService.SendOutcome.SENT;
+            });
+        } catch (Exception e) {
+            // Containment: a pump/send bug must degrade summaries, never the tick.
+            if (!this.regionSummaryTickErrorWarned) {
+                this.regionSummaryTickErrorWarned = true;
+                LSSLogger.error("Region-summary pump failed — contained (once per session)", e);
+            }
+        }
+    }
+
+    private boolean regionSummaryTickErrorWarned;
+
+    /** Ingress for {@code lss:region_summary_req} (any thread — stores pure data). The
+     *  HANDLER-checked kill switch (plan §5): checked per request, though the key is
+     *  boot-set in practice (not in the {@code /lsslod set} registry — a flip needs a
+     *  restart). */
+    public void handleRegionSummaryRequest(ServerPlayer player, byte[] body) {
+        if (!LSSServerConfig.CONFIG.enabled || !LSSServerConfig.CONFIG.enableRegionSummaries) {
+            return;
+        }
+        dev.vox.lss.common.region.RegionSummaryWire.Request request;
+        try {
+            request = dev.vox.lss.common.region.RegionSummaryWire.decodeRequest(body);
+        } catch (Exception e) {
+            // Hostile/malformed frame: contained drop (throttled — any authenticated
+            // client can spam these at packet rate).
+            long n = SUMMARY_REQ_DECODE_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+            if (n > 0) {
+                LSSLogger.warn("Malformed region-summary request from "
+                        + player.getName().getString() + " — ignored (" + n
+                        + " since the last report): " + e);
+            }
+            return;
+        }
+        // CURRENT dialect only (plan §9.4 — the far-player subscription discipline):
+        // a legacy-dialect session must not become stamps-eligible; the conforming
+        // client gates its own request on the CURRENT dialect already, so this only
+        // rejects nonconforming senders.
+        if (this.dialects.dialectOf(player.getUUID())
+                != dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT) {
+            return;
+        }
+        this.regionSummaries.offerRequest(player.getUUID(), request);
+    }
+
+    private static final dev.vox.lss.common.LogThrottle SUMMARY_REQ_DECODE_WARN =
+            new dev.vox.lss.common.LogThrottle(60_000);
+
+    /** The region-summary service (diag + tests). */
+    public dev.vox.lss.common.region.RegionSummaryService getRegionSummaries() {
+        return this.regionSummaries;
     }
 
     /** Far players (E1): one broadcast pass every {@code farPlayersUpdateIntervalTicks}
@@ -1125,6 +1282,35 @@ public class RequestProcessingService {
             this.v16Compat.observeBatchResponse(state.getPlayerUUID(), types, positions, count);
             dev.vox.lss.platform.LoaderServices.get().sendToPlayer(state.getPlayer(),
                     new BatchResponseS2CPayload(types, positions, count));
+        }, new dev.vox.lss.common.processing.OffThreadProcessor.StampsSink<>() {
+            // Stamped up_to_date (plan §3): the summary request is the eligibility
+            // declaration; frames are fire-and-forget (loss = today's behavior, heals
+            // on the next rejoin) and counted only on a completed send call.
+            @Override public boolean eligible(UUID uuid) {
+                // CURRENT dialect conjunct (3-Opus fold, plan §9.4): a session that
+                // re-handshakes DOWN to a legacy dialect keeps its request mark until
+                // disconnect — the far-player subscription discipline drops on the
+                // re-handshake, so this lane must too.
+                return RequestProcessingService.this.dialects.dialectOf(uuid)
+                        == dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT
+                        && RequestProcessingService.this.regionSummaries.hasRequestedThisSession(uuid);
+            }
+            @Override public void send(PlayerRequestState state, byte[] frame, int entries) {
+                // Writability drop (3-Opus fold, all three lenses): the frames land at
+                // exactly the join/portal moment the yield/pacing machinery protects,
+                // and this is the only raw-body S2C lane without a pressure consult.
+                // A plain UNCOUNTED drop, never RETRY — loss is the designed-tolerant
+                // case (the positions re-stamp on the next rejoin).
+                var snap = FabricChannelPressure.forPlayer(state.getPlayer()).snapshot();
+                if (snap.writable() == dev.vox.lss.common.processing.ChannelPressureProbe
+                        .Writability.NOT_WRITABLE) {
+                    return;
+                }
+                dev.vox.lss.platform.LoaderServices.get().sendToPlayer(state.getPlayer(),
+                        new dev.vox.lss.networking.payloads.ColumnStampsS2CPayload(frame));
+                RequestProcessingService.this.regionSummaries.diagnostics()
+                        .recordStampsFrame(entries, frame.length);
+            }
         });
     }
 
@@ -1230,6 +1416,11 @@ public class RequestProcessingService {
         return this.dirtyTracker;
     }
 
+    /** The region freshness stamp table (P1 header rung; P2 summary sweeper). */
+    public dev.vox.lss.common.region.RegionStampTable getRegionStamps() {
+        return this.regionStamps;
+    }
+
     /** Phase 5 ops (/lsslod store invalidate all): drop every stored row (batcher-side,
      *  tombstoned). The tscache is deliberately untouched: its stamps describe REGION
      *  truth, not store contents — re-asks re-resolve via tscache/probe/NBT as normal
@@ -1263,6 +1454,14 @@ public class RequestProcessingService {
     }
 
     public void shutdown() {
+        try {
+            // Own containment, FIRST (P2 review I-m2): no ordering dependency on the
+            // dirty drain, and a throw there must not leak the sweeper daemon (which
+            // holds the stamp table's header snapshots) across /reload or world swaps.
+            this.regionSummaries.shutdown();
+        } catch (Exception e) {
+            LSSLogger.error("Error shutting down region-summary sweeper", e);
+        }
         try {
             // Marks accumulated since the last broadcast interval must still invalidate the
             // timestamp cache BEFORE its final save (the invalidations ride the shutdown

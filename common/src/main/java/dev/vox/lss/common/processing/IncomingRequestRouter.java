@@ -406,7 +406,10 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
         long cachedTs = this.timestampCache.get(dimension, packed);
         if (cachedTs > 0 && cachedTs <= req.clientTimestamp()) {
             state.markDiskReadDone(req.cx(), req.cz());
-            this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state));
+            // Compare-backed rung — stamped-up_to_date eligible (plan §9.1): the
+            // predicate answers -1 under a pending mark / armed latch (§9.2).
+            this.ctx.sendActions().add(new SendAction.ColumnUpToDate(playerUuid, packed, state,
+                    this.ctx.stampSource().stampSecond(playerUuid, dimension, packed), dimension));
             this.ctx.diagnostics().incrementUpToDate();
             return true;
         }
@@ -423,7 +426,6 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
     private AdmitResult tryAdmitAndSubmit(PS state, UUID playerUuid, IncomingRequest req,
                                            long packed, String dimension) {
         if (this.diskReadingAvailable) {
-            boolean claimsData = req.clientTimestamp() > 0;
             // Miss-memo rung (docs/planning/miss-memo-design.md): a fresh authoritative
             // miss skips the redundant re-read and falls through to the generation ladder
             // directly — taking a GENERATION slot only, no SYNC slot, no reader-pool cost.
@@ -437,11 +439,12 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
                     && this.timestampCache.isFreshMiss(dimension, packed, System.nanoTime())) {
                 this.ctx.diagnostics().addMemoHit(1);
                 this.processor.escalateMissToGeneration(playerUuid, state, packed,
-                        req.cx(), req.cz(), claimsData, dimension, "memo");
+                        req.cx(), req.cz(), req.clientTimestamp(), dimension, "memo");
                 return AdmitResult.SUBMITTED; // dispositioned (submitted or silent drop)
             }
             // Route through disk reader (with cross-player dedup)
-            if (!state.tryAdmit(new PendingRequest(req.cx(), req.cz(), SlotType.SYNC_ON_LOAD, claimsData))) {
+            if (!state.tryAdmit(new PendingRequest(req.cx(), req.cz(), SlotType.SYNC_ON_LOAD,
+                    req.clientTimestamp()))) {
                 return AdmitResult.SLOT_FULL;
             }
             long order = this.ctx.sequence().next();
@@ -471,7 +474,8 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
                 state.removePendingByPosition(req.cx(), req.cz());
                 return AdmitResult.GATE_SATURATED;
             }
-            if (!attached && !this.processor.submitDiskRead(playerUuid, dimension, req.cx(), req.cz(), order)) {
+            if (!attached && !this.processor.submitDiskRead(playerUuid, dimension, req.cx(),
+                    req.cz(), order, req.clientTimestamp())) {
                 // Submit was a no-op (e.g. the dimension's level isn't registered yet) — a
                 // TRANSIENT condition. Unwind the pending entry (which frees the slot) and the
                 // dedup group so they aren't leaked, and drop silently (counted superseded):
@@ -488,7 +492,7 @@ class IncomingRequestRouter<PS extends AbstractPlayerRequestState<?>> {
             // No disk reader — direct generation for ANY request (unreachable in production:
             // both platforms always construct a reader; the disk-first miss path is the live
             // generation trigger)
-            if (!state.tryAdmit(new PendingRequest(req.cx(), req.cz(), SlotType.GENERATION, req.clientTimestamp() > 0))) {
+            if (!state.tryAdmit(new PendingRequest(req.cx(), req.cz(), SlotType.GENERATION, req.clientTimestamp()))) {
                 return AdmitResult.SLOT_FULL;
             }
             // Register in-flight so an overtaking edit taints the outcome, same as the

@@ -82,7 +82,7 @@ class DedupFanoutTest {
         }
 
         @Override
-        protected boolean submitDiskRead(UUID playerUuid, String dimension, int cx, int cz, long order) {
+        protected boolean submitDiskRead(UUID playerUuid, String dimension, int cx, int cz, long order, long clientTimestamp) {
             this.diskSubmits.incrementAndGet();
             this.reader.submitGated(playerUuid, cx, cz, dimension, order,
                     this.bytesByDimension.get(dimension));

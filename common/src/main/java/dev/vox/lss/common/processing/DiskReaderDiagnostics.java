@@ -14,6 +14,7 @@ public class DiskReaderDiagnostics {
     private final AtomicLong successCount = new AtomicLong();
     private final AtomicLong gatedCount = new AtomicLong();
     private final AtomicLong gateStopsCount = new AtomicLong();
+    private final AtomicLong headerHitsCount = new AtomicLong();
     private final AtomicLong totalReadTimeNanos = new AtomicLong();
 
     public void recordSubmitted() { this.submittedCount.incrementAndGet(); }
@@ -42,14 +43,20 @@ public class DiskReaderDiagnostics {
      *  next declaration (counted superseded there, law A1's queue_full precedent).
      *  Returns the new total (the reader's once-per-session WARN latch reads it). */
     public long recordGateStop() { return this.gateStopsCount.incrementAndGet(); }
+    /** A ts&gt;0 read answered by the header freshness rung (P1, region-summary-sync-
+     *  plan.md §3): the region header proved the client's copy current, so the read was
+     *  skipped. NEVER counted into submitted/completed (the store-hit exclusion
+     *  precedent — law A5's partitions see no read here) and never fed to the throttle
+     *  EWMA (no IO was measured). A mechanism counter like {@code memo_hits}. */
+    public void recordHeaderHit() { this.headerHitsCount.incrementAndGet(); }
 
     public String formatDiagnostics(int pendingCount) {
         long completed = this.completedCount.get();
         double avgMs = completed > 0 ? (this.totalReadTimeNanos.get() / (double) completed) / LSSConstants.NANOS_PER_MS : 0;
         long saturated = this.saturationCount.get();
-        return String.format("submitted=%d, completed=%d, not_found=%d, all_air=%d, errors=%d, saturated=%d, avg_read=%.1fms, pending=%d",
+        return String.format("submitted=%d, completed=%d, not_found=%d, all_air=%d, errors=%d, saturated=%d, header_hits=%d, avg_read=%.1fms, pending=%d",
                 this.submittedCount.get(), completed, this.notFoundCount.get(), this.allAirCount.get(),
-                this.errorCount.get(), saturated, avgMs, pendingCount);
+                this.errorCount.get(), saturated, this.headerHitsCount.get(), avgMs, pendingCount);
     }
 
     /**
@@ -65,6 +72,7 @@ public class DiskReaderDiagnostics {
 
     public long getGatedCount() { return this.gatedCount.get(); }
     public long getGateStopsCount() { return this.gateStopsCount.get(); }
+    public long getHeaderHitsCount() { return this.headerHitsCount.get(); }
     public long getSubmittedCount() { return this.submittedCount.get(); }
     public long getCompletedCount() { return this.completedCount.get(); }
     public long getNotFoundCount() { return this.notFoundCount.get(); }

@@ -380,6 +380,58 @@ class DiagnosticsFormatterTest {
     }
 
     @Test
+    void diagSummaryLineRendersAfterFarPlayersOnlyWhenPresentAndTheChainCommutes() {
+        // P2 review I-m6: the NEWEST component is exactly the one an older with-*
+        // method would silently drop via a compat-ctor overload (the review-B-3
+        // regression class) — so it gets the same ordering + commutativity pins as
+        // moveTraceLine/farPlayersLine.
+        var d = new DiagnosticsFormatter.DiagData(
+                true, 24,
+                2048, 1_048_576,
+                100, 5000, 10_485_760,
+                11, 33, 44, 55, 66,
+                22,
+                "sent=9, disk=1/2",
+                "submitted=5, completed=5",
+                "active=1/32", true,
+                7, 3,
+                2_097_152,
+                512,
+                List.of());
+
+        var without = DiagnosticsFormatter.formatDiagnostics(d);
+        assertTrue(without.stream().noneMatch(l -> l.startsWith("Summary")),
+                "an untouched summary service (null line) must add nothing — the inert"
+                        + " diag surface stays byte-unchanged");
+
+        String fpLine = "FarPlayers: subscribers=2, rosters=3, updates=40, entries=200,"
+                + " suppressed=5, bytes=8.0 KB";
+        String sLine = "Summary: reqs=2, frames=2, tiles known=100 never_clean=3"
+                + " no_region=17, range_filtered=0, bytes=4200, refresh_ms_max=12";
+        var with = DiagnosticsFormatter.formatDiagnostics(
+                d.withFarPlayersLine(fpLine).withSummaryLine(sLine));
+        int fpIdx = indexOfPrefix(with, "FarPlayers:");
+        int sIdx = indexOfPrefix(with, "Summary:");
+        int bwIdx = indexOfPrefix(with, "Bandwidth:");
+        assertTrue(fpIdx < sIdx && sIdx < bwIdx,
+                "the Summary line sits between FarPlayers and Bandwidth: " + with);
+        assertEquals(sLine, with.get(sIdx));
+
+        // The with-chain must fully commute — every earlier with-* threads the newest
+        // component through, in BOTH orders (Paper attaches summary first).
+        var reversed = DiagnosticsFormatter.formatDiagnostics(
+                d.withSummaryLine(sLine)
+                        .withFarPlayersLine(fpLine)
+                        .withYieldLine("Yield: armed=true, ticks_total=1, bytes_withheld=1 B")
+                        .withXrayLine("Xray: masked_sections=1")
+                        .withMoveTraceLine("MoveTrace: rung=vanilla rows=1 drops=0 events=0")
+                        .withV16Line("v16 clients: 1")
+                        .withV18Line("Dialects: v20=1, v19=0, v18=1"));
+        assertEquals(sLine, reversed.get(indexOfPrefix(reversed, "Summary:")),
+                "summaryLine must survive every subsequent with-* copy: " + reversed);
+    }
+
+    @Test
     void yieldDiagLineProducerHonorsTheArmedOrFiredContract() {
         var diag = new dev.vox.lss.common.processing.TickDiagnostics();
         assertEquals(null, DiagnosticsFormatter.yieldDiagLineOrNull(false, diag),

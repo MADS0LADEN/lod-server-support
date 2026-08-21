@@ -145,6 +145,16 @@ public class LSSServerNetworking {
         );
 
         ServerPlayNetworking.registerGlobalReceiver(
+                dev.vox.lss.networking.payloads.RegionSummaryRequestC2SPayload.TYPE,
+                (payload, context) -> {
+                    var service = requestService;
+                    if (service != null) {
+                        service.handleRegionSummaryRequest(context.player(), payload.body());
+                    }
+                }
+        );
+
+        ServerPlayNetworking.registerGlobalReceiver(
                 BatchChunkRequestC2SPayload.TYPE,
                 (payload, context) -> {
                     var service = requestService;
@@ -199,6 +209,9 @@ public class LSSServerNetworking {
                 // Far players: the subscription dies with the CONNECTION, never with the
                 // dimension-change remove+register cycle (the v18-rung checklist).
                 service.getFarPlayerService().removeViewer(handler.getPlayer().getUUID());
+                // Region summaries: same connection-scoped cleanup (pending request,
+                // queued job, and the re-sweep cooldown mark die here).
+                service.getRegionSummaries().removePlayer(handler.getPlayer().getUUID());
             }
             // Service-independent: the sidecar fact is recorded at the network level
             // (possibly before any service exists) and must die with the connection.

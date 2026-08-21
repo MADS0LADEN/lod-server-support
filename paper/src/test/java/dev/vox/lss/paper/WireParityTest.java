@@ -309,10 +309,22 @@ class WireParityTest {
                 // exist HERE; FarPlayerWireTest owns the body bytes and the Fabric twin
                 // pins its own carrier framing. The census entry only pins that the
                 // channels are declared.
-                "lss:far_player_prefs", "lss:far_player_roster", "lss:far_player_updates");
+                "lss:far_player_prefs", "lss:far_player_roster", "lss:far_player_updates",
+                // Region summaries (P2): RegionSummaryWire byte[] bodies on BOTH
+                // platforms — the same one-codec-two-carriers doctrine as far players
+                // (RegionSummaryWireTest owns the body bytes; the Fabric twin pins its
+                // carrier framing; Paper's carrier is the same NMS DiscardedPayload /
+                // plugin-messaging ingress as above).
+                "lss:region_summary_req", "lss:region_summary",
+                // Stamped up_to_date (stamped-up-to-date-plan.md §3): ColumnStampsWire
+                // byte[] bodies, same doctrine (ColumnStampsWireTest owns the bytes;
+                // Paper's carrier is the same NMS DiscardedPayload send).
+                "lss:col_stamps");
         assertEquals(covered, declared,
-                "every LSS channel must have a reference frame in this suite — a new payload"
-                + " requires frames in BOTH WireParityTests");
+                "every LSS channel must be accounted for in this census — raw-byte[]"
+                + " channels are enumerated with their codec-owning suite named in the"
+                + " comment above (frames live there); a FriendlyByteBuf payload needs"
+                + " reference frames in BOTH WireParityTests");
     }
 
     @Test

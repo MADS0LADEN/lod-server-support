@@ -78,7 +78,7 @@ class OffThreadProcessorStoreTest {
         }
 
         @Override
-        protected boolean submitDiskRead(UUID playerUuid, String dimension, int cx, int cz, long order) {
+        protected boolean submitDiskRead(UUID playerUuid, String dimension, int cx, int cz, long order, long clientTimestamp) {
             return true; // the tests inject results directly into the reader queue
         }
 
@@ -260,7 +260,7 @@ class OffThreadProcessorStoreTest {
         var rig = new Rig(true);
         long packed = PositionUtil.packPosition(20, 20);
         byte[] genBytes = {7, 7, 7, 7};
-        rig.state.tryAdmit(new PendingRequest(20, 20, SlotType.GENERATION, false));
+        rig.state.tryAdmit(new PendingRequest(20, 20, SlotType.GENERATION, 0L));
         rig.proc.addGenerationInFlight(rig.uuid, DIM, packed);
         rig.cycleWithGen(new TickSnapshot.GenerationReadyData(rig.uuid, 20, 20, DIM,
                 new LoadedColumnData(20, 20, genBytes, genBytes.length), TS, 7, false, false));
@@ -275,7 +275,7 @@ class OffThreadProcessorStoreTest {
     void staleGenerationOutcomeSkipsTheDeposit() {
         var rig = new Rig(true);
         long packed = PositionUtil.packPosition(21, 21);
-        rig.state.tryAdmit(new PendingRequest(21, 21, SlotType.GENERATION, false));
+        rig.state.tryAdmit(new PendingRequest(21, 21, SlotType.GENERATION, 0L));
         rig.proc.addGenerationInFlight(rig.uuid, DIM, packed);
         // The edit overtakes the buffered outcome...
         rig.proc.invalidateTimestamps(DIM, new long[]{packed});

@@ -61,9 +61,25 @@ class SectionStateFuzzTest {
         long[] pool = positionPool();
 
         boolean probeFired = false;
+        boolean ratchetFired = false;
         for (int op = 0; op < 4_000; op++) {
             long p = pool[rng.nextInt(pool.length)];
-            int kind = rng.nextInt(100);
+            int kind = rng.nextInt(101); // 100 = the ratchet op (3-Opus fold: added by WIDENING, not by halving prune)
+            if (kind == 100) {
+                // Stamped-up_to_date ratchet (stamped-up-to-date-plan.md §4): a pure
+                // monotonic ts advance on an existing positive mark-free unsatisfied
+                // stamp. NOTE (3-Opus fold): this op CANNOT affect the needs mask by
+                // construction — the differential's value here is the guard chain
+                // (positive/dirty/retry/sessionSatisfied precedence) and the ts value
+                // flowing into later classify/tile-validation ops identically.
+                long second = 1L + rng.nextInt(12_000);
+                boolean refMoved = ref.ratchetStamp(p, second);
+                boolean implMoved = impl.ratchetStamp(p, second);
+                assertEquals(refMoved, implMoved,
+                        "ratchetStamp divergence at op " + op + " seed " + seed);
+                ratchetFired |= implMoved;
+                continue;
+            }
             if (kind < 28) {
                 // Mostly real stamps; occasionally the wire-legal ts=0 (a hostile/buggy
                 // server — onColumnReceived applies it unchecked; review round 2).
@@ -133,11 +149,40 @@ class SectionStateFuzzTest {
                         ref.onReceived(lp, 9_000L);
                     }
                 }
-            } else if (kind < 97) {
+            } else if (kind < 96) {
                 int px = rng.nextInt(41) - 20, pz = rng.nextInt(41) - 20;
                 int dist = 8 + rng.nextInt(80);
                 impl.pruneOutOfRange(px, pz, dist);
                 ref.pruneOutOfRange(px, pz, dist);
+            } else if (kind < 97) {
+                // Region-summary tile validation (final review MAJOR-1/2): the
+                // provenance-scoped two-directional writer — validate strictly-newer
+                // stamps as SUMMARY provenance, revoke ONLY summary-set bits, report
+                // revocations. The one transition no other op produces is
+                // revocation-in-isolation (validated cleared with no stamp/mark
+                // change), so the needs invariant's coverage depends on this op.
+                int tileX = PositionUtil.unpackX(p) >> 5;
+                int tileZ = PositionUtil.unpackZ(p) >> 5;
+                long stampM = switch (rng.nextInt(3)) {
+                    case 0 -> 0L;                        // margined floor — validates all
+                    case 1 -> 1L + rng.nextInt(5_000);   // mid-domain — mixed outcomes
+                    default -> 9_999L;                   // above every stamp — revokes
+                };
+                var implRevoked = new LongArrayList();
+                var refRevoked = new LongArrayList();
+                var implOut = impl.applyTileValidation(tileX, tileZ, stampM, implRevoked::add);
+                long[] refOut = ref.applyTileValidation(tileX, tileZ, stampM, refRevoked::add);
+                assertEquals(refOut[0], implOut.newlyValidated(),
+                        "applyTileValidation newlyValidated divergence at op " + op
+                                + " seed " + seed);
+                assertEquals(refOut[1] == 1, implOut.fullyValidated(),
+                        "applyTileValidation fullyValidated divergence at op " + op
+                                + " seed " + seed);
+                implRevoked.sort(null);
+                refRevoked.sort(null);
+                assertEquals(refRevoked, implRevoked,
+                        "applyTileValidation revocation-set divergence at op " + op
+                                + " seed " + seed);
             } else if (kind < 98) {
                 impl.clear();
                 ref.clear();
@@ -192,6 +237,10 @@ class SectionStateFuzzTest {
         assertTrue(probeFired, "the ringNeedsFree soundness probe's TRUE branch must fire"
                 + " at least once per seed (the converge-leaf op guarantees territory;"
                 + " a never-firing probe pins nothing — review round 2)");
+        assertTrue(ratchetFired, "the ratchet op must actually MOVE a stamp at least"
+                + " once per seed — a shared guard bug returning false in both"
+                + " implementations would otherwise pass the differential while the"
+                + " feature is dead (final panel; the probeFired discipline mirrored)");
     }
 
     @Test
@@ -247,6 +296,13 @@ class SectionStateFuzzTest {
             assertEquals(ref.classify(p), impl.classify(p), "classify sweep" + at);
             assertEquals(ref.timestampFor(p), impl.timestampFor(p), "timestamp sweep" + at);
             assertEquals(ref.isSessionSatisfied(p), impl.isSessionSatisfied(p), "sessionSatisfied sweep" + at);
+            // The needs invariant DIRECTLY, bit-for-bit (final panel): needs bit ⇔
+            // classify != SATISFIED. The aggregated ringNeedsFree probes cannot see a
+            // stuck-OFF bit (the dangerous direction — the fast path would skip a
+            // needing position) while any sibling bit legitimately holds the leaf's
+            // aggregate up.
+            assertEquals(impl.classify(p) != ColumnStateMap.SATISFIED, impl.needsBitForTest(p),
+                    "needs bit diverges from classify at " + p + at);
         }
         assertEquals(ref.receivedCount(), impl.receivedCount(), "receivedCount" + at);
         assertEquals(ref.emptyCount(), impl.emptyCount(), "emptyCount" + at);
