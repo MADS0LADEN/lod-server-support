@@ -719,7 +719,8 @@ if [[ -z "$NATIVE_PROTOCOL" ]]; then
     exit 1
 fi
 if python3 "$PROJECT_ROOT/scripts/check_soak.py" "$RUN_RESULTS_DIR" "$SCENARIO" \
-    --expect-session-version "${SOAK_DIALECT:-$NATIVE_PROTOCOL}"; then
+    --expect-session-version "${SOAK_DIALECT:-$NATIVE_PROTOCOL}" \
+    --platform "$SOAK_PLATFORM"; then
     echo "[soak] PASS: $SCENARIO — results in $RUN_RESULTS_DIR"
 else
     code=$?
