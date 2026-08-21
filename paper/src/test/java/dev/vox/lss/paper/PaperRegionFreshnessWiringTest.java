@@ -115,12 +115,18 @@ class PaperRegionFreshnessWiringTest {
         int resolve = body.indexOf("resolveRegionDirs(server, worldRoot)");
         int attach = body.indexOf("diskReader.attachRegionStamps(regionStamps)");
         int bump = body.indexOf(".bumpLiveSaveMark(");
+        int stampSource = body.indexOf("setUpToDateStampSource(");
         int storeBranch = body.indexOf("if (storeMode != dev.vox.lss.common.store.LodStoreMode.OFF)");
         assertTrue(resolve > 0, "the wiring builder must construct the region dirs via"
                 + " resolveRegionDirs (the extracted, per-line-swappable site)");
         assertTrue(attach > 0, "the disk reader must get attachRegionStamps — without it"
                 + " the header rung is silently dead (disk.header_hits frozen at 0)");
         assertTrue(bump > 0, "the mark listener must bump the region live-save latch");
+        assertTrue(stampSource > 0, "the stamped-up_to_date predicate must be installed"
+                + " (setUpToDateStampSource) — without it every up_to_date ships"
+                + " unstamped and the heal feature is silently dead on Paper (the"
+                + " Phase B review: this lane has NO live gate on Paper — wrs's floors"
+                + " were racy and removed; this scan is the port protection)");
         assertTrue(storeBranch > 0, "census anchor: the store-mode branch exists");
         assertTrue(attach < storeBranch, "attachRegionStamps must sit BEFORE (outside)"
                 + " the store branch — the rung is load-bearing on store-LESS servers"
