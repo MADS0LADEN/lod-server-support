@@ -1270,6 +1270,7 @@ class Ctx:
     runs: dict                 # run number -> list of client snapshots
     qpoints: list
     config: dict               # scenario -config.json contents ({} if unavailable)
+    platform: str = "fabric"   # SOAK_PLATFORM of the recording (soak.sh --platform)
     quiescent_server: set = field(default_factory=set)   # server snapshot indices
     quiescent_client: set = field(default_factory=set)   # (run, client index) join targets
     run_actions: dict = field(default_factory=dict)      # run number -> list of action rows
@@ -1451,7 +1452,15 @@ def check_warm_rejoin_summary(ctx):
     # self-scaling suppression pin) on both halves: server entries produced, client
     # ratchets applied. A dead lane here means the eligibility gate, the drain sink,
     # or the client apply broke while every other pin stayed green.
-    if s.get("stamps_applied", 0) < 50:
+    # FABRIC-ONLY (live-diagnosed 2026-08-21, temptrace refuse-latch): on Paper marks
+    # fire at EDIT time and base-paper's ambient grass drip latches region (0,0);
+    # the same marks make exactly its tiles read stale, so run 2 re-asks ONLY
+    # latch-covered positions and every stamp is refused — the doctrine WORKING
+    # (an unsaved change is pending; a stamp would seal pre-change bytes). With no
+    # autosave inside the run window the latch never clears, so a Paper stamps
+    # floor here demands what the honesty rule forbids. On real Paper servers
+    # autosave (~5 min) advances headers and stamps flow between edits.
+    if ctx.platform == "fabric" and s.get("stamps_applied", 0) < 50:
         yield Violation("warm-rejoin-summary", "run2 final snapshot",
                         "the client ratcheted too few verification stamps — the "
                         "stamped-up_to_date lane is not reaching the cache",
@@ -1514,7 +1523,8 @@ def check_warm_rejoin_summary(ctx):
                         "the server's own window (radius/center drift between the two "
                         "halves)",
                         {"expected": "0", "actual": last["summary"]["range_filtered"]})
-    if last["summary"].get("stamps_entries", 0) < 50:
+    if ctx.platform == "fabric" and last["summary"].get("stamps_entries", 0) < 50:
+        # FABRIC-ONLY — the client-side floor's latch rationale applies verbatim.
         yield Violation("warm-rejoin-summary", "final server snapshot",
                         "the server produced too few verification stamps for run 2's "
                         "up_to_date volume — the compare-backed rungs are not stamping "
@@ -3676,7 +3686,7 @@ def check_global_schema(server_snaps, runs, violations):
     return ok
 
 
-def run_checker(results_dir, scenario, expect_session_version=None):
+def run_checker(results_dir, scenario, expect_session_version=None, platform="fabric"):
     violations, warnings = [], []
     unknown_keys, unknown_events = set(), set()
 
@@ -3758,7 +3768,7 @@ def run_checker(results_dir, scenario, expect_session_version=None):
                   runs=runs, qpoints=qpoints, config=config,
                   quiescent_server={q.si for q in qpoints},
                   quiescent_client={(q.run, q.ci) for q in qpoints},
-                  run_actions=run_actions)
+                  run_actions=run_actions, platform=platform)
         try:
             law_violations, windows, client_windows = evaluate_laws(ctx)
             violations += law_violations
@@ -4501,13 +4511,14 @@ def selftest():
                 cols1=4200, pre_cols=2100, srv_reqs=2, srv_frames=2, srv_bytes=178,
                 srv_rf=0, known2=2144, cols2=16, split_run1=True, poison_ok=True,
                 with_poison=True, srv_stamps=800, srv_stamps_bytes=8200,
-                cli_stamps=800):
+                cli_stamps=800, platform="fabric"):
         run1 = ([_cli(1000, seg=0, over={"responses.columns": pre_cols}),
                  _cli(200_000, seg=1, over={"responses.columns": cols1})]
                 if split_run1 else [_cli(1000, over={"responses.columns": cols1})])
         commands = ([_cmd(195_000, "setblock 264 310 264 minecraft:stone", ok=poison_ok)]
                     if with_poison else []) + [_cmd(210_000, "kick @a soak-phase-end")]
         return _ctx(
+            platform=platform,
             server_snaps=[_srv(1000), _srv(200_000, over={
                 "summary.requests": srv_reqs, "summary.frames": srv_frames,
                 "summary.bytes": srv_bytes, "summary.range_filtered": srv_rf,
@@ -4526,6 +4537,13 @@ def selftest():
                       "columns.known": known2,
                       "responses.columns": cols2})]})
     clean("warm-rejoin-summary healthy", list(check_warm_rejoin_summary(wrs_ctx())))
+    hits("warm-rejoin-summary stamps lane dead on fabric", list(check_warm_rejoin_summary(
+        wrs_ctx(srv_stamps=0, srv_stamps_bytes=0, cli_stamps=0))), "warm-rejoin-summary")
+    # Paper: edit-time marks latch the drip region and run 2 re-asks ONLY latch-covered
+    # positions — a zero stamps lane is the doctrine refusing toward unstamped, not a
+    # regression (live-diagnosed 2026-08-21). The floors are Fabric-only.
+    clean("warm-rejoin-summary paper zero-stamps tolerated", list(check_warm_rejoin_summary(
+        wrs_ctx(srv_stamps=0, srv_stamps_bytes=0, cli_stamps=0, platform="paper"))))
     hits("warm-rejoin-summary validated too little", list(check_warm_rejoin_summary(
         wrs_ctx(validated=100))), "warm-rejoin-summary")
     hits("warm-rejoin-summary too few clean tiles", list(check_warm_rejoin_summary(
@@ -5194,6 +5212,9 @@ def main(argv=None):
     parser.add_argument("--expect-session-version", type=int, default=None,
                         metavar="N", help="assert every established client session is "
                         "protocol N (soak.sh passes SOAK_DIALECT or the native version)")
+    parser.add_argument("--platform", default="fabric",
+                        help="SOAK_PLATFORM of the recording (fabric/paper/folia) — "
+                        "platform-conditional checks key on this")
     parser.add_argument("args", nargs="*", metavar="RESULTS_DIR SCENARIO",
                         help="results directory and scenario name")
     opts = parser.parse_args(argv)
@@ -5216,7 +5237,7 @@ def main(argv=None):
     if not results_dir.is_dir():
         print(f"FAIL: results dir not found: {results_dir}")
         return 1
-    return run_checker(results_dir, scenario, opts.expect_session_version)
+    return run_checker(results_dir, scenario, opts.expect_session_version, opts.platform)
 
 
 if __name__ == "__main__":
