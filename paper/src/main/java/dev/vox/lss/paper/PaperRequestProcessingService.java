@@ -483,34 +483,10 @@ public class PaperRequestProcessingService {
             }
         }
         // Region-dir resolver, HOISTED out of the store branch (region-summary-sync-plan.md
-        // §5 integration M2 — the Fabric twin's comment applies: the P1 header rung must
-        // work store-LESS, and the compiled store default is off).
-        // PER-LINE INVARIANT (surfaces row 17 — Bukkit world layout): Paper 26.x uses the
-        // vanilla UNIFIED layout, so the server worldRoot is the correct getStorageFolder
-        // root, same as Fabric. The 1.21.x lines use Bukkit's legacy SPLIT world dirs and
-        // re-root PER LEVEL via getWorld().getWorldFolder() — the two forms are NOT
-        // interchangeable: R2-9's live probe (2026-08-15) showed 26.2's getWorldFolder()
-        // returns the per-dimension SUBFOLDER (world/dimensions/minecraft/<dim>), so
-        // adopting the per-level form here would break this line's sweep the same way the
-        // unified form broke the 1.21.x port's. Walk row 17 on every port.
+        // §5 integration M2 — the P1 header rung must work store-LESS). The per-line
+        // layout invariant (surfaces row 17) lives on resolveRegionDirs below.
         var worldRoot = server.getWorldPath(LevelResource.ROOT).normalize();
-        var regionDirs = new java.util.HashMap<String, java.nio.file.Path>();
-        for (ServerLevel level : server.getAllLevels()) {
-            // Per-level belt: this loop now runs on STORE-LESS servers too, where the
-            // storage-folder API was never touched before — an exotic dimension key
-            // must degrade that one dimension to UNKNOWN (the table's designed
-            // fail-safe), never take down service start.
-            try {
-                regionDirs.put(level.dimension().identifier().toString(),
-                        net.minecraft.world.level.dimension.DimensionType
-                                .getStorageFolder(level.dimension(), worldRoot)
-                                .resolve("region").normalize());
-            } catch (Throwable t) {
-                LSSLogger.warn("Could not resolve the region directory for "
-                        + level.dimension().identifier() + " — region freshness there"
-                        + " falls through to full reads", t);
-            }
-        }
+        var regionDirs = resolveRegionDirs(server, worldRoot);
         var regionStamps = new dev.vox.lss.common.region.RegionStampTable(regionDirs::get);
         diskReader.attachRegionStamps(regionStamps);
         // Tracker + mark listener BEFORE the processor starts (the Fabric twin's
@@ -577,6 +553,43 @@ public class PaperRequestProcessingService {
         return new Wiring(players, diskReader, generationService, offThreadProcessor,
                 dirtyTracker, dirtyBroadcaster, lodStore, xrayMasks, wireCompressionLive,
                 regionStamps);
+    }
+
+    /** Region-dir resolution for the P1 freshness rungs (one call site in the wiring
+     *  builder above; extracted for the v0.12.0 B.0 wiring pin —
+     *  {@code PaperRegionFreshnessWiringTest} drives it with mocked levels). The
+     *  PER-LINE INVARIANT (surfaces row 17) lives HERE now, at the one swappable
+     *  site: Paper 26.x uses the vanilla UNIFIED layout ({@code getStorageFolder}
+     *  under the server worldRoot, same as Fabric); the 1.21.x lines use Bukkit's
+     *  legacy SPLIT world dirs and must re-root PER LEVEL via
+     *  {@code getWorld().getWorldFolder()} — the two forms are NOT interchangeable
+     *  (R2-9's live probe, 2026-08-15: 26.2's getWorldFolder() returns the
+     *  per-dimension SUBFOLDER, and the unified form broke the 1.21.x port's sweep
+     *  the same way). Ports adapt THIS method + the wiring test's expectations. */
+    static java.util.HashMap<String, java.nio.file.Path> resolveRegionDirs(
+            MinecraftServer server, java.nio.file.Path worldRoot) {
+        var regionDirs = new java.util.HashMap<String, java.nio.file.Path>();
+        for (ServerLevel level : server.getAllLevels()) {
+            // Per-level belt: this loop runs on STORE-LESS servers too — an exotic
+            // dimension key must degrade that one dimension to UNKNOWN (the table's
+            // designed fail-safe), never take down service start. The catch must not
+            // re-invoke anything throwable (B.0 pin finding: the old warn line called
+            // level.dimension() AGAIN, so a dimension whose accessor itself throws
+            // escaped the belt and killed start — capture the name first).
+            String dim = null;
+            try {
+                dim = level.dimension().identifier().toString();
+                regionDirs.put(dim,
+                        net.minecraft.world.level.dimension.DimensionType
+                                .getStorageFolder(level.dimension(), worldRoot)
+                                .resolve("region").normalize());
+            } catch (Throwable t) {
+                LSSLogger.warn("Could not resolve the region directory for "
+                        + (dim != null ? dim : "<unresolvable dimension>")
+                        + " — region freshness there falls through to full reads", t);
+            }
+        }
+        return regionDirs;
     }
 
     /** Registry identity for the LOD store meta guard (4-agent round R2-M3) — textual
