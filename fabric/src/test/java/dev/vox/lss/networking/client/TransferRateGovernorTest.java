@@ -1167,8 +1167,9 @@ class TransferRateGovernorTest {
 
     // ---- Window-limited Row-4 bypass (ramp-window-limited-credit-plan.md) ----
 
-    /** Climbs an armed governor to the ceiling via 7 kept-up doublings (EWMA 16K —
-     *  the existing keptUp test's feed shape). Returns {time, bytes, cols} cursors;
+    /** Climbs an armed governor to the ceiling via 7 kept-up doublings (the existing
+     *  keptUp test's feed shape; the resulting size EWMA is 32K — desired×2s bytes
+     *  over desired/16K columns). Returns {time, bytes, cols} cursors;
      *  rampOpenStreak is 1 afterward (the 4M→8M doubling credited once). */
     private long[] climbToCeiling(TransferRateGovernor g) {
         long t = 0, bytes = 0, cols = 0;
@@ -1314,6 +1315,13 @@ class TransferRateGovernorTest {
         cur = stuckInterval(g, cur, false, 200, 190); // same shape, NO latch
         assertEquals(desired, g.getDesiredBytesPerSec(),
                 "the unlatched twin interval holds at Row 4 (no leaked credit)");
+        // minor-3 (panel): desired can't move at the ceiling, so pin the no-leak
+        // claim on the PHASE — nine more unlatched twins would open a leaked latch.
+        for (int i = 0; i < 9; i++) {
+            cur = stuckInterval(g, cur, false, 200, 190);
+        }
+        assertEquals(TransferRateGovernor.Phase.RAMP, g.getPhase(),
+                "unlatched intervals never credit — the latch does not leak");
         // hardReset (an active=false tick) clears a pending latch.
         g.noteWindowLimited();
         assertTrue(g.windowLimitedLatchedForTest());
@@ -1326,6 +1334,26 @@ class TransferRateGovernorTest {
         var heir = new TransferRateGovernor();
         heir.adoptFrom(donor);
         assertFalse(heir.windowLimitedLatchedForTest(), "adoptFrom reseeds the interval");
+    }
+
+    @Test
+    void unlatchedUncreditedIntervalStillResetsTheStreak() {
+        // The panel's forgiveness-scoping MAJOR: forgiveness is for WINDOW-LIMITED
+        // aliasing only. An un-latched uncredited qualifying interval keeps main's
+        // semantics — immediate reset — so alternating credited/uncredited demand
+        // (~3/8 average answered) can never walk to OPEN.
+        var g = armed();
+        long[] cur = climbToCeiling(g); // streak 1
+        for (int i = 0; i < 8; i++) cur = stuckInterval(g, cur, true, 200, 190); // 9
+        cur = stuckInterval(g, cur, false, 200, 50); // UN-latched miss: hard reset
+        cur = stuckInterval(g, cur, true, 200, 190); // one credit = streak 1, not 10
+        assertEquals(TransferRateGovernor.Phase.RAMP, g.getPhase(),
+                "an un-latched miss resets exactly as before the fix");
+        for (int i = 0; i < 8; i++) cur = stuckInterval(g, cur, true, 200, 190);
+        assertEquals(TransferRateGovernor.Phase.RAMP, g.getPhase());
+        cur = stuckInterval(g, cur, true, 200, 190);
+        assertEquals(TransferRateGovernor.Phase.OPEN, g.getPhase(),
+                "ten fresh consecutive credits confirm after the reset");
     }
 
     @Test

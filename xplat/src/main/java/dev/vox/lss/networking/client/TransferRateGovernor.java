@@ -526,9 +526,22 @@ final class TransferRateGovernor {
             if (qualifying) {
                 if (credited) {
                     this.rampUncreditedRun = 0;
-                } else if (++this.rampUncreditedRun >= 2) {
-                    // Two consecutive uncredited qualifying intervals = real
-                    // degradation, not interval aliasing — reset (plan §3.4).
+                } else if (this.windowLimitedSeenThisInterval
+                        && this.rampUncreditedRun == 0) {
+                    // Forgiven ONCE, and only for a WINDOW-LIMITED interval (the
+                    // implementation panel's MAJOR: unscoped forgiveness loosened
+                    // the OPEN confirmation for every ramp session — alternating
+                    // credited/uncredited demand could confirm at ~3/8 average
+                    // answered where main required 10 consecutive). The scoped
+                    // case is exactly plan §3.4's aliasing shape: in the stop-and-
+                    // wait steady state every interval latches, and the ~1-in-6
+                    // window whose 4th batch drains into the next interval fails
+                    // answeredAllAsked without being degradation.
+                    this.rampUncreditedRun = 1;
+                } else {
+                    // Un-latched uncredited (main's semantics, restored) or the
+                    // second consecutive miss (real degradation): reset.
+                    this.rampUncreditedRun = 1;
                     this.rampOpenStreak = 0;
                 }
             }

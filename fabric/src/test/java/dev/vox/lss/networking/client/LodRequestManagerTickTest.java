@@ -956,6 +956,32 @@ class LodRequestManagerTickTest {
     }
 
     @Test
+    void manualBelowTheGovernedHalfNeverLatches() {
+        // The implementation panel's MAJOR-1 pin: with the adaptive cadence OFF the
+        // scan's governed half is the FULL sustained rate (2 at a fresh RAMP), so a
+        // manual knob of 1 is the binding clamp — and the latch must compare against
+        // the SAME composed governed half. The pre-fix code re-read burst =
+        // ceil(sustained/4) = 1 <= manual and latched a manually-capped walk.
+        int prior = LSSClientConfig.CONFIG.lodColumnsPerSecondLimit;
+        LSSClientConfig.CONFIG.lodColumnsPerSecondLimit = 1;
+        try {
+            setupManager(config(8, true));
+            manager.joinSlowStartEnabled = () -> true; // live RAMP: governed half = 2
+            manager.transferGovernorEnabled = () -> true;
+            // Adaptive cadence forced OFF (the CONFIG default is on): the governed
+            // half of the min-compose is sustainedColumnsPerSecond() = 2.
+            manager.scannerForTest().adaptiveCadenceEnabled = () -> false;
+            plainTick(dim("overworld"));
+            assertEquals(1, sent.size());
+            assertEquals(1, sent.get(0).count(), "the manual knob (1) clamped the walk");
+            assertFalse(manager.governor.windowLimitedLatchedForTest(),
+                    "manual (1) < the governed half (2): the manual knob was the binder");
+        } finally {
+            LSSClientConfig.CONFIG.lodColumnsPerSecondLimit = prior;
+        }
+    }
+
+    @Test
     void manualCapBindingNeverLatchesTheWindowLimit() {
         // The min-compose's manual half as the binder (governed burst 0 — slow start
         // off): the walk truncates against the MANUAL knob, and the latch's

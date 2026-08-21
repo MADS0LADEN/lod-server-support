@@ -444,6 +444,12 @@ class SpiralScanner {
         // the constant AND neither the pressure taper nor the wire-batch min reduced
         // it further. A taper-reduced budget (the CPU-weak client between 25% and
         // halt) must never read as governor-window-limited.
+        // Accepted corner (implementation panel minor-2): at tiny caps the taper's
+        // round + max(1,·) floor can land the tapered budget back ON the cap value
+        // (unconditionally at burstCap == 1), so a heavily-pressured early-RAMP
+        // client can read cap-clamped. Bounded by the same self-arrest geometry as
+        // exact-fill — a wrongly-latched doubling doubles the budget past the
+        // pressure point, and credits still require desired > ENGAGE_BELOW.
         this.lastBudgetCapClamped = burstCap > 0
                 && burstCap < LSSConstants.WANT_SET_BUDGET
                 && budget == burstCap;
@@ -886,7 +892,8 @@ class SpiralScanner {
         this.scanRing = 0;
         this.lastExclusionRadius = -1; // next session re-anchors; no spurious shrink reset
         this.lastLodDistance = -1;     // ...same for the lod-shrink rung
-        this.lastWalkTruncated = false; // fresh session predicts the full disc — fail closed
+        this.lastWalkTruncated = false;
+        this.lastBudgetCapClamped = false; // fresh session predicts the full disc — fail closed
         this.scanTickCounter = LSSConstants.TICKS_PER_SECOND - 1;
         this.missingVanillaChunks = Integer.MAX_VALUE;
         this.cachedVoxyDistance = -1;
@@ -1023,14 +1030,10 @@ class SpiralScanner {
     boolean truncatedBelowPrefixForTest() { return this.truncatedBelowPrefix; }
     /** predictedWalkCost's truncation input — the walk differential asserts arm parity
      *  on it directly (review round 2 MINOR: only count trajectories implied it). */
-    boolean lastWalkTruncatedForTest() { return this.lastWalkTruncated; }
+    boolean wasLastWalkTruncated() { return this.lastWalkTruncated; }
     int getScanRing() { return this.scanRing; }
     int getMissingVanillaChunks() { return this.missingVanillaChunks; }
     int getLastBudget() { return this.lastBudget; }
-
-    /** Did the last walk stop early because the budget filled? (The truncation half
-     *  of the governor's window-limited latch — see {@link #lastWalkTruncated}.) */
-    boolean wasLastWalkTruncated() { return this.lastWalkTruncated; }
 
     /** Was the burst cap the binding, taper-free clamp on the last walk's budget?
      *  (The provenance half — see the maybeScan recording site.) */

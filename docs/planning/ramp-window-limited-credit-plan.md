@@ -165,13 +165,23 @@ uncredited interval, so the 10-credit exit could never fire on the fix's own
 headline rig. The streak reset gains one interval of forgiveness:
 
 - New field `rampUncreditedRun`. In the `finally`: a credited interval zeroes
-  it; a qualifying uncredited interval increments it, and only the SECOND
-  consecutive one resets `rampOpenStreak` (non-qualifying intervals remain
-  no-observations, as today).
-- Round-3 safety is preserved: the trickle cannot credit at all (§2 — credits
-  require desired > 4 MB/s), so forgiveness never manufactures streaks from
-  nothing; an alternating credited/uncredited link is delivering >4 MB/s growth
-  evidence half the time, which is honest OPEN material.
+  it; a qualifying uncredited interval that was WINDOW-LIMITED is forgiven once
+  (the run marks 1); any other uncredited qualifying interval — un-latched, or
+  the second consecutive miss — resets `rampOpenStreak` exactly as main did
+  (non-qualifying intervals remain no-observations, as today).
+- SCOPED TO THE LATCH (implementation-panel fold, governor MAJOR): an unscoped
+  forgiveness loosened the OPEN confirmation for every ramp session —
+  alternating credited/uncredited demand patterns could confirm at ~3/8 average
+  answered where main required 10 consecutive; and it silently forgave Row-1/2/3
+  holds (vanilla-behind included). Scoping costs the headline fix nothing: in
+  the stop-and-wait steady state EVERY interval latches, so the aliased miss is
+  always a latched interval.
+- Round-3 safety is preserved by demand geometry, not by a delivery claim (the
+  same fold corrected §3.4's earlier justification — `credited` measures the
+  governor's post-doubling desired, not delivered bytes): credits require
+  desired > 4 MB/s, which requires the walk to keep FILLING a ≥~170-350-column
+  governed budget with ≥¾ answered — sustained backfill demand no trickle or
+  alternating pattern produces, and un-latched misses now reset regardless.
 - Expected exit at the measured rig shape: ~12 intervals ≈ 24 s (10 credits
   with ~1-in-6 forgiven misses). A REAL degradation (two consecutive uncredited
   intervals) still resets exactly as before.
@@ -213,10 +223,15 @@ headline rig. The streak reset gains one interval of forgiveness:
    the fix: today's failure (permanent ramp park) costs every good-server
    session ~25-35% forever; the new failure lands in OPEN = v0.11 behavior with
    all its containment.
-3. **Genuinely slow serves stay parked.** At cycle > ~2 s (serve ≲ 180 col/s),
-   declare-bearing intervals fail `answeredAllAsked` (the answers drain into the
-   next interval) and drain-only intervals never latch — the ramp keeps holding,
-   which is protective there. Recorded as designed behavior.
+3. **Genuinely slow serves park via the double-miss reset (mechanism corrected
+   by the implementation panel).** Answers stream continuously, so a 1-declare
+   interval's answered ratio is ~2000 ms/cycle and `answeredAllAsked` holds up
+   to cycle ≈ 2.67 s: the 2.0-2.67 s band (≈130-180 col/s) reaches OPEN through
+   forgiven zero-declare intervals — an accepted landing (§4.2; OPEN is
+   self-paced there too). Past ~2.67 s the ratio itself falls under ¾, the
+   declare-bearing AND drain-only intervals are both uncredited, the run
+   reaches 2, and the reset parks the ramp — which is the protective outcome
+   for genuinely slow serves.
 4. **Partial answers never credit and never snap.** Window-limited + answered <
    ¾ declared → all rungs fail → HOLD (the new pre-snap guard). A server hiccup
    costs an interval, not the earned desired (mirrors
@@ -250,8 +265,11 @@ headline rig. The streak reset gains one interval of forgiveness:
   bypass is a Row-4 bypass, not a blanket pre-snap return (a wrong
   implementation early-returning on the latch before the snap must red here).
 - `windowLimitedSingleAliasedMissIsForgiven` / `twoConsecutiveMissesReset`
-  (§3.4): credited×5, one uncredited, credited×5 → OPEN; credited×9,
-  uncredited×2 → streak restarts.
+  (§3.4): credited×5, one latched uncredited, credited×5 → OPEN; credited×9,
+  latched uncredited×2 → streak restarts.
+- `unlatchedUncreditedIntervalStillResetsTheStreak` (the scoping pin): an
+  UN-latched miss after nine credits resets immediately — the alternating
+  pattern can never confirm.
 - `trickleThroughTinyBudgetSelfArrestsAndNeverCredits` (MAJOR-1(b) bound):
   latched intervals with small answered demand double desired only while the
   implied budget < demand, park below ENGAGE_BELOW, phase stays RAMP,
@@ -319,3 +337,28 @@ Findings and dispositions (all folded into the sections above):
   pre-snap guard's bit-identicality when unlatched, the tick-order attribution,
   the latch-clearing coverage (including the DISABLED-scan corner), the
   credited-streak accounting, and the pinned-decision inventory.
+
+## 9. The 3-Opus implementation panel fold (2026-08-21) — normative
+
+- **Wiring MAJOR (composition mismatch):** with `enableAdaptiveScanCadence`
+  false the scan's governed half is the FULL sustained rate while the latch
+  re-read burst = ceil(sustained/4) — manually-capped walks in
+  [ceil(sustained/4), sustained/2) latched as governor-window-limited. Folded:
+  `governedBurstCap()` is the ONE composition both sites read; pinned by
+  `manualBelowTheGovernedHalfNeverLatches` (cadence-off, manual 1 < sustained 2).
+- **Governor MAJOR (forgiveness scope):** folded as §3.4 now records — the
+  forgiveness is latch-scoped; un-latched uncredited intervals reset exactly as
+  main; pinned by `unlatchedUncreditedIntervalStillResetsTheStreak`. §3.4's
+  alternating-link justification was replaced (credited measures post-doubling
+  desired, not delivery); §4.3's slow-serve mechanism corrected (parks via the
+  double-miss reset past ~2.67 s cycles; the 2.0-2.67 s band reaches OPEN,
+  accepted).
+- Minors folded: the tiny-cap taper floor corner documented at the scanner
+  recording site (bounded by self-arrest; `burstCap == 1` always reads
+  cap-clamped under pressure); `lastBudgetCapClamped` cleared in
+  `SpiralScanner.reset()` for lifecycle symmetry; the duplicate truncation
+  accessor collapsed to one (`wasLastWalkTruncated`, production + tests);
+  `climbToCeiling`'s EWMA javadoc corrected (32K); the interval-scoped test's
+  vacuous desired-at-ceiling assertion pinned on PHASE over nine unlatched
+  twins; the manager test suite gained the cadence-off manual-binding arm the
+  original suite could not red on.

@@ -225,6 +225,18 @@ public class LodRequestManager {
         return Math.min(manual, governed);
     }
 
+    /** The GOVERNED half of the budget-clamp min-compose — the ONE composition both
+     *  the scanner's columnBurstCap supplier and the window-limited latch read (the
+     *  implementation panel's MAJOR-1: with the adaptive cadence off the governed
+     *  half is the FULL sustained rate, and a latch re-reading burst = sustained/4
+     *  mis-attributed manually-capped walks in the band [ceil(sustained/4),
+     *  sustained/2) to the governor). */
+    private int governedBurstCap() {
+        return this.scanner.adaptiveCadenceEnabled.getAsBoolean()
+                ? this.governor.burstColumnsPerSecond()
+                : this.governor.sustainedColumnsPerSecond();
+    }
+
     public LodRequestManager() {
         // Adaptive cadence: the scanner's fast trigger reads the awaiting-set size each
         // tick. Same main-client-thread contract as every other tracker consumer — every
@@ -244,9 +256,7 @@ public class LodRequestManager {
                 this.governor.sustainedColumnsPerSecond());
         this.scanner.columnBurstCap = () -> composeRateCaps(
                 LSSClientConfig.CONFIG.lodColumnsPerSecondLimit,
-                this.scanner.adaptiveCadenceEnabled.getAsBoolean()
-                        ? this.governor.burstColumnsPerSecond()
-                        : this.governor.sustainedColumnsPerSecond());
+                governedBurstCap());
     }
 
     public void onSessionConfig(SessionConfigS2CPayload config, String serverAddress) {
@@ -636,7 +646,7 @@ public class LodRequestManager {
                 // governor-window-limited). Tick order puts governor.tick() before
                 // this phase, so the latch lands in the interval this declaration
                 // counts toward.
-                int governedBurst = this.governor.burstColumnsPerSecond();
+                int governedBurst = governedBurstCap();
                 int manual = LSSClientConfig.CONFIG.lodColumnsPerSecondLimit;
                 if (this.scanner.wasLastWalkTruncated()
                         && this.scanner.wasLastBudgetCapClamped()
