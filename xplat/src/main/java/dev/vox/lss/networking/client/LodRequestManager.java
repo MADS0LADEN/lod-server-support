@@ -639,16 +639,23 @@ public class LodRequestManager {
             if (scanned > 0 && sendRequests(this.sendPositionBuffer,
                     this.sendTimestampBuffer, scanned)) {
                 // The governor's window-limited latch (ramp-window-limited-credit-
-                // plan.md §3.2): a SUCCESSFULLY-SENT walk that the GOVERNED burst
-                // cap truncated — the cap was the binding, taper-free clamp
-                // (scanner provenance) AND the governed rate is the binding half
-                // of the min-compose (a manually-capped loop must not claim to be
-                // governor-window-limited). Tick order puts governor.tick() before
-                // this phase, so the latch lands in the interval this declaration
-                // counts toward.
+                // plan.md §3.2): a SUCCESSFULLY-SENT, COMPLETION-CLOCKED (fast-
+                // fired) walk that the GOVERNED burst cap truncated — the cap was
+                // the binding, near-taper-free clamp (scanner provenance) AND the
+                // governed rate is the binding half of the min-compose (a manually-
+                // capped loop must not claim to be governor-window-limited). The
+                // fast conjunct is the dynamics-review MAJOR-2 fold: a backlogged
+                // slow link runs FALLBACK-clocked (the outstanding gate refuses
+                // fast fires while >5% is unanswered) and its 1 Hz full-budget
+                // re-declares would otherwise satisfy answeredAllAsked up to
+                // ~5.3x the link rate — fallback fires never latch, so slow links
+                // keep (approximately) main's Row-4 park. Tick order puts
+                // governor.tick() before this phase, so the latch lands in the
+                // interval this declaration counts toward.
                 int governedBurst = governedBurstCap();
                 int manual = LSSClientConfig.CONFIG.lodColumnsPerSecondLimit;
-                if (this.scanner.wasLastWalkTruncated()
+                if (this.scanner.wasLastScanFast()
+                        && this.scanner.wasLastWalkTruncated()
                         && this.scanner.wasLastBudgetCapClamped()
                         && governedBurst > 0
                         && (manual <= 0 || governedBurst <= manual)) {
@@ -1271,7 +1278,10 @@ public class LodRequestManager {
             case ENGAGED -> this.governor.sustainedColumnsPerSecond() + "/s ("
                     + (this.governor.getDesiredBytesPerSec() / 1024) + " KB/s)";
             case RAMP -> "ramp@" + (this.governor.getDesiredBytesPerSec() / 1024)
-                    + " KB/s (" + this.governor.sustainedColumnsPerSecond() + "/s)";
+                    + " KB/s (" + this.governor.sustainedColumnsPerSecond() + "/s, credits="
+                    + this.governor.rampOpenStreakForDiag() + "/"
+                    + TransferRateGovernor.DISENGAGE_RATE_INTERVALS
+                    + (this.governor.windowLimitedLatched() ? ", wl" : "") + ")";
             case OPEN -> "open";
             case DISABLED -> "off";
         };

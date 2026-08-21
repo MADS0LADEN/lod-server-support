@@ -808,9 +808,14 @@ final class TransferRateGovernor {
     /** Test accessor: the asymmetric size estimator's current value (-1 = no sample). */
     double getSizeEstimateForTest() { return this.sizeEwmaBytes; }
 
-    /** Test accessor: the window-limited latch's current-interval state (the manager
-     *  wiring tests observe the latch, not the private field). */
-    boolean windowLimitedLatchedForTest() { return this.windowLimitedSeenThisInterval; }
+    /** The window-limited latch's current-interval state — the diag receipt
+     *  (dynamics review minor-2: a "still parked" field report must be able to
+     *  answer "did the latch arm?" without a code read) and the wiring tests'
+     *  observable. */
+    boolean windowLimitedLatched() { return this.windowLimitedSeenThisInterval; }
+
+    /** RAMP→OPEN confirmation progress for the diag line (credits=N/10). */
+    int rampOpenStreakForDiag() { return this.rampOpenStreak; }
 
     /** Desired rate in bytes/s while ENGAGED or RAMP, 0 otherwise — diag only. */
     long getDesiredBytesPerSec() {

@@ -444,15 +444,21 @@ class SpiralScanner {
         // the constant AND neither the pressure taper nor the wire-batch min reduced
         // it further. A taper-reduced budget (the CPU-weak client between 25% and
         // halt) must never read as governor-window-limited.
-        // Accepted corner (implementation panel minor-2): at tiny caps the taper's
-        // round + max(1,·) floor can land the tapered budget back ON the cap value
-        // (unconditionally at burstCap == 1), so a heavily-pressured early-RAMP
-        // client can read cap-clamped. Bounded by the same self-arrest geometry as
-        // exact-fill — a wrongly-latched doubling doubles the budget past the
-        // pressure point, and credits still require desired > ENGAGE_BELOW.
+        // MARGINAL-pressure tolerance (dynamics review MAJOR-1): exact equality
+        // disarmed the latch at ~9 queued columns when the cap sits near the rig's
+        // ~350 (round(347×0.9985) = 346 != 347) — ordinary Voxy ingest counts would
+        // have killed the fix at exactly the park point it targets. The cap counts
+        // as the binding clamp while the tapered budget stays within 25% of it
+        // (budget×4 >= cap×3): mild pressure tolerated, deep pressure (scale <
+        // ~0.75) attributes to the taper and refuses — preserving MAJOR-1(c)'s
+        // CPU-weak exclusion (the 500-of-1000 taper test still reads false).
+        // Accepted corner: at burstCap == 1 the max(1,·) floor keeps budget == cap
+        // under any pressure — bounded by the self-arrest geometry (a wrongly
+        // latched doubling doubles the budget past the pressure point, and credits
+        // still require desired > ENGAGE_BELOW).
         this.lastBudgetCapClamped = burstCap > 0
                 && burstCap < LSSConstants.WANT_SET_BUDGET
-                && budget == burstCap;
+                && budget * 4 >= burstCap * 3;
 
         if (budget <= 0) return -1;
 

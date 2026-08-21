@@ -1309,7 +1309,7 @@ class TransferRateGovernorTest {
         var g = armed();
         long[] cur = climbToCeiling(g);
         cur = stuckInterval(g, cur, true, 200, 190); // credited, latch consumed at seed
-        assertFalse(g.windowLimitedLatchedForTest(),
+        assertFalse(g.windowLimitedLatched(),
                 "seedInterval clears the latch — it never leaks into the next interval");
         long desired = g.getDesiredBytesPerSec();
         cur = stuckInterval(g, cur, false, 200, 190); // same shape, NO latch
@@ -1324,16 +1324,16 @@ class TransferRateGovernorTest {
                 "unlatched intervals never credit — the latch does not leak");
         // hardReset (an active=false tick) clears a pending latch.
         g.noteWindowLimited();
-        assertTrue(g.windowLimitedLatchedForTest());
+        assertTrue(g.windowLimitedLatched());
         g.tick(cur[0] + 1, cur[1], cur[2], cur[3], cur[4], 1, false, NORMAL_PING, false);
-        assertFalse(g.windowLimitedLatchedForTest(), "hardReset clears the latch");
+        assertFalse(g.windowLimitedLatched(), "hardReset clears the latch");
         // adoptFrom never carries a pending latch (interval state reseeds).
         var donor = armed();
         climbToCeiling(donor);
         donor.noteWindowLimited();
         var heir = new TransferRateGovernor();
         heir.adoptFrom(donor);
-        assertFalse(heir.windowLimitedLatchedForTest(), "adoptFrom reseeds the interval");
+        assertFalse(heir.windowLimitedLatched(), "adoptFrom reseeds the interval");
     }
 
     @Test

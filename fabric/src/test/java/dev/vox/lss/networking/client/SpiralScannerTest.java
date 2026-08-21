@@ -2523,6 +2523,21 @@ class SpiralScannerTest {
     }
 
     @Test
+    void marginalPressureKeepsTheCapClampFlag() {
+        // Dynamics review MAJOR-1: exact equality disarmed the latch at ~9 queued
+        // columns near the rig's ~350 cap — the fix would have been dead at exactly
+        // its park point. The 25%-tolerance predicate must survive marginal pressure.
+        var s = scanner(64);
+        s.columnBurstCap = () -> 350;
+        var sink = new Sink();
+        int n = fireScan(s, 0, 9, 6000, 0, new ColumnStateMap(), sink);
+        assertEquals(349, n, "round(350 x 0.9985) — the taper shaved one column");
+        assertTrue(s.wasLastWalkTruncated());
+        assertTrue(s.wasLastBudgetCapClamped(),
+                "a one-column taper shave near the cap is still the cap's clamp");
+    }
+
+    @Test
     void constantBudgetBinderClearsTheCapClampFlag() {
         // A burst cap at/above WANT_SET_BUDGET never actually clamps — truncation
         // against the constant budget is the pre-governor shape and must not latch.

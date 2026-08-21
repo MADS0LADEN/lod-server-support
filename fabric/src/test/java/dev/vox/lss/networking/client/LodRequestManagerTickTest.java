@@ -926,19 +926,34 @@ class LodRequestManagerTickTest {
     // ---- Window-limited latch wiring (ramp-window-limited-credit-plan.md §3.2) ----
 
     @Test
-    void truncatedGovernedWalkLatchesTheWindowLimit() {
+    void truncatedGovernedWalkLatchesOnFastFiresOnly() {
         // A RAMP-fresh governor's burst budget is 1 (64 KB/s over the 32 KB seed,
-        // quartered) — the lod-8 disc truncates against it, the send succeeds, the
-        // governed rate is the binding half (manual knob off) → the latch sets.
+        // quartered) — the lod-8 disc truncates against it and the send succeeds.
+        // The PRIMED first scan is a FALLBACK fire and must NOT latch (dynamics
+        // review MAJOR-2: fallback-clocked full-budget re-declares on a backlogged
+        // slow link would satisfy answeredAllAsked to ~5.3x the link rate — only
+        // COMPLETION-CLOCKED fast fires may claim window-limited). Answering the
+        // batch arms the fast path; the fast fire latches.
         setupManager(config(8, true));
         manager.joinSlowStartEnabled = () -> true;
         manager.transferGovernorEnabled = () -> true;
         enableAdaptiveSeam();
-        plainTick(dim("overworld"));
+        var overworld = dim("overworld");
+        plainTick(overworld);
         assertEquals(1, sent.size(), "the primed first scan shipped");
         assertEquals(1, sent.get(0).count(), "the governed burst budget clamped the walk to 1");
-        assertTrue(manager.governor.windowLimitedLatchedForTest(),
-                "a successfully-sent governed-cap-truncated walk latches the window limit");
+        assertFalse(manager.governor.windowLimitedLatched(),
+                "the primed scan is a FALLBACK fire — fallback fires never latch");
+        answer(sent.get(0), overworld, 1); // outstanding 0 → fast eligible
+        // The spacing gate (sustained 2/s, lastSent 1) spaces the fast fire to
+        // tick 10 — before the 20-tick fallback, so the fire is the FAST path.
+        int ticks = ticksToNextBatch(overworld, 1);
+        assertTrue(ticks < LSSConstants.TICKS_PER_SECOND,
+                "premise: fired before the fallback window (tick " + ticks + ")");
+        assertTrue(manager.scannerForTest().wasLastScanFast(),
+                "premise: the follow-up fire is the FAST path");
+        assertTrue(manager.governor.windowLimitedLatched(),
+                "a successfully-sent, fast-fired, governed-cap-truncated walk latches");
     }
 
     @Test
@@ -951,7 +966,7 @@ class LodRequestManagerTickTest {
             throw new RuntimeException("transport down");
         });
         plainTick(dim("overworld"));
-        assertFalse(manager.governor.windowLimitedLatchedForTest(),
+        assertFalse(manager.governor.windowLimitedLatched(),
                 "nothing was offered — a failed send must not latch");
     }
 
@@ -974,7 +989,7 @@ class LodRequestManagerTickTest {
             plainTick(dim("overworld"));
             assertEquals(1, sent.size());
             assertEquals(1, sent.get(0).count(), "the manual knob (1) clamped the walk");
-            assertFalse(manager.governor.windowLimitedLatchedForTest(),
+            assertFalse(manager.governor.windowLimitedLatched(),
                     "manual (1) < the governed half (2): the manual knob was the binder");
         } finally {
             LSSClientConfig.CONFIG.lodColumnsPerSecondLimit = prior;
@@ -996,7 +1011,7 @@ class LodRequestManagerTickTest {
             plainTick(dim("overworld"));
             assertEquals(1, sent.size());
             assertTrue(sent.get(0).count() <= 10, "the manual cap clamped the walk");
-            assertFalse(manager.governor.windowLimitedLatchedForTest(),
+            assertFalse(manager.governor.windowLimitedLatched(),
                     "the manual knob was the binder — no governed window-limit claim");
         } finally {
             LSSClientConfig.CONFIG.lodColumnsPerSecondLimit = prior;

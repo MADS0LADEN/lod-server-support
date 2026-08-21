@@ -96,15 +96,33 @@ New interval-scoped latch on `TransferRateGovernor`, mirroring `noteMovement()`:
   by the GOVERNED cap:
 
 ```java
-int governedBurst = this.governor.burstColumnsPerSecond();
+int governedBurst = governedBurstCap(); // the ONE composition both sites read
 int manual = LSSClientConfig.CONFIG.lodColumnsPerSecondLimit;
 if (scanned > 0 && sent
+        && this.scanner.wasLastScanFast()          // completion-clocked only
         && this.scanner.wasLastWalkTruncated()
         && this.scanner.wasLastBudgetCapClamped()
         && governedBurst > 0 && (manual <= 0 || governedBurst <= manual)) {
     this.governor.noteWindowLimited();
 }
 ```
+
+Two as-built amendments (§9, the implementation panel):
+- **The fast conjunct** (dynamics MAJOR-2): only a COMPLETION-CLOCKED (fast-
+  fired) walk may latch. The 1 Hz fallback fires unconditionally and re-declares
+  a full budget however slow the drain, so a backlogged slow-but-clean link
+  would otherwise satisfy `answeredAllAsked` up to ~5.3× its rate; fallback
+  fires never latch, so such links park near main's Row-4 point (the residual
+  widening is bounded: while cycles stay under ~1 s the loop is fast-clocked
+  and can credit to ~4× link — an accepted, ENGAGE-guarded landing; past ~1 s
+  the fallback outruns the fast path and Row 4 holds). The rig is 381/383 fast.
+- **The provenance tolerance** (dynamics MAJOR-1): the cap-clamped flag is
+  `budget × 4 ≥ burstCap × 3`, not exact equality — equality disarmed the latch
+  at ~9 queued columns near the ~350-column park point (round(347×0.9985)=346).
+  Deep taper (scale < ~0.75) still attributes to the taper and refuses.
+- The RAMP diag label gains a receipt: `ramp@8192 KB/s (1419/s, credits=N/10,
+  wl)` — confirmation progress + whether the current interval latched, so a
+  "still parked" field report is self-diagnosing.
 
 The last conjunct keeps the latch's meaning honest when the manual knob is the
 binding half of the min-compose (MAJOR-1(c) second shape): a manually-capped
@@ -223,15 +241,16 @@ headline rig. The streak reset gains one interval of forgiveness:
    the fix: today's failure (permanent ramp park) costs every good-server
    session ~25-35% forever; the new failure lands in OPEN = v0.11 behavior with
    all its containment.
-3. **Genuinely slow serves park via the double-miss reset (mechanism corrected
-   by the implementation panel).** Answers stream continuously, so a 1-declare
-   interval's answered ratio is ~2000 ms/cycle and `answeredAllAsked` holds up
-   to cycle ≈ 2.67 s: the 2.0-2.67 s band (≈130-180 col/s) reaches OPEN through
-   forgiven zero-declare intervals — an accepted landing (§4.2; OPEN is
-   self-paced there too). Past ~2.67 s the ratio itself falls under ¾, the
-   declare-bearing AND drain-only intervals are both uncredited, the run
-   reaches 2, and the reset parks the ramp — which is the protective outcome
-   for genuinely slow serves.
+3. **Genuinely slow serves and slow links park via the FAST conjunct (mechanism
+   corrected twice — final form is the dynamics fold).** The latch requires a
+   completion-clocked (fast) fire, and the fast path only fires while the last
+   batch reaches 95% answered before the 1 Hz fallback — i.e. while the cycle
+   stays under ~1 s. A serve/link rate slow enough to push the cycle past ~1 s
+   runs fallback-clocked, never latches, and Row 4 holds exactly as main
+   (park ≈ desired where burst ≈ serve-rate ≈ ~4× link at the boundary, vs
+   main's ~2× — the bounded widening §9 records as accepted; bufferbloat links
+   additionally engage via Row 1's ping conjunct, and the un-latched double-miss
+   reset still guards the confirmation).
 4. **Partial answers never credit and never snap.** Window-limited + answered <
    ¾ declared → all rungs fail → HOLD (the new pre-snap guard). A server hiccup
    costs an interval, not the earned desired (mirrors
@@ -295,10 +314,12 @@ Manager/scanner wiring:
 1. (Model check, pre-fix, optional) `/lsslod set mbPerSecondLimitPerPlayer 50`
    on the test rig → cadence ≈ 2.4 Hz → the UNMODIFIED ramp should complete in
    ~20 s. Confirms the model independently of the fix.
-2. (Fix check) Default config, fixed client: join → within ~30 s the
-   once-per-session log "LOD slow start complete", `governed=` absent from
-   `/lss diag`, `Budget: used=800/800` (or pressure-scaled), recv rate up
-   ~25% vs the stuck baseline.
+2. (Fix check) Default config, fixed client: join → within ~40 s (7 doublings
+   ≈ 14 s + 9 further credits ≈ 18 s + join lead-in and any forgiven alias
+   miss) the once-per-session log "LOD slow start complete", `governed=` absent
+   from `/lss diag` (while confirming it reads `ramp@… credits=N/10, wl`),
+   `Budget: used=800/800` (or pressure-scaled), recv rate up ~25% vs the stuck
+   baseline.
 
 ## 7. Rollout
 
@@ -362,3 +383,30 @@ Findings and dispositions (all folded into the sections above):
   vacuous desired-at-ceiling assertion pinned on PHASE over nine unlatched
   twins; the manager test suite gained the cadence-off manual-binding arm the
   original suite could not red on.
+
+### 9.1 The dynamics lens fold (same panel, second round)
+
+- **MAJOR-1 (provenance brittleness):** exact `budget == burstCap` disarmed the
+  latch at ~9 queued columns at the rig's park point — the fix would have been
+  green in every suite and dead on its own rig. Folded: the 25%-tolerance
+  predicate (`budget×4 ≥ cap×3`), the `marginalPressureKeepsTheCapClampFlag`
+  scanner test at rig scale (cap 350, q=9), the deep-taper refusal preserved
+  (the 500-of-1000 test unchanged).
+- **MAJOR-2 (fallback-clocked credits):** the 1 Hz fallback re-declares full
+  budgets regardless of drain, so slow-but-clean links credited to ~5.3× link
+  rate through the bypass. Folded: the `wasLastScanFast()` conjunct — the latch
+  now MEANS completion-clocked window-limited; fallback fires never latch;
+  `truncatedGovernedWalkLatchesOnFastFiresOnly` pins both directions (the
+  primed fallback scan must NOT latch; the fast follow-up must). Residual
+  widening ~2× at the fast/fallback boundary recorded as accepted (§4.3).
+- minor-1 (bit-identical claim vs the finally): resolved by the forgiveness
+  scoping in §9 — with the scope, latch-false behavior is equivalent to main's
+  (an un-latched uncredited interval resets, as before).
+- minor-2: the RAMP diag receipt (credits=N/10, wl) added.
+- minor-3: §6 timing corrected to ~40 s.
+- Residual test-system note: the fully-composed marginal shape (burst ≈ 350
+  AND queue = 9 through the real manager tick) is covered piecewise (scanner at
+  rig scale; manager at burst 1 with the fast/fallback split); a composed
+  manager test would need EWMA feeding through real ticks and is left to the
+  live check (§6.2's `wl` receipt makes the composed answer observable in one
+  diag read).
