@@ -64,7 +64,11 @@ public class LodRequestManager {
     private final InFlightTracker tracker = new InFlightTracker();
 
     private boolean cacheLoaded = false;
-    private volatile CompletableFuture<Long2LongOpenHashMap> pendingCacheLoad = null;
+    // The pending load carries PRE-BUILT section leaves (ColumnStateMap.LoadedState) —
+    // built on the cache IO thread, adopted in O(leaves) at the gate. The old map-typed
+    // future put the whole per-entry apply (up to 2M un-presized hash inserts, est.
+    // 100-300 ms) on the render thread in one tick (quadtree-client-state-plan.md A1).
+    private volatile CompletableFuture<ColumnStateMap.LoadedState> pendingCacheLoad = null;
     // Ingest failures reported while this dimension's cache load is still in flight: applied
     // against the not-yet-loaded map they are absorbed (onIngestFailed no-ops on an absent
     // entry) and loadFrom would then resurrect the stale ts>0 stamp from disk — a claim for
@@ -495,7 +499,7 @@ public class LodRequestManager {
             try {
                 var loaded = this.pendingCacheLoad.getNow(null);
                 if (loaded != null && this.lastDimension != null) {
-                    this.columns.loadFrom(loaded);
+                    this.columns.adoptLoaded(loaded);
                 }
             } catch (Exception ignored) {}
             this.pendingCacheLoad = null;
@@ -865,7 +869,7 @@ public class LodRequestManager {
 
     private void startAsyncCacheLoad(ResourceKey<Level> dimension) {
         this.failuresDuringCacheLoad.clear(); // per-dimension buffer; a new load starts clean
-        this.pendingCacheLoad = ColumnCacheStore.loadAsync(this.serverAddress, dimension);
+        this.pendingCacheLoad = ColumnCacheStore.loadStateAsync(this.serverAddress, dimension);
     }
 
     public void disconnect() {
@@ -897,10 +901,14 @@ public class LodRequestManager {
         // terrain + full re-download on revisit — see ColumnCacheStore.mergeSaveAsync).
         // A session whose map ended EMPTY but which deliberately unstamped positions must
         // still save: skipping would resurrect the dishonest stamps from the file.
+        //
+        // OWNERSHIP TRANSFER (the A2 fix, quadtree-client-state-plan.md §3.4): the state
+        // is DETACHED into the save — no render-thread copy — which resets the per-column
+        // map. Both callers (onDimensionChange, the session-gate teardown) clear or drop
+        // this manager immediately after, so the reset replaces a copy-then-discard.
         if (!this.columns.isEmptyMap() || this.columns.hasPersistentRemovals()) {
-            ColumnCacheStore.mergeSaveAsync(this.serverAddress, this.lastDimension,
-                    this.columns.mapForSave(), this.columns.persistentRemovalsForSave(),
-                    this.lastChunkX, this.lastChunkZ);
+            ColumnCacheStore.mergeSaveDetachedAsync(this.serverAddress, this.lastDimension,
+                    this.columns.detachForSave(), this.lastChunkX, this.lastChunkZ);
         }
     }
 
@@ -928,9 +936,11 @@ public class LodRequestManager {
     /** Replace the batch send transport (production default sends via Fabric networking). */
     void setBatchSenderForTest(BatchSender sender) { this.batchSender = sender; }
 
-    /** Inject a cache-load future to drive the cache gate without real cache IO. */
+    /** Inject a cache-load future to drive the cache gate without real cache IO. Keeps
+     *  the historical raw-map signature; the leaf build happens on whatever thread
+     *  completes the future (tests are single-threaded and small). */
     void setPendingCacheLoadForTest(CompletableFuture<Long2LongOpenHashMap> future) {
-        this.pendingCacheLoad = future;
+        this.pendingCacheLoad = future.thenApply(ColumnStateMap::buildLoaded);
     }
 
     /** Skip the first-tick async cache load — tick-phase tests drive the gate explicitly. */
@@ -978,6 +988,11 @@ public class LodRequestManager {
     /** Fast (completion-triggered) scan fires this session — the adaptive-cadence liveness signal. */
     public long getFastScans() { return this.scanner.getFastScans(); }
     public long getRateGated() { return this.scanner.getRateGated(); }
+    /** Rings the section-store fast path confirmed without a position walk (session). */
+    public long getQuadRingSkips() { return this.scanner.getQuadRingSkips(); }
+    /** Reopened-ring valve overflows this session (quadtree-client-state-plan.md phase 0
+     *  — the B1 "does the valve trip in the wild?" measurement). */
+    public long getValveTrips() { return this.scanner.getValveTrips(); }
 
     /** Governor receipt for /lss diag (review n14: rate_gated conflates manual and
      *  governed refusals — this label disambiguates). Four shapes since the slow

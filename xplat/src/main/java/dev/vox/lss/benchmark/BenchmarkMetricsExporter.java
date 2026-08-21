@@ -516,6 +516,12 @@ public final class BenchmarkMetricsExporter {
         // Manual column-rate cap (client-column-rate-cap-design.md): spacing-gate refusals.
         // Additive key, 0 whenever the cap is off (the shipped default).
         scan.put("rate_gated", manager != null ? manager.getRateGated() : 0L);
+        // Section-store fast path (quadtree-client-state-plan.md): rings confirmed
+        // leaf-wise without a position walk, and reopened-ring valve overflows (the
+        // phase-0 B1 field measurement). Additive keys; check_soak validates top-level
+        // client keys only.
+        scan.put("quad_ring_skips", manager != null ? manager.getQuadRingSkips() : 0L);
+        scan.put("valve_trips", manager != null ? manager.getValveTrips() : 0L);
         result.put("scan", scan);
 
         // Declared-and-unanswered (the awaiting-answer set), replaced per scan.
