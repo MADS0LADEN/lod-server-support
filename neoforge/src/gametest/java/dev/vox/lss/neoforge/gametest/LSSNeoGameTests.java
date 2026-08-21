@@ -234,6 +234,15 @@ public final class LSSNeoGameTests {
                                 ? -1 : probe.serializedSections().length)
                         + " editPos=" + editPos + " chunk=" + chunk.getPos());
         // And the hook body routes a changed observation into the tracker.
+        // DRAIN FIRST (hardened 2026-08-21, first surfaced on the 1.21.1 line once its
+        // smoke actually ran): totalMarked counts NEW set-adds only, and a background
+        // batch-save through the real mixin can have already marked THIS chunk (the
+        // structure placement is a content change) — the hook's re-mark of a pending
+        // position then legitimately does not count, and the global-counter assertion
+        // reds on save-cadence luck. Draining consumes any background mark; drain,
+        // edit, and hook call share one server-thread tick, so nothing can re-mark
+        // in between and the increment is deterministic.
+        service.getDirtyTracker().drainDirty(dim);
         long before = service.getDirtyTracker().getTotalMarked();
         level.setBlock(editPos.above(), Blocks.EMERALD_BLOCK.defaultBlockState(), 3);
         LSSServerNetworking.onChunkSaveData(level, chunk);
