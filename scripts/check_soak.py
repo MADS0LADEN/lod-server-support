@@ -1446,25 +1446,16 @@ def check_warm_rejoin_summary(ctx):
                         "client's no-evidence skip (both sentinels validate nothing) is "
                         "not engaging (~9 expected on this geometry)",
                         {"expected": ">= 5", "actual": s.get("tiles_no_region", 0)})
-    # Stamped up_to_date (stamped-up-to-date-plan.md §7): run 2's residue re-asks are
-    # answered up_to_date in volume (recorded green: 1,567) through the compare-backed
-    # rungs, so the stamps lane must be LIVE — floors at 50 (~30x headroom under the
-    # self-scaling suppression pin) on both halves: server entries produced, client
-    # ratchets applied. A dead lane here means the eligibility gate, the drain sink,
-    # or the client apply broke while every other pin stayed green.
-    # FABRIC-ONLY (live-diagnosed 2026-08-21, temptrace refuse-latch): on Paper marks
-    # fire at EDIT time and base-paper's ambient grass drip latches region (0,0);
-    # the same marks make exactly its tiles read stale, so run 2 re-asks ONLY
-    # latch-covered positions and every stamp is refused — the doctrine WORKING
-    # (an unsaved change is pending; a stamp would seal pre-change bytes). With no
-    # autosave inside the run window the latch never clears, so a Paper stamps
-    # floor here demands what the honesty rule forbids. On real Paper servers
-    # autosave (~5 min) advances headers and stamps flow between edits.
-    if ctx.platform == "fabric" and s.get("stamps_applied", 0) < 50:
-        yield Violation("warm-rejoin-summary", "run2 final snapshot",
-                        "the client ratcheted too few verification stamps — the "
-                        "stamped-up_to_date lane is not reaching the cache",
-                        {"expected": ">= 50", "actual": s.get("stamps_applied", 0)})
+    # Stamped up_to_date: wrs carries NO stamps floors (Phase B 3-Opus fold,
+    # 2026-08-21 — the floor's population here is the player-tile stale residue,
+    # which is RACY on every platform: the summary frame itself arms the region
+    # latch's clear-side grace, which then refuses the re-ask burst the frame
+    # triggers. Same-day yields: fabric 64-712, paper 0-831, folia 64 — a floor
+    # of 50 against a 0-831 distribution gates a race, not the lane. The lane's
+    # honest live gate is stamp-heal-prime (unmarked-region stale tiles, 100%
+    # yield, floors 400/400); Paper's unit gate is the wiring source-scan in
+    # PaperRegionFreshnessWiringTest. The stamps_bytes ceiling below stays — an
+    # upper bound has no race exposure.)
     if s["tiles_stale"] + s["tiles_unknown"] < 1:
         yield Violation("warm-rejoin-summary", "run2 final snapshot",
                         "the poisoned player tile validated despite the t195 edit — it "
@@ -1523,13 +1514,6 @@ def check_warm_rejoin_summary(ctx):
                         "the server's own window (radius/center drift between the two "
                         "halves)",
                         {"expected": "0", "actual": last["summary"]["range_filtered"]})
-    if ctx.platform == "fabric" and last["summary"].get("stamps_entries", 0) < 50:
-        # FABRIC-ONLY — the client-side floor's latch rationale applies verbatim.
-        yield Violation("warm-rejoin-summary", "final server snapshot",
-                        "the server produced too few verification stamps for run 2's "
-                        "up_to_date volume — the compare-backed rungs are not stamping "
-                        "(or the eligibility mark never armed)",
-                        {"expected": ">= 50", "actual": last["summary"].get("stamps_entries", 0)})
     # The stamps lane's own ceiling (plan §9.10 — keeps the summary.bytes ceiling
     # sharp): ~10-11 B/entry over at most the run-2 re-ask population.
     if last["summary"].get("stamps_bytes", 0) > 65536:
@@ -4537,13 +4521,15 @@ def selftest():
                       "columns.known": known2,
                       "responses.columns": cols2})]})
     clean("warm-rejoin-summary healthy", list(check_warm_rejoin_summary(wrs_ctx())))
-    hits("warm-rejoin-summary stamps lane dead on fabric", list(check_warm_rejoin_summary(
-        wrs_ctx(srv_stamps=0, srv_stamps_bytes=0, cli_stamps=0))), "warm-rejoin-summary")
-    # Paper: edit-time marks latch the drip region and run 2 re-asks ONLY latch-covered
-    # positions — a zero stamps lane is the doctrine refusing toward unstamped, not a
-    # regression (live-diagnosed 2026-08-21). The floors are Fabric-only.
-    clean("warm-rejoin-summary paper zero-stamps tolerated", list(check_warm_rejoin_summary(
-        wrs_ctx(srv_stamps=0, srv_stamps_bytes=0, cli_stamps=0, platform="paper"))))
+    # wrs carries NO stamps floors (Phase B fold — the population is racy on every
+    # platform; stamp-heal-prime is the lane's floor-bearing gate): zero stamps must
+    # NOT red here, on any platform.
+    clean("warm-rejoin-summary zero-stamps tolerated (raced latch, any platform)",
+          list(check_warm_rejoin_summary(
+              wrs_ctx(srv_stamps=0, srv_stamps_bytes=0, cli_stamps=0))))
+    clean("warm-rejoin-summary zero-stamps tolerated on paper",
+          list(check_warm_rejoin_summary(
+              wrs_ctx(srv_stamps=0, srv_stamps_bytes=0, cli_stamps=0, platform="paper"))))
     hits("warm-rejoin-summary validated too little", list(check_warm_rejoin_summary(
         wrs_ctx(validated=100))), "warm-rejoin-summary")
     hits("warm-rejoin-summary too few clean tiles", list(check_warm_rejoin_summary(
@@ -4562,10 +4548,6 @@ def selftest():
         wrs_ctx(srv_bytes=5000))), "warm-rejoin-summary")
     hits("warm-rejoin-summary window range-clamped", list(check_warm_rejoin_summary(
         wrs_ctx(srv_rf=3))), "warm-rejoin-summary")
-    hits("warm-rejoin-summary stamps lane dead server-side", list(check_warm_rejoin_summary(
-        wrs_ctx(srv_stamps=0, srv_stamps_bytes=0))), "warm-rejoin-summary")
-    hits("warm-rejoin-summary stamps never reached the client", list(check_warm_rejoin_summary(
-        wrs_ctx(cli_stamps=3))), "warm-rejoin-summary")
     hits("warm-rejoin-summary stamps bytes runaway", list(check_warm_rejoin_summary(
         wrs_ctx(srv_stamps_bytes=200_000))), "warm-rejoin-summary")
     hits("warm-rejoin-summary poisoned tile validated", list(check_warm_rejoin_summary(
