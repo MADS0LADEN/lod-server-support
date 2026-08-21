@@ -1748,7 +1748,12 @@ def check_stamp_heal_rejoin(ctx):
     after-set, not a ratchet failure — plus one persistent no-evidence doubt
     tile (NEVER_CLEAN) at the window edge. Ceiling 5 = the structural 4 + one
     tile of variance, still far below the unhealed shape (phase 1 pinned >= 8
-    BEFORE this join's shutdown-save additions); the bulk must read clean."""
+    BEFORE this join's shutdown-save additions); the bulk must read clean.
+    The clean floor PAIRS with that ceiling: 16 real tiles - 5 admitted residue
+    = 11 (the two legs were briefly inconsistent at 12/5 — a run drawing the
+    admitted variance tile has clean = 11 by arithmetic, first fired live on
+    the 26.1 v0.12.0 port smoke, 2026-08-21; the unhealed shape reads <= 8,
+    so 11 still separates cleanly). Re-derive BOTH legs together."""
     r1 = ctx.final_client(1)
     if r1 is None:
         yield Violation("stamp-heal-rejoin", "run1", "no client snapshots", {})
@@ -1774,12 +1779,12 @@ def check_stamp_heal_rejoin(ctx):
                         "-> cache save -> re-declaration chain broke somewhere)",
                         {"expected": "stale+unknown <= 5",
                          "stale": s["tiles_stale"], "unknown": s["tiles_unknown"]})
-    if s["tiles_clean"] < 12:
+    if s["tiles_clean"] < 11:
         yield Violation("stamp-heal-rejoin", "run1 final snapshot",
                         "too few clean tiles — the healed bulk must validate "
-                        "(same 16-real/9-no-region window geometry as "
-                        "warm-rejoin-summary)",
-                        {"expected": ">= 12", "actual": s["tiles_clean"]})
+                        "(16-real/9-no-region window geometry; floor = 16 - the "
+                        "stale+unknown ceiling of 5, see docstring)",
+                        {"expected": ">= 11", "actual": s["tiles_clean"]})
     if s["columns_validated"] < 800:
         yield Violation("stamp-heal-rejoin", "run1 final snapshot",
                         "summary validated too few columns on the healed rejoin",
@@ -4698,6 +4703,11 @@ def selftest():
         shr_ctx(known=300, req=100))), "stamp-heal-rejoin")
     hits("stamp-heal-rejoin clean floor alone", list(check_stamp_heal_rejoin(
         shr_ctx(clean=6))), "stamp-heal-rejoin")
+    # The admitted-variance boundary (26.1 port smoke, 2026-08-21): stale+unknown
+    # exactly at the ceiling forces clean = 16 - 5 = 11, which must PASS — the
+    # floor pairs with the ceiling, or the ceiling's variance tile is a lie.
+    clean("stamp-heal-rejoin variance tile admitted", list(check_stamp_heal_rejoin(
+        shr_ctx(stale=4, unknown=1, clean=11))))
     hits("stamp-heal-rejoin req>=known alone", list(check_stamp_heal_rejoin(
         shr_ctx(req=2000, known=1900))), "stamp-heal-rejoin")
     hits("stamp-heal-rejoin req ceiling alone", list(check_stamp_heal_rejoin(
