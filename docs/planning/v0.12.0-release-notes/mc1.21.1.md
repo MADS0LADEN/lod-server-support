@@ -30,3 +30,4 @@
 
 - This line (including the NeoForge build) is supported at the best-effort tier. No features were cut in this release.
 - The NeoForge build carries the client half of the new behaviors too — region summaries and stamped verification work on NeoForge clients exactly as on Fabric.
+- The Xaero map bridge works on NeoForge clients as well (with the NeoForge build of Xaero's World Map), but there is no in-game toggle there — enable it with `enableXaeroMapBridge` in `lss-client-config.json`.
