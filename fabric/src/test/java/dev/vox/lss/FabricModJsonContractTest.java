@@ -65,6 +65,12 @@ class FabricModJsonContractTest {
         org.junit.jupiter.api.Assertions.assertEquals("${suggests_voxy}",
                 suggests.get("voxy").getAsString(),
                 "suggests.voxy must be the processResources placeholder");
+        // Deliberately a literal "*", NOT a templated range: the Xaero bridge binds
+        // reflectively and fails soft across Xaero versions (xaero-map-bridge-plan.md
+        // §2.2) — a version range here would claim a compatibility pin we don't have.
+        org.junit.jupiter.api.Assertions.assertEquals("*",
+                suggests.get("xaeroworldmap").getAsString(),
+                "suggests.xaeroworldmap must be the literal any-version wildcard");
         for (String key : new String[]{"suggests_sodium", "suggests_voxy",
                 "sodium_version", "modmenu_version",
                 "moonrise_modrinth_version", "c2me_modrinth_version"}) {

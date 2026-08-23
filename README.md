@@ -25,6 +25,8 @@ On NeoForge (1.21.1) there are two tested client paths, depending on your Sodium
 
 Compatible with [AntiXray](https://modrinth.com/mod/anti-xray), [Moonrise](https://modrinth.com/mod/moonrise-opt), [C2ME](https://modrinth.com/mod/c2me-fabric), [ViaVersion](https://modrinth.com/plugin/viaversion)/[ViaBackwards](https://modrinth.com/plugin/viabackwards), and most other mods. Can be run alongside Distant Horizons on the same server to support DH clients and Voxy clients simultaneously. 
 
+With [Xaero's World Map](https://modrinth.com/mod/xaeros-world-map) installed on the client, downloaded LOD terrain is also written into the world map, so the map fills in far beyond vanilla render distance (multiplayer only — for single-player worldgen use [Xaero WorldGen](https://modrinth.com/mod/voxyworldgenxaero-bridge) instead). The toggle lives on the LSS Sodium options page ("Write LODs to Xaero's Map"). On a server you had already explored before installing, run `/lss clearcache` once while connected to re-stream the terrain and backfill the map.
+
 LOD Server Support is backwards and forwards compatible from v0.4.0 through the current version. Server operators can freely update to take advantage of improvements without breaking clients on older versions, and clients can update without breaking compatibility with older servers.
 
 [Voxy Server Side](https://modrinth.com/plugin/voxy-server-side) is the same mod. Voxy Server Side clients are compatible with LOD Server Support servers and vice versa.

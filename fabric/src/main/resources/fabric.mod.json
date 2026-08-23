@@ -48,6 +48,7 @@
   "suggests": {
     "sodium": "${suggests_sodium}",
     "modmenu": "*",
-    "voxy": "${suggests_voxy}"
+    "voxy": "${suggests_voxy}",
+    "xaeroworldmap": "*"
   }
 }

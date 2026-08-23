@@ -17,6 +17,24 @@ public final class ModCompat {
         if (dev.vox.lss.platform.LoaderServices.get().isModLoaded("voxy")) {
             voxyLoaded = VoxyCompat.init();
         }
+        if (dev.vox.lss.platform.LoaderServices.get().isModLoaded("xaeroworldmap")) {
+            XaeroMapCompat.init();
+        }
+    }
+
+    /** End-of-client-tick forwarder (main client thread) — the Xaero bridge's pump. */
+    public static void clientTick() {
+        XaeroMapCompat.clientTick();
+    }
+
+    /** Disconnect forwarder — a session's queued map tiles never outlive it. */
+    public static void onDisconnect() {
+        XaeroMapCompat.onDisconnect();
+    }
+
+    /** The conditional {@code /lss diag} Xaero line, or null when Xaero was never detected. */
+    public static String xaeroDiagLine() {
+        return XaeroMapCompat.diagLine();
     }
 
     public static OptionalInt getVoxyViewDistanceChunks() {

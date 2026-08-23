@@ -368,6 +368,7 @@ public final class ClientNetGlue {
     public static void onDisconnect() {
         sessionGate.onDisconnect();
         FarPlayerClientSupport.onSessionEnd();
+        dev.vox.lss.compat.ModCompat.onDisconnect();
     }
 
     /** End-of-client-tick body. */
@@ -380,5 +381,8 @@ public final class ClientNetGlue {
             manager.tick();
         }
         columnProcessor.scheduleProcessing(sessionGate.isServerEnabled());
+        // The Xaero map bridge's budgeted commit pump (xaero-map-bridge-plan.md §2.4) —
+        // main client thread, no-op unless Xaero is present with queued tiles.
+        dev.vox.lss.compat.ModCompat.clientTick();
     }
 }

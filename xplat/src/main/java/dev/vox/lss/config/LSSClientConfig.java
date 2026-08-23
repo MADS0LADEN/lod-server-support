@@ -86,6 +86,12 @@ public class LSSClientConfig extends JsonConfig {
     // — exactly the pre-summary per-column revalidation. There is no persisted client
     // state, so a flip can poison nothing.
     public boolean enableRegionSummarySync = true;
+    // Xaero's World Map bridge (issue #223, docs/planning/xaero-map-bridge-plan.md): write
+    // received LOD columns into Xaero's World Map so the map records terrain far beyond
+    // vanilla render distance. Inert without the xaeroworldmap mod; checked LIVE (the Sodium
+    // toggle applies mid-session — flipping off clears the bridge's queue and, on the next
+    // handshake, releases the voxel-columns capability bit an Xaero-only install held).
+    public boolean enableXaeroMapBridge = true;
     // Ingest-pressure request pacing (issue #71, docs/planning/ingest-backpressure-design.md):
     // scale the want-set budget down — and halt declarations entirely at a threshold — when a
     // registered LOD consumer reports a pending ingest backlog (Voxy's ingest queue depth via
