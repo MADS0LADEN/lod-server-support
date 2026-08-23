@@ -50,3 +50,6 @@ CLAUDE.local.md
 
 # Tier-3/gametest client cache droppings (the .lss gameDir convention)
 fabric/.lss/
+
+# jdtls/buildship artifacts (a stray add -A once committed these)
+.eclipse/
