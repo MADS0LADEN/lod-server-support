@@ -211,7 +211,7 @@ final class XaeroMapCompat {
     private long queuedBytes; // under queueLock
 
     private final AtomicLong written = new AtomicLong();
-    private final AtomicLong skippedLoaded = new AtomicLong();
+    private final AtomicLong skippedNative = new AtomicLong();
     private final AtomicLong deferEvents = new AtomicLong();
     private final AtomicLong droppedOverflow = new AtomicLong();
     private final AtomicLong droppedStale = new AtomicLong();
@@ -430,7 +430,7 @@ final class XaeroMapCompat {
     long counterForTest(String name) {
         return switch (name) {
             case "written" -> this.written.get();
-            case "skipped_loaded" -> this.skippedLoaded.get();
+            case "skipped_native" -> this.skippedNative.get();
             case "defer_events" -> this.deferEvents.get();
             case "dropped_overflow" -> this.droppedOverflow.get();
             case "dropped_stale" -> this.droppedStale.get();
@@ -447,7 +447,7 @@ final class XaeroMapCompat {
                 + this.droppedExpired.get();
         return "XaeroMap: state=" + state + ", queued=" + queuedForTest()
                 + ", written=" + this.written.get()
-                + ", skipped_loaded=" + this.skippedLoaded.get()
+                + ", skipped_native=" + this.skippedNative.get()
                 + ", defer_events=" + this.deferEvents.get()
                 + ", dropped=" + dropped
                 + ", commit_failures=" + this.commitFailures.get()
@@ -554,11 +554,11 @@ final class XaeroMapCompat {
                 this.droppedStale.incrementAndGet();
                 continue;
             }
-            if (this.levelOps.isChunkLoaded(world, tile.chunkX(), tile.chunkZ())) {
-                // The native writer owns loaded chunks and rewrites them on its
+            if (nativelyWritable(world, tile.chunkX(), tile.chunkZ())) {
+                // The native writer owns these chunks and rewrites them on its
                 // clean-flag anyway — never fight it (plan §2.6).
                 removeIfCurrent(key, entry, tile);
-                this.skippedLoaded.incrementAndGet();
+                this.skippedNative.incrementAndGet();
                 continue;
             }
             var outcome = commitEntry(mp, saveLoad, tile,
@@ -590,6 +590,29 @@ final class XaeroMapCompat {
                 }
             }
         }
+    }
+
+    /**
+     * Will the NATIVE writer actually write this chunk? Its edge rule (decompiled
+     * {@code writeChunk}) requires the chunk AND all 8 neighbors loaded — so the
+     * outermost ring of loaded vanilla chunks is never natively written. Skipping
+     * on "loaded" alone left that ring written by NOBODY: a 1-chunk black circle
+     * at the vanilla/LOD boundary around every join point (field-tested 2026-08-23
+     * — the columns had been served during the join window, and the broad skip
+     * threw the tiles away). A loaded-but-edge chunk is bridge-written instead;
+     * the native writer reclaims it on its clean-flag once fully surrounded.
+     */
+    private boolean nativelyWritable(Object world, int chunkX, int chunkZ) {
+        if (!this.levelOps.isChunkLoaded(world, chunkX, chunkZ)) return false;
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if ((dx != 0 || dz != 0)
+                        && !this.levelOps.isChunkLoaded(world, chunkX + dx, chunkZ + dz)) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private enum Outcome { COMMITTED, DEFERRED, AWAITING_LOAD, AWAITING_LOAD_REQUESTED, FAILED }
