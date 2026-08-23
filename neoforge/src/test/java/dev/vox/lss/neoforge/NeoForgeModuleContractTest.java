@@ -202,20 +202,44 @@ class NeoForgeModuleContractTest {
         }
     }
 
+    /**
+     * Same-FQN twins with NO loader surface — byte-identical by contract (a fix landing
+     * in one tree only is silent drift the compile cannot see; both compile fine alone):
+     * ScopedCarrier (V-2/S5 — a version-volatile whole-file swap at port time, but on ONE
+     * line the same file) and the legacy-Sodium options stack
+     * (sodium-options-page-generations-plan.md D4/D5 — the probe, the reflective
+     * builder, the constructor hook, and the mixin config, whose compatibilityLevel is
+     * per-LINE data but identical across the two loaders of one line).
+     */
+    private static final String[] BYTE_IDENTICAL_TWINS = {
+            "src/main/java/dev/vox/lss/compat/ScopedCarrier.java",
+            "src/main/java/dev/vox/lss/config/menu/SodiumGeneration.java",
+            "src/main/java/dev/vox/lss/config/menu/LegacySodiumPage.java",
+            "src/main/java/dev/vox/lss/mixin/sodium/SodiumLegacyOptionsHook.java",
+            "src/main/resources/lss-sodium-legacy.mixins.json",
+    };
+
     @Test
-    void scopedCarrierTwinsAreByteIdentical() throws IOException {
-        // V-2/S5: unlike the renderer twins (which legitimately diverge — the neoforge
-        // render path is cut), ScopedCarrier has no loader surface at all, so the twins
-        // must stay BYTE-identical — a fix landing in one tree only is silent drift the
-        // compile cannot see (both compile fine alone).
-        byte[] fab = Files.readAllBytes(
-                resolve("fabric/src/main/java/dev/vox/lss/compat/ScopedCarrier.java"));
-        byte[] neo = Files.readAllBytes(
-                resolve("neoforge/src/main/java/dev/vox/lss/compat/ScopedCarrier.java"));
-        assertTrue(java.util.Arrays.equals(fab, neo),
-                "the ScopedCarrier twins drifted — apply the change to BOTH trees "
-                        + "(they are version-volatile whole-file swaps at port time, "
-                        + "but on ONE line they are the same file)");
+    void loaderSurfaceFreeTwinsAreByteIdentical() throws IOException {
+        for (String rel : BYTE_IDENTICAL_TWINS) {
+            byte[] fab = Files.readAllBytes(resolve("fabric/" + rel));
+            byte[] neo = Files.readAllBytes(resolve("neoforge/" + rel));
+            assertTrue(java.util.Arrays.equals(fab, neo),
+                    rel + " twins drifted — apply the change to BOTH trees");
+        }
+    }
+
+    @Test
+    void theLegacySodiumOptionsConfigIsDeclaredAndItsHookExists() throws IOException {
+        String toml = read("neoforge/src/main/resources/META-INF/neoforge.mods.toml");
+        assertTrue(toml.contains("config=\"lss-sodium-legacy.mixins.json\""),
+                "the toml must carry a second [[mixins]] row for the legacy Sodium options hook");
+        String config = read("neoforge/src/main/resources/lss-sodium-legacy.mixins.json");
+        assertTrue(config.contains("\"SodiumLegacyOptionsHook\""));
+        assertTrue(exists("neoforge/src/main/java/dev/vox/lss/mixin/sodium/SodiumLegacyOptionsHook.java"),
+                "the config lists a hook whose neoforge twin source must exist");
+        assertTrue(config.contains("\"required\": false"),
+                "non-required — an apply failure degrades to no options page");
     }
 
     /** Repo-relative resolution surviving both the Gradle CWD (module dir) and repo root. */

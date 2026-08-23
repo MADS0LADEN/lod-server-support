@@ -484,6 +484,11 @@ def check_neoforge_jar(jar, problems):
             problems.append(f"{base}: logoFile points at {logo.group(1)!r} but that "
                             "entry is not in the jar")
     for required, why in (("lss.neoforge.mixins.json", "mixin config"),
+                          ("lss-sodium-legacy.mixins.json",
+                           "legacy-Sodium options hook mixin config"),
+                          ("assets/lss/lang/en_us.json",
+                           "lang file (the legacy Sodium options page's keys — a lost"
+                           " processResources copy ships raw keys)"),
                           ("META-INF/accesstransformer.cfg", "access transformer"),
                           ("META-INF/services/dev.vox.lss.platform.LoaderServices",
                            "LoaderServices ServiceLoader registration")):
@@ -502,10 +507,10 @@ def check_neoforge_jar(jar, problems):
 # NOT listed — their absence from the neoforge jar would be real drift).
 FABRIC_ONLY_CLASS_PREFIXES = (
     "dev/vox/lss/LSSMod", "dev/vox/lss/LSSClient",
+    # The 0.8+ Sodium config-API walker + the ModMenu switch stay fabric-only; the
+    # catalog, the probe, the legacy builder and RateSliderStops are shared/twinned
+    # (sodium-options-page-generations-plan.md §3) and ride the presence check.
     "dev/vox/lss/config/LSSConfigMenu", "dev/vox/lss/config/LSSModMenuIntegration",
-    # Sodium slider-curve policy for the config menu above — same Sodium-only surface,
-    # split into its own class only so Tier 1 can classload it (2026-08-14).
-    "dev/vox/lss/config/RateSliderStops",
     "dev/vox/lss/networking/client/LSSClientCommands",
     "dev/vox/lss/mixin/IntegratedServerLanHook",
     "dev/vox/lss/mixin/trace/MovementRejectHook",
@@ -615,6 +620,7 @@ def check_vss_pair_neoforge(lss_jar, vss_jar, problems):
                    for k in VSS_NEOFORGE_REBRAND_KEYS):
             problems.append(f"{vbase}: neoforge.mods.toml line {i} differs outside the "
                             f"branding keys {VSS_NEOFORGE_REBRAND_KEYS}: {b!r}")
+    _check_vss_lang_rebrand(lss_jar, vss_jar, vbase, problems)
 
 
 def check_third_party_notices(jar, is_fabric, problems):
@@ -681,27 +687,11 @@ def check_vss_paper_identity(jar, problems):
 VSS_FABRIC_ALLOWED_DIFF = {"name", "description", "icon", "contact", "authors"}
 
 
-def check_vss_pair_fabric(lss_jar, vss_jar, problems):
-    """Field-by-field diff of the two built descriptors: only branding fields may differ,
-    and `name` MUST differ (a silent un-rebranded copy is a build regression). Also pins
-    that the descriptor's icon path actually exists inside the vss jar."""
-    vbase = os.path.basename(vss_jar)
-    try:
-        lmeta = json.loads(_read(lss_jar, "fabric.mod.json"))
-        vmeta = json.loads(_read(vss_jar, "fabric.mod.json"))
-    except (KeyError, json.JSONDecodeError):
-        return  # per-jar checks already flag a missing/invalid descriptor
-    for key in sorted(set(lmeta) | set(vmeta)):
-        if key in VSS_FABRIC_ALLOWED_DIFF:
-            continue
-        if lmeta.get(key) != vmeta.get(key):
-            problems.append(f"{vbase}: fabric.mod.json field {key!r} differs from the LSS jar "
-                            f"— the VSS rebrand may only touch {sorted(VSS_FABRIC_ALLOWED_DIFF)}")
-    if lmeta.get("name") == vmeta.get("name"):
-        problems.append(f"{vbase}: fabric.mod.json 'name' equals the LSS jar's — not rebranded")
-    icon = vmeta.get("icon")
-    if icon and icon not in _names(vss_jar):
-        problems.append(f"{vbase}: fabric.mod.json icon {icon!r} is not an entry in the jar")
+
+def _check_vss_lang_rebrand(lss_jar, vss_jar, vbase, problems):
+    """Lang-value rebrand pin, shared by the fabric AND neoforge VSS pairs (the NeoForge
+    jar gained the lang files with the legacy Sodium options page —
+    sodium-options-page-generations-plan.md §3 — and its vssJar the same rewrite loop)."""
     # Lang-value rebrand pin (review-wave V-M2, generalized for the zh locales): the
     # vssJar rewrites EVERY assets/lss/lang/*.json entry's VALUES — a silent no-op ships
     # VSS Sodium pages reading "LOD Server Support"/"LSS" mid-sentence (the exact defect
@@ -732,6 +722,29 @@ def check_vss_pair_fabric(lss_jar, vss_jar, problems):
                     r"(?<![A-Za-z0-9_])LSS(?![A-Za-z0-9_])", sv):
                 problems.append(f"{vbase}: {LANG} value {k!r} still carries LSS branding "
                                 "— the vssJar lang rewrite no-opped or missed it")
+
+def check_vss_pair_fabric(lss_jar, vss_jar, problems):
+    """Field-by-field diff of the two built descriptors: only branding fields may differ,
+    and `name` MUST differ (a silent un-rebranded copy is a build regression). Also pins
+    that the descriptor's icon path actually exists inside the vss jar."""
+    vbase = os.path.basename(vss_jar)
+    try:
+        lmeta = json.loads(_read(lss_jar, "fabric.mod.json"))
+        vmeta = json.loads(_read(vss_jar, "fabric.mod.json"))
+    except (KeyError, json.JSONDecodeError):
+        return  # per-jar checks already flag a missing/invalid descriptor
+    for key in sorted(set(lmeta) | set(vmeta)):
+        if key in VSS_FABRIC_ALLOWED_DIFF:
+            continue
+        if lmeta.get(key) != vmeta.get(key):
+            problems.append(f"{vbase}: fabric.mod.json field {key!r} differs from the LSS jar "
+                            f"— the VSS rebrand may only touch {sorted(VSS_FABRIC_ALLOWED_DIFF)}")
+    if lmeta.get("name") == vmeta.get("name"):
+        problems.append(f"{vbase}: fabric.mod.json 'name' equals the LSS jar's — not rebranded")
+    icon = vmeta.get("icon")
+    if icon and icon not in _names(vss_jar):
+        problems.append(f"{vbase}: fabric.mod.json icon {icon!r} is not an entry in the jar")
+    _check_vss_lang_rebrand(lss_jar, vss_jar, vbase, problems)
 
 
 # plugin.yml lines that are the identity + wire contract: the VSS rebrand must leave every
@@ -1931,6 +1944,11 @@ def _selftest():
             entries = {
                 "META-INF/neoforge.mods.toml": toml,
                 "lss.neoforge.mixins.json": "{}",
+                "lss-sodium-legacy.mixins.json": "{}",
+                "assets/lss/lang/en_us.json": json.dumps(
+                    {"lss.config.page": "General",
+                     "lss.config.far_players_with_seeu": ("Prefer VSS Far Players" if brand == BRAND_VSS
+                                                          else "Prefer LSS Far Players")}),
                 "META-INF/accesstransformer.cfg": "public net.minecraft.world.level.chunk.PalettedContainer data",
                 "META-INF/services/dev.vox.lss.platform.LoaderServices":
                     "dev.vox.lss.platform.NeoForgeLoaderServices",
@@ -1982,6 +2000,29 @@ def _selftest():
         check(any("logoFile points at" in m for m in p),
               f"logoFile referencing a missing icon not caught: {p}")
         _write_tree_neoforge("lod-server-support-neoforge.jar", TOML_LSS, BRAND_LSS)
+
+        # sodium-options-page-generations-plan.md §4: the legacy Sodium options hook's
+        # config and the lang file are release-gated on NeoForge (a lost
+        # processResources copy or a dropped [[mixins]] resource ships a page-less or
+        # raw-key jar with every unit gate green)
+        for dropped in ("lss-sodium-legacy.mixins.json", "assets/lss/lang/en_us.json"):
+            _write_tree_neoforge("lod-server-support-neoforge.jar", TOML_LSS, BRAND_LSS,
+                                 drop=(dropped,))
+            p = []
+            check_neoforge_jar(os.path.join(dneo, "lod-server-support-neoforge.jar"), p)
+            check(any(f"missing {dropped}" in m for m in p),
+                  f"neoforge jar without {dropped} not caught: {p}")
+        _write_tree_neoforge("lod-server-support-neoforge.jar", TOML_LSS, BRAND_LSS)
+        # the VSS neoforge lang rewrite must actually rebrand (the fabric pair's V-M2 pin)
+        _write_tree_neoforge("voxy-server-side-neoforge.jar", TOML_VSS, BRAND_VSS,
+                             extra={"assets/lss/lang/en_us.json": json.dumps(
+                                 {"lss.config.far_players_with_seeu": "Prefer LSS Far Players"})})
+        p = []
+        check_vss_pair_neoforge(os.path.join(dneo, "lod-server-support-neoforge.jar"),
+                                os.path.join(dneo, "voxy-server-side-neoforge.jar"), p)
+        check(any("still carries LSS branding" in m for m in p),
+              f"un-rebranded neoforge VSS lang not caught: {p}")
+        _write_tree_neoforge("voxy-server-side-neoforge.jar", TOML_VSS, BRAND_VSS)
 
         # jarjar-shape negatives (neoforge-jarjar-sqlite-plan.md §4): metadata
         # pointing at a missing nested jar; flat org/sqlite leaking back beside the

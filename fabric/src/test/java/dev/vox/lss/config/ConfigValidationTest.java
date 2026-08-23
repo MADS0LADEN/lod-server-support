@@ -1,5 +1,6 @@
 package dev.vox.lss.config;
 
+import dev.vox.lss.config.menu.RateSliderStops;
 import dev.vox.lss.common.LSSConstants;
 import org.junit.jupiter.api.Test;
 

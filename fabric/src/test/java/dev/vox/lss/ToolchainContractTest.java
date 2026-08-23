@@ -82,10 +82,12 @@ class ToolchainContractTest {
 
     @Test
     void mixinCompatibilityLevelMatchesTheCompiledTarget() throws Exception {
-        // BOTH mixin configs — the tracer's non-required lss-trace.mixins.json regresses
-        // just as silently on a forward merge as the required one.
+        // ALL THREE mixin configs — the tracer's non-required lss-trace.mixins.json and the
+        // legacy-Sodium options hook's lss-sodium-legacy.mixins.json regress just as
+        // silently on a forward merge as the required one (per-version-surfaces row 10).
         int major = classFileMajor(LSSMod.class, "/dev/vox/lss/LSSMod.class");
-        for (String config : new String[] {"/lss.mixins.json", "/lss-trace.mixins.json"}) {
+        for (String config : new String[] {"/lss.mixins.json", "/lss-trace.mixins.json",
+                "/lss-sodium-legacy.mixins.json"}) {
             JsonObject mixins;
             try (InputStream in = LSSMod.class.getResourceAsStream(config)) {
                 assertNotNull(in, config + " not on the classpath");

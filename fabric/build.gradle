@@ -38,6 +38,15 @@ configurations {
     storeDeps
 }
 
+configurations {
+    // sodium-options-page-generations-plan.md §4 — see the dependency's comment.
+    sodiumLegacyGolden {
+        canBeConsumed = false
+        canBeResolved = true
+        transitive = false
+    }
+}
+
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
     implementation "net.fabricmc:fabric-loader:${project.loader_version}"
@@ -63,6 +72,13 @@ dependencies {
     localRuntime "com.github.luben:zstd-jni:1.5.7-3"
     compileOnly "maven.modrinth:sodium:${sodium_version}"
     compileOnly "maven.modrinth:modmenu:${modmenu_version}"
+    // The legacy (0.6/0.7) Sodium options surface SodiumLegacySurfaceResolvesTest checks
+    // LegacySodiumPage.SURFACE against by NAME + ARITY (sodium-options-page-generations-
+    // plan.md §4): a PLAIN configuration, resolved outside loom and never on any compile
+    // or test classpath (the test opens the jar as a zip — a Sodium class on the T1
+    // classpath would be shadowed by the stub package anyway). Offline or unresolvable
+    // = the test skips itself (see the test task below).
+    sodiumLegacyGolden "maven.modrinth:sodium:${sodium_legacy_golden}"
     // Compat validation arm: -Pbenchmark.moonrise=true puts Moonrise on the dev runtime
     // (the same Modrinth version issue #69 was reported against), so the soak harness can
     // drive the full dirty pipeline — the SerializableChunkData.copyOf hook, broadcast,
@@ -84,6 +100,19 @@ dependencies {
 
 test {
     useJUnitPlatform()
+    // SodiumLegacySurfaceResolvesTest's input: the legacy Sodium jar (gradle.properties
+    // sodium_legacy_golden). Resolved at EXECUTION so an offline box still runs Tier 1 —
+    // the test then skips with an assumption instead of failing the build.
+    inputs.property "sodium_legacy_golden", project.sodium_legacy_golden
+    doFirst {
+        def goldenJar = ''
+        try {
+            goldenJar = configurations.sodiumLegacyGolden.files.find { it.name.endsWith('.jar') }?.absolutePath ?: ''
+        } catch (Exception e) {
+            logger.warn("sodiumLegacyGolden unresolvable (offline?) — SodiumLegacySurfaceResolvesTest will skip: ${e.message}")
+        }
+        systemProperty 'lss.sodiumLegacyGoldenJar', goldenJar
+    }
     // GameTestEntrypointContractTest reads these at runtime (repo-walk); without declaring
     // them as inputs, adding a gametest class or editing the entrypoint list leaves the
     // task UP-TO-DATE locally and the contract never re-checks.

@@ -153,6 +153,12 @@ processResources {
     from(rootProject.file('fabric/src/main/resources/assets/lss/icon.png')) {
         into 'assets/lss'
     }
+    // The options-page lang keys (sodium-options-page-generations-plan.md §3): the legacy
+    // Sodium page renders on NeoForge too (the 0.6.13 Voxy-fork client path), so the
+    // NeoForge jar needs the same lang files — derived from the fabric tree like the icon.
+    from(rootProject.file('fabric/src/main/resources/assets/lss/lang')) {
+        into 'assets/lss/lang'
+    }
 }
 
 // Native strip lists — zstd-jni only on this module (sqlite rides NESTED with all
@@ -306,6 +312,23 @@ tasks.register('vssJar') {
                         def props = 'shortName=VSS\ndisplayName=Voxy Server Side\nclientCommand=vss\nserverCommand=vsslod\n'
                         zos.putNextEntry(new ZipEntry('lss-brand.properties'))
                         zos.write(props.getBytes('UTF-8'))
+                        zos.closeEntry()
+                    } else if (e.name.startsWith('assets/lss/lang/') && e.name.endsWith('.json')) {
+                        // Display-string rebrand in EVERY lang file's VALUES only (keys stay
+                        // lss.* — addressed by the untouched mod id) — the fabric vssJar's
+                        // loop, ported when the NeoForge jar gained the lang files for the
+                        // legacy Sodium page (sodium-options-page-generations-plan.md §3;
+                        // release_check's lang-value pin covers this pair too).
+                        def lang = new groovy.json.JsonSlurper().parse(zf.getInputStream(e))
+                        def rebranded = lang.collectEntries { k, v ->
+                            [k, v.toString()
+                                    .replace('LOD Server Support', 'Voxy Server Side')
+                                    .replaceAll(/\bLSS\b/, 'VSS')]
+                        }
+                        byte[] lb = groovy.json.JsonOutput.prettyPrint(
+                                groovy.json.JsonOutput.toJson(rebranded)).getBytes('UTF-8')
+                        zos.putNextEntry(new ZipEntry(e.name))
+                        zos.write(lb)
                         zos.closeEntry()
                     } else {
                         def ne = new ZipEntry(e.name)
