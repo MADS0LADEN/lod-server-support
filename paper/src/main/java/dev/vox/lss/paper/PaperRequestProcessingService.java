@@ -391,7 +391,7 @@ public class PaperRequestProcessingService {
         // wiring): compare-backed rungs stamp "verified now" unless the position's
         // change is marked-but-undrained or the region latch is armed. Null table
         // (pre-region-stamps test wirings) keeps the NEVER default — no stamps.
-        // Paper residual (plan §9.3 as corrected by §11 item 5, accepted-with-eyes-
+        // Paper residual (plan §9.3 as corrected by §10 item 5, accepted-with-eyes-
         // open and UNCANARIED): an event-blind content change (the unfired-event
         // class) is invisible to BOTH guards; its stamp seals until the chunk's next
         // save — the store resweep bounds the store-rung arm. No soak canaries the
