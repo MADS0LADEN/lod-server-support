@@ -93,3 +93,60 @@ conflicts). Execution starts only after the main-changeset 5-reviewer panel
 changes the ramp code on main, the backport picks the amended commits instead.
 
 ## 5. As-built record (appended per line)
+
+**26.1 (support/mc26.1-v0.12).** Series applied CLEAN (5/5, zero conflicts).
+Targeted suites green; selftest 265; full clean pre-flight at 0.12.0 +
+release_check OK; CI green @ 338c3cdc. 2-Opus pair: ZERO MAJORs — fidelity
+verified patch-identical with every executable surface byte-equal to main
+(the one drifted file, ServiceLifecycleGameTests, carries pre-existing
+TestPositions-helper drift the hunk landed cleanly around — the §2 audit
+never covered the fold commit's files, corrected below); context verified
+against the line's own recordings, including a ZERO-margin
+stamp-heal-rejoin pass (clean=11/residue=5, both legs exactly on their
+limits) that made the thin-margins flake entry more urgent here than on
+main. Doc folds pushed: c20dc8ea (plan refresh + CLAUDE.md ×3) + 725ba1a8
+(summary/stamped plan refreshes).
+
+**1.21.11 (support/mc1.21.11-v0.12).** Series applied CLEAN (5/5).
+Targeted suites green; selftest 265; full clean pre-flight + release_check
+OK; CI green @ 043cc53b. 2-Opus pair: ZERO MAJORs — all five patches
+content-identical; drift confined to ServiceLifecycleGameTests +
+PaperRequestProcessingService (pre-existing, provably untouched: before-diff
+== after-diff); the premise leg verified against the line's 095410Z
+recording (no_region=9, one-tile margins both ways). The context reviewer
+also caught the fold commit's §11-vs-§10 citation typo (fixed everywhere,
+PR #226). Doc folds pushed: fdabd2d0 (three plan refreshes + CLAUDE.md ×3).
+
+**1.21.1 (support/mc1.21.1).** Series applied CLEAN — §2's predicted
+context conflicts never materialized (the 8 rename-drift lines all sit
+outside the hunks' context windows; end-state diff vs main is exactly those
+8 lines). Targeted suites green (`:fabric:test` without the absent Tier-3
+task); selftest 265; full clean pre-flight (`:fabric:build` plain) +
+release_check OK; CI green @ 34baca75. 2-Opus pair: ZERO MAJORs — patch-id
+identity 5/5; NeoForge compiles the same purity-clean xplat source and
+drives the identical client loop via ClientTickEvent.Post; the premise leg
+verified inert against 14 recorded runs (all no_region==9). Doc folds
+pushed: 584a71e5.
+
+**Cross-line corrections from the pairs (all folded):**
+- §2's "zero drift" claim was file-set-scoped too narrowly: the fold
+  commit's ServiceLifecycleGameTests + PaperRequestProcessingService carry
+  real pre-existing drift on 26.1/1.21.11 (TestPositions helpers / row-17
+  split-dir re-root + ChunkPos accessors). End-state equality is NOT
+  achievable for those two — future audits must compare drift-diff before
+  vs after instead.
+- The three panel-amended plan docs (ramp/§5, summary/clock-rewind,
+  stamped/§10-monitor-bound) had gone stale on every line when main's docs
+  half stayed main-only — refreshed to main's state on all three lines.
+- The fold commit's Paper comment cited §11 for the UNCANARIED correction;
+  it is §10 item 5 (PR #226, picked to all lines).
+- PR #226's add -A swept three untracked jdtls .eclipse launch files into
+  main and the picks — removed everywhere + .gitignore'd (PR #227).
+- No `(cherry picked from …)` trailers on the series (line convention nit;
+  provenance is unambiguous via patch-id + preserved authorship).
+
+**Final line tips (after folds + nit picks):** 26.1 @ f266cb74,
+1.21.11 @ b21a67fc, 1.21.1 @ 64c89e69 — each with the comment-nit and
+gitignore commits above their CI-green backport tips; fresh CI runs
+triggered on push, and final-tip clean pre-flights re-run (results in the
+release plan §12.9).

@@ -2,7 +2,7 @@
 
 Enables players with [Voxy](https://modrinth.com/mod/voxy) to see fully rendered terrain out to hundreds of chunks on multiplayer servers without needing to explore the world first. Also includes **Far Players**: players far beyond normal render distance appear in the LOD terrain with name tags, equipment, and mounts.
 
-**Try it live**: join `lod-server-support.modrinth.gg` with Voxy and this mod installed. Supports Minecraft 26.2, 26.1, 1.21.11, and 1.21.1.
+**Try it live**: join `lod-server-support.modrinth.gg` with Voxy and this mod installed. Supports Minecraft 26.2, 26.1, 1.21.11, 1.21.10, and 1.21.1.
 
 https://github.com/user-attachments/assets/721fb344-890e-4e03-ab36-539444427f7b
 
@@ -15,6 +15,7 @@ Clients use the Fabric mod on every version; on 1.21.1 a NeoForge client works a
 | 26.2 | ✅ | ✅ | ✅ (experimental) | - |
 | 26.1 | ✅ | ✅ | ✅ (experimental) | - |
 | 1.21.11 | ✅ | ✅ | ✅ (experimental) | - |
+| 1.21.10 | ✅ | ✅ | - | - |
 | 1.21.1 | ✅ | ✅ | - | ✅ |
 
 On NeoForge (1.21.1) there are two tested client paths, depending on your Sodium version:
