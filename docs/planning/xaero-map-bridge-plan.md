@@ -257,7 +257,10 @@ CFR decompile output in `cfr-out262/`, XaeroPlus clone). Key findings:
    consecutive-failure latch (5 in a row) kills the bridge for the session
    (`state=dead` in diag), FarPlayerRenderer-crash-latch style.
 9. **Config + Sodium toggle.** New client config key `enableXaeroMapBridge`
-   (default true) checked LIVE at both enqueue and pump, so the Sodium toggle
+   (default FALSE — flipped from the plan's original true by user decision
+   2026-08-23, pre-release: opt-in while the feature is new, because map writes
+   are persistent saved data; ConfigValidationTest pins the OFF default) checked
+   LIVE at both enqueue and pump, so the Sodium toggle
    applies mid-session (flip off → queue cleared). Sodium option
    `lss:xaero_map_bridge` on the LSS page (boolean, `join_slow_start` pattern,
    enabled-dep on `lss:receive_server_lods`), lang keys

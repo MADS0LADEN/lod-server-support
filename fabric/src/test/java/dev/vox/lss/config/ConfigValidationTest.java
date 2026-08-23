@@ -769,22 +769,24 @@ class ConfigValidationTest {
     }
 
     @Test
-    void xaeroMapBridgeDefaultsOnAndRoundTripsThroughJson() {
-        // The Xaero bridge toggle (xaero-map-bridge-plan.md §2.9) ships ON — the same
-        // sibling hazard: a silent default-off revert would pass CI green while the
-        // Sodium option's setDefaultValue(true) quietly disagreed with the field.
+    void xaeroMapBridgeDefaultsOffAndRoundTripsThroughJson() {
+        // The Xaero bridge toggle (xaero-map-bridge-plan.md §2.9) ships OFF for
+        // v0.12.0 (user decision 2026-08-23: opt-in while the feature is new — map
+        // writes are persistent saved data). Same sibling hazard as ever: a silent
+        // default flip would pass CI green while the Sodium option's
+        // setDefaultValue quietly disagreed with the field.
         var c = clientConfig();
-        assertTrue(c.enableXaeroMapBridge, "the Xaero map bridge must default ON");
+        assertFalse(c.enableXaeroMapBridge, "the Xaero map bridge must default OFF");
         c.validate();
-        assertTrue(c.enableXaeroMapBridge, "validate() must not touch the boolean");
+        assertFalse(c.enableXaeroMapBridge, "validate() must not touch the boolean");
         var gson = new com.google.gson.Gson();
         String saved = gson.toJson(clientConfig());
-        assertTrue(saved.contains("\"enableXaeroMapBridge\":true"),
+        assertTrue(saved.contains("\"enableXaeroMapBridge\":false"),
                 "a fresh config must persist the default under the exact key: " + saved);
         var loaded = gson.fromJson(saved.replace(
-                "\"enableXaeroMapBridge\":true", "\"enableXaeroMapBridge\":false"),
+                "\"enableXaeroMapBridge\":false", "\"enableXaeroMapBridge\":true"),
                 dev.vox.lss.config.LSSClientConfig.class);
-        assertFalse(loaded.enableXaeroMapBridge, "a saved false must bind back as false");
+        assertTrue(loaded.enableXaeroMapBridge, "a saved true must bind back as true");
     }
 
     @Test

@@ -122,7 +122,7 @@ public class LSSConfigMenu implements ConfigEntryPoint {
                 ? "lss.config.xaero_map_bridge.tooltip"
                 : "lss.config.xaero_map_bridge.tooltip.not_installed"));
         xaeroOption.setImpact(OptionImpact.LOW);
-        xaeroOption.setDefaultValue(true);
+        xaeroOption.setDefaultValue(false);
         xaeroOption.setBinding(v -> cfg.enableXaeroMapBridge = v, () -> cfg.enableXaeroMapBridge);
         xaeroOption.setStorageHandler(save);
         xaeroOption.setEnabledProvider(s -> s.readBooleanOption(enabledDep[0]), enabledDep);
