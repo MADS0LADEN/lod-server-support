@@ -10,6 +10,9 @@ public class MapRegion extends LeveledRegion<Object> {
     public boolean writingPaused;
     public byte loadState = 2;
     public boolean resting = true;
+    /** Models the real formula's pending-flags conjunct (!reloadHasBeenRequested
+     *  && !recacheHasBeenRequested && !isRefreshing) — the stub MapSaveLoad flips
+     *  it false on requestLoad, so a granted region honestly reads in-flight. */
     public boolean canRequestReload = true;
     public int visits;
     public Boolean beingWritten; // null until first set — pins "set true, never cleared"
@@ -35,11 +38,18 @@ public class MapRegion extends LeveledRegion<Object> {
         return this.loadState;
     }
 
-    public void setLoadState(byte state) { this.loadState = state; }
+    public void setLoadState(byte state) {
+        requireRegionMonitor("setLoadState");
+        this.loadState = state;
+        dev.vox.lss.compat.XaeroStubEvents.record("region.setLoadState " + state);
+    }
 
+    /** FAITHFUL formula (decompiled): loadState != 3 && != 1 && !recache — so a
+     *  cache-parked (3) region reads not-resting until the 3→4 revival, exactly
+     *  like the real loader's dead end. The manual field models the recache term. */
     public boolean isResting() {
         requireRegionMonitor("isResting");
-        return this.resting;
+        return this.resting && this.loadState != 3 && this.loadState != 1;
     }
 
     public void registerVisit() {
@@ -53,9 +63,12 @@ public class MapRegion extends LeveledRegion<Object> {
         dev.vox.lss.compat.XaeroStubEvents.record("region.setBeingWritten " + beingWritten);
     }
 
+    /** FAITHFUL formula (decompiled): pending-flags-clear && (ls 0 | 4 | 2-and-
+     *  beingWritten) — the memoryless window's honest in-flight predicate. */
     public boolean canRequestReload_unsynced() {
         requireRegionMonitor("canRequestReload_unsynced");
-        return this.canRequestReload;
+        return this.canRequestReload && (this.loadState == 0 || this.loadState == 4
+                || (this.loadState == 2 && Boolean.TRUE.equals(this.beingWritten)));
     }
 
     public void setAllCachePrepared(boolean prepared) {

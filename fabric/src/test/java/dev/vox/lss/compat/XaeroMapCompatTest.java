@@ -47,10 +47,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *       prepare→overlays→write per-pixel order (the stub's prepareForWriting
  *       clears overlays like the real one, so a wrong order wipes them), and
  *       {@code setBeingWritten} set-and-NEVER-cleared;</li>
- *   <li>the mandatory paced requestLoad dance: setBeingWritten BEFORE requestLoad,
- *       the pacing gauge consulted BEFORE any region monitor (lock-order — the
- *       deadlock pin), one request per pump, awaiting-load exempt from the
- *       deferral cap;</li>
+ *   <li>the region load dance: beingWritten TRUE at request time (STATE-recorded
+ *       by the stub — event order was vacuous, the commit probe also sets it),
+ *       the memoryless outstanding window (in-flight recognized from Xaero's own
+ *       canRequestReload, the loader's dead ends self-heal, cache-parked regions
+ *       revive 3→4), Xaero's shared pacing surface untouched in BOTH directions,
+ *       largest cluster issued LAST for the LIFO drain, awaiting-load exempt
+ *       from the deferral cap;</li>
  *   <li>queue policy: latest-wins with DISTINCT tiles, oldest-first eviction,
  *       count AND byte bounds, cross-dimension replacement, config-off clear,
  *       no-session drop;</li>
@@ -285,8 +288,8 @@ class XaeroMapCompatTest {
 
     @Test
     void theByteGaugeBoundsOverlayHeavyTiles() {
-        // Max-overlay tiles are ~87 KB by the gauge's estimate; the 24 MB budget
-        // admits ~290 of them — far below the 2048 count cap.
+        // Max-overlay tiles are ~87 KB by the gauge's estimate; the 48 MB budget
+        // admits ~550 of them — far below the 8192 count cap.
         var runs = new XaeroTileExtractor.OverlayRun[256][];
         for (int i = 0; i < 256; i++) {
             runs[i] = new XaeroTileExtractor.OverlayRun[XaeroTileExtractor.MAX_OVERLAYS];
@@ -295,14 +298,14 @@ class XaeroMapCompatTest {
                         Blocks.WATER.defaultBlockState(), (byte) 0, false, 1);
             }
         }
-        for (int i = 0; i < 400; i++) {
+        for (int i = 0; i < 700; i++) {
             var heavy = tile(i * 4, 0);
             var withRuns = new XaeroTileExtractor.PreparedTile(heavy.chunkX(), heavy.chunkZ(),
                     heavy.worldBottomY(), heavy.floorState(), heavy.floorY(), heavy.topY(),
                     heavy.biome(), heavy.light(), heavy.glowing(), runs);
             this.bridge.offerPrepared(OVERWORLD, withRuns);
         }
-        assertTrue(this.bridge.queuedForTest() < 400,
+        assertTrue(this.bridge.queuedForTest() < 700,
                 "the byte gauge must evict before the count cap on overlay-heavy tiles"
                         + " (queued=" + this.bridge.queuedForTest() + ")");
         assertTrue(this.bridge.queuedBytesForTest() <= XaeroMapCompat.MAX_QUEUE_BYTES);
@@ -479,7 +482,7 @@ class XaeroMapCompatTest {
     // ---- the region load dance ----
 
     @Test
-    void unloadedRegionGetsExactlyOnePacedLoadRequestWithBeingWrittenFirst() {
+    void unloadedRegionIsLoadRequestedWithBeingWrittenFirstAndNeverReRequested() {
         offer(64, 64); // region (2,2), fresh
         var region = new MapRegion();
         region.loadState = 0;
@@ -488,38 +491,46 @@ class XaeroMapCompatTest {
         assertEquals(1, this.processor.saveLoad.loadRequests.size(),
                 "an unloaded region must be load-REQUESTED (fresh regions never self-promote)");
         assertEquals(1, this.bridge.counterForTest("load_requests"));
+        assertEquals(1, this.bridge.regionsWaitingForTest());
         var events = XaeroStubEvents.snapshot();
-        int setBeingWritten = events.indexOf("region.setBeingWritten true");
-        int requestLoad = events.indexOf("saveLoad.requestLoad lss-xaero-bridge");
-        assertTrue(setBeingWritten >= 0 && requestLoad > setBeingWritten,
-                "setBeingWritten(true) must precede requestLoad (it stops the load drain"
-                        + " demoting an empty fresh region): " + events);
-        assertTrue(events.contains("saveLoad.setNextToLoadByViewing"),
-                "the request must register with the pacing gauge");
+        assertTrue(events.contains("saveLoad.requestLoad lss-xaero-bridge beingWritten"),
+                "beingWritten must already be TRUE at request time — it stops the load"
+                        + " drain demoting an empty fresh region (STATE-recorded by the"
+                        + " stub; event order was vacuous, the commit probe also sets it): "
+                        + events);
+        assertFalse(events.contains("saveLoad.setNextToLoadByViewing"),
+                "the native consumers' pacing token must never be repointed: " + events);
         assertEquals(1, this.bridge.queuedForTest(), "awaiting-load entries stay queued");
 
-        // Pacing: while the gauge refuses, further pumps issue NO second request…
-        this.processor.saveLoad.nextToLoadByViewing.allowAnotherRegionToLoad = false;
+        // The memoryless window: once requested, Xaero's own canRequestReload
+        // answers false (the stub flips it like the real reloadHasBeenRequested),
+        // so every further pump reads IN-FLIGHT and issues NO re-request…
         for (int i = 0; i < XaeroMapCompat.DEFER_CAP + 50; i++) {
             this.bridge.pump();
         }
-        assertEquals(1, this.processor.saveLoad.loadRequests.size(), "paced: one request total");
+        assertEquals(1, this.processor.saveLoad.loadRequests.size(),
+                "one request per region until its load lands");
         // …and awaiting-load deferrals are EXEMPT from the deferral cap.
         assertEquals(1, this.bridge.queuedForTest(),
                 "an entry awaiting a region load must never be dropped by the deferral cap");
 
-        // The load lands: the next pump commits.
+        // The load lands: the next pump commits and nothing waits.
         region.loadState = 2;
         this.bridge.pump();
         assertEquals(1, this.bridge.counterForTest("written"));
         assertEquals(0, this.bridge.queuedForTest());
+        assertEquals(0, this.bridge.regionsWaitingForTest());
     }
 
     @Test
-    void thePacingGaugeIsConsultedBeforeAnyRegionMonitor() {
-        // The deadlock pin (review MAJOR): shouldAllowAnotherRegionToLoad synchronizes
-        // on its own (possibly BRANCH) region while Xaero's loader nests
-        // parent-then-leaf — production must consult it BEFORE touching any region.
+    void theSharedPacingSurfaceIsNeverTouched() {
+        // BOTH directions of Xaero's load-pacing surface stay untouched (plan §14):
+        // shouldAllowAnotherRegionToLoad synchronizes on its own (possibly BRANCH)
+        // region — a lock-order inversion against Xaero's parent-then-leaf loader
+        // thread (a real client deadlock) — and setNextToLoadByViewing is purely
+        // the four native consumers' pacing token (the loader never reads it);
+        // repointing it at a far bridge region vetoed writer/minimap/GUI/reloader
+        // for multi-second stretches after each granted region's save.
         offer(64, 64);
         var gauge = new MapRegion(); // park a "previous" region in the pacing slot
         this.processor.saveLoad.nextToLoadByViewing = gauge;
@@ -528,18 +539,159 @@ class XaeroMapCompatTest {
         this.processor.regions.put((2L << 32) | 2L, region);
         this.bridge.pump();
         var events = XaeroStubEvents.snapshot();
-        int pacing = events.indexOf("pacing.shouldAllowAnotherRegionToLoad");
-        int firstRegionTouch = -1;
-        for (int i = 0; i < events.size(); i++) {
-            if (events.get(i).startsWith("region.")) {
-                firstRegionTouch = i;
-                break;
-            }
+        assertFalse(events.contains("pacing.shouldAllowAnotherRegionToLoad"),
+                "the shared gauge must never be consulted (deadlock-class removal): " + events);
+        assertFalse(events.contains("saveLoad.setNextToLoadByViewing"),
+                "the pacing token must never be repointed (native-consumer veto): " + events);
+        assertTrue(this.processor.saveLoad.nextToLoadByViewing == gauge,
+                "the pacing token must be left exactly as found");
+        assertEquals(1, this.processor.saveLoad.loadRequests.size(),
+                "the memoryless window still grants the load");
+        // Structural: no reflective handle for the pacing surface may even exist.
+        for (var f : XaeroMapCompat.Handles.class.getDeclaredFields()) {
+            var n = f.getName().toLowerCase(java.util.Locale.ROOT);
+            assertFalse(n.contains("shouldallow") || n.contains("nexttoload"),
+                    "no handle for the pacing surface may exist: " + f.getName());
         }
-        assertTrue(pacing >= 0, "the gauge must be consulted: " + events);
-        assertTrue(firstRegionTouch < 0 || pacing < firstRegionTouch,
-                "the pacing gauge must be consulted BEFORE any region monitor work"
-                        + " (lock-order vs Xaero's loader thread): " + events);
+    }
+
+    @Test
+    void grantsGoToTheLargestPendingRegionsUpToTheWindow() {
+        // 10 pending regions; region (2,2) holds THREE tiles, the rest one each —
+        // and the big cluster is offered LAST, so insertion order cannot masquerade
+        // as size order (3-Opus fold: the old arrangement made the sort vacuous).
+        // The grant phase spends up to MAX_OUTSTANDING_LOADS requests per pump on
+        // the largest clusters, ISSUED smallest-first: the loader drains
+        // toLoad.get(0) against our priority front-inserts (LIFO), so the
+        // LAST-issued (largest) region is the one drained FIRST.
+        for (int i = 1; i <= 9; i++) {
+            offer(64 + i * 32, 320); // regions (2+i, 10), one tile each
+        }
+        offer(64, 64);
+        offer(68, 64);
+        offer(72, 64); // three tiles in region (2,2) — offered LAST
+        var bigRegion = unloadedRegion();
+        this.processor.regions.put((2L << 32) | 2L, bigRegion);
+        for (int i = 1; i <= 9; i++) {
+            this.processor.regions.put(((long) (2 + i) << 32) | 10L, unloadedRegion());
+        }
+        this.bridge.pump();
+        var requests = this.processor.saveLoad.loadRequests;
+        assertEquals(XaeroMapCompat.MAX_OUTSTANDING_LOADS, requests.size(),
+                "one pump must batch a full window of load requests");
+        assertTrue(requests.get(requests.size() - 1) == bigRegion,
+                "the region holding the most queued tiles must be issued LAST — the"
+                        + " final front-insert is what the LIFO drain serves FIRST");
+        assertEquals(10, this.bridge.regionsWaitingForTest());
+        assertEquals(0, this.bridge.counterForTest("commit_failures"));
+    }
+
+    @Test
+    void theWindowRefillsAsLoadsLand() {
+        // 12 waiting regions, window 8: pump 1 requests 8 (the stub flips their
+        // canRequestReload — honestly in flight). Landing 3 frees 3 slots: the
+        // next pump commits the landed tiles AND requests exactly 3 more.
+        for (int i = 0; i < 12; i++) {
+            offer(64 + i * 32, 320); // regions (2..13, 10)
+            this.processor.regions.put(((long) (2 + i) << 32) | 10L, unloadedRegion());
+        }
+        this.bridge.pump();
+        assertEquals(8, this.processor.saveLoad.loadRequests.size());
+        this.bridge.pump();
+        assertEquals(8, this.processor.saveLoad.loadRequests.size(),
+                "window full, no slot free — no new grants");
+        for (int i = 0; i < 3; i++) {
+            this.processor.saveLoad.loadRequests.get(i).loadState = 2; // lands
+        }
+        this.bridge.pump();
+        assertEquals(3, this.bridge.counterForTest("written"), "landed tiles commit");
+        assertEquals(11, this.processor.saveLoad.loadRequests.size(),
+                "the 3 freed slots must refill with exactly 3 new grants");
+    }
+
+    @Test
+    void aRemovedDeadEndRegionIsReRequestedOnAFreshObject() {
+        // Two of the loader's three dead ends END IN removeMapRegion (failed read →
+        // loadState 4 + remove; empty load → remove): the granted region OBJECT
+        // disappears without ever reaching loadState 2. A slot-tracking window
+        // would leak that slot forever (3-Opus fold MAJOR); the memoryless window
+        // self-heals — the next probe's getLeafMapRegion(create=true) hands back a
+        // fresh unloaded region that reads requestable again.
+        offer(64, 64);
+        long key = (2L << 32) | 2L;
+        this.processor.regions.put(key, unloadedRegion());
+        this.bridge.pump();
+        assertEquals(1, this.processor.saveLoad.loadRequests.size());
+        this.bridge.pump();
+        assertEquals(1, this.processor.saveLoad.loadRequests.size(), "in flight: no re-request");
+        var deadEnded = this.processor.regions.remove(key); // Xaero's removeMapRegion
+        this.processor.createdRegionLoadState = 0;          // detection creates UNLOADED
+        this.bridge.pump();
+        assertEquals(2, this.processor.saveLoad.loadRequests.size(),
+                "the dead-ended region must be re-requested…");
+        assertTrue(this.processor.saveLoad.loadRequests.get(1) != deadEnded
+                        && this.processor.saveLoad.loadRequests.get(1)
+                                == this.processor.regions.get(key),
+                "…on the FRESH region object the probe re-created");
+    }
+
+    @Test
+    void aCacheParkedRegionIsRevivedViaTheNativeThreeToFourTransition() {
+        // The loader's third dead end (3-Opus fold MAJOR): a cache-only load parks
+        // the region at loadState 3, where isResting AND canRequestReload are both
+        // false FOREVER — without revival the bucket waits until session end.
+        // Xaero's own clearRegion idiom (3→4) makes it requestable again.
+        offer(64, 64);
+        var region = new MapRegion();
+        region.loadState = 3;
+        this.processor.regions.put((2L << 32) | 2L, region);
+        this.bridge.pump();
+        assertEquals(1, this.processor.saveLoad.loadRequests.size(),
+                "a cache-parked region must be revived and requested");
+        assertTrue(XaeroStubEvents.snapshot().contains("region.setLoadState 4"),
+                "the revival must be Xaero's own 3→4 transition");
+        region.loadState = 2; // the load lands
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("written"));
+        assertEquals(0, this.bridge.queuedForTest());
+    }
+
+    @Test
+    void aParkedRegionWithPendingNativeWorkIsLeftAlone() {
+        // The revival must RESTORE loadState 3 when the guards still refuse (a
+        // pending native recache/refresh owns the region) — and never mark
+        // beingWritten on the way out.
+        offer(64, 64);
+        var region = new MapRegion();
+        region.loadState = 3;
+        region.canRequestReload = false; // pending native work
+        this.processor.regions.put((2L << 32) | 2L, region);
+        this.bridge.pump();
+        assertTrue(this.processor.saveLoad.loadRequests.isEmpty());
+        assertEquals(3, region.loadState, "the failed revival must restore loadState 3");
+        org.junit.jupiter.api.Assertions.assertNull(region.beingWritten,
+                "a refused request must not mark beingWritten");
+        assertEquals(1, this.bridge.queuedForTest(), "the bucket keeps waiting");
+    }
+
+    @Test
+    void aBucketOfManyEntriesCountsOneDeferEventPerPump() {
+        // The bucketed drain probes each region ONCE per pump — at large radius a
+        // ring crosses ~r/4 regions, and per-entry probing burned the whole budget
+        // on identical awaiting-load answers (the throughput round's motivation).
+        for (int i = 0; i < 20; i++) {
+            offer(64 + i, 64); // 20 tiles, all in region (2,2) — chunkX 64..83
+        }
+        this.processor.regions.put((2L << 32) | 2L, unloadedRegion());
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("defer_events"),
+                "one defer event per BUCKET per pump, not per entry");
+        assertEquals(20, this.bridge.queuedForTest());
+        long lookups = XaeroStubEvents.snapshot().stream()
+                .filter(e -> e.startsWith("processor.getLeafMapRegion")).count();
+        assertEquals(2, lookups,
+                "20 same-region entries must cost exactly TWO region lookups — one"
+                        + " commit probe (bucket short-circuit) + one grant request");
     }
 
     @Test
@@ -558,14 +710,14 @@ class XaeroMapCompatTest {
     }
 
     @Test
-    void twoUnloadedRegionsShareTheOneRequestPerPumpPacing() {
+    void twoUnloadedRegionsAreGrantedInTheSamePump() {
         offer(64, 64);   // region (2,2)
         offer(320, 320); // region (10,10)
         this.processor.regions.put((2L << 32) | 2L, unloadedRegion());
         this.processor.regions.put((10L << 32) | 10L, unloadedRegion());
         this.bridge.pump();
-        assertEquals(1, this.processor.saveLoad.loadRequests.size(),
-                "at most ONE requestLoad per pump pass (the native ~1/pass pacing)");
+        assertEquals(2, this.processor.saveLoad.loadRequests.size(),
+                "both fit the outstanding window — one pump grants both");
     }
 
     private MapRegion unloadedRegion() {
@@ -704,14 +856,58 @@ class XaeroMapCompatTest {
     }
 
     @Test
-    void theNanosBudgetStopsTheDrainImmediately() {
-        offer(0, 0);
-        offer(4, 0);
-        this.bridge.pumpNanosBudget = 0; // every entry is over budget
+    void aZeroBudgetPumpStillMakesProgressEveryPump() {
+        // The live-lock MAJOR (3-Opus fold): the old pre-walk ran OUTSIDE the nanos
+        // budget, so a broke pump could do literally nothing while retaining the
+        // whole queue, forever. The budget check is now skipped until one unit of
+        // progress (a drop or a commit attempt) — a zero budget commits exactly
+        // ONE entry per pump, still grants probed waiting regions, and the queue
+        // always drains.
+        offer(0, 0);   // committable bucket (auto-created loaded region)
+        offer(4, 0);   // same bucket
+        offer(64, 64); // waiting bucket — region (2,2)
+        this.processor.regions.put((2L << 32) | 2L, unloadedRegion());
+        this.bridge.pumpNanosBudget = 0;
         this.bridge.pump();
-        assertEquals(0, this.bridge.counterForTest("written"),
-                "a zero time budget must commit nothing");
-        assertEquals(2, this.bridge.queuedForTest(), "over-budget entries are retained");
+        assertEquals(1, this.bridge.counterForTest("written"),
+                "a zero budget must still commit exactly one entry (progress guarantee)");
+        for (int i = 0; i < 8 && this.bridge.queuedForTest() > 1; i++) {
+            this.bridge.pump();
+        }
+        assertEquals(2, this.bridge.counterForTest("written"),
+                "over pumps the zero-budget drain must empty the committable bucket");
+        assertEquals(1, this.bridge.queuedForTest(), "only the awaiting entry remains");
+        assertEquals(1, this.processor.saveLoad.loadRequests.size(),
+                "the waiting region must be granted its load despite the broke budget");
+    }
+
+    @Test
+    void aBusyTileChunkDefersOnlyItsOwnEntriesAndSiblingsCommit() {
+        // Three entries in ONE region, distinct tile chunks; the first entry's tile
+        // chunk is PBO-downloading. The old region-wide deferral starved (and after
+        // DEFER_CAP pumps EXPIRED) whole buckets over one busy tile chunk (3-Opus
+        // fold MAJOR); tile-chunk-scoped deferral lets the siblings commit now,
+        // and the busy entry expires ALONE at its own cap.
+        offer(0, 0);  // tileChunk (0,0) — armed busy
+        offer(4, 0);  // tileChunk (1,0)
+        offer(8, 0);  // tileChunk (2,0)
+        var region = new MapRegion();
+        var busy = new MapTileChunk(region, 0, 0);
+        busy.loadState = 2;
+        busy.leafTexture.downloadFromPBO = true;
+        region.setChunk(0, 0, busy);
+        this.processor.regions.put(0L, region);
+        this.bridge.pump();
+        assertEquals(2, this.bridge.counterForTest("written"),
+                "siblings in other tile chunks must commit past the busy one");
+        assertEquals(1, this.bridge.queuedForTest());
+        for (int i = 0; i < XaeroMapCompat.DEFER_CAP + 2; i++) {
+            this.bridge.pump();
+        }
+        assertEquals(0, this.bridge.queuedForTest(),
+                "the busy entry expires at its own deferral cap");
+        assertEquals(1, this.bridge.counterForTest("dropped_expired"),
+                "…counted exactly once (removal-guarded counting)");
     }
 
     @Test
@@ -840,7 +1036,8 @@ class XaeroMapCompatTest {
         var line = this.bridge.describe();
         assertTrue(line.startsWith("XaeroMap: state=active, queued="), line);
         assertTrue(line.contains(", written=") && line.contains(", defer_events=")
-                && line.contains(", dropped=") && line.contains(", commit_failures="), line);
+                && line.contains(", dropped=") && line.contains(", commit_failures=")
+                && line.contains(", regions_waiting="), line);
         this.enabled = false;
         assertTrue(this.bridge.describe().contains("state=disabled"));
     }

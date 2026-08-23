@@ -169,15 +169,21 @@ CFR decompile output in `cfr-out262/`, XaeroPlus clone). Key findings:
    constraint, the commit-count cap (64) is a safety ceiling (impl review MAJOR:
    the original cap of 8 = 160 tiles/s against 300-1000 delivered columns/s
    made every fast-link backfill drop most of the map and made the clearcache
-   heal circular) — plus at most ~1 `requestLoad` per pump pass (the native
-   pacing, §2.7). The drain start ROTATES per pump (the IncomingRequestRouter
-   M4 precedent): below queue saturation nothing evicts a permanently-deferring
-   prefix, and an unrotated head-first walk would starve committable entries.
+   heal circular) — plus up to a window's worth of `requestLoad` grants per
+   pump (§14's memoryless outstanding window; supersedes the original ~1/pass
+   gauge pacing). The drain is region-BUCKETED (§14) with the rotation at
+   BUCKET granularity (the IncomingRequestRouter M4 precedent — an unrotated
+   head-first walk would starve committable buckets behind a permanently-
+   deferring prefix), the snapshot taken under ONE queue-lock acquisition and
+   the per-entry filters run INSIDE the budgeted loop; the budget check is
+   skipped until the pump has made one unit of progress (a drop or a commit
+   attempt), so a degenerate budget can never live-lock (3-Opus fold MAJOR).
 5. **Bounded latest-wins queue, keyed by packed chunk pos** — bounded by COUNT
-   (2048) and BYTES (~24 MB estimated; the ClientColumnProcessor discipline —
-   plain tiles are ~4.7 KB but overlay-heavy ocean tiles reach ~90 KB, so a
-   count cap alone admits ~165 MB; impl review MAJOR corrected this plan's
-   original ≤8 MB arithmetic). A newer tile for the same position replaces in
+   (8192) and BYTES (~48 MB estimated; §14 widened both from the original
+   2048/24 MB — the ClientColumnProcessor discipline: plain tiles are ~4.7 KB
+   but overlay-heavy ocean tiles reach ~90 KB, so the count cap alone would
+   admit ~0.5 GB; impl review MAJOR corrected this plan's original ≤8 MB
+   arithmetic). A newer tile for the same position replaces in
    place; overflow evicts oldest (counted). Cleared at session end
    (`ClientNetGlue.onDisconnect`) and on config-off; offers are additionally
    gated on a LIVE LSS session, closing the disconnect-drain race that could
@@ -226,16 +232,21 @@ CFR decompile output in `cfr-out262/`, XaeroPlus clone). Key findings:
    TTL). Per region, mirror the write gates (`!region.isWritingPaused()` under
    `writerThreadPauseSync` — the save-race exclusion — then `loadState == 2` +
    `registerVisit()` + `isResting()` under the region monitor) and the
-   MANDATORY load dance for regions not at loadState 2:
+   MANDATORY load dance for regions not at loadState 2 (§14's grant phase —
+   supersedes the original ~1/pass gauge pacing): under the region monitor,
+   `loadState != 2` → the 3→4 revival if cache-parked → `isResting()` →
    `canRequestReload_unsynced()` → `setBeingWritten(true)` →
-   `requestLoad(region, "lss-xaero-bridge")`, paced ~1/pass via
-   `getNextToLoadByViewing().shouldAllowAnotherRegionToLoad()` — fresh regions
-   NEVER self-promote, so without this the feature silently no-ops everywhere
-   Xaero hasn't already been. Entries for a region awaiting load defer without
+   `requestLoad(region, "lss-xaero-bridge")` — fresh regions NEVER
+   self-promote, so without this the feature silently no-ops everywhere Xaero
+   hasn't already been. Deferral scope is split (3-Opus fold MAJOR): REGION-
+   scoped not-ready (being saved / not resting) burns the whole bucket's
+   deferral counters and short-circuits; TILE-CHUNK-scoped not-ready (the 4×4
+   chunk's loadState, a PBO download) burns only that entry and its bucket
+   siblings keep committing. Entries for a region awaiting load defer without
    burning deferral budget; a per-entry deferral cap (~200 ladder-ready passes)
-   then drops (counted). `setBeingWritten(true)` is set and never cleared by us
-   (§1 — the save path owns the reset; clearing it would silently lose every
-   tile not later touched by the native writer).
+   then drops (counted, removal-guarded). `setBeingWritten(true)` is set and
+   never cleared by us (§1 — the save path owns the reset; clearing it would
+   silently lose every tile not later touched by the native writer).
 8. **Failure containment — the map must never cost LOD correctness.** The
    consumer callback catches ALL its own throwables (nothing escapes to
    `dispatchColumn` — an escape would trigger `reportIngestFailure` and put the
@@ -343,10 +354,12 @@ construction under it is proven — SectionConstructionPinTest et al.):
 `mainStuffSync`, `mainWorld`, `renderThreadPauseSync` (whichever of these the
 decompiled ladder actually reads — final list from the decompile).
 `MapWorld.getCurrentDimensionId()` (+ `isCacheOnlyMode` if it lives here).
-`MapSaveLoad`: `requestLoad(MapRegion, String)`, `isRegionDetectionComplete()`,
-`getNextToLoadByViewing()` (+ its `shouldAllowAnotherRegionToLoad()`).
+`MapSaveLoad`: `requestLoad(MapRegion, String)`, `isRegionDetectionComplete()`
+(the pacing pair `getNextToLoadByViewing()`/`shouldAllowAnotherRegionToLoad()`
+was in the original list — REMOVED by §14, never resolved as-built).
 `MapRegion`: field `writerThreadPauseSync`, `isWritingPaused()`,
-`getLoadState()`, `isResting()`, `registerVisit()`, `setBeingWritten(boolean)`,
+`getLoadState()`, `setLoadState(byte)` (§14's 3→4 cache-parked revival),
+`isResting()`, `registerVisit()`, `setBeingWritten(boolean)`,
 `canRequestReload_unsynced()`, `setAllCachePrepared(boolean)`, `getChunk(...)`.
 `MapTileChunk`: ctor, `getTile`/`setTile(int, int, MapTile,
 BlockStateShortShapeCache, MapProcessor)`, `setLoadState(byte)`,
@@ -368,12 +381,17 @@ identical signatures in the 1.21.1 jar): `MapProcessor.
 getMapRegionHighlightsPreparer()` + `MapRegionHighlightsPreparer.prepare(
 MapRegion,int,int,boolean)` (the createdTileChunk block), `MapProcessor.
 getCaveModeDepthConfig()` (setWrittenCave's live depth — mirroring the config
-avoids a spurious native rewrite delta), `MapSaveLoad.setNextToLoadByViewing(
-LeveledRegion)` (the pacing registration half), `MapTileChunk.includeInSave()`,
+avoids a spurious native rewrite delta), `MapTileChunk.includeInSave()`,
 `MapRegion.setChunk(int,int,MapTileChunk)`. Deliberately ABSENT:
 `updateBuffers`, `addToRefresh`, `BlockTintProvider`, `MapUpdateFastConfig`,
 `BiomeColorCalculator` (§1 — Xaero's own sweeps handle textures/refresh/save
-once the flags are set).
+once the flags are set), and — since §14 — the ENTIRE shared load-pacing
+surface: `shouldAllowAnotherRegionToLoad`/`getNextToLoadByViewing` (the
+branch-region monitor deadlock class, gone structurally) AND
+`setNextToLoadByViewing` (the 3-Opus fold: the loader never reads the token —
+only the four native consumers' pacing does, and repointing it at a far bridge
+region vetoed writer/minimap/GUI/reloader after every granted region's save;
+pinned by theSharedPacingSurfaceIsNeverTouched's reflective no-handle scan).
 
 ## 5. Pixel recipe (v1 — mirrors the decompiled `loadPixel`)
 
@@ -402,10 +420,13 @@ the manual test), no slope polish.
 
 ## 6. Observability
 
-Counters (`written`, `skipped_native`, `defer_events` — defer EVENTS, not
-entries — `dropped` = overflow+stale+expired aggregate, `commit_failures` —
-split out because it is the only pre-death failure signal, unlike the benign
-drop flavors — `load_requests`, `queued` gauge) + `state` (active / unavailable
+Counters (`written`, `skipped_native`, `defer_events` — defer EVENTS: one per
+BUCKET per pump for region-scoped flavors, one per entry for tile-chunk-scoped
+(§14) — `dropped` = overflow+stale+expired aggregate (removal-guarded: counts
+DROPS, never attempts), `commit_failures` — split out because it is the only
+pre-death failure signal, unlike the benign drop flavors — `load_requests`,
+`queued` gauge, `regions_waiting` gauge — waiting regions as PROBED by the last
+pump, a lower bound under budget truncation) + `state` (active / unavailable
 / dead / disabled), surfaced ONLY in the client `/lss diag` conditional line
 (comma-separated, the house style) — no exporter/soak schema churn. The
 `unavailable` state is the RESOLVE-FAILED case (Xaero present, internals
@@ -628,3 +649,143 @@ center), counter renamed `skipped_loaded` → `skipped_native`, pinned by
 updated fully-surrounded skip test. Healing an ALREADY-recorded ring needs a
 column re-serve — `/lss clearcache` while connected (rejoins alone answer
 up_to_date, no data flows).
+
+## 14. Region-throughput round (2026-08-23, field-test round 2 — AMENDS §2.4/§2.5/§2.7/§4/§6, all amended in place)
+
+Field observation (the user's second test): at large map radius the bridge lost
+many tiles. Mechanism: a spiral ring at chunk radius r crosses ~r/4 Xaero map
+regions (~75 at r=300 vs ~3 at r=12), while region loads were granted at ≤1 per
+pump (20/s) — entries flooded in for ungranted regions, the queue overflowed,
+and evict-oldest discarded whole awaiting-load clusters (permanent holes: the
+positions are stamped and never re-served).
+
+Decompile findings that reshaped the design (all verified in MapSaveLoad/
+LeveledRegion):
+- `requestLoad(region, reason)` → `addToLoad(…, prioritize=TRUE)`: front-inserts
+  and lands even mid-drain (the non-prioritized path's `loadingFiles` drop guard
+  does not apply).
+- The loader's drain (`MapSaveLoad.run`) processes UNLIMITED cheap loads per
+  MapRunner cycle (virgin regions with no file — most of an LOD backfill — and
+  cache-only loads) but exits after ONE expensive file load.
+- `shouldAllowAnotherRegionToLoad` is semantically a 1-IN-FLIGHT window: it
+  refuses while the last-requested region's `reloadHasBeenRequested` is still
+  set (cleared when the drain finishes that region). It also synchronizes on its
+  own — possibly BRANCH — region (§12 reviewer 3's deadlock).
+
+The round as-built (supersedes §2.4's rotation-over-entries and §2.7's
+gauge-paced ~1/pass request; items reshaped in place by the §14.1 fold):
+1. **Bucketed drain**: ONE queue-lock snapshot, pure-arithmetic grouping by
+   Xaero map region (32×32 chunks — Xaero's consent granularity), the
+   stale-dimension/natively-writable filters per entry INSIDE the budgeted
+   commit loop, and a progress guarantee — the budget check is skipped until
+   one drop or commit attempt has happened, so a broke budget can never
+   live-lock (fold MAJOR: the original pre-walk ran outside the budget with a
+   lock acquisition + chunk lookups per entry). Each region is probed ONCE per
+   pump; a REGION-scoped not-ready outcome short-circuits its whole bucket
+   (defer_events counts per bucket per pump), while TILE-CHUNK-scoped busy
+   states (the 4×4 loadState, a PBO download) defer only their own entry and
+   the bucket's siblings keep committing (fold MAJOR: region-wide burn expired
+   whole buckets over one busy tile chunk). Rotation is at bucket granularity;
+   region-scoped DEFERRED burns every bucketed entry's deferral counter (cap
+   semantics preserved; drops are removal-guarded so counters count drops).
+2. **MEMORYLESS outstanding-load window** (`MAX_OUTSTANDING_LOADS` 8) replaces
+   the gauge: the commit probe classifies every awaiting region from Xaero's
+   OWN state read in the same region monitor — `canRequestReload_unsynced()`
+   false means a request is genuinely queued/loading/refreshing (IN-FLIGHT,
+   occupies a slot); loadState 3 means cache-parked (needs revival); otherwise
+   REQUESTABLE. The grant phase requests the largest pending clusters into the
+   remaining slots. No bookkeeping set exists to leak or skew (fold MAJORs:
+   the first cut intersected a remembered set with the probed-this-pump
+   buckets, which both released slots for merely-unprobed regions AND leaked
+   slots forever against the loader's three dead ends). Dead ends self-heal:
+   failed/empty loads end in removeMapRegion and the next probe's
+   getLeafMapRegion(create=true) hands back a fresh requestable region;
+   cache-only loads park at loadState 3 (isResting and canRequestReload both
+   false forever) and are revived via Xaero's own 3→4 transition (the
+   clearRegion idiom; restored to 3 if the guards still refuse). Requests are
+   ISSUED smallest-of-the-chosen-first (fold MINOR): the loader drains
+   toLoad.get(0) against our priority front-inserts (LIFO), so the largest
+   cluster must be the FINAL front-insert to drain first. Self-clocking:
+   cheap-load (virgin) mixes refill every pump; expensive mixes hold at the
+   window near the loader's real drain (~10 expensive loads/s at the 100 ms
+   MapRunner cadence — the original text said ~160 grants/s off a 2× cadence
+   error; the cheap-mix refill ceiling is ~8/pump at 20 pumps/s). Each request
+   still runs the native dance (region monitor; setBeingWritten BEFORE
+   requestLoad — state-pinned, not order-pinned). The ENTIRE shared pacing
+   surface is untouched: `shouldAllowAnotherRegionToLoad`/
+   `getNextToLoadByViewing` were never resolved (branch-region-monitor
+   deadlock, gone structurally), and `setNextToLoadByViewing` was REMOVED by
+   the fold — the loader never reads the token; it is purely the pacing input
+   of the four native consumers (writer/minimap/GUI/reloader), and repointing
+   it at a far bridge region vetoed all four for multi-second stretches after
+   each granted region's save (`hasRemovableSourceData` post-save, refreshes).
+   Left alone, the native writer's own requests front-insert AHEAD of our
+   batch — the right priority. Pinned: theSharedPacingSurfaceIsNeverTouched
+   (events + token-identity + reflective no-handle scan).
+3. **Wider survival window**: MAX_QUEUE 2048 → 8192 entries, MAX_QUEUE_BYTES
+   24 → 48 MB.
+4. **Observability**: `regions_waiting=` gauge added to the diag line (waiting
+   regions as PROBED by the last pump — a lower bound under budget truncation;
+   the direct grant-pressure signal).
+
+Expected field shape: grant rate stops binding for virgin-region backfills,
+commits bound at 64/tick (1280/s) > delivery, `dropped` collapses toward 0;
+post-clearcache re-streams over EXISTING map files stay expensive-load-bound
+(the loader's ~10/s) but the 8-deep window + 8192-entry queue ride it out.
+
+Accepted (documented) edges: budget-truncated pumps under-count in-flight
+regions (unprobed buckets are unknown) and can transiently over-grant by at
+most one window per pump — requests are idempotent (a queued region reads
+not-requestable), so the excess is bounded and only widens the in-flight set,
+never re-requests; a region-scoped DEFERRED burns deferral budget for entries
+that might individually be committable next pump (blast radius accepted — the
+flavors are save-transient); `regions_waiting` can read low right after a
+truncated pump.
+
+### 14.1 3-Opus review + fold record (2026-08-23, PR #231)
+
+Three Opus reviewers (drain correctness / loader-model fidelity / test-and-doc
+rigor) over the first cut. All findings folded; the decisive reshapes:
+- **Live-lock class** (R2-MAJOR-1/R1-MAJOR-3): the bucketing pre-walk ran
+  per-entry queue locks + chunk lookups OUTSIDE the nanos budget; a budget
+  break before any bucket then intersected the window memory with an empty
+  map, releasing every slot — a zero-work pump that repeated forever. Fixed:
+  one-lock snapshot, filters inside the budget, the progress guarantee
+  (pinned: aZeroBudgetPumpStillMakesProgressEveryPump).
+- **Window memory unsound** (R2-MAJOR-2 + R1-MAJOR-1): retainAll(pending)
+  mistook not-probed for landed (window degenerates to request-all, LIFO then
+  inverts nearest-first) while the loader's three dead-end outcomes (fail →
+  loadState 4 + removeMapRegion; empty → removeMapRegion; cache-only →
+  loadState 3) leaked remembered slots forever — 8 leaks = bridge stops
+  requesting for the session. Fixed by deleting the memory: verdicts from
+  canRequestReload_unsynced in the commit probe's monitor (R2's key decompile
+  fact: it is false exactly while reloadHasBeenRequested/recache/refreshing),
+  plus the 3→4 revival for the parked dead end (pinned:
+  theWindowRefillsAsLoadsLand, aRemovedDeadEndRegionIsReRequestedOnAFreshObject,
+  aCacheParkedRegionIsRevivedViaTheNativeThreeToFourTransition,
+  aParkedRegionWithPendingNativeWorkIsLeftAlone).
+- **Native-consumer veto** (R1-MINOR-2, upgraded on inspection): our
+  setNextToLoadByViewing repointing blocked all four native consumers'
+  shouldAllowAnotherRegionToLoad for recurring multi-second stretches; the
+  loader itself never reads the token (grep-verified: MapLimiter,
+  MapFullReloader, MapWriter, GuiMap, MinimapRenderListener only). Removed.
+- **Tile-chunk deferral scope** (R3-M3/R1-MINOR-4): split DEFERRED_TILE from
+  region-scoped DEFERRED (pinned:
+  aBusyTileChunkDefersOnlyItsOwnEntriesAndSiblingsCommit).
+- **Vacuous pins** (R3-M1/M2): the largest-first test's insertion order
+  equaled its sorted order (big cluster now offered LAST, and the pin is
+  issued-LAST per the LIFO inversion); the setBeingWritten-before-requestLoad
+  order pin matched the commit probe's event (the stub now records the
+  region's beingWritten STATE inside requestLoad). Stub honesty upgrades:
+  requestLoad flips canRequestReload false (models reloadHasBeenRequested),
+  canRequestReload_unsynced/isResting use the decompiled formulas,
+  setLoadState is monitor-enforced + event-recorded, createdRegionLoadState
+  knob for detection-creates-unloaded scenarios.
+- **Counter honesty** (R2-MINOR-2): removeIfCurrent returns whether it
+  removed; drop counters count drops (a survived fresher tile no longer
+  recounts every pump); an in-place tile replace resets the entry's deferral
+  patience. Grant loop got the dead check (R2-MINOR-3).
+- REFUTED by bytecode (recorded so nobody re-chases them): duplicate
+  requestLoad is impossible (remove+add(0) dedupe + canRequestReload guard);
+  unbounded toLoad growth is impossible; the filter walk was ~1× not 9×
+  isChunkLoaded per entry (nativelyWritable short-circuits on the center).
