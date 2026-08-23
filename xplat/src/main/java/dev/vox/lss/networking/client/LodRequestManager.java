@@ -1272,7 +1272,8 @@ public class LodRequestManager {
     /** Governor receipt for /lss diag (review n14: rate_gated conflates manual and
      *  governed refusals — this label disambiguates). Four shapes since the slow
      *  start: ENGAGED keeps the pre-phase "<cols>/s (<KB>/s)" (the live-round
-     *  receipt format), RAMP renders "ramp@<KB>/s (<cols>/s)", plus "open"/"off". */
+     *  receipt format), RAMP renders "ramp@<KB>/s (<cols>/s, credits=N/10[, wl])"
+     *  (the window-limited fold's field receipt), plus "open"/"off". */
     public String getGovernedRateLabel() {
         return switch (this.governor.getPhase()) {
             case ENGAGED -> this.governor.sustainedColumnsPerSecond() + "/s ("
