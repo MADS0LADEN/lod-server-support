@@ -119,7 +119,9 @@ public final class RegionSummaryService {
      *  its queue's HEAD and stops only THAT player's drain (no head-of-line blocking
      *  across players). Entries are swept at {@link #removePlayer}; an empty queue
      *  left behind by a drain is retained until then (removing it would race the
-     *  sweeper's computeIfAbsent-add and orphan a frame). */
+     *  sweeper's computeIfAbsent-add and orphan a frame). The sweeper's own post-add
+     *  liveness re-check in {@link #assemble} covers the one ordering removePlayer
+     *  cannot: a quit landing while its frame is still assembling. */
     private final ConcurrentHashMap<UUID, ConcurrentLinkedQueue<ReadyFrame>> ready =
             new ConcurrentHashMap<>();
     private final Object sweeperWake = new Object();
@@ -162,12 +164,17 @@ public final class RegionSummaryService {
             this.sweeper.start();
         }
         this.diag.recordRequest();
+        this.pending.put(player, new Pending(request, this.nanoClock.getAsLong() + PENDING_TTL_NANOS));
         // The stamps-eligibility mark (stamped-up-to-date-plan.md §9.4): the summary
         // request IS the capability declaration — a session that requested this
         // server life receives stamped-up_to_date frames. Survives dimension change
         // (matching the per-dimension request re-fire), swept at NETWORK disconnect.
+        // Marked AFTER the pending slot (panel fold 2026-08-22): the pump's anchor-less
+        // sweep requires no-pending before stripping a mark, so a sweep iteration
+        // straddling these two writes must never see the mark without its protecting
+        // slot — mark-first let a mid-registration straddle strip stamps eligibility
+        // for the player's whole dimension visit (the client requests only at entry).
         this.requestedThisSession.add(player);
-        this.pending.put(player, new Pending(request, this.nanoClock.getAsLong() + PENDING_TTL_NANOS));
     }
 
     /** True once this session sent a summary request — the stamped-up_to_date send
@@ -365,6 +372,21 @@ public final class RegionSummaryService {
         this.diag.recordRefreshMillis((System.nanoTime() - t0) / 1_000_000);
         this.ready.computeIfAbsent(player, k -> new ConcurrentLinkedQueue<>())
                 .add(new ReadyFrame(frame, this.nanoClock.getAsLong() + FRAME_RETRY_TTL_NANOS));
+        // Post-add liveness re-check (panel fold 2026-08-22): a removePlayer landing
+        // between the pump's jobs hand-off and the add above resurrects the ready
+        // queue for a departed UUID — the vanished-send belt would drop the frame,
+        // but the EMPTY queue would then leak for the server's life (the anchor-less
+        // sweep iterates requestedThisSession, which no longer holds the UUID).
+        // Re-checking AFTER the add closes both orderings: a removePlayer that
+        // completed before this check left the mark gone (swept here); one that runs
+        // after the add sweeps the queue itself. Residual: a same-UUID rejoin whose
+        // re-request lands inside this assembly's window keeps the frame — it is at
+        // most assembly-old, dimension-bound at the client, and per-player FIFO keeps
+        // it ahead of the new session's fresher frame (the stale-then-fresh order the
+        // client apply requires).
+        if (!this.requestedThisSession.contains(player)) {
+            this.ready.remove(player);
+        }
     }
 
     public void shutdown() {
@@ -384,6 +406,10 @@ public final class RegionSummaryService {
 
     boolean hasPendingForTest(UUID player) {
         return this.pending.containsKey(player);
+    }
+
+    boolean hasReadyEntryForTest(UUID player) {
+        return this.ready.containsKey(player);
     }
 
     int readyCountForTest() {

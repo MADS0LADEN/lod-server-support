@@ -1483,6 +1483,23 @@ public class ServiceLifecycleGameTests {
 
         helper.succeedWhen(() -> {
             service.tick();
+            var sumDiag = service.getRegionSummaries().diagnostics();
+            if (service.getDiskReader().getDiag().getHeaderHitsCount() < 1
+                    || !state.hasDiskReadDone(cx, cz)
+                    || sumDiag.getFrames() < 1 || sumDiag.getStampsFrames() < 1) {
+                // Wall-denominate the wait (the TwoPlayerGameTests fix, panel fold
+                // 2026-08-22): this waits on an async pool disk read, the MIN_PRIORITY
+                // sweeper daemon's window assembly, and the dedicated-lane sends — all
+                // wall-bound work an unthrottled gametest server (~0.2-0.4 ms/tick)
+                // outruns in ~0.5 s of wall budget. >=50 ms per waiting tick keeps the
+                // ceiling tick-rate-independent; the passing path sleeps only for the
+                // handful of ticks the async legs actually take.
+                try {
+                    Thread.sleep(50L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
             helper.assertTrue(service.getDiskReader().getDiag().getHeaderHitsCount() >= 1,
                     "the header rung must intercept the margined-fresh read against the"
                             + " real region file");

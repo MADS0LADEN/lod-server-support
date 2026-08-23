@@ -1753,7 +1753,13 @@ def check_stamp_heal_rejoin(ctx):
     = 11 (the two legs were briefly inconsistent at 12/5 — a run drawing the
     admitted variance tile has clean = 11 by arithmetic, first fired live on
     the 26.1 v0.12.0 port smoke, 2026-08-21; the unhealed shape reads <= 8,
-    so 11 still separates cleanly). Re-derive BOTH legs together."""
+    so 11 still separates cleanly). Re-derive BOTH legs together. The no_region
+    floor (>= 5, matching wrs/dwos) is the pair's PREMISE leg (panel fold
+    2026-08-22): the 16-real/9-no-region geometry both legs are derived from
+    must be observed, not assumed — if no_region ever shrinks, real tiles grow
+    and the ceiling+floor pair silently loses its exactly-16 tightness (the
+    same class of drift the 12/5 inconsistency came from), and it doubles as
+    the false-clean-against-sentinel belt the sibling checks carry."""
     r1 = ctx.final_client(1)
     if r1 is None:
         yield Violation("stamp-heal-rejoin", "run1", "no client snapshots", {})
@@ -1772,6 +1778,15 @@ def check_stamp_heal_rejoin(ctx):
                         {"expected": "columns.known >= 1500", "actual": known})
         return
     s = r1["summary"]
+    if s["tiles_no_region"] < 5:
+        yield Violation("stamp-heal-rejoin", "run1 final snapshot",
+                        "the window geometry premise broke — the 25-tile window is "
+                        "derived as 9 no-region + 16 real, and the ceiling/floor pair "
+                        "below is exactly tight against 16 (see docstring); a shrunken "
+                        "no_region count means the pair no longer measures what it "
+                        "was derived from (or tiles validated against a sentinel)",
+                        {"expected": "tiles_no_region >= 5",
+                         "actual": s["tiles_no_region"]})
     if s["tiles_stale"] + s["tiles_unknown"] > 5:
         yield Violation("stamp-heal-rejoin", "run1 final snapshot",
                         "the stale set did not heal — phase 1's stamped up_to_date "
@@ -4701,6 +4716,8 @@ def selftest():
     # trips EXACTLY ONE leg, so deleting that leg turns its violation list empty.
     hits("stamp-heal-rejoin carry premise alone", list(check_stamp_heal_rejoin(
         shr_ctx(known=300, req=100))), "stamp-heal-rejoin")
+    hits("stamp-heal-rejoin geometry premise lost", list(check_stamp_heal_rejoin(
+        shr_ctx(no_region=2))), "stamp-heal-rejoin")
     hits("stamp-heal-rejoin clean floor alone", list(check_stamp_heal_rejoin(
         shr_ctx(clean=6))), "stamp-heal-rejoin")
     # The admitted-variance boundary (26.1 port smoke, 2026-08-21): stale+unknown

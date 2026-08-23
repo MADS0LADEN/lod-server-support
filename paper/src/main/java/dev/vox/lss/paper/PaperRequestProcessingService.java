@@ -391,10 +391,13 @@ public class PaperRequestProcessingService {
         // wiring): compare-backed rungs stamp "verified now" unless the position's
         // change is marked-but-undrained or the region latch is armed. Null table
         // (pre-region-stamps test wirings) keeps the NEVER default — no stamps.
-        // Paper residual (plan §9.3, accepted-with-eyes-open): an event-blind content
-        // change (the unfired-event class) is invisible to BOTH guards; its stamp
-        // seals until the chunk's next save — the store resweep bounds the store-rung
-        // arm, and paper-store-unfired-event's probe legs canary the class.
+        // Paper residual (plan §9.3 as corrected by §11 item 5, accepted-with-eyes-
+        // open and UNCANARIED): an event-blind content change (the unfired-event
+        // class) is invisible to BOTH guards; its stamp seals until the chunk's next
+        // save — the store resweep bounds the store-rung arm. No soak canaries the
+        // class (paper-store-unfired-event's client is summary-gated off — the canary
+        // is structurally impossible); theEventBlindStateStampsByAcceptedDesign pins
+        // the residual as deliberate.
         if (this.offThreadProcessor != null && this.regionStamps != null
                 && this.dirtyTracker != null) {
             this.offThreadProcessor.setUpToDateStampSource((player, dim, packed) -> {
