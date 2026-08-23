@@ -115,8 +115,14 @@ lands. The tscache refresh from a header answer is **monotonic-max** — a
 header-derived bound never lowers a higher observed acquisition stamp (the
 downgrade would persist a memo claim globally and bypass the rung's own 5 s
 re-validation). Clock rewind/backup restore behaves exactly like today's tscache
-comparison (shared, pre-existing limitation — healed by the next real save's
-dirty broadcast).
+comparison (shared, pre-existing limitation) — but the panel (2026-08-22)
+corrected the heal claim: a backwards step ≤ FUTURE_SKEW_ALLOWANCE (1 h) leaves
+recent header seconds "future"-but-accepted, so `maxHeaderSecond` exceeds the
+rewound clock, no new mark can arm the latch, and the header rung can intercept
+the dirty re-ask's read with a false compare — the dirty-broadcast heal is
+DEFERRED, not immediate. Bounded: a rewind > 1 h reads degenerate → NEVER_CLEAN
+(safe), and the ≤ 1 h window self-heals when wall clock passes the stale stamps
++ margin. v0.13 carry: also latch when `maxHeaderSecond > now + margin`.
 
 **Harness.** Soak-neutral in the hit regime (same `up_to_date` counters; soaks run
 intact-tscache single-player). New Tier-1 pins: the strict-inequality margin, the
@@ -339,8 +345,11 @@ upgraded pairs instead of reading it as breakage.
   verified equivalent, not merely asserted (v1.0's gap, honesty M2).
 - **Shared pre-existing limitations, stated**: server clock rewind and
   backup-restored worlds can produce wrong currency claims in BOTH the existing
-  per-column path and the summary (same clock, same stamps); both heal on the next
-  real save's dirty broadcast/header bump. Not mitigated, documented.
+  per-column path and the summary (same clock, same stamps). Panel correction
+  (2026-08-22): post-P1 the heal is deferred, not immediate — inside the ≤ 1 h
+  skew allowance the header rung intercepts the dirty re-ask (see the latch
+  section above); beyond it, degenerate-second poisoning fails safe. Not
+  mitigated, documented; hardening carried to v0.13.
 - **The one new residual**: a change whose save submission, header write, AND
   dirty broadcast are all lost (hard crash between copyOf and the region write)
   reverts the chunk on disk; the client's stamp may postdate the reverted content.
