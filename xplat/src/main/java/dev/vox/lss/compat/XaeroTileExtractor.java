@@ -5,7 +5,6 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.tags.BlockTags;
-import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.AirBlock;
@@ -14,10 +13,10 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.DoublePlantBlock;
 import net.minecraft.world.level.block.FlowerBlock;
 import net.minecraft.world.level.block.LiquidBlock;
+import net.minecraft.world.level.block.HalfTransparentBlock;
 import net.minecraft.world.level.block.PitcherCropBlock;
 import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.TallFlowerBlock;
-import net.minecraft.world.level.block.TransparentBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunkSection;
@@ -52,10 +51,14 @@ import java.util.List;
  *       a resync serves an all-air column.</li>
  * </ul>
  * Two documented approximations of the native behavior (accepted by the plan
- * review): translucency is decided by {@code instanceof TransparentBlock} /
- * {@code FluidTags.WATER} instead of Xaero's model-quad sprite-alpha analysis
- * (which needs the live model manager), and Xaero's "flowers" map option is
- * mirrored at its default (flowers visible).
+ * review): translucency is decided by {@code instanceof HalfTransparentBlock}
+ * (ice/slime/honey + the glass family) / water-by-fluid-TYPE instead of Xaero's
+ * model-quad sprite-alpha analysis (which needs the live model manager) — a
+ * translucent-rendered block outside that family (nether portal is the vanilla
+ * case) floors the pixel here where native overlays it; and Xaero's "flowers"
+ * map option is mirrored at its default (flowers visible). Sky light is never
+ * read — the native writer uses it only in cave mode — so no-sky dimensions
+ * (nether/End) need no special casing.
  */
 final class XaeroTileExtractor {
 
@@ -142,15 +145,22 @@ final class XaeroTileExtractor {
     /** Top-down scan of one pixel — the loadPixel loop with the cave branches folded away. */
     private static void scanPixel(ColumnAccess column, int x, int z, int startY, PixelScan scan) {
         int lowY = scan.lowY;
+        boolean extendedLastStep = false;
         int h = startY;
         while (h >= lowY) {
             BlockState state = column.blockAt(x, h, z);
             FluidState fluid = state.getFluidState();
+            BlockState fluidLegacyBlock = fluid.isEmpty() ? null : fluid.createLegacyBlock();
 
-            // The native one-shot deep-run extension: once the pixel has overlays and
-            // the run is ≥5 blocks deep, trace to the bottom of the transparency and
-            // account the remainder's opacity in one step instead of per block.
-            boolean extendThisStep = scan.hasOverlays() && scan.firstTransparentY - h >= EXTEND_RUN_DEPTH;
+            // The native ONE-SHOT deep-run extension (the !shouldExtendTillTheBottom
+            // term): once the pixel has overlays and the run is ≥5 blocks deep, trace
+            // to the bottom of the transparency and account the remainder's opacity in
+            // one step. One-shot matters: without it the pixel stays in extend mode for
+            // the rest of the column and no new overlay run can ever open below the
+            // first extension (review MINOR — deep-ocean multi-run collapse).
+            boolean extendThisStep = !extendedLastStep && scan.hasOverlays()
+                    && scan.firstTransparentY - h >= EXTEND_RUN_DEPTH;
+            extendedLastStep = extendThisStep;
             int skipY = h;
             if (extendThisStep) {
                 skipY = h - 1;
@@ -172,18 +182,18 @@ final class XaeroTileExtractor {
 
             byte blockLight = column.lightAt(x, h + 1, z);
 
-            if (!fluid.isEmpty()) {
+            if (fluidLegacyBlock != null) {
                 // Native fluid branch: the overlay/floor decision runs on the fluid's
                 // legacy BLOCK state, but a floor hit records the ORIGINAL state.
-                BlockState fluidBlock = fluid.createLegacyBlock();
-                if (scan.step(fluidBlock, fluidOverlayable(fluid), blockLight, h,
+                if (scan.step(fluidLegacyBlock, fluidOverlayable(fluid), blockLight, h,
                         extendThisStep, skipY)) {
                     scan.floor(state, h, blockLight);
                     return;
                 }
             }
             Block b = state.getBlock();
-            if (!(b instanceof AirBlock) && b != fluid.createLegacyBlock().getBlock()) {
+            if (!(b instanceof AirBlock)
+                    && (fluidLegacyBlock == null || b != fluidLegacyBlock.getBlock())) {
                 if (scan.step(state, blockOverlayable(state), blockLight, h,
                         extendThisStep, skipY)) {
                     scan.floor(state, h, blockLight);
@@ -343,10 +353,12 @@ final class XaeroTileExtractor {
         }
     }
 
-    /** Approximation of Xaero's model-alpha translucency (see class javadoc). */
+    /** Approximation of Xaero's model-alpha translucency (see class javadoc).
+     *  HalfTransparentBlock is the 26.2 family root: ice, slime, honey, and (via
+     *  the TransparentBlock subclass) plain + stained glass. */
     private static boolean blockOverlayable(BlockState state) {
         Block b = state.getBlock();
-        return b instanceof AirBlock || b instanceof TransparentBlock;
+        return b instanceof AirBlock || b instanceof HalfTransparentBlock;
     }
 
     private static boolean fluidOverlayable(FluidState fluid) {
@@ -356,12 +368,24 @@ final class XaeroTileExtractor {
         return type == Fluids.WATER || type == Fluids.FLOWING_WATER;
     }
 
+    /** The native buggedStates memo: a throwing getMapColor is remembered so a bugged
+     *  block in a wall costs one exception, not 256 per column on the decode thread.
+     *  Bounded (a hostile registry can't grow it unboundedly); decode-thread-confined
+     *  today, CHM-backed so a future second reader stays safe. */
+    private static final java.util.Set<BlockState> BUGGED_STATES =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private static final int MAX_BUGGED_STATES = 256;
+
     private static boolean hasVanillaColor(BlockState state) {
+        if (BUGGED_STATES.contains(state)) return false;
         try {
             var color = state.getMapColor(EmptyBlockGetter.INSTANCE, BlockPos.ZERO);
             return color != null && color.col != 0;
         } catch (Throwable t) {
-            return false; // native adds throwing states to a bugged list and skips them
+            // Native adds throwing states to a bugged list and skips them (the scan
+            // continues to the next block down, exactly like a colorless block).
+            if (BUGGED_STATES.size() < MAX_BUGGED_STATES) BUGGED_STATES.add(state);
+            return false;
         }
     }
 

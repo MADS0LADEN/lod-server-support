@@ -20,6 +20,7 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 
@@ -30,31 +31,58 @@ import java.util.function.BooleanSupplier;
  * dependency, zero mixins (every member the bridge touches is public in Xaero WM
  * 1.45.0, verified 26.2 ≡ 1.21.1) — following the {@code VoxyCompat}/
  * {@code MoonriseReadCompat} interop discipline: any resolve failure disables the
- * bridge with one warn; runtime failures latch it dead after
- * {@value #THROW_LATCH} consecutive commit failures; LOD delivery is NEVER
- * affected (the consumer swallows everything and never reports ingest failure —
- * a map problem must not trigger re-serves).
+ * bridge with one warn (diag shows {@code state=unavailable}); runtime failures
+ * latch it dead for the session after {@value #THROW_LATCH} consecutive failures;
+ * LOD delivery is NEVER affected — the consumer swallows every throwable
+ * ({@code Error}s included: {@code LSSApi.dispatchColumn} converts ANY escape
+ * into an ingest-failure report, and a map problem must not trigger re-serves).
  *
  * <p>Two-stage pipeline (plan §2.4): the registered {@link VoxelColumnConsumer}
  * extracts a {@link XaeroTileExtractor.PreparedTile} on the LSS decode thread and
- * offers it to a bounded latest-wins queue; {@link #pump()} — the shared
- * end-of-client-tick body, MAIN CLIENT THREAD (Xaero enforces it with
+ * offers it to a bounded (count AND bytes) latest-wins queue; {@link #pump()} —
+ * the shared end-of-client-tick body, MAIN CLIENT THREAD (Xaero enforces it with
  * {@code isSameThread} throws) — re-runs the native writer's gate ladder
  * verbatim, then commits under Xaero's own locks in the decompiled
  * {@code MapWriter.writeChunk} sequence, including the mandatory paced
  * {@code requestLoad} dance for regions Xaero hasn't loaded (fresh regions never
  * self-promote) and the set-never-clear {@code setBeingWritten} lifecycle (the
- * save path owns the reset). GPU work stays Xaero's: the bridge only flags
- * {@code setToUpdateBuffers}, never calls {@code updateBuffers}.
+ * save path owns the reset). The load-pacing gauge is consulted ONCE per pump
+ * BEFORE any region monitor — {@code shouldAllowAnotherRegionToLoad} synchronizes
+ * on its own (possibly BRANCH) region, and Xaero's loader thread nests
+ * parent-then-leaf, so consulting it while holding a leaf monitor is a
+ * lock-order inversion (review MAJOR — a real client deadlock). GPU work stays
+ * Xaero's: the bridge only flags {@code setToUpdateBuffers}, never calls
+ * {@code updateBuffers}.
+ *
+ * <p><b>Registration lifecycle</b> (review MAJOR): the consumer is what holds the
+ * handshake's CAPABILITY_VOXEL_COLUMNS bit ({@code LSSApi.hasVoxelConsumers()}),
+ * so an Xaero-only install (no Voxy) legitimately subscribes to LOD data — that
+ * IS the feature. But deregistering MID-SESSION would put every arriving column
+ * through the no-consumer ingest-failure path (up to 4 re-serves per position
+ * before parking — a whole-disc churn for a map problem), so: registration is
+ * add-only while a session may be live (init + pump), a disabled or dead bridge
+ * becomes a silent no-op consumer (offers are dropped), and deregistration
+ * happens ONLY at {@link #onDisconnect()} — which is also where the death latch
+ * re-arms (session-scoped: one bad session must not disable the feature for the
+ * whole JVM; genuine Xaero drift re-latches within {@value #THROW_LATCH}
+ * commits next session).
  */
 final class XaeroMapCompat {
 
     static final int MAX_QUEUE = 2048;
-    static final int MAX_COMMITS_PER_PUMP = 8;
+    /** Byte gauge companion to the count cap (the ClientColumnProcessor discipline —
+     *  a count cap alone admits ~165 MB of max-overlay tiles; plain tiles are ~4.7 KB
+     *  but ocean tiles carry per-pixel overlay runs). Estimated, not exact. */
+    static final long MAX_QUEUE_BYTES = 24L * 1024 * 1024;
+    /** Safety ceiling only — the nanos budget below is the binding constraint
+     *  (review MAJOR: 8 committed only 160 tiles/s against 300-1000 delivered
+     *  columns/s, making every backfill drop most of the map). */
+    static final int MAX_COMMITS_PER_PUMP = 64;
     static final long PUMP_NANOS_BUDGET = 2_000_000L;
     /** Ladder-ready deferrals (busy region, PBO download) before an entry drops. */
     static final int DEFER_CAP = 200;
-    /** Consecutive pump/commit failures before the bridge latches dead for the session. */
+    /** Consecutive failures (commit-side or extraction-side) before the bridge
+     *  latches dead for the SESSION (re-armed at disconnect). */
     static final int THROW_LATCH = 5;
     /** The surface layer — native {@code caveLayer} sentinel. */
     private static final int SURFACE_LAYER = Integer.MAX_VALUE;
@@ -97,24 +125,39 @@ final class XaeroMapCompat {
     // ---- static facade (production wiring; ModCompat owns the instance) ----
 
     private static volatile XaeroMapCompat instance;
+    /** Xaero present but its internal surface unrecognized — drives the
+     *  {@code state=unavailable} diag line (without it a drifted Xaero would be
+     *  indistinguishable from "not installed", hiding the plan's top risk). */
+    private static volatile boolean resolveFailed;
 
     /** Client init, Xaero present: resolve + register the consumer (if enabled). */
     static boolean init() {
+        return initWith(Class::forName);
+    }
+
+    /** The init body with an injectable resolver (the resolve-failure path's test seam). */
+    static boolean initWith(ClassResolver resolver) {
         try {
-            var h = Handles.resolve(Class::forName);
+            var h = Handles.resolve(resolver);
             var bridge = new XaeroMapCompat(h, PRODUCTION_LEVEL_OPS,
                     () -> LSSClientConfig.CONFIG.enableXaeroMapBridge,
+                    LSSApi::isServerEnabled,
                     LSSApi::registerColumnConsumer, LSSApi::removeColumnConsumer);
-            bridge.reconcileRegistration();
+            bridge.maybeRegister();
             instance = bridge;
-            LSSLogger.info("Xaero's World Map detected — LOD map bridge active");
+            LSSLogger.info(LSSClientConfig.CONFIG.enableXaeroMapBridge
+                    ? "Xaero's World Map detected — LOD map bridge active"
+                    : "Xaero's World Map detected — LOD map bridge ready"
+                            + " (disabled by enableXaeroMapBridge)");
             return true;
         } catch (ClassNotFoundException | NoSuchMethodException | NoSuchFieldException
                  | IllegalAccessException e) {
+            resolveFailed = true;
             LSSLogger.warn("Xaero map bridge: this Xaero's World Map version has a different"
                     + " internal surface — bridge disabled (" + e + ")");
             return false;
         } catch (Throwable e) {
+            resolveFailed = true;
             LSSLogger.error("Failed to initialize the Xaero map bridge", e);
             return false;
         }
@@ -126,16 +169,25 @@ final class XaeroMapCompat {
         if (bridge != null) bridge.pump();
     }
 
-    /** Disconnect body — a session's queued tiles never outlive it. */
+    /** Disconnect body — session teardown (queue, latches, registration). */
     static void onDisconnect() {
         var bridge = instance;
-        if (bridge != null) bridge.clearQueue();
+        if (bridge != null) bridge.onSessionEnd();
     }
 
     /** The conditional {@code /lss diag} line, or null when Xaero was never detected. */
     static String diagLine() {
         var bridge = instance;
-        return bridge == null ? null : bridge.describe();
+        if (bridge != null) return bridge.describe();
+        return resolveFailed
+                ? "XaeroMap: state=unavailable (unrecognized Xaero internals — bridge off)"
+                : null;
+    }
+
+    /** Test seam: forget the static facade state. */
+    static void resetFacadeForTest() {
+        instance = null;
+        resolveFailed = false;
     }
 
     // ---- instance ----
@@ -143,6 +195,10 @@ final class XaeroMapCompat {
     private final Handles h;
     private final LevelOps levelOps;
     private final BooleanSupplier enabled;
+    /** An LSS session is live — offers outside one are dropped (closes the
+     *  disconnect-drain race that could carry one stale tile into the NEXT
+     *  server's — or a singleplayer world's — persistent map). */
+    private final BooleanSupplier sessionActive;
     private final java.util.function.Consumer<VoxelColumnConsumer> registrar;
     private final java.util.function.Consumer<VoxelColumnConsumer> deregistrar;
     private final VoxelColumnConsumer consumer;
@@ -152,55 +208,83 @@ final class XaeroMapCompat {
     private final Object queueLock = new Object();
     /** Packed chunk pos → entry; insertion-ordered, latest tile wins in place. */
     private final LinkedHashMap<Long, Entry> queue = new LinkedHashMap<>();
+    private long queuedBytes; // under queueLock
 
     private final AtomicLong written = new AtomicLong();
     private final AtomicLong skippedLoaded = new AtomicLong();
-    private final AtomicLong deferrals = new AtomicLong();
-    private final AtomicLong droppedCount = new AtomicLong();
+    private final AtomicLong deferEvents = new AtomicLong();
+    private final AtomicLong droppedOverflow = new AtomicLong();
+    private final AtomicLong droppedStale = new AtomicLong();
+    private final AtomicLong droppedExpired = new AtomicLong();
+    private final AtomicLong commitFailures = new AtomicLong();
     private final AtomicLong loadRequests = new AtomicLong();
     private volatile boolean dead;
     private int consecutiveFailures; // main thread only
+    /** Decode-thread twin of the commit-side latch: a permanently-throwing
+     *  extractor must not burn CPU + hold the capability subscription forever. */
+    private final AtomicInteger consecutiveExtractFailures = new AtomicInteger();
     /** The per-pump time budget — a field so tests can neutralize MethodHandle warmup. */
     long pumpNanosBudget = PUMP_NANOS_BUDGET;
+    /** Rotating drain start (the IncomingRequestRouter M4 precedent): without it a
+     *  permanently-deferring queue prefix starves committable entries forever. */
+    private int drainRotation; // main thread only
 
     private static final class Entry {
         volatile XaeroTileExtractor.PreparedTile tile; // replaced under queueLock (latest wins)
         final Object dimension;
+        int bytes; // under queueLock
         int ladderReadyDeferrals; // main thread only
 
-        Entry(Object dimension, XaeroTileExtractor.PreparedTile tile) {
+        Entry(Object dimension, XaeroTileExtractor.PreparedTile tile, int bytes) {
             this.dimension = dimension;
             this.tile = tile;
+            this.bytes = bytes;
         }
     }
 
     XaeroMapCompat(Handles h, LevelOps levelOps, BooleanSupplier enabled,
+                   BooleanSupplier sessionActive,
                    java.util.function.Consumer<VoxelColumnConsumer> registrar,
                    java.util.function.Consumer<VoxelColumnConsumer> deregistrar) {
         this.h = h;
         this.levelOps = levelOps;
         this.enabled = enabled;
+        this.sessionActive = sessionActive;
         this.registrar = registrar;
         this.deregistrar = deregistrar;
         this.consumer = buildConsumer();
     }
 
     /**
-     * (De)register the consumer to match enabled ∧ ¬dead. Live registration matters
-     * beyond this bridge: {@code LSSApi.hasVoxelConsumers()} drives the handshake's
-     * CAPABILITY_VOXEL_COLUMNS bit, so an Xaero-only install (no Voxy) legitimately
-     * subscribes to LOD data — that IS the feature — while a disabled or dead bridge
-     * must not hold the bit (or a map-less client would download the whole disc for
-     * nothing on its next join). Main thread (init + pump).
+     * ADD-only registration reconcile (init + every pump): a mid-session enable
+     * starts feeding the map (when a stream exists — an Xaero-only install that
+     * joined disabled has no capability bit until rejoin, which the tooltip's
+     * wording tolerates). Deregistration is deliberately NOT here — see the class
+     * javadoc's registration-lifecycle rule and {@link #onSessionEnd()}.
      */
-    void reconcileRegistration() {
-        boolean want = !this.dead && this.enabled.getAsBoolean();
-        if (want && !this.registered) {
+    void maybeRegister() {
+        if (!this.dead && this.enabled.getAsBoolean() && !this.registered) {
             this.registrar.accept(this.consumer);
             this.registered = true;
-        } else if (!want && this.registered) {
+        }
+    }
+
+    /**
+     * Session teardown (the loaders' disconnect events): drop the session's queue,
+     * re-arm the death latches (session-scoped — one bad session must not disable
+     * the feature until restart), and settle registration for the NEXT handshake
+     * (a disabled bridge releases the capability bit here, never mid-session).
+     */
+    void onSessionEnd() {
+        clearQueue();
+        this.dead = false;
+        this.consecutiveFailures = 0;
+        this.consecutiveExtractFailures.set(0);
+        if (this.registered && !this.enabled.getAsBoolean()) {
             this.deregistrar.accept(this.consumer);
             this.registered = false;
+        } else {
+            maybeRegister();
         }
     }
 
@@ -210,14 +294,24 @@ final class XaeroMapCompat {
             try {
                 offerColumn(dimension, chunkX, chunkZ,
                         level.getMinY(), level.getMaxY() + 1, columnData);
+                this.consecutiveExtractFailures.set(0);
             } catch (Throwable t) {
-                // NEVER escape: LSSApi treats a consumer throw as an ingest failure and
-                // re-serves the column — a map problem must not churn LOD delivery.
-                if (t instanceof Error err && !(t instanceof AssertionError)) throw err;
+                // Swallow EVERYTHING, Errors included: LSSApi.dispatchColumn converts
+                // any escape into reportIngestFailure — a re-serve loop for a map
+                // problem (review MAJOR). A VM-fatal Error will resurface on a frame
+                // that can afford it; here it would cost LOD correctness.
                 long n = EXTRACT_FAIL_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
                 if (n > 0) {
                     LSSLogger.warn("Xaero map bridge: tile extraction failed (" + n
                             + " failure(s) since the last report)", t);
+                }
+                if (this.consecutiveExtractFailures.incrementAndGet() >= THROW_LATCH
+                        && !this.dead) {
+                    this.dead = true;
+                    clearQueue();
+                    LSSLogger.error("Xaero map bridge: " + THROW_LATCH + " consecutive"
+                            + " extraction failures — disabling the bridge for this session"
+                            + " (LODs are unaffected)", t);
                 }
             }
         };
@@ -226,9 +320,29 @@ final class XaeroMapCompat {
     /** Decode-thread entry: extract + enqueue (latest-wins, bounded, oldest drops). */
     void offerColumn(ResourceKey<Level> dimension, int chunkX, int chunkZ,
                      int worldBottomY, int worldTopY, VoxelColumnData columnData) {
-        if (this.dead || !this.enabled.getAsBoolean()) return;
-        offerPrepared(dimension,
-                XaeroTileExtractor.extract(chunkX, chunkZ, worldBottomY, worldTopY, columnData));
+        if (this.dead || !this.enabled.getAsBoolean() || !this.sessionActive.getAsBoolean()) {
+            return;
+        }
+        long key = ((long) chunkX << 32) | (chunkZ & 0xFFFFFFFFL);
+        synchronized (this.queueLock) {
+            // Don't pay the 256-pixel extraction for a tile the full queue would
+            // evict on arrival (sustained-overflow CPU on the LOD decode thread).
+            if (this.queue.size() >= MAX_QUEUE && !this.queue.containsKey(key)) {
+                this.droppedOverflow.incrementAndGet();
+                return;
+            }
+        }
+        var tile = XaeroTileExtractor.extract(chunkX, chunkZ, worldBottomY, worldTopY, columnData);
+        offerPrepared(dimension, tile);
+    }
+
+    /** Approximate retained bytes for the byte gauge (shallow arrays + overlay runs). */
+    static int approxBytes(XaeroTileExtractor.PreparedTile tile) {
+        int bytes = 4800;
+        for (var runs : tile.overlays()) {
+            if (runs != null) bytes += 24 + runs.length * 32;
+        }
+        return bytes;
     }
 
     /** Enqueue seam (tests build {@link XaeroTileExtractor.PreparedTile}s directly). */
@@ -236,30 +350,54 @@ final class XaeroMapCompat {
         int chunkX = tile.chunkX();
         int chunkZ = tile.chunkZ();
         long key = ((long) chunkX << 32) | (chunkZ & 0xFFFFFFFFL);
+        int bytes = approxBytes(tile);
         synchronized (this.queueLock) {
             var existing = this.queue.get(key);
             if (existing != null) {
                 if (existing.dimension == dimension) {
+                    this.queuedBytes += bytes - existing.bytes;
                     existing.tile = tile;
+                    existing.bytes = bytes;
                     return;
                 }
-                this.queue.remove(key); // stale-dimension entry: the new serve replaces it
+                // Stale-dimension entry: the new serve replaces it (fresh Entry, so
+                // an in-flight pump pass's compare-and-remove cannot delete it).
+                this.queuedBytes -= existing.bytes;
+                this.queue.remove(key);
             }
-            if (this.queue.size() >= MAX_QUEUE) {
+            while (!this.queue.isEmpty()
+                    && (this.queue.size() >= MAX_QUEUE
+                        || this.queuedBytes + bytes > MAX_QUEUE_BYTES)) {
                 var it = this.queue.entrySet().iterator();
-                if (it.hasNext()) {
-                    it.next();
-                    it.remove();
-                    this.droppedCount.incrementAndGet();
-                }
+                this.queuedBytes -= it.next().getValue().bytes;
+                it.remove();
+                this.droppedOverflow.incrementAndGet();
             }
-            this.queue.put(key, new Entry(dimension, tile));
+            this.queuedBytes += bytes;
+            this.queue.put(key, new Entry(dimension, tile, bytes));
         }
     }
 
     void clearQueue() {
         synchronized (this.queueLock) {
             this.queue.clear();
+            this.queuedBytes = 0;
+        }
+    }
+
+    /**
+     * Remove only if the entry AND its tile are still the ones this pump pass
+     * examined — a plain remove would silently delete a fresher tile (or a
+     * replacement Entry) the decode thread installed mid-commit (review MINOR:
+     * the latest-wins guarantee must survive the commit window).
+     */
+    private void removeIfCurrent(Long key, Entry entry, XaeroTileExtractor.PreparedTile tile) {
+        synchronized (this.queueLock) {
+            var current = this.queue.get(key);
+            if (current == entry && entry.tile == tile) {
+                this.queuedBytes -= entry.bytes;
+                this.queue.remove(key);
+            }
         }
     }
 
@@ -269,16 +407,35 @@ final class XaeroMapCompat {
         }
     }
 
+    boolean hasQueuedForTest(int chunkX, int chunkZ) {
+        synchronized (this.queueLock) {
+            return this.queue.containsKey(((long) chunkX << 32) | (chunkZ & 0xFFFFFFFFL));
+        }
+    }
+
+    long queuedBytesForTest() {
+        synchronized (this.queueLock) {
+            return this.queuedBytes;
+        }
+    }
+
     boolean deadForTest() {
         return this.dead;
+    }
+
+    boolean registeredForTest() {
+        return this.registered;
     }
 
     long counterForTest(String name) {
         return switch (name) {
             case "written" -> this.written.get();
             case "skipped_loaded" -> this.skippedLoaded.get();
-            case "deferred" -> this.deferrals.get();
-            case "dropped" -> this.droppedCount.get();
+            case "defer_events" -> this.deferEvents.get();
+            case "dropped_overflow" -> this.droppedOverflow.get();
+            case "dropped_stale" -> this.droppedStale.get();
+            case "dropped_expired" -> this.droppedExpired.get();
+            case "commit_failures" -> this.commitFailures.get();
             case "load_requests" -> this.loadRequests.get();
             default -> throw new IllegalArgumentException(name);
         };
@@ -286,18 +443,21 @@ final class XaeroMapCompat {
 
     String describe() {
         String state = this.dead ? "dead" : this.enabled.getAsBoolean() ? "active" : "disabled";
-        return "XaeroMap: state=" + state + " queued=" + queuedForTest()
-                + " written=" + this.written.get()
-                + " skipped_loaded=" + this.skippedLoaded.get()
-                + " deferred=" + this.deferrals.get()
-                + " dropped=" + this.droppedCount.get()
-                + " load_requests=" + this.loadRequests.get();
+        long dropped = this.droppedOverflow.get() + this.droppedStale.get()
+                + this.droppedExpired.get();
+        return "XaeroMap: state=" + state + ", queued=" + queuedForTest()
+                + ", written=" + this.written.get()
+                + ", skipped_loaded=" + this.skippedLoaded.get()
+                + ", defer_events=" + this.deferEvents.get()
+                + ", dropped=" + dropped
+                + ", commit_failures=" + this.commitFailures.get()
+                + ", load_requests=" + this.loadRequests.get();
     }
 
     // ---- the pump (main client thread) ----
 
     void pump() {
-        reconcileRegistration();
+        maybeRegister();
         if (this.dead) return;
         if (!this.enabled.getAsBoolean()) {
             clearQueue(); // the live toggle: flipping off drops the backlog immediately
@@ -355,72 +515,80 @@ final class XaeroMapCompat {
                 dimensionId = this.h.getCurrentDimensionId.invoke(mapWorld);
                 if (this.levelOps.dimension(world) != dimensionId) return;
             }
-            drainEntries(keys, mp, saveLoad, world, dimensionId);
+            // The load-pacing gauge, consulted ONCE per pump and BEFORE any region
+            // monitor — the native shape (MapWriter.onRender computes it before its
+            // visit loop). shouldAllowAnotherRegionToLoad synchronizes on its own
+            // (possibly BRANCH) region while Xaero's loader thread nests
+            // parent-then-leaf, so calling it under a leaf monitor is a lock-order
+            // inversion and a real main-thread deadlock (review MAJOR).
+            boolean allowLoadRequest = shouldAllowAnotherLoad(saveLoad);
+            drainEntries(keys, mp, saveLoad, world, dimensionId, allowLoadRequest);
         }
     }
 
     private void drainEntries(List<Long> keys, Object mp, Object saveLoad,
-                              Object world, Object dimensionId) throws Throwable {
+                              Object world, Object dimensionId,
+                              boolean allowLoadRequest) throws Throwable {
         long start = System.nanoTime();
         int commits = 0;
         boolean loadRequestedThisPump = false;
-        for (Long key : keys) {
+        // Rotate the drain start per pump (the IncomingRequestRouter M4 precedent):
+        // below queue saturation nothing evicts a permanently-deferring prefix, and
+        // an unrotated head-first walk would let it starve committable entries.
+        int size = keys.size();
+        int startIndex = size == 0 ? 0 : Math.floorMod(this.drainRotation++, size);
+        for (int n = 0; n < size; n++) {
             if (commits >= MAX_COMMITS_PER_PUMP || System.nanoTime() - start > this.pumpNanosBudget) {
                 return;
             }
+            Long key = keys.get((startIndex + n) % size);
             Entry entry;
             synchronized (this.queueLock) {
                 entry = this.queue.get(key);
             }
             if (entry == null) continue;
+            var tile = entry.tile;
             if (entry.dimension != dimensionId) {
                 // Can never become valid — the pump-side stale-dimension drop (plan §2.5).
-                remove(key);
-                this.droppedCount.incrementAndGet();
+                removeIfCurrent(key, entry, tile);
+                this.droppedStale.incrementAndGet();
                 continue;
             }
-            var tile = entry.tile;
             if (this.levelOps.isChunkLoaded(world, tile.chunkX(), tile.chunkZ())) {
-                // The native writer owns loaded chunks and reclaims them on its
-                // clean-flag — never fight it (plan §2.6).
-                remove(key);
+                // The native writer owns loaded chunks and rewrites them on its
+                // clean-flag anyway — never fight it (plan §2.6).
+                removeIfCurrent(key, entry, tile);
                 this.skippedLoaded.incrementAndGet();
                 continue;
             }
-            var outcome = commitEntry(mp, saveLoad, tile, loadRequestedThisPump);
+            var outcome = commitEntry(mp, saveLoad, tile,
+                    allowLoadRequest && !loadRequestedThisPump);
             switch (outcome) {
                 case COMMITTED -> {
-                    remove(key);
+                    removeIfCurrent(key, entry, tile);
                     this.written.incrementAndGet();
                     this.consecutiveFailures = 0;
                     commits++;
                 }
                 case AWAITING_LOAD_REQUESTED -> {
                     loadRequestedThisPump = true;
-                    this.deferrals.incrementAndGet();
+                    this.deferEvents.incrementAndGet();
                 }
-                case AWAITING_LOAD -> this.deferrals.incrementAndGet();
+                case AWAITING_LOAD -> this.deferEvents.incrementAndGet();
                 case DEFERRED -> {
                     // Ladder was ready but the region/tile-chunk wasn't — this is the
                     // only defer flavor that burns the per-entry budget (plan §2.7).
-                    this.deferrals.incrementAndGet();
+                    this.deferEvents.incrementAndGet();
                     if (++entry.ladderReadyDeferrals > DEFER_CAP) {
-                        remove(key);
-                        this.droppedCount.incrementAndGet();
+                        removeIfCurrent(key, entry, tile);
+                        this.droppedExpired.incrementAndGet();
                     }
                 }
                 case FAILED -> {
-                    remove(key);
-                    this.droppedCount.incrementAndGet();
+                    removeIfCurrent(key, entry, tile);
                     if (this.dead) return;
                 }
             }
-        }
-    }
-
-    private void remove(Long key) {
-        synchronized (this.queueLock) {
-            this.queue.remove(key);
         }
     }
 
@@ -437,7 +605,7 @@ final class XaeroMapCompat {
      */
     private Outcome commitEntry(Object mp, Object saveLoad,
                                 XaeroTileExtractor.PreparedTile tile,
-                                boolean loadRequestedThisPump) {
+                                boolean allowLoadRequest) {
         try {
             int chunkX = tile.chunkX();
             int chunkZ = tile.chunkZ();
@@ -475,9 +643,12 @@ final class XaeroMapCompat {
                     if (!proper) {
                         // The mandatory load dance (fresh regions NEVER self-promote to
                         // loadState 2): setBeingWritten-BEFORE-request is load-bearing —
-                        // it stops the load drain demoting an empty fresh region.
-                        if (resting && !loadRequestedThisPump
-                                && shouldAllowAnotherLoad(saveLoad)
+                        // it stops the load drain demoting an empty fresh region. The
+                        // pacing gauge was consulted OUTSIDE region monitors (see
+                        // pumpLadder). NB: requestLoad is main-thread-only despite its
+                        // queue-add look — its tail runs a highlight prepare that
+                        // hard-throws off Minecraft.isSameThread().
+                        if (resting && allowLoadRequest
                                 && (boolean) this.h.canRequestReload.invoke(region)) {
                             this.h.requestLoad.invoke(saveLoad, region, "lss-xaero-bridge");
                             this.h.setNextToLoadByViewing.invoke(saveLoad, region);
@@ -565,6 +736,7 @@ final class XaeroMapCompat {
     }
 
     private void noteFailure(Throwable t) {
+        this.commitFailures.incrementAndGet();
         long n = COMMIT_FAIL_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
         if (n > 0) {
             LSSLogger.warn("Xaero map bridge: commit failed (" + n
@@ -887,7 +1059,8 @@ final class XaeroMapCompat {
                 throws NoSuchMethodException, IllegalAccessException {
             Method found = null;
             for (Method m : owner.getMethods()) {
-                if (m.getName().equals(name) && m.getParameterCount() == paramCount) {
+                if (m.getName().equals(name) && m.getParameterCount() == paramCount
+                        && !m.isSynthetic() && !m.isBridge()) {
                     found = m;
                     break;
                 }

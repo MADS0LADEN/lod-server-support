@@ -1,8 +1,10 @@
 # Xaero's World Map bridge — implementation plan (issue #223)
 
 Status: IMPLEMENTED 2026-08-23 on feat/xaero-map-bridge (2-Fable plan review folded
-— §10; implementation notes in §11). Targets main (the staged v0.12.0 release),
-designed for cheap porting to all four support lines.
+— §10; implementation notes in §11; the 1-Fable + 4-Opus implementation review
+folded — §12). Targets main (the staged v0.12.0 release), designed for cheap
+porting to all four support lines (§8.4 lists the three per-line API
+substitutions).
 
 ## 0. Goal
 
@@ -163,18 +165,30 @@ CFR decompile output in `cfr-out262/`, XaeroPlus clone). Key findings:
    overlay runs (§5) — so no `LevelChunkSection` reference outlives the
    callback. Stage 2 (main client thread, from the existing shared
    `ClientNetGlue.onEndClientTick()` pump — both loaders already call it): drain
-   a bounded queue under a per-tick budget (default: max 8 tile commits AND
-   2 ms, whichever first), plus at most ~1 `requestLoad` per pump pass (the
-   native pacing, §2.7).
-5. **Bounded latest-wins queue, keyed by packed chunk pos** (cap 2048 entries ≈
-   ≤8 MB of PreparedTiles worst-case; a newer tile for the same position
-   replaces the old). Overflow drops oldest (counted). Cleared on disconnect
-   (`ClientNetGlue.onDisconnect`, beside `FarPlayerClientSupport.onSessionEnd()`)
-   and on config-off. Stale-DIMENSION entries are NOT a lifecycle event: the
-   pump drops any entry whose dimension differs from the current level's
-   (counted `dropped`) — no dimension-change hook needed. This mirrors the LSS
-   re-declaration philosophy: a dropped tile is not a correctness hole — the map
-   is best-effort, and the position heals on the next dirty serve or a
+   a bounded queue under a per-tick budget — the 2 ms wall is the BINDING
+   constraint, the commit-count cap (64) is a safety ceiling (impl review MAJOR:
+   the original cap of 8 = 160 tiles/s against 300-1000 delivered columns/s
+   made every fast-link backfill drop most of the map and made the clearcache
+   heal circular) — plus at most ~1 `requestLoad` per pump pass (the native
+   pacing, §2.7). The drain start ROTATES per pump (the IncomingRequestRouter
+   M4 precedent): below queue saturation nothing evicts a permanently-deferring
+   prefix, and an unrotated head-first walk would starve committable entries.
+5. **Bounded latest-wins queue, keyed by packed chunk pos** — bounded by COUNT
+   (2048) and BYTES (~24 MB estimated; the ClientColumnProcessor discipline —
+   plain tiles are ~4.7 KB but overlay-heavy ocean tiles reach ~90 KB, so a
+   count cap alone admits ~165 MB; impl review MAJOR corrected this plan's
+   original ≤8 MB arithmetic). A newer tile for the same position replaces in
+   place; overflow evicts oldest (counted). Cleared at session end
+   (`ClientNetGlue.onDisconnect`) and on config-off; offers are additionally
+   gated on a LIVE LSS session, closing the disconnect-drain race that could
+   carry one stale tile into the NEXT server's (or a singleplayer world's)
+   persistent map. Every pump-side removal is COMPARE-and-remove (entry + tile
+   identity) so a commit racing a fresh re-offer can never delete the newer
+   tile. Stale-DIMENSION entries are NOT a lifecycle event: the pump drops any
+   entry whose dimension differs from the current level's (counted) — no
+   dimension-change hook needed. This mirrors the LSS re-declaration
+   philosophy: a dropped tile is not a correctness hole — the map is
+   best-effort, and the position heals on the next dirty serve or a
    `/lss clearcache` backfill.
 6. **Overlap policy: never fight Xaero's native writer.** At COMMIT time (main
    thread — safe and current), skip any position whose chunk is currently
@@ -339,10 +353,20 @@ BlockStateShortShapeCache, MapProcessor)`, `setLoadState(byte)`,
 `increaseOpacity(int)`. `OverlayManager.getOriginal(Overlay)`.
 
 Exact arities/owners come from the decompiled sequence at implementation time
-(§2.3's decompile-is-normative rule); resolve all-or-nothing. Deliberately
-ABSENT: `updateBuffers`, `addToRefresh`, `BlockTintProvider`,
-`MapUpdateFastConfig`, `BiomeColorCalculator` (§1 — Xaero's own sweeps handle
-textures/refresh/save once the flags are set).
+(§2.3's decompile-is-normative rule); resolve all-or-nothing. Members ADDED at
+implementation because the decompiled sequence uses them (impl review: each is
+a single point of bridge-death on an Xaero update, so the list must be
+complete for the next re-verification — all five verified present with
+identical signatures in the 1.21.1 jar): `MapProcessor.
+getMapRegionHighlightsPreparer()` + `MapRegionHighlightsPreparer.prepare(
+MapRegion,int,int,boolean)` (the createdTileChunk block), `MapProcessor.
+getCaveModeDepthConfig()` (setWrittenCave's live depth — mirroring the config
+avoids a spurious native rewrite delta), `MapSaveLoad.setNextToLoadByViewing(
+LeveledRegion)` (the pacing registration half), `MapTileChunk.includeInSave()`,
+`MapRegion.setChunk(int,int,MapTileChunk)`. Deliberately ABSENT:
+`updateBuffers`, `addToRefresh`, `BlockTintProvider`, `MapUpdateFastConfig`,
+`BiomeColorCalculator` (§1 — Xaero's own sweeps handle textures/refresh/save
+once the flags are set).
 
 ## 5. Pixel recipe (v1 — mirrors the decompiled `loadPixel`)
 
@@ -371,13 +395,19 @@ the manual test), no slope polish.
 
 ## 6. Observability
 
-AtomicLong counters (`written`, `skipped_loaded`, `deferred`, `dropped`,
-`load_requests`, `queued` gauge) + `state` (active / unavailable / dead /
-disabled) surfaced ONLY in the client `/lss diag` conditional line — no
-exporter/soak schema churn. Harness inertness is by ABSENCE (no Xaero jar in
-soak/benchmark/gametest runtimes, and no schema fields added), no property gate
-needed; the lss-multi-test Prism profiles are real clients where bridge
-activity is correct behavior.
+Counters (`written`, `skipped_loaded`, `defer_events` — defer EVENTS, not
+entries — `dropped` = overflow+stale+expired aggregate, `commit_failures` —
+split out because it is the only pre-death failure signal, unlike the benign
+drop flavors — `load_requests`, `queued` gauge) + `state` (active / unavailable
+/ dead / disabled), surfaced ONLY in the client `/lss diag` conditional line
+(comma-separated, the house style) — no exporter/soak schema churn. The
+`unavailable` state is the RESOLVE-FAILED case (Xaero present, internals
+unrecognized) and renders even though no bridge instance exists — without it a
+drifted Xaero is indistinguishable from "not installed", hiding §7.1's top
+risk. Harness inertness is by ABSENCE (no Xaero jar in soak/benchmark/gametest
+runtimes, and no schema fields added), no property gate needed; the
+lss-multi-test Prism profiles are real clients where bridge activity is correct
+behavior.
 
 ## 7. Risks / accepted
 
@@ -412,8 +442,14 @@ activity is correct behavior.
 2. Cave layers.
 3. Voxy-store backfill for converged servers (§2.10).
 4. Support-line ports (after the user's manual test, with the rest of the
-   staged v0.12.0+ work): xplat code applies verbatim; 1.21.10 drops the menu
-   hunk; verify the per-line Xaero 1.45.0 jar in the test instance.
+   staged v0.12.0+ work). NOT verbatim (impl review corrected §2.11's claim) —
+   three mechanical per-line API substitutions in the new xplat code:
+   `level.getMinY()/getMaxY()` → `getMinBuildHeight()/getMaxBuildHeight()` on
+   1.21.1 only, and `state.getLightDampening()` → `getLightBlock(BlockGetter,
+   BlockPos)` on ALL THREE 1.21.x lines (verified against the per-line
+   mappings); plus the menu hunk's `Identifier.parse` → `ResourceLocation.parse`
+   on 1.21.1 and the whole menu hunk dropped on 1.21.10 (its Sodium cut).
+   Verify the per-line Xaero 1.45.0 jar in the test instance.
 
 ## 9. Execution order
 
@@ -484,3 +520,87 @@ brand-neutrality; SP non-goal stated (§0).
   against real-package-name stubs under `fabric/src/test/java/xaero/map/` with a
   shared ordered event sink (`XaeroStubEvents`) pinning the cross-object commit
   sequence; `FabricModJsonContractTest` pins the literal-`"*"` suggests entry.
+
+## 12. Implementation review record (2026-08-23, 1-Fable + 4-Opus over PR #229)
+
+Reviewer 1 (Fable, decompile fidelity): NO MAJORs — all ~65 handle descriptors,
+both hot paths, the requestLoad lock-order vs the MapRunner drain, the
+flag-then-consume texture path, and the extractor recipe verified faithful
+member-by-member against the shipped 1.45.0 jar. Folded MINORs: the skipped
+`isNormalMapData` cross-layer branch recorded as an accepted gap (below);
+requestLoad's secret main-thread-only-ness commented at the call site. NOTEs
+recorded: post-cap overlay charging diverges in >10-layer stacks; run-merge is
+per-state (native also merges same-particle-material states); nether portal
+floors instead of overlaying (the translucency approximation); every commit
+re-textures (no per-pixel equality short-circuit — bounded by the budget).
+
+Reviewer 2 (Opus, LSS integration): MAJOR-1 — mid-session deregistration of the
+sole consumer put every arriving column through the no-consumer ingest-failure
+path (up to 4 re-serves per position, whole-disc churn); FIXED with the
+registration lifecycle in §2 (add-only while live, no-op consumer when
+disabled/dead, deregistration + latch re-arm only at session end). MAJOR-2 —
+the 8-commit cap arithmetic (160 tiles/s vs 300-1000 columns/s); FIXED (§2.4:
+64-cap safety ceiling, 2 ms binding; plus the full-queue extraction pre-skip).
+MINORs folded: Errors swallowed in the consumer (dispatchColumn converts ANY
+escape into a re-serve); the session-active offer gate (the cross-server /
+singleplayer one-tile leak); compare-and-remove (the lost-fresher-tile race);
+the byte gauge; the ConfigValidationTest default pin; the honest disabled init
+log.
+
+Reviewer 3 (Opus, concurrency/failure): MAJOR-1 — a REAL main-thread deadlock:
+`shouldAllowAnotherRegionToLoad` (which synchronizes on its own, possibly
+BRANCH, region) was called inside the leaf-region monitor while Xaero's loader
+thread nests parent-then-leaf and the map GUI parks branch regions in
+`nextToLoadByViewing`; FIXED by hoisting the gauge consult to once-per-pump
+before any region monitor (the native shape) — pinned by an event-order test.
+MAJOR-2 = the byte-gauge finding (fixed above; §2.5 arithmetic corrected).
+MAJOR-3 — the death latch was process-permanent with no re-arm; FIXED:
+session-scoped (re-armed at session end; genuine drift re-latches next session
+within 5 commits). MINORs folded: extraction failures now feed their own
+latch; the bugged-state memo (one exception per bugged state, not 256/column);
+the one-shot extension guard restored (native parity — pinned by the
+charge-arithmetic test); drain rotation (head-of-line starvation);
+synthetic/bridge methods skipped in the name-scan. NOTEs verified clean:
+memory-visibility audit, queueLock leaf-ness, extractor thread-confinement,
+hostile-input handling; `registerVisit`'s wider footprint and the
+reconfiguration-gap queue survival recorded as accepted.
+
+Reviewer 4 (Opus, test rigor): stub-vs-jar descriptor audit CLEAN (zero
+mismatches). MAJORs all folded: the stub `prepareForWriting` made faithful
+(clears overlays — the per-pixel order pin is now real); the region save-race
+gate test; holdsLock monitor-discipline checks inside the stubs; the two
+latch-semantics tests (across-pumps + success-resets); the colorless rung now
+actually reached (TRIPWIRE — visible but MapColor.NONE — with BARRIER kept as
+the render-shape case); biome/glowing pinned end-to-end (extractor
+biome-at-topH with a differing upper-section biome + commit pass-through).
+MINORs folded: the five dead-knob branch tests, the surface-layer event
+assert, the zero-nanos budget test, setChanged-before-setTile + ctor-args
+order pins, distinct-tile latest-wins + oldest-eviction, cross-dimension
+replacement, the facade/diag tests, the wiring contract test
+(XaeroWiringContractTest — the SaveHookContractTest family), @AfterEach stub
+hygiene, and the ranked extractor cases (waterlogged, ice, multi-run,
+water-to-void, run light, boundary light, extension arithmetic).
+
+Reviewer 5 (Opus, product surface): MAJORs folded: the release-notes
+"never overwrites" claim corrected (only currently-loaded chunks are
+protected; Xaero reclaims on revisit); the `unavailable` diag state made REAL
+(a resolve-failed latch renders it — it was unreachable dead code); the five
+added reflective members recorded in §4. MINORs folded: §8.4's port-cost
+correction (three API substitutions, not verbatim); the Configuration bullet
+for `enableXaeroMapBridge`; counter semantics split (`commit_failures` out of
+`dropped`, `defer_events` naming); comma-separated diag (house style) + a
+describe() test; README permanence/masking/re-download-cost/works-without-Voxy
+wording; the NeoForge mod id VERIFIED (`xaeroworldmap` in the NeoForge jar's
+neoforge.mods.toml — §2.2's open item closed). Notes accepted: no map-only
+backfill verb (v-next, §8.3); single-player silence (README states MP-only);
+the load reason string "lss-xaero-bridge" may surface in Xaero's own logs.
+
+Accepted gaps (recorded, deliberate): the native `!isNormalMapData()`
+cross-layer outdating branch is skipped (converted-legacy-map regions can show
+stale CAVE layers where LOD tiles landed until a native rewrite); post-cap
+overlay charging and >10-run stacks diverge from native; `registerVisit` fires
+per deferred pass (wider visit footprint than the native player-window
+writer); a server-initiated play→config reconfiguration skips the disconnect
+teardown (the session-active offer gate + stale-dimension drops contain it);
+`AWAITING_LOAD` entries have no expiry short of queue eviction (transient in
+practice; the rotation keeps them from starving the drain).

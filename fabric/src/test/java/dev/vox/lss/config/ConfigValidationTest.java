@@ -769,6 +769,25 @@ class ConfigValidationTest {
     }
 
     @Test
+    void xaeroMapBridgeDefaultsOnAndRoundTripsThroughJson() {
+        // The Xaero bridge toggle (xaero-map-bridge-plan.md §2.9) ships ON — the same
+        // sibling hazard: a silent default-off revert would pass CI green while the
+        // Sodium option's setDefaultValue(true) quietly disagreed with the field.
+        var c = clientConfig();
+        assertTrue(c.enableXaeroMapBridge, "the Xaero map bridge must default ON");
+        c.validate();
+        assertTrue(c.enableXaeroMapBridge, "validate() must not touch the boolean");
+        var gson = new com.google.gson.Gson();
+        String saved = gson.toJson(clientConfig());
+        assertTrue(saved.contains("\"enableXaeroMapBridge\":true"),
+                "a fresh config must persist the default under the exact key: " + saved);
+        var loaded = gson.fromJson(saved.replace(
+                "\"enableXaeroMapBridge\":true", "\"enableXaeroMapBridge\":false"),
+                dev.vox.lss.config.LSSClientConfig.class);
+        assertFalse(loaded.enableXaeroMapBridge, "a saved false must bind back as false");
+    }
+
+    @Test
     void scanPrefixRetentionDefaultsOnAndRoundTripsThroughJson() {
         // Scan prefix retention (docs/planning/scanner-reopened-rings-plan.md) ships ON —
         // a silent default-off revert would pass CI green (unit rigs set the seam

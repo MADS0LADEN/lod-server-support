@@ -31,7 +31,13 @@ public class MapProcessor {
     public final java.util.Map<Long, MapRegion> regions = new java.util.HashMap<>();
     public boolean leafMapRegionReturnsNull;
 
-    public boolean isWritingPaused() { return this.writingPaused; }
+    public boolean isWritingPaused() {
+        if (!Thread.holdsLock(this.renderThreadPauseSync)) {
+            throw new IllegalStateException("isWritingPaused outside renderThreadPauseSync —"
+                    + " the native onRender ladder's outer monitor");
+        }
+        return this.writingPaused;
+    }
 
     public boolean isWaitingForWorldUpdate() { return this.waitingForWorldUpdate; }
 
@@ -52,6 +58,8 @@ public class MapProcessor {
     public MapSaveLoad getMapSaveLoad() { return this.saveLoad; }
 
     public MapRegion getLeafMapRegion(int caveLayer, int regX, int regZ, boolean create) {
+        dev.vox.lss.compat.XaeroStubEvents.record(
+                "processor.getLeafMapRegion layer=" + caveLayer + " " + regX + "," + regZ);
         if (this.leafMapRegionReturnsNull) return null;
         long key = ((long) regX << 32) | (regZ & 0xFFFFFFFFL);
         var existing = this.regions.get(key);

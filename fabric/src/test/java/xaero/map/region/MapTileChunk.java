@@ -59,6 +59,10 @@ public class MapTileChunk {
 
     public void setTile(int x, int z, MapTile tile, BlockStateShortShapeCache cache,
                         MapProcessor processor) {
+        if (!Thread.holdsLock(this.region.writerThreadPauseSync)) {
+            throw new IllegalStateException("setTile outside writerThreadPauseSync — the"
+                    + " native writer commits tiles under the region's writer-pause monitor");
+        }
         if (this.setTileThrows) throw new IllegalStateException("armed setTile throw");
         this.tiles[x][z] = tile;
         dev.vox.lss.compat.XaeroStubEvents.record("tileChunk.setTile " + x + "," + z);

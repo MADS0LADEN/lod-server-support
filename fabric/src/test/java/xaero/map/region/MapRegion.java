@@ -1,6 +1,10 @@
 package xaero.map.region;
 
-/** Tier-1 stub — records the writeChunk lifecycle calls the compat must mirror. */
+/** Tier-1 stub — records the writeChunk lifecycle calls the compat must mirror,
+ *  and ENFORCES the region-monitor discipline: the state accessors throw unless
+ *  the caller holds the monitors the native writer holds (review MAJOR: without
+ *  this, dropping a synchronized block ships green). In the real jar
+ *  setAllCachePrepared and the load-pacing members live on LeveledRegion. */
 public class MapRegion extends LeveledRegion<Object> {
     public final Object writerThreadPauseSync = new Object();
     public boolean writingPaused;
@@ -11,22 +15,48 @@ public class MapRegion extends LeveledRegion<Object> {
     public Boolean beingWritten; // null until first set — pins "set true, never cleared"
     public final MapTileChunk[][] chunks = new MapTileChunk[8][8];
 
-    public boolean isWritingPaused() { return this.writingPaused; }
+    private void requireRegionMonitor(String site) {
+        if (!Thread.holdsLock(this)) {
+            throw new IllegalStateException(site + " outside the region monitor — the native"
+                    + " writeChunk discipline requires synchronized(region)");
+        }
+    }
 
-    public byte getLoadState() { return this.loadState; }
+    public boolean isWritingPaused() {
+        if (!Thread.holdsLock(this.writerThreadPauseSync)) {
+            throw new IllegalStateException("region.isWritingPaused outside"
+                    + " writerThreadPauseSync — the save-race exclusion's monitor");
+        }
+        return this.writingPaused;
+    }
+
+    public byte getLoadState() {
+        requireRegionMonitor("getLoadState");
+        return this.loadState;
+    }
 
     public void setLoadState(byte state) { this.loadState = state; }
 
-    public boolean isResting() { return this.resting; }
+    public boolean isResting() {
+        requireRegionMonitor("isResting");
+        return this.resting;
+    }
 
-    public void registerVisit() { this.visits++; }
+    public void registerVisit() {
+        requireRegionMonitor("registerVisit");
+        this.visits++;
+    }
 
     public void setBeingWritten(boolean beingWritten) {
+        requireRegionMonitor("setBeingWritten");
         this.beingWritten = beingWritten;
         dev.vox.lss.compat.XaeroStubEvents.record("region.setBeingWritten " + beingWritten);
     }
 
-    public boolean canRequestReload_unsynced() { return this.canRequestReload; }
+    public boolean canRequestReload_unsynced() {
+        requireRegionMonitor("canRequestReload_unsynced");
+        return this.canRequestReload;
+    }
 
     public void setAllCachePrepared(boolean prepared) {
         dev.vox.lss.compat.XaeroStubEvents.record("region.setAllCachePrepared " + prepared);

@@ -11,11 +11,15 @@ import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.data.registries.VanillaRegistries;
 import net.minecraft.server.Bootstrap;
+import net.minecraft.core.Holder;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -45,6 +49,7 @@ class XaeroTileExtractorTest {
     private static final int TOP_Y = 320;
 
     private static PalettedContainerFactory FACTORY;
+    private static HolderLookup.RegistryLookup<Biome> BIOME_LOOKUP;
 
     @BeforeAll
     static void setup() {
@@ -52,6 +57,7 @@ class XaeroTileExtractorTest {
         Bootstrap.bootStrap();
         HolderLookup.Provider provider = VanillaRegistries.createLookup();
         HolderLookup.RegistryLookup<Biome> src = provider.lookupOrThrow(Registries.BIOME);
+        BIOME_LOOKUP = src;
         MappedRegistry<Biome> biomes = new MappedRegistry<>(Registries.BIOME, Lifecycle.stable());
         src.listElements().forEach(ref ->
                 biomes.register(ref.key(), ref.value(), RegistrationInfo.BUILT_IN));
@@ -83,6 +89,15 @@ class XaeroTileExtractorTest {
 
     private static int idx(int x, int z) {
         return x * 16 + z;
+    }
+
+    /** Set the biome quart containing the given section-local block position. */
+    @SuppressWarnings("unchecked")
+    private static void setBiome(LevelChunkSection section, int x, int y, int z,
+                                 ResourceKey<Biome> biome) {
+        Holder<Biome> holder = BIOME_LOOKUP.getOrThrow(biome);
+        ((PalettedContainer<Holder<Biome>>) section.getBiomes())
+                .getAndSet(x >> 2, (y & 15) >> 2, z >> 2, holder);
     }
 
     /** Fill one full 16×16 layer of a section at local y. */
@@ -237,12 +252,164 @@ class XaeroTileExtractorTest {
     }
 
     @Test
-    void colorlessBlocksAreSkippedAsFloor() {
+    void renderShapeInvisibleBlocksAreSkippedAsFloor() {
         var section = emptySection();
         section.setBlockState(9, 3, 9, Blocks.STONE.defaultBlockState());  // Y = -61
-        section.setBlockState(9, 4, 9, Blocks.BARRIER.defaultBlockState()); // Y = -60, MapColor NONE
+        section.setBlockState(9, 4, 9, Blocks.BARRIER.defaultBlockState()); // Y = -60, INVISIBLE
+        var tile = extract(column(new SectionSpec(-4, section, null)));
+        assertEquals(Blocks.STONE.defaultBlockState(), tile.floorState()[idx(9, 9)],
+                "a RenderShape.INVISIBLE block cannot floor the pixel (native isInvisible)");
+    }
+
+    @Test
+    void colorlessBlocksAreSkippedAsFloor() {
+        // TRIPWIRE is VISIBLE (RenderShape.MODEL) but has MapColor.NONE — the one
+        // rung only hasVanillaColor can catch (BARRIER never reaches it: the
+        // render-shape rung short-circuits first; review MAJOR — this test is what
+        // keeps the hasVanillaColor rung from being deletable unnoticed).
+        var section = emptySection();
+        section.setBlockState(9, 3, 9, Blocks.STONE.defaultBlockState());   // Y = -61
+        section.setBlockState(9, 4, 9, Blocks.TRIPWIRE.defaultBlockState()); // Y = -60
         var tile = extract(column(new SectionSpec(-4, section, null)));
         assertEquals(Blocks.STONE.defaultBlockState(), tile.floorState()[idx(9, 9)],
                 "a zero-map-color block cannot floor the pixel (native hasVanillaColor)");
+    }
+
+    @Test
+    void waterloggedBlocksOverlayAndFloorAtTheSameY() {
+        // Extremely common terrain: the fluid branch overlays the water, the block
+        // branch floors the ORIGINAL (waterlogged) state at the same Y.
+        var waterloggedSlab = Blocks.OAK_SLAB.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED, true);
+        var section = emptySection();
+        section.setBlockState(3, 6, 3, waterloggedSlab); // Y = -58
+        var tile = extract(column(new SectionSpec(-4, section, null)));
+        int i = idx(3, 3);
+        assertEquals(waterloggedSlab, tile.floorState()[i],
+                "the floor records the ORIGINAL block state, not the fluid's legacy block");
+        assertEquals(-58, tile.floorY()[i]);
+        assertEquals(-58, tile.topY()[i]);
+        var runs = tile.overlays()[i];
+        assertNotNull(runs, "the waterlogged fluid must overlay");
+        assertEquals(1, runs.length);
+        assertEquals(Blocks.WATER.defaultBlockState(), runs[0].state());
+    }
+
+    @Test
+    void iceOverlaysLikeWater() {
+        // HalfTransparentBlock is the 26.2 translucent family root (ice/slime/honey);
+        // the narrower TransparentBlock check would silently floor every frozen ocean.
+        var section = emptySection();
+        section.setBlockState(5, 4, 5, Blocks.STONE.defaultBlockState()); // Y = -60
+        section.setBlockState(5, 5, 5, Blocks.ICE.defaultBlockState());  // Y = -59
+        var tile = extract(column(new SectionSpec(-4, section, null)));
+        int i = idx(5, 5);
+        assertEquals(Blocks.STONE.defaultBlockState(), tile.floorState()[i]);
+        var runs = tile.overlays()[i];
+        assertNotNull(runs, "ice must overlay, not floor");
+        assertEquals(Blocks.ICE.defaultBlockState(), runs[0].state());
+    }
+
+    @Test
+    void distinctTranslucentStatesSplitIntoRunsAndSameStatesMerge() {
+        // Two glass colors of two blocks each (total depth 4 — below the extension
+        // threshold): two runs, each carrying its own state, contiguous blocks merged.
+        var section = emptySection();
+        section.setBlockState(6, 2, 6, Blocks.STONE.defaultBlockState());               // Y = -62
+        section.setBlockState(6, 3, 6, Blocks.STAINED_GLASS.blue().defaultBlockState());  // Y = -61
+        section.setBlockState(6, 4, 6, Blocks.STAINED_GLASS.blue().defaultBlockState());  // Y = -60
+        section.setBlockState(6, 5, 6, Blocks.STAINED_GLASS.red().defaultBlockState());   // Y = -59
+        section.setBlockState(6, 6, 6, Blocks.STAINED_GLASS.red().defaultBlockState());   // Y = -58
+        var tile = extract(column(new SectionSpec(-4, section, null)));
+        var runs = tile.overlays()[idx(6, 6)];
+        assertNotNull(runs);
+        assertEquals(2, runs.length, "one run per contiguous same-state stretch");
+        assertEquals(Blocks.STAINED_GLASS.red().defaultBlockState(), runs[0].state(),
+                "runs are recorded top-down");
+        assertEquals(Blocks.STAINED_GLASS.blue().defaultBlockState(), runs[1].state());
+    }
+
+    @Test
+    void waterToTheVoidHasOverlaysButNoFloor() {
+        var section = emptySection();
+        for (int y = 0; y < 16; y++) {
+            section.setBlockState(1, y, 2, Blocks.WATER.defaultBlockState()); // the whole section
+        }
+        var tile = extract(column(new SectionSpec(-4, section, null)));
+        int i = idx(1, 2);
+        assertEquals(Blocks.AIR.defaultBlockState(), tile.floorState()[i],
+                "no opaque floor found → the AIR-at-bottom shape");
+        assertEquals(BOTTOM_Y, tile.floorY()[i]);
+        assertEquals(0, tile.light()[i], "the no-floor case writes light 0 (native)");
+        assertEquals(-49, tile.topY()[i], "the water surface still raises topHeight");
+        assertNotNull(tile.overlays()[i], "the water overlays survive a floorless pixel");
+    }
+
+    @Test
+    void theDeepRunExtensionIsOneShotAndChargesTheFullDepth() {
+        // 6 water, a torch (invisible — breaks the extension trace), 3 more water,
+        // stone. The one-shot native flag means the lower water still gets CHARGED
+        // through a second extension: total opacity == total water depth (9). The
+        // pre-review code jumped past the lower water without charging it (7).
+        var section = emptySection();
+        section.setBlockState(2, 0, 2, Blocks.STONE.defaultBlockState()); // Y = -64
+        section.setBlockState(2, 1, 2, Blocks.WATER.defaultBlockState());
+        section.setBlockState(2, 2, 2, Blocks.WATER.defaultBlockState());
+        section.setBlockState(2, 3, 2, Blocks.WATER.defaultBlockState());
+        section.setBlockState(2, 4, 2, Blocks.TORCH.defaultBlockState());
+        for (int y = 5; y <= 10; y++) {
+            section.setBlockState(2, y, 2, Blocks.WATER.defaultBlockState());
+        }
+        var tile = extract(column(new SectionSpec(-4, section, null)));
+        int i = idx(2, 2);
+        assertEquals(Blocks.STONE.defaultBlockState(), tile.floorState()[i]);
+        var runs = tile.overlays()[i];
+        assertNotNull(runs);
+        assertEquals(1, runs.length, "post-extension water folds into the current run (native)");
+        assertEquals(9, runs[0].opacity(),
+                "every water block must be charged exactly once across both extensions");
+    }
+
+    @Test
+    void overlayRunsCarryTheLightAtTheirFirstBlock() {
+        var section = emptySection();
+        section.setBlockState(7, 3, 7, Blocks.STONE.defaultBlockState()); // Y = -61
+        section.setBlockState(7, 4, 7, Blocks.WATER.defaultBlockState()); // Y = -60
+        var light = new DataLayer();
+        light.set(7, 5, 7, 11); // block light above the run's first (topmost) block
+        var tile = extract(column(new SectionSpec(-4, section, light)));
+        var runs = tile.overlays()[idx(7, 7)];
+        assertNotNull(runs);
+        assertEquals(11, runs[0].light(), "run light = block light at its start");
+    }
+
+    @Test
+    void lightAboveASectionBoundaryReadsAbsentAsZero() {
+        var section = emptySection();
+        fillLayer(section, 15, Blocks.STONE.defaultBlockState()); // Y = -49, section top
+        var light = new DataLayer();
+        light.set(8, 15, 8, 9); // the floor's OWN nibble — must not be used
+        var tile = extract(column(new SectionSpec(-4, section, light)));
+        assertEquals(0, tile.light()[idx(8, 8)],
+                "floor+1 crosses into an absent section, which reads as light 0");
+    }
+
+    @Test
+    void biomeIsSampledAtTopHeightNotTheFloor() {
+        // Floor in the lower section (factory-default biome), water surface high in an
+        // upper section whose biome quart is DESERT: the pixel biome must be the
+        // surface's (topHeight), not the floor's (review MAJOR: the plan's named
+        // "biome at topH" pin was otherwise undelivered).
+        var lower = emptySection();
+        lower.setBlockState(4, 4, 4, Blocks.STONE.defaultBlockState()); // Y = -60
+        var upper = emptySection();
+        upper.setBlockState(4, 8, 4, Blocks.WATER.defaultBlockState()); // Y = -24 (sectionY -2)
+        setBiome(upper, 4, 8, 4, Biomes.DESERT);
+        var tile = extract(column(new SectionSpec(-4, lower, null), new SectionSpec(-2, upper, null)));
+        int i = idx(4, 4);
+        assertEquals(-24, tile.topY()[i], "premise: the water surface is topHeight");
+        assertEquals(-60, tile.floorY()[i]);
+        assertEquals(Biomes.DESERT, tile.biome()[i],
+                "biome must be sampled at topHeight (the surface), not the floor");
     }
 }

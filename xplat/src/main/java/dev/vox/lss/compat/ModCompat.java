@@ -32,7 +32,9 @@ public final class ModCompat {
         XaeroMapCompat.onDisconnect();
     }
 
-    /** The conditional {@code /lss diag} Xaero line, or null when Xaero was never detected. */
+    /** The conditional {@code /lss diag} Xaero line, or null when Xaero is not
+     *  installed (a detected-but-unresolvable Xaero renders {@code state=unavailable}
+     *  — the drift case must be visible, not mistaken for "not installed"). */
     public static String xaeroDiagLine() {
         return XaeroMapCompat.diagLine();
     }
