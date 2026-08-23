@@ -7,7 +7,7 @@ set -euo pipefail
 #                            the poison (3-Opus fold: the clearcache erased the very
 #                            inversion the heal must prove against): run 1's stamps
 #                            stay serve-then-save, run 2's frame finds the BULK stale
-#                            (the named check's before-pin: tiles_stale >= 8), and
+#                            (the named check's before-pin: stale+unknown >= 8), and
 #                            the up_to_date answers RATCHET the carried cache
 #   2. stamp-heal-rejoin     the carried world + carried client cache rejoin once
 #                            more: the named check pins the HEADLINE claim —

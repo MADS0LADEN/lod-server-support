@@ -454,6 +454,11 @@ public final class RegionStampTable {
             // the monitor — a deadline pushed ahead of setHeader let a concurrent
             // reader serve the PREVIOUS horizon's stale header as fresh for the whole
             // IO duration of this refresh. Deadline writes below follow setHeader.
+            // NARROWED, not closed (panel 2026-08-22): a reader whose two volatile
+            // loads straddle both stores can still return the previous horizon's
+            // snapshot as fresh — that residue is within the 5 s staleness the
+            // STAT_HORIZON already accepts, and marked changes are covered by the
+            // latch (latchedOrInGrace reads the live fields, never this snapshot).
             if (read == null) {
                 // Unreadable header: no honest claim; retry after the horizon.
                 setHeader(entry, UNREADABLE, h);

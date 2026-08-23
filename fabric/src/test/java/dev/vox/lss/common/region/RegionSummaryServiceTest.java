@@ -408,6 +408,82 @@ class RegionSummaryServiceTest {
         }
     }
 
+    @Test
+    void aQuitDuringAssemblyCannotResurrectTheReadyQueue() throws Exception {
+        // Panel fold 2026-08-22: removePlayer landing between the pump's jobs
+        // hand-off and assemble's ready-queue add used to recreate the departed
+        // UUID's queue — the vanished-send belt dropped the frame but the empty
+        // queue leaked for the server's life (the anchor-less sweep iterates
+        // requestedThisSession, which no longer held the UUID), and a same-UUID
+        // rejoin inside the RETRY TTL could receive the dead session's frame.
+        // The sweeper's post-add liveness re-check closes both.
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var rig = new Rig((dim, tx, tz) -> {
+            entered.countDown();
+            try {
+                release.await(10, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return NOW;
+        });
+        try {
+            var player = UUID.randomUUID();
+            rig.service.offerRequest(player, new RegionSummaryWire.Request(DIM, 0, 0, 0));
+            rig.pump(rig.anchorsAt(player, DIM, 0, 0)); // admits; the sweeper starts
+            assertTrue(entered.await(10, java.util.concurrent.TimeUnit.SECONDS),
+                    "premise: assembly in flight on the sweeper");
+            rig.service.removePlayer(player); // the quit lands mid-assembly
+            release.countDown();
+            long deadline = System.nanoTime() + POLL_DEADLINE_NANOS;
+            while (rig.service.readyCountForTest() != 0) {
+                if (System.nanoTime() > deadline) {
+                    fail("timed out waiting for the post-add re-check to sweep the"
+                            + " resurrected queue, ready=" + rig.service.readyCountForTest());
+                }
+                Thread.sleep(10);
+            }
+            assertFalse(rig.service.hasReadyEntryForTest(player),
+                    "the resurrected MAP ENTRY is swept too — a drained-but-retained"
+                            + " empty queue for a dead UUID is the server-lifetime leak");
+            rig.pump(u -> null); // a later drain must find nothing to send
+            assertNull(rig.sent.poll(), "no dead-session frame may reach the sender");
+        } finally {
+            release.countDown();
+            rig.service.shutdown();
+        }
+    }
+
+    @Test
+    void anchorlessSweepClearsAQuitRaceResurrectedMark() {
+        // The Folia quit race (the pump's anchor-less eligibility sweep): a
+        // region-thread offerRequest lands AFTER the tick thread's removePlayer,
+        // resurrecting the eligibility mark with no disconnect sweep left to run.
+        // The resurrected request's own pending entry shields the mark (a genuine
+        // mid-registration request must not lose stamps eligibility — the client
+        // requests only at dimension entry) until the pending TTL lapses; then the
+        // sweep clears the mark in the same pump that drops the stale pending.
+        var rig = new Rig((dim, tx, tz) -> NOW);
+        try {
+            var player = UUID.randomUUID();
+            rig.service.offerRequest(player, new RegionSummaryWire.Request(DIM, 0, 0, 0));
+            rig.service.removePlayer(player);
+            rig.service.offerRequest(player, new RegionSummaryWire.Request(DIM, 0, 0, 0));
+            assertTrue(rig.service.hasRequestedThisSession(player),
+                    "premise: the racing offer resurrected the mark");
+            rig.pump(u -> null); // anchor-less, pending inside its TTL: shielded
+            assertTrue(rig.service.hasRequestedThisSession(player),
+                    "the pending entry shields a mid-registration mark");
+            rig.clock.addAndGet(RegionSummaryService.PENDING_TTL_NANOS + 1);
+            rig.pump(u -> null); // drops the expired pending, then sweeps the mark
+            assertFalse(rig.service.hasRequestedThisSession(player),
+                    "the anchor-less sweep clears the quit-race mark");
+        } finally {
+            rig.service.shutdown();
+        }
+    }
+
     private static void awaitAssembly(Rig rig) throws InterruptedException {
         long deadline = System.nanoTime() + POLL_DEADLINE_NANOS;
         while (rig.service.readyCountForTest() == 0) {

@@ -8,13 +8,19 @@ import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 /**
  * THE REFERENCE ORACLE for {@link SectionStateFuzzTest}: the pre-quadtree
  * {@link ColumnStateMap} implementation (hash-map backing, main @ 79e49951 / v0.11.1),
- * preserved VERBATIM apart from the class name. The section-leaf rewrite
+ * preserved verbatim apart from the class name FOR THE v0.11.1 SURFACES. The
+ * summary-era surfaces ({@code applyTileValidation}, {@code ratchetStamp}, the
+ * {@code summaryValidated} set) did not exist in v0.11.1 — they are co-designed
+ * hash-backed twins written alongside the leaf implementation they audit (panel
+ * record 2026-08-22), so for those ops the fuzz's value is an INDEPENDENT-STRUCTURE
+ * differential (hash sets vs leaf bitmasks — it still catches the index/mask-math
+ * class), not shipped-semantics preservation. The section-leaf rewrite
  * (docs/planning/quadtree-client-state-plan.md) must be observationally equivalent to
  * this code — the fuzz drives identical op sequences into both and compares every
- * observable after every op. Do not "improve" this class: its value is that it IS the
- * shipped semantics, bug-for-bug (the one sanctioned divergence — sub- -1 timestamp
- * normalization — is documented in the new class's javadoc and normalized by the fuzz's
- * input domain).
+ * observable after every op. Do not "improve" this class: for the v0.11.1 surfaces
+ * its value is that it IS the shipped semantics, bug-for-bug (the one sanctioned
+ * divergence — sub- -1 timestamp normalization — is documented in the new class's
+ * javadoc and normalized by the fuzz's input domain).
  */
 class ReferenceColumnStateMap {
 

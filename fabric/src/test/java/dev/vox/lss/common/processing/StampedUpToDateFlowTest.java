@@ -505,15 +505,22 @@ class StampedUpToDateFlowTest {
         // save advances the header past the stamp; the store resweep bounds the
         // store-rung arm. If this test starts failing because a guard now catches
         // the shape, update plan §9.3 — the residual shrank.
+        // Composed from the REAL guard objects (panel fold 2026-08-22 — the previous
+        // shape hand-rolled the ladder and could never red): the platform ladder
+        // verbatim (RequestProcessingService.setUpToDateStampSource / the Paper twin),
+        // eligibility modeled true — false only makes the predicate MORE conservative.
         var tracker = new DirtyColumnTracker();
+        var table = new dev.vox.lss.common.region.RegionStampTable(d -> null);
         long packed = PositionUtil.packPosition(3, 3);
-        // The platform composition (both service lambdas): eligibility short-circuit
-        // is modeled true; then isPending, then the latch.
-        assertFalse(tracker.isPending(DIM, packed), "no mark — the event never fired");
-        // No RegionStampTable entry either (no mark ever bumped it) — the latch half
-        // answers false for an unexamined region (pinned in RegionStampTableTest).
-        // Composed outcome: the predicate returns a positive second — the seal.
-        long second = tracker.isPending(DIM, packed) ? -1L : System.currentTimeMillis() / 1000L;
+        long second;
+        if (tracker.isPending(DIM, packed)) {
+            second = -1L; // no mark — the event never fired, so this rung is blind
+        } else if (table.isClaimSuppressed(DIM,
+                PositionUtil.unpackX(packed), PositionUtil.unpackZ(packed))) {
+            second = -1L; // no mark ever bumped the region — the latch is blind too
+        } else {
+            second = System.currentTimeMillis() / 1000L;
+        }
         assertTrue(second > 0, "the event-blind state stamps — the ACCEPTED residual");
     }
 

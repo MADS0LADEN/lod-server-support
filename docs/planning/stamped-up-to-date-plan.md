@@ -427,9 +427,14 @@ Accepted-open (recorded, deliberately not machined):
   residual is counter attribution. Commented at the predicate.
 - **The sweeper holds a region-entry monitor across its header read** (~one 8 KiB
   read + two stats): a reader-pool thread wanting the SAME region can block
-  behind it ahead of the disk-read gate. Bounded (per-region, ms-scale, and the
-  chunk rung usually rides the tscache instead); the fix (IO outside the
-  monitor + CAS) is real machinery for a stall no live gate has ever surfaced.
+  behind it ahead of the disk-read gate. Bounded, but looser than "ms-scale" on
+  a loaded box (panel restating, 2026-08-22): the holder is MIN_PRIORITY with no
+  priority inheritance, and the proximity-ordered want-set makes same-region
+  collisions the COMMON case during a warm rejoin — tens of ms of reduced read
+  parallelism is the realistic worst case. Still no correctness or deadlock
+  exposure (the blocked thread holds no permit and no second monitor); the fix
+  (IO outside the monitor + CAS) is real machinery for a stall no live gate has
+  ever surfaced.
 - **Fabric's `handleRegionSummaryRequest` hostile-decode containment is
   unexercised by a dedicated test** (Paper's twin pin covers the shared logic;
   Fabric's extra branch is the throttled decode WARN).

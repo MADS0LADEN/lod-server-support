@@ -272,7 +272,14 @@ headline rig. The streak reset gains one interval of forgiveness:
   control arm).
 - `windowLimitedBypassStillRequiresAnswers` — latch set, answered < ¾ declared,
   zero bytes → HOLD, desired unchanged, streak observably reset (a subsequent
-  credited run needs a fresh 10).
+  credited run needs a fresh 10). SHIPPED PIECEWISE, not under this name (panel
+  record 2026-08-22): the zero-byte HOLD is Row-5's `measured <= 0` return,
+  which precedes both latch-sensitive edits and is pinned unlatched by
+  `partiallyAnsweredByteFreeIntervalHoldsInsteadOfSnapping`; the bytes-moved
+  latched HOLD is `windowLimitedUnderOfferNeverSnaps`; the reset observable is
+  `windowLimitedTwoConsecutiveMissesResetTheStreak`. Note the "observably
+  reset" clause predates §3.4's forgiveness fold — a SINGLE latched miss is
+  forgiven by design; two consecutive misses reset.
 - `windowLimitedUnderOfferNeverSnaps` — latch set, bytes moved (measured > 0),
   growth fails → desired unchanged (the pre-snap guard; the ENGAGED-freeze
   mirror).
