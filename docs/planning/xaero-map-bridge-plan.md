@@ -472,15 +472,28 @@ behavior.
    test finds visible seams at the native/LOD boundary.
 2. Cave layers.
 3. Voxy-store backfill for converged servers (§2.10).
-4. Support-line ports (after the user's manual test, with the rest of the
-   staged v0.12.0+ work). NOT verbatim (impl review corrected §2.11's claim) —
-   three mechanical per-line API substitutions in the new xplat code:
-   `level.getMinY()/getMaxY()` → `getMinBuildHeight()/getMaxBuildHeight()` on
-   1.21.1 only, and `state.getLightDampening()` → `getLightBlock(BlockGetter,
-   BlockPos)` on ALL THREE 1.21.x lines (verified against the per-line
-   mappings); plus the menu hunk's `Identifier.parse` → `ResourceLocation.parse`
-   on 1.21.1 and the whole menu hunk dropped on 1.21.10 (its Sodium cut).
-   Verify the per-line Xaero 1.45.0 jar in the test instance.
+4. Support-line ports — DONE 2026-08-23 (port/xaero-* branches, 2-Opus
+   reviewed per line). The AS-BUILT substitutions, correcting this item's
+   original recipe in two places (the backport reviews caught both): the
+   light-opacity rename is `state.getLightDampening()` → **no-arg**
+   `getLightBlock()` on 1.21.11 AND 1.21.10 (the 2-arg
+   `getLightBlock(BlockGetter, BlockPos)` overload exists ONLY on 1.21.1,
+   where the port passes `EmptyBlockGetter.INSTANCE, BlockPos.ZERO` — the
+   constant-opacity approximation; the original "2-arg on all three 1.21.x"
+   claim was wrong on two of the three), and the list was missing the test
+   constant rename `Blocks.STAINED_GLASS.blue()/.red()` →
+   `BLUE_/RED_STAINED_GLASS` (needed on EVERY support line — the flat
+   constants predate 26.2's ColorCollection). The rest as originally planned:
+   `getMinY()/getMaxY()+1` → `getMinBuildHeight()/getMaxBuildHeight()` on
+   1.21.1 only (max already EXCLUSIVE — the +1 drops), `Identifier` →
+   `ResourceLocation` on 1.21.1 and 1.21.10 (tests + the 1.21.1 menu hunk;
+   1.21.11 keeps Identifier), the menu hunk dropped on 1.21.10 (its Sodium
+   cut — config key + diag are that line's full control surface), and the
+   1.21.1 test bench uses the line's `Registry<Biome>` section family via its
+   `SectionConstruction` seam in place of `PalettedContainerFactory`.
+   Still owed per line: the live check of that line's Xaero 1.45.0 jar in its
+   test instance (the reflective surface was member-verified against the 26.2
+   and 1.21.1 jars only; resolve failure fails soft to `state=unavailable`).
 
 ## 9. Execution order
 
