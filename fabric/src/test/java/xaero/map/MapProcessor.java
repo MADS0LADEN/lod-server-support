@@ -30,6 +30,10 @@ public class MapProcessor {
     public MapRegionHighlightsPreparer highlightsPreparer = new MapRegionHighlightsPreparer();
     public final java.util.Map<Long, MapRegion> regions = new java.util.HashMap<>();
     public boolean leafMapRegionReturnsNull;
+    /** LoadState for regions getLeafMapRegion auto-creates. The stub default (2 =
+     *  loaded) keeps plain commit tests short; the real detection creates fresh
+     *  regions UNLOADED — tests of the removeMapRegion dead-end self-heal set 0. */
+    public byte createdRegionLoadState = 2;
 
     public boolean isWritingPaused() {
         if (!Thread.holdsLock(this.renderThreadPauseSync)) {
@@ -65,6 +69,7 @@ public class MapProcessor {
         var existing = this.regions.get(key);
         if (existing == null && create) {
             existing = new MapRegion();
+            existing.loadState = this.createdRegionLoadState;
             this.regions.put(key, existing);
         }
         return existing;
