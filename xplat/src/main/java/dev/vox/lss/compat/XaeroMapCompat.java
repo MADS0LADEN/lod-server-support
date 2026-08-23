@@ -43,16 +43,20 @@ import java.util.function.BooleanSupplier;
  * the shared end-of-client-tick body, MAIN CLIENT THREAD (Xaero enforces it with
  * {@code isSameThread} throws) — re-runs the native writer's gate ladder
  * verbatim, then commits under Xaero's own locks in the decompiled
- * {@code MapWriter.writeChunk} sequence, including the mandatory paced
+ * {@code MapWriter.writeChunk} sequence, including the mandatory
  * {@code requestLoad} dance for regions Xaero hasn't loaded (fresh regions never
  * self-promote) and the set-never-clear {@code setBeingWritten} lifecycle (the
- * save path owns the reset). The load-pacing gauge is consulted ONCE per pump
- * BEFORE any region monitor — {@code shouldAllowAnotherRegionToLoad} synchronizes
- * on its own (possibly BRANCH) region, and Xaero's loader thread nests
- * parent-then-leaf, so consulting it while holding a leaf monitor is a
- * lock-order inversion (review MAJOR — a real client deadlock). GPU work stays
- * Xaero's: the bridge only flags {@code setToUpdateBuffers}, never calls
- * {@code updateBuffers}.
+ * save path owns the reset). The drain is REGION-BUCKETED with an
+ * outstanding-load window (plan §14): entries group by their Xaero map region
+ * (32×32 chunks — Xaero's consent granularity), loaded regions commit in
+ * clusters, and load requests go to the pending regions holding the most tiles,
+ * at most {@value #MAX_OUTSTANDING_LOADS} in flight. Xaero's own
+ * {@code shouldAllowAnotherRegionToLoad} gauge is deliberately NEVER consulted:
+ * it synchronizes on its own (possibly BRANCH) region — a lock-order inversion
+ * against Xaero's parent-then-leaf loader thread (review MAJOR, a real client
+ * deadlock) — and semantically it is just a 1-in-flight window, which the
+ * outstanding window generalizes. GPU work stays Xaero's: the bridge only flags
+ * {@code setToUpdateBuffers}, never calls {@code updateBuffers}.
  *
  * <p><b>Registration lifecycle</b> (review MAJOR): the consumer is what holds the
  * handshake's CAPABILITY_VOXEL_COLUMNS bit ({@code LSSApi.hasVoxelConsumers()}),
@@ -69,11 +73,11 @@ import java.util.function.BooleanSupplier;
  */
 final class XaeroMapCompat {
 
-    static final int MAX_QUEUE = 2048;
+    static final int MAX_QUEUE = 8192;
     /** Byte gauge companion to the count cap (the ClientColumnProcessor discipline —
      *  a count cap alone admits ~165 MB of max-overlay tiles; plain tiles are ~4.7 KB
      *  but ocean tiles carry per-pixel overlay runs). Estimated, not exact. */
-    static final long MAX_QUEUE_BYTES = 24L * 1024 * 1024;
+    static final long MAX_QUEUE_BYTES = 48L * 1024 * 1024;
     /** Safety ceiling only — the nanos budget below is the binding constraint
      *  (review MAJOR: 8 committed only 160 tiles/s against 300-1000 delivered
      *  columns/s, making every backfill drop most of the map). */
@@ -81,6 +85,11 @@ final class XaeroMapCompat {
     static final long PUMP_NANOS_BUDGET = 2_000_000L;
     /** Ladder-ready deferrals (busy region, PBO download) before an entry drops. */
     static final int DEFER_CAP = 200;
+    /** Our in-flight region-load window — the honest generalization of Xaero's own
+     *  1-in-flight gauge (plan §14): the loader drains unlimited CHEAP (virgin)
+     *  loads per cycle but only one expensive file load, so a small fixed window
+     *  self-clocks the request rate to the real drain rate. */
+    static final int MAX_OUTSTANDING_LOADS = 8;
     /** Consecutive failures (commit-side or extraction-side) before the bridge
      *  latches dead for the SESSION (re-armed at disconnect). */
     static final int THROW_LATCH = 5;
@@ -228,6 +237,11 @@ final class XaeroMapCompat {
     /** Rotating drain start (the IncomingRequestRouter M4 precedent): without it a
      *  permanently-deferring queue prefix starves committable entries forever. */
     private int drainRotation; // main thread only
+    /** Regions we have requested loads for whose loads have not landed — refreshed
+     *  each pump by intersecting with the still-pending buckets. Main thread only. */
+    private final java.util.LinkedHashSet<Long> outstandingLoads = new java.util.LinkedHashSet<>();
+    /** Regions with queued tiles awaiting their Xaero load, as of the last pump. */
+    private volatile int regionsWaiting;
 
     private static final class Entry {
         volatile XaeroTileExtractor.PreparedTile tile; // replaced under queueLock (latest wins)
@@ -277,6 +291,8 @@ final class XaeroMapCompat {
      */
     void onSessionEnd() {
         clearQueue();
+        this.outstandingLoads.clear();
+        this.regionsWaiting = 0;
         this.dead = false;
         this.consecutiveFailures = 0;
         this.consecutiveExtractFailures.set(0);
@@ -423,6 +439,14 @@ final class XaeroMapCompat {
         return this.dead;
     }
 
+    int regionsWaitingForTest() {
+        return this.regionsWaiting;
+    }
+
+    int outstandingLoadsForTest() {
+        return this.outstandingLoads.size();
+    }
+
     boolean registeredForTest() {
         return this.registered;
     }
@@ -451,7 +475,8 @@ final class XaeroMapCompat {
                 + ", defer_events=" + this.deferEvents.get()
                 + ", dropped=" + dropped
                 + ", commit_failures=" + this.commitFailures.get()
-                + ", load_requests=" + this.loadRequests.get();
+                + ", load_requests=" + this.loadRequests.get()
+                + ", regions_waiting=" + this.regionsWaiting;
     }
 
     // ---- the pump (main client thread) ----
@@ -515,33 +540,33 @@ final class XaeroMapCompat {
                 dimensionId = this.h.getCurrentDimensionId.invoke(mapWorld);
                 if (this.levelOps.dimension(world) != dimensionId) return;
             }
-            // The load-pacing gauge, consulted ONCE per pump and BEFORE any region
-            // monitor — the native shape (MapWriter.onRender computes it before its
-            // visit loop). shouldAllowAnotherRegionToLoad synchronizes on its own
-            // (possibly BRANCH) region while Xaero's loader thread nests
-            // parent-then-leaf, so calling it under a leaf monitor is a lock-order
-            // inversion and a real main-thread deadlock (review MAJOR).
-            boolean allowLoadRequest = shouldAllowAnotherLoad(saveLoad);
-            drainEntries(keys, mp, saveLoad, world, dimensionId, allowLoadRequest);
+            drainEntries(keys, mp, saveLoad, world, dimensionId);
         }
     }
 
+    /** One queue entry paired with its key for the bucketed drain. */
+    private record Pending(Long key, Entry entry, XaeroTileExtractor.PreparedTile tile) {}
+
+    /**
+     * The bucketed drain (the region-throughput round, plan §14). One pass over the
+     * snapshot groups entries by their Xaero MAP REGION (32×32 chunks — Xaero's
+     * consent granularity: no tile may commit until its region's save file is
+     * loaded). Then: COMMIT phase over region buckets (rotated — the
+     * IncomingRequestRouter M4 precedent), probing each region ONCE per pump and
+     * short-circuiting its whole bucket on a not-ready outcome (at large radius a
+     * spiral ring crosses ~r/4 regions, and per-entry probing burned the budget on
+     * thousands of identical AWAITING_LOAD answers); then the GRANT phase requests
+     * loads for the pending regions holding the MOST queued tiles, so each grant
+     * unlocks a whole cluster.
+     */
     private void drainEntries(List<Long> keys, Object mp, Object saveLoad,
-                              Object world, Object dimensionId,
-                              boolean allowLoadRequest) throws Throwable {
+                              Object world, Object dimensionId) throws Throwable {
         long start = System.nanoTime();
-        int commits = 0;
-        boolean loadRequestedThisPump = false;
-        // Rotate the drain start per pump (the IncomingRequestRouter M4 precedent):
-        // below queue saturation nothing evicts a permanently-deferring prefix, and
-        // an unrotated head-first walk would let it starve committable entries.
-        int size = keys.size();
-        int startIndex = size == 0 ? 0 : Math.floorMod(this.drainRotation++, size);
-        for (int n = 0; n < size; n++) {
-            if (commits >= MAX_COMMITS_PER_PUMP || System.nanoTime() - start > this.pumpNanosBudget) {
-                return;
-            }
-            Long key = keys.get((startIndex + n) % size);
+
+        // Bucket by region, filtering stale/native-owned entries (LevelOps only — no
+        // Xaero reflection in this walk). LinkedHashMap keeps spiral locality.
+        var buckets = new LinkedHashMap<Long, List<Pending>>();
+        for (Long key : keys) {
             Entry entry;
             synchronized (this.queueLock) {
                 entry = this.queue.get(key);
@@ -561,34 +586,124 @@ final class XaeroMapCompat {
                 this.skippedNative.incrementAndGet();
                 continue;
             }
-            var outcome = commitEntry(mp, saveLoad, tile,
-                    allowLoadRequest && !loadRequestedThisPump);
-            switch (outcome) {
-                case COMMITTED -> {
-                    removeIfCurrent(key, entry, tile);
-                    this.written.incrementAndGet();
-                    this.consecutiveFailures = 0;
-                    commits++;
+            long regionKey = (((long) (tile.chunkX() >> 5)) << 32)
+                    | ((tile.chunkZ() >> 5) & 0xFFFFFFFFL);
+            buckets.computeIfAbsent(regionKey, k -> new ArrayList<>())
+                    .add(new Pending(key, entry, tile));
+        }
+
+        // COMMIT phase: rotate over buckets; one region probe per bucket per pump.
+        var bucketKeys = new ArrayList<>(buckets.keySet());
+        var pendingLoad = new LinkedHashMap<Long, List<Pending>>(); // regions awaiting load
+        int commits = 0;
+        int size = bucketKeys.size();
+        int startIndex = size == 0 ? 0 : Math.floorMod(this.drainRotation++, size);
+        bucketLoop:
+        for (int n = 0; n < size; n++) {
+            if (commits >= MAX_COMMITS_PER_PUMP || System.nanoTime() - start > this.pumpNanosBudget) {
+                break;
+            }
+            Long regionKey = bucketKeys.get((startIndex + n) % size);
+            var bucket = buckets.get(regionKey);
+            for (var pending : bucket) {
+                if (commits >= MAX_COMMITS_PER_PUMP
+                        || System.nanoTime() - start > this.pumpNanosBudget) {
+                    break bucketLoop;
                 }
-                case AWAITING_LOAD_REQUESTED -> {
-                    loadRequestedThisPump = true;
-                    this.deferEvents.incrementAndGet();
-                }
-                case AWAITING_LOAD -> this.deferEvents.incrementAndGet();
-                case DEFERRED -> {
-                    // Ladder was ready but the region/tile-chunk wasn't — this is the
-                    // only defer flavor that burns the per-entry budget (plan §2.7).
-                    this.deferEvents.incrementAndGet();
-                    if (++entry.ladderReadyDeferrals > DEFER_CAP) {
-                        removeIfCurrent(key, entry, tile);
-                        this.droppedExpired.incrementAndGet();
+                var outcome = commitEntry(mp, pending.tile());
+                switch (outcome) {
+                    case COMMITTED -> {
+                        removeIfCurrent(pending.key(), pending.entry(), pending.tile());
+                        this.written.incrementAndGet();
+                        this.consecutiveFailures = 0;
+                        commits++;
+                    }
+                    case AWAITING_LOAD -> {
+                        // The whole bucket shares this region's state: one defer event
+                        // per BUCKET per pump (no per-entry probe churn), the entries
+                        // stay queued, the region goes to the grant phase.
+                        this.deferEvents.incrementAndGet();
+                        pendingLoad.put(regionKey, bucket);
+                        continue bucketLoop;
+                    }
+                    case DEFERRED -> {
+                        // Ladder was ready but the LOADED region/tile-chunk was busy —
+                        // the only defer flavor that burns the deferral budget (plan
+                        // §2.7). The whole bucket shares the state: burn each entry's
+                        // counter once (cap semantics preserved) and move on.
+                        this.deferEvents.incrementAndGet();
+                        for (var p : bucket) {
+                            if (++p.entry().ladderReadyDeferrals > DEFER_CAP) {
+                                removeIfCurrent(p.key(), p.entry(), p.tile());
+                                this.droppedExpired.incrementAndGet();
+                            }
+                        }
+                        continue bucketLoop;
+                    }
+                    case FAILED -> {
+                        // Possibly entry-specific (a hostile state) — drop it and keep
+                        // trying the bucket's siblings unless the latch fired.
+                        removeIfCurrent(pending.key(), pending.entry(), pending.tile());
+                        if (this.dead) return;
                     }
                 }
-                case FAILED -> {
-                    removeIfCurrent(key, entry, tile);
-                    if (this.dead) return;
-                }
             }
+        }
+        this.regionsWaiting = pendingLoad.size();
+
+        // GRANT phase: refresh the outstanding window (a region no longer pending —
+        // loaded, or its tiles all evicted — frees its slot), then request loads for
+        // the pending regions with the MOST queued tiles, so each grant unlocks a
+        // whole cluster. The window (≤ MAX_OUTSTANDING_LOADS) is the honest
+        // generalization of Xaero's own 1-in-flight gauge: the loader drains
+        // unlimited CHEAP (virgin-region) loads per cycle but only one expensive
+        // file load, so request rate self-clocks to the real drain rate.
+        this.outstandingLoads.retainAll(pendingLoad.keySet());
+        if (this.outstandingLoads.size() >= MAX_OUTSTANDING_LOADS) return;
+        var byValue = new ArrayList<>(pendingLoad.entrySet());
+        byValue.sort((a, b) -> Integer.compare(b.getValue().size(), a.getValue().size()));
+        for (var candidate : byValue) {
+            if (this.outstandingLoads.size() >= MAX_OUTSTANDING_LOADS) return;
+            Long regionKey = candidate.getKey();
+            if (this.outstandingLoads.contains(regionKey)) continue;
+            if (requestRegionLoad(mp, saveLoad, regionKey)) {
+                this.outstandingLoads.add(regionKey);
+                this.loadRequests.incrementAndGet();
+            }
+        }
+    }
+
+    /**
+     * The native writer's load-request dance for one region (MapWriter:340-348 —
+     * region monitor only): setBeingWritten-BEFORE-request is load-bearing (it stops
+     * the load drain demoting an empty fresh region), and requestLoad front-inserts
+     * with priority (verified: the 2-arg overload passes prioritize=true, which also
+     * bypasses the loader's mid-drain add guard). setNextToLoadByViewing keeps
+     * Xaero's shared admission bookkeeping honest — the NATIVE writer's own gauge
+     * consult sees our pending load and politely defers its next request. NB:
+     * requestLoad is main-thread-only despite its queue-add look — its tail runs a
+     * highlight prepare that hard-throws off Minecraft.isSameThread().
+     */
+    private boolean requestRegionLoad(Object mp, Object saveLoad, long regionKey) {
+        try {
+            int regionX = (int) (regionKey >> 32);
+            int regionZ = (int) regionKey;
+            Object region = this.h.getLeafMapRegion.invoke(mp, SURFACE_LAYER,
+                    regionX, regionZ, true);
+            if (region == null) return false;
+            synchronized (region) {
+                if ((byte) this.h.getLoadState.invoke(region) == 2) return false;
+                if (!(boolean) this.h.isResting.invoke(region)) return false;
+                if (!(boolean) this.h.canRequestReload.invoke(region)) return false;
+                this.h.setBeingWritten.invoke(region, true);
+                this.h.requestLoad.invoke(saveLoad, region, "lss-xaero-bridge");
+                this.h.setNextToLoadByViewing.invoke(saveLoad, region);
+                return true;
+            }
+        } catch (Throwable t) {
+            if (t instanceof Error err && !(t instanceof AssertionError)) throw err;
+            noteFailure(t);
+            return false;
         }
     }
 
@@ -615,20 +730,18 @@ final class XaeroMapCompat {
         return true;
     }
 
-    private enum Outcome { COMMITTED, DEFERRED, AWAITING_LOAD, AWAITING_LOAD_REQUESTED, FAILED }
+    private enum Outcome { COMMITTED, DEFERRED, AWAITING_LOAD, FAILED }
 
     /**
      * One entry against its region — the decompiled {@code MapWriter.writeChunk}
      * region discipline: {@code writerThreadPauseSync} + {@code !isWritingPaused()}
      * (the save-race exclusion), the region monitor for load-state/visit/resting,
      * {@code setBeingWritten(true)} set and NEVER cleared by us (save-eligibility —
-     * the save path owns the reset), the paced {@code requestLoad} dance for
-     * unloaded regions, tile-chunk creation with its cache flags, then the pixel
-     * commit.
+     * the save path owns the reset), tile-chunk creation with its cache flags, then
+     * the pixel commit. Load REQUESTS live in the grant phase
+     * ({@link #requestRegionLoad}) — an unloaded region answers AWAITING_LOAD here.
      */
-    private Outcome commitEntry(Object mp, Object saveLoad,
-                                XaeroTileExtractor.PreparedTile tile,
-                                boolean allowLoadRequest) {
+    private Outcome commitEntry(Object mp, XaeroTileExtractor.PreparedTile tile) {
         try {
             int chunkX = tile.chunkX();
             int chunkZ = tile.chunkZ();
@@ -664,20 +777,9 @@ final class XaeroMapCompat {
                         }
                     }
                     if (!proper) {
-                        // The mandatory load dance (fresh regions NEVER self-promote to
-                        // loadState 2): setBeingWritten-BEFORE-request is load-bearing —
-                        // it stops the load drain demoting an empty fresh region. The
-                        // pacing gauge was consulted OUTSIDE region monitors (see
-                        // pumpLadder). NB: requestLoad is main-thread-only despite its
-                        // queue-add look — its tail runs a highlight prepare that
-                        // hard-throws off Minecraft.isSameThread().
-                        if (resting && allowLoadRequest
-                                && (boolean) this.h.canRequestReload.invoke(region)) {
-                            this.h.requestLoad.invoke(saveLoad, region, "lss-xaero-bridge");
-                            this.h.setNextToLoadByViewing.invoke(saveLoad, region);
-                            this.loadRequests.incrementAndGet();
-                            return Outcome.AWAITING_LOAD_REQUESTED;
-                        }
+                        // Fresh regions NEVER self-promote to loadState 2 — the grant
+                        // phase requests the load; this entry (and its whole bucket)
+                        // just waits.
                         return Outcome.AWAITING_LOAD;
                     }
                 }
@@ -695,12 +797,6 @@ final class XaeroMapCompat {
             noteFailure(t);
             return Outcome.FAILED;
         }
-    }
-
-    private boolean shouldAllowAnotherLoad(Object saveLoad) throws Throwable {
-        Object nextToLoad = this.h.getNextToLoadByViewing.invoke(saveLoad);
-        return nextToLoad == null
-                || (boolean) this.h.shouldAllowAnotherRegionToLoad.invoke(nextToLoad);
     }
 
     /** The decompiled per-tile commit sequence, verbatim order (plan §1). */
@@ -811,9 +907,7 @@ final class XaeroMapCompat {
         final MethodHandle getCurrentDimensionId;
         final MethodHandle isRegionDetectionComplete;
         final MethodHandle requestLoad;
-        final MethodHandle getNextToLoadByViewing;
         final MethodHandle setNextToLoadByViewing;
-        final MethodHandle shouldAllowAnotherRegionToLoad;
         final MethodHandle writerThreadPauseSync;
         final MethodHandle regionIsWritingPaused;
         final MethodHandle getLoadState;
@@ -930,14 +1024,9 @@ final class XaeroMapCompat {
             this.requestLoad = lookup.findVirtual(saveLoadClass, "requestLoad",
                             MethodType.methodType(void.class, regionClass, String.class))
                     .asType(MethodType.methodType(void.class, Object.class, Object.class, String.class));
-            this.getNextToLoadByViewing = virtual(lookup, saveLoadClass, "getNextToLoadByViewing",
-                    MethodType.methodType(leveledRegionClass), Object.class);
             this.setNextToLoadByViewing = lookup.findVirtual(saveLoadClass, "setNextToLoadByViewing",
                             MethodType.methodType(void.class, leveledRegionClass))
                     .asType(MethodType.methodType(void.class, Object.class, Object.class));
-            this.shouldAllowAnotherRegionToLoad = virtual(lookup, leveledRegionClass,
-                    "shouldAllowAnotherRegionToLoad",
-                    MethodType.methodType(boolean.class), boolean.class);
 
             this.writerThreadPauseSync = getter(lookup, regionClass, "writerThreadPauseSync");
             this.regionIsWritingPaused = virtual(lookup, regionClass, "isWritingPaused",

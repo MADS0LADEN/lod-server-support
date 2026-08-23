@@ -628,3 +628,56 @@ center), counter renamed `skipped_loaded` → `skipped_native`, pinned by
 updated fully-surrounded skip test. Healing an ALREADY-recorded ring needs a
 column re-serve — `/lss clearcache` while connected (rejoins alone answer
 up_to_date, no data flows).
+
+## 14. Region-throughput round (2026-08-23, field-test round 2 — AMENDS §2.4/§2.7/§4)
+
+Field observation (the user's second test): at large map radius the bridge lost
+many tiles. Mechanism: a spiral ring at chunk radius r crosses ~r/4 Xaero map
+regions (~75 at r=300 vs ~3 at r=12), while region loads were granted at ≤1 per
+pump (20/s) — entries flooded in for ungranted regions, the queue overflowed,
+and evict-oldest discarded whole awaiting-load clusters (permanent holes: the
+positions are stamped and never re-served).
+
+Decompile findings that reshaped the design (all verified in MapSaveLoad/
+LeveledRegion):
+- `requestLoad(region, reason)` → `addToLoad(…, prioritize=TRUE)`: front-inserts
+  and lands even mid-drain (the non-prioritized path's `loadingFiles` drop guard
+  does not apply).
+- The loader's drain (`MapSaveLoad.run`) processes UNLIMITED cheap loads per
+  MapRunner cycle (virgin regions with no file — most of an LOD backfill — and
+  cache-only loads) but exits after ONE expensive file load.
+- `shouldAllowAnotherRegionToLoad` is semantically a 1-IN-FLIGHT window: it
+  refuses while the last-requested region's `reloadHasBeenRequested` is still
+  set (cleared when the drain finishes that region). It also synchronizes on its
+  own — possibly BRANCH — region (§12 reviewer 3's deadlock).
+
+The round (supersedes §2.4's rotation-over-entries and §2.7's gauge-paced
+~1/pass request):
+1. **Bucketed drain**: entries group by Xaero map region (32×32 chunks —
+   Xaero's consent granularity); each region is probed ONCE per pump and a
+   not-ready outcome short-circuits its whole bucket (defer_events now counts
+   per bucket per pump — the counter's scale shrank accordingly). Rotation
+   moves to bucket granularity; DEFERRED burns every bucketed entry's deferral
+   counter (cap semantics preserved).
+2. **Outstanding-load window** (`MAX_OUTSTANDING_LOADS` 8) replaces the gauge:
+   the grant phase requests loads for pending regions LARGEST-CLUSTER-FIRST
+   until 8 are in flight, refreshing the window each pump by intersecting with
+   still-pending buckets (a loaded — or fully-evicted — region frees its slot).
+   This self-clocks to the loader's real drain rate: cheap-load mixes refill
+   every pump (~160 grants/s), expensive mixes hold at the window. Each request
+   still runs the native dance (region monitor; setBeingWritten BEFORE
+   requestLoad; setNextToLoadByViewing so the NATIVE writer's own gauge sees
+   our pending loads and politely defers — bounded courtesy inversion, noted).
+   `shouldAllowAnotherRegionToLoad`/`getNextToLoadByViewing` are REMOVED from
+   the reflective surface (§4 shrinks by two members) — the branch-region
+   monitor is never taken, so §12 reviewer 3's deadlock class is gone
+   structurally (pinned: theSharedPacingGaugeIsNeverConsulted).
+3. **Wider survival window**: MAX_QUEUE 2048 → 8192 entries, MAX_QUEUE_BYTES
+   24 → 48 MB.
+4. **Observability**: `regions_waiting=` gauge added to the diag line (pending
+   regions as of the last pump — the direct grant-pressure signal).
+
+Expected field shape: grant rate stops binding for virgin-region backfills,
+commits bound at 64/tick (1280/s) > delivery, `dropped` collapses toward 0;
+post-clearcache re-streams over EXISTING map files stay expensive-load-bound
+(the loader's 1/cycle) but the 8-deep window + 8192-entry queue ride it out.

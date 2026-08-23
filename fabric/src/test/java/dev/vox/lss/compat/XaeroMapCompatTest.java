@@ -295,14 +295,14 @@ class XaeroMapCompatTest {
                         Blocks.WATER.defaultBlockState(), (byte) 0, false, 1);
             }
         }
-        for (int i = 0; i < 400; i++) {
+        for (int i = 0; i < 700; i++) {
             var heavy = tile(i * 4, 0);
             var withRuns = new XaeroTileExtractor.PreparedTile(heavy.chunkX(), heavy.chunkZ(),
                     heavy.worldBottomY(), heavy.floorState(), heavy.floorY(), heavy.topY(),
                     heavy.biome(), heavy.light(), heavy.glowing(), runs);
             this.bridge.offerPrepared(OVERWORLD, withRuns);
         }
-        assertTrue(this.bridge.queuedForTest() < 400,
+        assertTrue(this.bridge.queuedForTest() < 700,
                 "the byte gauge must evict before the count cap on overlay-heavy tiles"
                         + " (queued=" + this.bridge.queuedForTest() + ")");
         assertTrue(this.bridge.queuedBytesForTest() <= XaeroMapCompat.MAX_QUEUE_BYTES);
@@ -479,7 +479,7 @@ class XaeroMapCompatTest {
     // ---- the region load dance ----
 
     @Test
-    void unloadedRegionGetsExactlyOnePacedLoadRequestWithBeingWrittenFirst() {
+    void unloadedRegionIsLoadRequestedWithBeingWrittenFirstAndNeverReRequested() {
         offer(64, 64); // region (2,2), fresh
         var region = new MapRegion();
         region.loadState = 0;
@@ -488,6 +488,7 @@ class XaeroMapCompatTest {
         assertEquals(1, this.processor.saveLoad.loadRequests.size(),
                 "an unloaded region must be load-REQUESTED (fresh regions never self-promote)");
         assertEquals(1, this.bridge.counterForTest("load_requests"));
+        assertEquals(1, this.bridge.regionsWaitingForTest());
         var events = XaeroStubEvents.snapshot();
         int setBeingWritten = events.indexOf("region.setBeingWritten true");
         int requestLoad = events.indexOf("saveLoad.requestLoad lss-xaero-bridge");
@@ -495,31 +496,35 @@ class XaeroMapCompatTest {
                 "setBeingWritten(true) must precede requestLoad (it stops the load drain"
                         + " demoting an empty fresh region): " + events);
         assertTrue(events.contains("saveLoad.setNextToLoadByViewing"),
-                "the request must register with the pacing gauge");
+                "the request must register with Xaero's shared admission bookkeeping");
         assertEquals(1, this.bridge.queuedForTest(), "awaiting-load entries stay queued");
 
-        // Pacing: while the gauge refuses, further pumps issue NO second request…
-        this.processor.saveLoad.nextToLoadByViewing.allowAnotherRegionToLoad = false;
+        // The outstanding window: while the load hasn't landed, further pumps issue
+        // NO re-request…
         for (int i = 0; i < XaeroMapCompat.DEFER_CAP + 50; i++) {
             this.bridge.pump();
         }
-        assertEquals(1, this.processor.saveLoad.loadRequests.size(), "paced: one request total");
+        assertEquals(1, this.processor.saveLoad.loadRequests.size(),
+                "outstanding window: one request per region until its load lands");
         // …and awaiting-load deferrals are EXEMPT from the deferral cap.
         assertEquals(1, this.bridge.queuedForTest(),
                 "an entry awaiting a region load must never be dropped by the deferral cap");
 
-        // The load lands: the next pump commits.
+        // The load lands: the next pump commits and frees the window slot.
         region.loadState = 2;
         this.bridge.pump();
         assertEquals(1, this.bridge.counterForTest("written"));
         assertEquals(0, this.bridge.queuedForTest());
+        assertEquals(0, this.bridge.outstandingLoadsForTest());
     }
 
     @Test
-    void thePacingGaugeIsConsultedBeforeAnyRegionMonitor() {
-        // The deadlock pin (review MAJOR): shouldAllowAnotherRegionToLoad synchronizes
-        // on its own (possibly BRANCH) region while Xaero's loader nests
-        // parent-then-leaf — production must consult it BEFORE touching any region.
+    void theSharedPacingGaugeIsNeverConsulted() {
+        // The deadlock class is structurally gone (throughput round, plan §14):
+        // shouldAllowAnotherRegionToLoad synchronizes on its own (possibly BRANCH)
+        // region — a lock-order inversion against Xaero's parent-then-leaf loader —
+        // and the bridge replaces it with its own outstanding window, so the method
+        // must never be invoked at all.
         offer(64, 64);
         var gauge = new MapRegion(); // park a "previous" region in the pacing slot
         this.processor.saveLoad.nextToLoadByViewing = gauge;
@@ -528,18 +533,51 @@ class XaeroMapCompatTest {
         this.processor.regions.put((2L << 32) | 2L, region);
         this.bridge.pump();
         var events = XaeroStubEvents.snapshot();
-        int pacing = events.indexOf("pacing.shouldAllowAnotherRegionToLoad");
-        int firstRegionTouch = -1;
-        for (int i = 0; i < events.size(); i++) {
-            if (events.get(i).startsWith("region.")) {
-                firstRegionTouch = i;
-                break;
-            }
+        assertFalse(events.contains("pacing.shouldAllowAnotherRegionToLoad"),
+                "the shared gauge must never be consulted (deadlock-class removal): " + events);
+        assertEquals(1, this.processor.saveLoad.loadRequests.size(),
+                "the outstanding window still grants the load");
+    }
+
+    @Test
+    void grantsGoToTheLargestPendingRegionsUpToTheWindow() {
+        // 10 pending regions; region (2,2) holds THREE tiles, the rest one each. The
+        // grant phase must batch up to MAX_OUTSTANDING_LOADS requests per pump and
+        // spend them largest-cluster-first, so each grant unlocks the most tiles.
+        offer(64, 64);
+        offer(68, 64);
+        offer(72, 64); // three tiles in region (2,2)
+        for (int i = 1; i <= 9; i++) {
+            offer(64 + i * 32, 320); // regions (2+i, 10), one tile each
         }
-        assertTrue(pacing >= 0, "the gauge must be consulted: " + events);
-        assertTrue(firstRegionTouch < 0 || pacing < firstRegionTouch,
-                "the pacing gauge must be consulted BEFORE any region monitor work"
-                        + " (lock-order vs Xaero's loader thread): " + events);
+        var bigRegion = unloadedRegion();
+        this.processor.regions.put((2L << 32) | 2L, bigRegion);
+        for (int i = 1; i <= 9; i++) {
+            this.processor.regions.put(((long) (2 + i) << 32) | 10L, unloadedRegion());
+        }
+        this.bridge.pump();
+        assertEquals(XaeroMapCompat.MAX_OUTSTANDING_LOADS,
+                this.processor.saveLoad.loadRequests.size(),
+                "one pump must batch a full window of load requests");
+        assertEquals(XaeroMapCompat.MAX_OUTSTANDING_LOADS, this.bridge.outstandingLoadsForTest());
+        assertTrue(this.processor.saveLoad.loadRequests.get(0) == bigRegion,
+                "the region holding the most queued tiles must be requested FIRST");
+        assertEquals(10, this.bridge.regionsWaitingForTest());
+    }
+
+    @Test
+    void aBucketOfManyEntriesCountsOneDeferEventPerPump() {
+        // The bucketed drain probes each region ONCE per pump — at large radius a
+        // ring crosses ~r/4 regions, and per-entry probing burned the whole budget
+        // on identical AWAITING_LOAD answers (the throughput round's motivation).
+        for (int i = 0; i < 20; i++) {
+            offer(64 + i, 64); // 20 tiles, all in region (2,2) — chunkX 64..83
+        }
+        this.processor.regions.put((2L << 32) | 2L, unloadedRegion());
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("defer_events"),
+                "one defer event per BUCKET per pump, not per entry");
+        assertEquals(20, this.bridge.queuedForTest());
     }
 
     @Test
@@ -558,14 +596,14 @@ class XaeroMapCompatTest {
     }
 
     @Test
-    void twoUnloadedRegionsShareTheOneRequestPerPumpPacing() {
+    void twoUnloadedRegionsAreGrantedInTheSamePump() {
         offer(64, 64);   // region (2,2)
         offer(320, 320); // region (10,10)
         this.processor.regions.put((2L << 32) | 2L, unloadedRegion());
         this.processor.regions.put((10L << 32) | 10L, unloadedRegion());
         this.bridge.pump();
-        assertEquals(1, this.processor.saveLoad.loadRequests.size(),
-                "at most ONE requestLoad per pump pass (the native ~1/pass pacing)");
+        assertEquals(2, this.processor.saveLoad.loadRequests.size(),
+                "both fit the outstanding window — one pump grants both");
     }
 
     private MapRegion unloadedRegion() {
@@ -840,7 +878,8 @@ class XaeroMapCompatTest {
         var line = this.bridge.describe();
         assertTrue(line.startsWith("XaeroMap: state=active, queued="), line);
         assertTrue(line.contains(", written=") && line.contains(", defer_events=")
-                && line.contains(", dropped=") && line.contains(", commit_failures="), line);
+                && line.contains(", dropped=") && line.contains(", commit_failures=")
+                && line.contains(", regions_waiting="), line);
         this.enabled = false;
         assertTrue(this.bridge.describe().contains("state=disabled"));
     }
