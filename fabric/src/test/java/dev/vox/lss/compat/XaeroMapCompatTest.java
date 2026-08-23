@@ -394,14 +394,43 @@ class XaeroMapCompatTest {
         assertEquals(0, this.bridge.counterForTest("written"));
     }
 
+    private void loadChunk(int chunkX, int chunkZ) {
+        this.loadedChunks.add(((long) chunkX << 32) | (chunkZ & 0xFFFFFFFFL));
+    }
+
     @Test
-    void loadedChunksAreSkippedNotWritten() {
+    void fullySurroundedLoadedChunksAreSkippedNotWritten() {
         offer(7, 9);
-        this.loadedChunks.add(((long) 7 << 32) | 9L);
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                loadChunk(7 + dx, 9 + dz);
+            }
+        }
         this.bridge.pump();
         assertEquals(0, this.bridge.queuedForTest());
-        assertEquals(1, this.bridge.counterForTest("skipped_loaded"));
+        assertEquals(1, this.bridge.counterForTest("skipped_native"));
         assertEquals(0, this.bridge.counterForTest("written"));
+    }
+
+    @Test
+    void aLoadedEdgeChunkIsBridgeWritten() {
+        // The boundary-ring regression (field-tested 2026-08-23): the native writer's
+        // edge rule refuses any chunk without all 8 neighbors loaded, so the OUTERMOST
+        // ring of loaded vanilla chunks is never natively written — skipping it here
+        // too left a 1-chunk black circle at the vanilla/LOD boundary around every
+        // join point. A loaded-but-edge chunk must be bridge-written; the native
+        // writer reclaims it on its clean-flag once fully surrounded.
+        offer(7, 9);
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                loadChunk(7 + dx, 9 + dz);
+            }
+        }
+        this.loadedChunks.remove(((long) 8 << 32) | 10L); // one missing neighbor → edge
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("written"),
+                "an edge chunk (native-unwritable) must be bridge-written");
+        assertEquals(0, this.bridge.counterForTest("skipped_native"));
     }
 
     // ---- deferral flavors (the dead-knob branches) ----

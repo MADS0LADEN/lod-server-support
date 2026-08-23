@@ -190,20 +190,27 @@ CFR decompile output in `cfr-out262/`, XaeroPlus clone). Key findings:
    philosophy: a dropped tile is not a correctness hole — the map is
    best-effort, and the position heals on the next dirty serve or a
    `/lss clearcache` backfill.
-6. **Overlap policy: never fight Xaero's native writer.** At COMMIT time (main
-   thread — safe and current), skip any position whose chunk is currently
-   loaded in the `ClientLevel` (`EmptyLevelChunk` counts as not-loaded, like the
-   native writer; counted `skipped_loaded`): the native writer owns loaded
-   chunks and rewrites them on its clean-flag anyway (§1 boundary self-heal —
-   our tiles get reclaimed when the player arrives, so LOD-over-native
-   degradation is self-limiting in both directions). Note: the scanner already
-   excludes vanilla-view positions from the want-set, so loaded-chunk columns
-   mostly never arrive — `skipped_loaded` is a race belt (movement crescents,
+6. **Overlap policy: skip exactly what the native writer will write.** At COMMIT
+   time (main thread — safe and current), skip a position only when its chunk
+   AND all 8 neighbors are loaded in the `ClientLevel` (`EmptyLevelChunk`
+   counts as not-loaded; counted `skipped_native`) — the native writer's OWN
+   edge rule. Skipping on "loaded" alone was the v1 rule and produced the
+   FIELD-TESTED boundary-ring defect (2026-08-23, the first manual test): the
+   native writer never writes the outermost ring of loaded chunks (no outer
+   neighbors), so with both writers declining it, every join point grew a
+   1-chunk black circle at the vanilla/LOD boundary — the ring's columns HAD
+   been served during the join window (before vanilla chunks arrived) and the
+   broad skip threw the tiles away. Under the narrowed rule the edge ring is
+   bridge-written and the native writer reclaims it on its clean-flag once
+   fully surrounded (§1 boundary self-heal — LOD-over-native degradation stays
+   self-limiting in both directions). Note: the scanner already excludes
+   vanilla-view positions from the want-set, so fully-surrounded-chunk columns
+   mostly never arrive — `skipped_native` is a race belt (movement crescents,
    RD shrink, chunk-loaded-between-serve-and-commit), not a volume path.
-   Accepted edge: a chunk loaded but outside Xaero's own write window
-   (`min(config, 32, effectiveRD)`) is skipped by both writers — a thin stale
-   ring possible when server view distance exceeds Xaero's window; heals when
-   the chunk enters the window or is re-served.
+   Accepted edge: a chunk loaded AND surrounded but outside Xaero's own write
+   window (`min(config, 32, effectiveRD)`) is skipped by both writers — a thin
+   stale ring possible when server view distance exceeds Xaero's window; heals
+   when the chunk enters the window or is re-served.
 7. **Gate ladder = the native writer's, verbatim; deferral not deletion.** Every
    pump pass re-checks, in the native order and under the native monitors
    (§1's ladder): session present + usable, `!isWritingPaused()`,
@@ -395,7 +402,7 @@ the manual test), no slope polish.
 
 ## 6. Observability
 
-Counters (`written`, `skipped_loaded`, `defer_events` — defer EVENTS, not
+Counters (`written`, `skipped_native`, `defer_events` — defer EVENTS, not
 entries — `dropped` = overflow+stale+expired aggregate, `commit_failures` —
 split out because it is the only pre-death failure signal, unlike the benign
 drop flavors — `load_requests`, `queued` gauge) + `state` (active / unavailable
@@ -604,3 +611,20 @@ writer); a server-initiated play→config reconfiguration skips the disconnect
 teardown (the session-active offer gate + stale-dimension drops contain it);
 `AWAITING_LOAD` entries have no expiry short of queue eviction (transient in
 practice; the rotation keeps them from starving the drain).
+
+## 13. Field-test round 1 (2026-08-23, the user's first manual test)
+
+The map filled correctly out to the LOD distance, with ONE defect: a 1-chunk-wide
+black ring at chunk radius ~11 around the join point (measured off the user's map
+export — thickness exactly 16 px = 1 chunk, circular like vanilla's cylindrical
+chunk loading). Root cause was an interaction of two skip rules on the same ring:
+the native writer's edge rule (all 8 neighbors must be loaded — decompiled
+`writeChunk`'s edgeChunk loop) never writes the outermost loaded ring, and the
+bridge's v1 skip ("any loaded chunk") dropped the served join-window tiles for
+that same ring. Fix: the skip is now the native edge rule itself
+(`nativelyWritable` — chunk + all 8 neighbors loaded, short-circuit on the
+center), counter renamed `skipped_loaded` → `skipped_native`, pinned by
+`aLoadedEdgeChunkIsBridgeWritten` (a loaded-but-edge chunk commits) and the
+updated fully-surrounded skip test. Healing an ALREADY-recorded ring needs a
+column re-serve — `/lss clearcache` while connected (rejoins alone answer
+up_to_date, no data flows).
