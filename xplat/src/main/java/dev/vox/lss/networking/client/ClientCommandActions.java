@@ -197,5 +197,12 @@ public final class ClientCommandActions {
                 LSSClientConfig.CONFIG.lodColumnsPerSecondLimit,
                 manager.getGovernedRateLabel(), manager.getRateGated()
         )).withStyle(ChatFormatting.GRAY));
+
+        // Xaero map bridge (issue #223, conditional slot — present only when Xaero's
+        // World Map was detected at init; the Summary-line precedent).
+        var xaeroLine = dev.vox.lss.compat.ModCompat.xaeroDiagLine();
+        if (xaeroLine != null) {
+            feedback.accept(Component.literal(xaeroLine).withStyle(ChatFormatting.GRAY));
+        }
     }
 }

@@ -110,6 +110,25 @@ public class LSSConfigMenu implements ConfigEntryPoint {
         rateGroup.addOption(slowStartOption);
         page.addOptionGroup(rateGroup);
 
+        // Xaero's World Map bridge (issue #223, xaero-map-bridge-plan.md §2.9): write
+        // received LODs into Xaero's map. Checked LIVE (flip applies mid-session);
+        // with Xaero absent the toggle is inert — say so where the user is looking
+        // (the join_slow_start/SeeU conditional-tooltip precedent).
+        var xaeroGroup = builder.createOptionGroup();
+        boolean xaeroPresent = FabricLoader.getInstance().isModLoaded("xaeroworldmap");
+        var xaeroOption = builder.createBooleanOption(Identifier.parse("lss:xaero_map_bridge"));
+        xaeroOption.setName(Component.translatable("lss.config.xaero_map_bridge"));
+        xaeroOption.setTooltip(Component.translatable(xaeroPresent
+                ? "lss.config.xaero_map_bridge.tooltip"
+                : "lss.config.xaero_map_bridge.tooltip.not_installed"));
+        xaeroOption.setImpact(OptionImpact.LOW);
+        xaeroOption.setDefaultValue(true);
+        xaeroOption.setBinding(v -> cfg.enableXaeroMapBridge = v, () -> cfg.enableXaeroMapBridge);
+        xaeroOption.setStorageHandler(save);
+        xaeroOption.setEnabledProvider(s -> s.readBooleanOption(enabledDep[0]), enabledDep);
+        xaeroGroup.addOption(xaeroOption);
+        page.addOptionGroup(xaeroGroup);
+
         // ---- Far players (E2, FARP §3.3): its own page — a distinct feature with
         //      its own privacy semantics, not another LOD slider ----
         // Save handler for far-player options: persist AND push the prefs NOW (E2

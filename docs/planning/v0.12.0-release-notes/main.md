@@ -4,6 +4,8 @@
 - **Region summaries: one small frame replaces a million re-checks** — With client and server both on v0.12.0, entering a dimension now costs one compact frame (a few KB) listing which regions are unchanged; the client validates the clean bulk of its cached terrain from it instead of re-declaring every column over several minutes. Verify with `/lsslod diag`'s new `Summary:` line.
 - **Stamped up-to-date responses** — The server timestamps its "your copy is current" answers, so terrain verified in one session stays verified in the next. This closes the loop where the same regions were re-checked on every single rejoin forever. Like the summary exchange, the stamps need both halves on v0.12.0 — they ride the client's summary subscription, so an older client (or one with `enableRegionSummarySync` off) simply keeps plain per-column revalidation. (On servers with the LOD store enabled, the stickiness lands one session later — the store's honest, older stamps take one extra verified rejoin to ratchet forward.)
 
+- **Xaero's World Map fills in beyond render distance** — With Xaero's World Map installed on the client, downloaded LOD terrain is also written into the world map, so the map records distant terrain instead of stopping at vanilla render distance. Works even without a LOD renderer: Xaero's Map plus this mod alone will download and map the terrain (that download is new for such installs). Client-side only, any server version, no hard dependency — the bridge switches off cleanly when Xaero isn't installed or its internals change.
+
 ### Performance
 
 - **Far lighter client memory** — The client's terrain-tracking state moves to a compact section-leaf layout: roughly 6-10× smaller at the default 512-chunk LOD distance, with smoother scanning and fewer render-thread hitches when teleporting or changing dimensions.
@@ -17,6 +19,7 @@
 
 - **`enableRegionSummaries`** (server, default on) and **`enableRegionSummarySync`** (client, in `lss-client-config.json`, default on) — kill switches for the new summary exchange.
 - **`enableQuadtreeScan`** (client, in `lss-client-config.json`, default on) — the new fast ring-scan path; disable to restore the per-position walk.
+- **`enableXaeroMapBridge`** (client, in `lss-client-config.json`, default on; also the "Write LODs to Xaero's Map" toggle on the Sodium options page) — the Xaero map bridge above. Map writes are saved map data: chunks near you stay Xaero's own and Xaero redraws its tiles whenever you revisit an area, but distant LOD-drawn tiles persist until you do — turn the toggle off before joining if you don't want that. On servers explored before this update, run `/lss clearcache` while connected to re-stream the terrain and backfill the map (a full re-download; the map fills progressively while it runs).
 
 ### Compatibility
 
