@@ -11,6 +11,7 @@
 ### Bug Fixes
 
 - **Replacing the mod jar on a running server no longer risks an unclean shutdown (Fabric)** — An internal diagnostics class could load for the first time during shutdown and fail if the jar had been swapped underneath, aborting the orderly stop and the final world save. It now loads only when that diagnostic is actually enabled.
+- **The join slow start now finishes on fast connections** — The client's adaptive transfer ramp could park permanently below full speed on healthy links: its own request cycle, not the network, was the bottleneck, and the ramp misread that ceiling as the link's. The client now recognizes the pattern and completes the ramp within about 40 seconds of joining, restoring the full request budget (roughly 25% more LOD throughput on affected sessions). Client-side — works against any server version.
 
 ### Configuration
 
