@@ -91,7 +91,9 @@ public class LSSClientConfig extends JsonConfig {
     // vanilla render distance. Inert without the xaeroworldmap mod; checked LIVE (the Sodium
     // toggle applies mid-session — flipping off clears the bridge's queue and, on the next
     // handshake, releases the voxel-columns capability bit an Xaero-only install held).
-    public boolean enableXaeroMapBridge = true;
+    // Default OFF for v0.12.0 (user decision 2026-08-23): opt-in while the feature is new —
+    // map writes are persistent saved data, so the surprise default is the cautious one.
+    public boolean enableXaeroMapBridge = false;
     // Ingest-pressure request pacing (issue #71, docs/planning/ingest-backpressure-design.md):
     // scale the want-set budget down — and halt declarations entirely at a threshold — when a
     // registered LOD consumer reports a pending ingest backlog (Voxy's ingest queue depth via
