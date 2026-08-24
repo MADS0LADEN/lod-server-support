@@ -194,11 +194,15 @@ class XaeroMapCompatTest {
                     "init must register the column consumer");
             assertNotNull(XaeroMapCompat.diagLine());
         } finally {
-            // Deregister the production consumer: session end with the toggle off.
+            // Deregister the production consumer: session end with the toggle off — the
+            // registration settle is the MAIN-THREAD half (sweep C), i.e. the next tick.
             cfg.enableXaeroMapBridge = false;
             XaeroMapCompat.onDisconnect();
+            XaeroMapCompat.clientTick();
             cfg.enableXaeroMapBridge = old;
             XaeroMapCompat.resetFacadeForTest();
+            assertFalse(dev.vox.lss.api.LSSApi.hasVoxelConsumers(),
+                    "the production consumer must not leak into other suites");
         }
     }
 
