@@ -129,6 +129,10 @@ final class XaeroTileExtractor {
                 BlockState finalState = scan.floorState == null ? AIR : scan.floorState;
                 floorState[i] = finalState;
                 floorY[i] = (short) (scan.floorState == null ? worldBottomY : scan.floorY);
+                // Xaero persists topHeight as ONE UNSIGNED BYTE (MapSaveLoad.savePixel) — a
+                // negative topY (a visible block below y=0, common in far End/void terrain)
+                // reloads wrong there. Native's own writer feeds the same field; cosmetic
+                // (slope shading only) — sweep B m6, recorded, not worked around.
                 topY[i] = (short) scan.topH;
                 biome[i] = column.biomeAt(x, scan.topH, z);
                 light[i] = scan.floorState == null ? 0 : scan.floorLight;

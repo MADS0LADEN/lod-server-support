@@ -1,0 +1,17 @@
+### Bug Fixes
+
+- **Fixes a client crash when writing LODs to Xaero's World Map** — Map writes could crash Xaero's map saver ("Trying to save cache for a region with cache not prepared"), about three times an hour on a busy client. The bridge now rebuilds map textures itself, only while the map region is idle.
+- **Map tiles can no longer leak between servers** — A tile still being prepared at the moment you disconnected could be written into the next server's saved map. It is now discarded with the rest of the session.
+- **Disconnecting abruptly no longer risks a client hang** — A timeout, connection reset or server crash tore the map bridge down from the network thread while the client was still using it. Teardown now completes on the main thread.
+- **The map bridge stops when Xaero has crashed internally** — It no longer keeps writing behind a map that Xaero has already given up on.
+- **The map bridge names its Xaero requirement** — Xaero's World Map 1.42.0 or newer is required; older versions silently did nothing. The log and the in-game tooltip now say so.
+
+### New Features
+
+- **The map bridge follows Xaero's own map-writing switches** — "Load New Chunks" and "Update Chunks" in Xaero's settings now gate LOD writes exactly as they gate Xaero's own, so a server that disables map writing is honored too.
+- **LOD map writes wait while the map shows a cave layer** — Tiles go to the map's surface layer, so writing pauses underground with auto cave mode and in the Nether by default, instead of writing tiles nobody can see.
+- **The in-game settings page works on both Sodium generations of this line** — Sodium 0.8.x (the Create+/Connector pairing) keeps LSS's own entry in Video Settings; Sodium 0.6.13 (the NeoForge Voxy-port pairing) gets LSS tabs beside Sodium's own. On Fabric it is also reachable from ModMenu's Configure button. On NeoForge only the Sodium 0.6/0.7 tabs exist so far (without the far-player render options, which NeoForge does not render yet).
+
+### Compatibility
+
+- Mixed client/server versions remain fully compatible in both directions. This is the one line shipping a NeoForge build (best-effort tier). (No Folia build exists for 1.21.1.)

@@ -123,4 +123,23 @@ class NeoForgeLoaderSeamContractTest {
                 "the render-path cut must stay RENDER-ONLY — arm/capability state is"
                         + " shared xplat code this twin must never touch");
     }
+
+    /**
+     * The NeoForge client wiring of the loader-neutral lifecycle (sweep C N2): the
+     * xplat pins cover ClientNetGlue's three call sites, but nothing pinned that THIS
+     * loader registers the tick pump, the disconnect settle and the compat init —
+     * deleting any of the three kills the Xaero bridge, far players and the client
+     * session with every test green.
+     */
+    @Test
+    void neoForgeClientWiresTheLifecycleTickAndCompatInit() throws IOException {
+        String boot = read("neoforge/src/main/java/dev/vox/lss/neoforge/LSSNeoClientBootstrap.java");
+        assertTrue(Pattern.compile("ClientTickEvent\\.Post\\.class,\\s*e -> ClientNetGlue\\.onEndClientTick\\(\\)").matcher(boot).find(),
+                "the end-of-client-tick pump must be registered on ClientTickEvent.Post");
+        assertTrue(Pattern.compile("ClientPlayerNetworkEvent\\.LoggingOut\\.class,\\s*e -> ClientNetGlue\\.onDisconnect\\(\\)").matcher(boot).find(),
+                "the disconnect settle must be registered on ClientPlayerNetworkEvent.LoggingOut");
+        assertTrue(Pattern.compile("ClientPlayerNetworkEvent\\.LoggingIn\\.class,\\s*e -> ClientNetGlue\\.onJoin\\(\\)").matcher(boot).find(),
+                "the join hook must be registered on ClientPlayerNetworkEvent.LoggingIn");
+        assertTrue(boot.contains("ModCompat.init();"), "the compat ladder (Xaero, Voxy) must be initialized");
+    }
 }

@@ -142,6 +142,8 @@ class XaeroTileExtractorTest {
         assertEquals(BOTTOM_Y, tile.topY()[i], "void pixels never raise topHeight");
         assertEquals(0, tile.light()[i]);
         assertNull(tile.overlays()[i]);
+        assertNull(tile.biome()[i], "no section = no biome: Xaero null-guards it at every consumer"
+                + " (MapBlock.write, the texture palette, the biome color calculator)");
     }
 
     @Test
