@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -133,6 +134,10 @@ class XaeroMapCompatTest {
     @AfterEach
     void tearDownStubStatics() {
         WorldMapSession.current = null;
+        xaero.map.WorldMap.crashHandler.crashedBy = null;
+        xaero.map.common.config.option.WorldMapProfiledConfigOptions.LOAD_NEW_CHUNKS.value = true;
+        xaero.map.common.config.option.WorldMapProfiledConfigOptions.UPDATE_CHUNKS.value = true;
+        xaero.map.region.MapTile.CURRENT_WORLD_INTERPRETATION_VERSION = 1;
         XaeroStubEvents.clear();
         XaeroMapCompat.resetFacadeForTest();
     }
@@ -1534,6 +1539,121 @@ class XaeroMapCompatTest {
 
     // ---- diag ----
 
+    // ---- the compatibility sweep (plan §16): the native ladder's other gates ----
+
+    @Test
+    void aCrashedXaeroIsNeverTouched() {
+        offer(64, 64);
+        xaero.map.WorldMap.crashHandler.crashedBy = new RuntimeException("Xaero latched");
+        this.bridge.pump();
+        assertEquals(0, this.bridge.counterForTest("written"));
+        assertEquals(1, this.bridge.queuedForTest(), "retained, not dropped");
+        assertTrue(this.processor.regions.isEmpty(), "no region lookup, no monitors: " + XaeroStubEvents.snapshot());
+        assertEquals(1, this.bridge.counterForTest("xaero_crashed"));
+        assertTrue(this.bridge.describe().contains("xaero_crashed=true"));
+        xaero.map.WorldMap.crashHandler.crashedBy = null;
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("written"));
+        assertEquals(0, this.bridge.counterForTest("xaero_crashed"));
+    }
+
+    @Test
+    void loadNewChunksOffRefusesNewTilesAndUpdateChunksOffRefusesRewrites() {
+        var options = xaero.map.common.config.option.WorldMapProfiledConfigOptions.class;
+        // A new tile needs "Load New Chunks".
+        xaero.map.common.config.option.WorldMapProfiledConfigOptions.LOAD_NEW_CHUNKS.value = false;
+        offer(64, 64);
+        this.bridge.pump();
+        assertEquals(0, this.bridge.counterForTest("written"));
+        assertEquals(1, this.bridge.counterForTest("skipped_settings"));
+        assertEquals(0, this.bridge.queuedForTest(), "refused entries drop (a re-serve refills them)");
+        var region = theRegion();
+        assertNotNull(region.getChunk(0, 0), "the tile chunk was created before the per-chunk gate — the native order");
+        assertNull(region.getChunk(0, 0).getTile(0, 0));
+        assertEquals(0, this.bridge.counterForTest("pending_updates"), "nothing owed for a refused tile");
+        // Switched back on: the tile writes.
+        xaero.map.common.config.option.WorldMapProfiledConfigOptions.LOAD_NEW_CHUNKS.value = true;
+        offer(64, 64);
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("written"));
+        // An EXISTING tile needs "Update Chunks" — Load New Chunks alone does not allow a rewrite.
+        xaero.map.common.config.option.WorldMapProfiledConfigOptions.UPDATE_CHUNKS.value = false;
+        offer(64, 64);
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("written"));
+        assertEquals(2, this.bridge.counterForTest("skipped_settings"));
+        // ...while a new tile still writes under Load New Chunks.
+        offer(65, 64);
+        this.bridge.pump();
+        assertEquals(2, this.bridge.counterForTest("written"));
+        assertNotNull(options);
+    }
+
+    @Test
+    void bothSwitchesOffDropTheBacklogButStillFlushOwedRebuilds() {
+        this.bridge.updateIdlePumps = 1;
+        offer(64, 64);
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("pending_updates"));
+        xaero.map.common.config.option.WorldMapProfiledConfigOptions.LOAD_NEW_CHUNKS.value = false;
+        xaero.map.common.config.option.WorldMapProfiledConfigOptions.UPDATE_CHUNKS.value = false;
+        offer(68, 64);
+        offer(72, 64);
+        this.bridge.pump();
+        assertEquals(0, this.bridge.queuedForTest(), "the native ladder returns: our backlog drops");
+        assertEquals(2, this.bridge.counterForTest("skipped_settings"));
+        assertEquals(1, this.bridge.counterForTest("written"));
+        assertEquals(1, this.bridge.counterForTest("buffer_updates"),
+                "a rebuild already owed to a written tile chunk still runs — never a blank tile");
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
+    }
+
+    @Test
+    void theOptionalSurfaceIsOptional() throws Exception {
+        XaeroMapCompat.ClassResolver withoutOptional = name -> {
+            if (name.startsWith("xaero.lib.") || name.equals("xaero.map.WorldMap")
+                    || name.equals("xaero.map.CrashHandler")) {
+                throw new ClassNotFoundException(name);
+            }
+            return Class.forName(name);
+        };
+        var handles = XaeroMapCompat.Handles.resolve(withoutOptional);
+        assertNull(handles.crashGate);
+        assertNull(handles.settingsGate);
+        assertEquals(1, handles.interpretationVersion);
+        assertEquals("crash-gate settings-gate", handles.optionalMissing);
+        var reduced = new XaeroMapCompat(handles, this.fakeLevelOps, () -> this.enabled,
+                () -> this.sessionActive, this.registered::add, this.registered::remove);
+        reduced.pumpNanosBudget = Long.MAX_VALUE;
+        reduced.updateNanosBudget = Long.MAX_VALUE;
+        reduced.maybeRegister();
+        // Both switches off AND a latched crash: the reduced bridge cannot see either and
+        // keeps the pre-§16 behavior — it writes (the floor is unchanged).
+        xaero.map.common.config.option.WorldMapProfiledConfigOptions.LOAD_NEW_CHUNKS.value = false;
+        xaero.map.common.config.option.WorldMapProfiledConfigOptions.UPDATE_CHUNKS.value = false;
+        xaero.map.WorldMap.crashHandler.crashedBy = new RuntimeException("latched");
+        reduced.offerPrepared(OVERWORLD, tile(64, 64));
+        reduced.pump();
+        assertEquals(1, reduced.counterForTest("written"));
+        assertTrue(reduced.describe().contains("optional_unbound=crash-gate settings-gate"), reduced.describe());
+    }
+
+    @Test
+    void theInterpretationVersionIsReadFromXaeroNotALiteral() throws Exception {
+        xaero.map.region.MapTile.CURRENT_WORLD_INTERPRETATION_VERSION = 7;
+        var handles = XaeroMapCompat.Handles.resolve(Class::forName);
+        assertEquals(7, handles.interpretationVersion);
+        var bridge7 = new XaeroMapCompat(handles, this.fakeLevelOps, () -> this.enabled,
+                () -> this.sessionActive, this.registered::add, this.registered::remove);
+        bridge7.pumpNanosBudget = Long.MAX_VALUE;
+        bridge7.updateNanosBudget = Long.MAX_VALUE;
+        bridge7.maybeRegister();
+        bridge7.offerPrepared(OVERWORLD, tile(64, 64));
+        bridge7.pump();
+        assertTrue(XaeroStubEvents.snapshot().contains("tile.setWorldInterpretationVersion 7"),
+                "a Xaero bump must reach the tiles: " + XaeroStubEvents.snapshot());
+    }
+
     @Test
     void describeRendersTheHouseStyle() {
         var line = this.bridge.describe();
@@ -1542,7 +1662,9 @@ class XaeroMapCompatTest {
                 && line.contains(", dropped=") && line.contains(", commit_failures=")
                 && line.contains(", regions_waiting=") && line.contains(", buffer_updates=")
                 && line.contains(", pending_updates=") && line.contains(", dropped_updates=")
-                && line.contains(", dropped_unloaded="), line);
+                && line.contains(", dropped_unloaded=") && line.contains(", skipped_settings="), line);
+        assertFalse(line.contains("xaero_crashed"), "the crash token appears only while latched");
+        assertFalse(line.contains("optional_unbound"), "every optional group binds against the stubs");
         this.enabled = false;
         assertTrue(this.bridge.describe().contains("state=disabled"));
     }

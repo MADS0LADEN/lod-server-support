@@ -2,6 +2,9 @@ package xaero.map.region;
 
 /** Tier-1 stub. */
 public class MapTile {
+    /** The real field is static FINAL; non-final here so a test can vary the value the
+     *  bridge reads reflectively at resolve time. */
+    public static int CURRENT_WORLD_INTERPRETATION_VERSION = 1;
     public final int chunkX;
     public final int chunkZ;
     public final MapBlock[][] blocks = new MapBlock[16][16];

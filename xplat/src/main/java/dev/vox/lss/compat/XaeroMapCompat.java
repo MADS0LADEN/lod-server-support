@@ -219,7 +219,7 @@ final class XaeroMapCompat {
                  | IllegalAccessException e) {
             resolveFailed = true;
             LSSLogger.warn("Xaero map bridge: this Xaero's World Map version has a different"
-                    + " internal surface — bridge disabled (" + e + ")");
+                    + " internal surface (the bridge needs 1.42.0 or newer) — bridge off:", e);
             return false;
         } catch (Throwable e) {
             resolveFailed = true;
@@ -309,6 +309,13 @@ final class XaeroMapCompat {
      *  first — its own counter (review A) so the live test can tell a parking race
      *  from the stall/dimension/session drops. */
     private final AtomicLong droppedUnloaded = new AtomicLong();
+    /** Entries the user's own Xaero map-writing switches refused (plan §16): "Load New
+     *  Chunks" off for a new tile, "Update Chunks" off for an existing one, or both off. */
+    private final AtomicLong skippedSettings = new AtomicLong();
+    /** Xaero has latched an internal crash (its CrashHandler) — the native writer's
+     *  first gate; the bridge idles until it clears (it never does: Xaero re-throws it
+     *  on the next render pass). Diag-visible. */
+    private volatile boolean xaeroCrashed;
     private volatile int pendingUpdatesGauge;
     /** Rotating drain start (the IncomingRequestRouter M4 precedent): without it a
      *  permanently-deferring queue prefix starves committable entries forever. */
@@ -583,6 +590,8 @@ final class XaeroMapCompat {
             case "buffer_updates" -> this.bufferUpdates.get();
             case "dropped_updates" -> this.droppedUpdates.get();
             case "dropped_unloaded" -> this.droppedUnloaded.get();
+            case "skipped_settings" -> this.skippedSettings.get();
+            case "xaero_crashed" -> this.xaeroCrashed ? 1 : 0;
             case "pending_updates" -> this.pendingUpdatesGauge;
             default -> throw new IllegalArgumentException(name);
         };
@@ -603,7 +612,10 @@ final class XaeroMapCompat {
                 + ", buffer_updates=" + this.bufferUpdates.get()
                 + ", pending_updates=" + this.pendingUpdatesGauge
                 + ", dropped_updates=" + this.droppedUpdates.get()
-                + ", dropped_unloaded=" + this.droppedUnloaded.get();
+                + ", dropped_unloaded=" + this.droppedUnloaded.get()
+                + ", skipped_settings=" + this.skippedSettings.get()
+                + (this.xaeroCrashed ? ", xaero_crashed=true" : "")
+                + (this.h.optionalMissing != null ? ", optional_unbound=" + this.h.optionalMissing : "");
     }
 
     // ---- the pump (main client thread) ----
@@ -656,6 +668,16 @@ final class XaeroMapCompat {
         if (session == null || !(boolean) this.h.sessionIsUsable.invoke(session)) return;
         Object mp = this.h.getMapProcessor.invoke(session);
         if (mp == null) return;
+        if (this.h.crashGate != null) {
+            // The native writer's FIRST gate (MapWriter.onRender pc 4-10): never touch a
+            // Xaero that has latched an internal crash (plan §16, sweep A).
+            Object handler = this.h.crashGate.crashHandler().invoke();
+            if (handler != null && this.h.crashGate.getCrashedBy().invoke(handler) != null) {
+                this.xaeroCrashed = true;
+                return;
+            }
+        }
+        this.xaeroCrashed = false;
         Object renderPause = this.h.renderThreadPauseSync.invoke(mp);
         synchronized (renderPause) {
             if ((boolean) this.h.isWritingPaused.invoke(mp)) return;
@@ -673,6 +695,31 @@ final class XaeroMapCompat {
                     || (boolean) this.h.ignoreWorld.invoke(mp, world)) {
                 return;
             }
+            // The user's own map-writing switches, read exactly as the native ladder reads
+            // them (plan §16, sweep A): "Load New Chunks" gates NEW tiles, "Update Chunks"
+            // gates rewrites of EXISTING ones (writeChunk's per-chunk checks); both off =
+            // the native ladder returns — ours drops the backlog (the toggle semantics; a
+            // re-serve refills it when writing is switched back on). Unresolvable on this
+            // Xaero (optional surface) = both open, i.e. the pre-§16 behavior.
+            boolean loadNew = true;
+            boolean update = true;
+            if (this.h.settingsGate != null) {
+                var g = this.h.settingsGate;
+                Object manager = g.getClientConfigManager().invoke(g.getConfigs().invoke(g.instance().invoke()));
+                loadNew = Boolean.TRUE.equals(g.getEffective().invoke(manager, g.loadNewChunks().invoke()));
+                update = Boolean.TRUE.equals(g.getEffective().invoke(manager, g.updateChunks().invoke()));
+                if (!loadNew && !update) {
+                    int n;
+                    synchronized (this.queueLock) {
+                        n = this.queue.size();
+                    }
+                    clearQueue();
+                    this.skippedSettings.addAndGet(n);
+                    this.regionsWaiting = 0;
+                    flushPendingUpdates(mp, currentDimensionUnchecked(mapWorld));
+                    return;
+                }
+            }
             Object dimensionId;
             Object mainSync = this.h.mainStuffSync.invoke(mp);
             synchronized (mainSync) {
@@ -682,8 +729,14 @@ final class XaeroMapCompat {
             }
             flushPendingUpdates(mp, dimensionId);
             if (this.dead) return;
-            drainEntries(mp, saveLoad, world, dimensionId);
+            drainEntries(mp, saveLoad, world, dimensionId, loadNew, update);
         }
+    }
+
+    /** The current dimension id for the owed-rebuild flush on the both-switches-off path
+     *  (rebuilds already OWED still run — written tiles must not stay blank). */
+    private Object currentDimensionUnchecked(Object mapWorld) throws Throwable {
+        return this.h.getCurrentDimensionId.invoke(mapWorld);
     }
 
     /** One queue entry paired with its key for the bucketed drain. */
@@ -711,7 +764,8 @@ final class XaeroMapCompat {
      * degenerate budget drains the queue over pumps instead of live-locking.
      */
     private void drainEntries(Object mp, Object saveLoad,
-                              Object world, Object dimensionId) throws Throwable {
+                              Object world, Object dimensionId,
+                              boolean loadNew, boolean update) throws Throwable {
         long start = System.nanoTime();
 
         List<Pending> snapshot;
@@ -768,7 +822,7 @@ final class XaeroMapCompat {
                     continue;
                 }
                 progressed = true;
-                var outcome = commitEntry(mp, dimensionId, pending.tile());
+                var outcome = commitEntry(mp, dimensionId, pending.tile(), loadNew, update);
                 switch (outcome) {
                     case COMMITTED -> {
                         removeIfCurrent(pending.key(), pending.entry(), pending.tile());
@@ -809,6 +863,12 @@ final class XaeroMapCompat {
                         this.deferEvents.incrementAndGet();
                         waiting.add(new WaitingRegion(regionKey, bucket.size(), outcome));
                         continue bucketLoop;
+                    }
+                    case SKIPPED_SETTINGS -> {
+                        // The user's Xaero switch refused this tile (new vs existing) —
+                        // dropped, counted; a re-serve brings it back when switched on.
+                        removeIfCurrent(pending.key(), pending.entry(), pending.tile());
+                        this.skippedSettings.incrementAndGet();
                     }
                     case FAILED -> {
                         // Possibly entry-specific (a hostile state) — drop it and keep
@@ -944,7 +1004,7 @@ final class XaeroMapCompat {
     private enum Outcome {
         COMMITTED, DEFERRED, DEFERRED_TILE,
         AWAITING_REQUESTABLE, AWAITING_PARKED, AWAITING_IN_FLIGHT,
-        FAILED
+        SKIPPED_SETTINGS, FAILED
     }
 
     /**
@@ -959,7 +1019,8 @@ final class XaeroMapCompat {
      * same monitor read.
      */
     private Outcome commitEntry(Object mp, Object dimensionId,
-                                XaeroTileExtractor.PreparedTile tile) {
+                                XaeroTileExtractor.PreparedTile tile,
+                                boolean loadNew, boolean update) {
         try {
             int chunkX = tile.chunkX();
             int chunkZ = tile.chunkZ();
@@ -1018,9 +1079,9 @@ final class XaeroMapCompat {
                     return Outcome.DEFERRED_TILE;
                 }
 
-                commitPixels(mp, dimensionId, region, tileChunk, createdTileChunk,
-                        localTcX, localTcZ, tile);
-                return Outcome.COMMITTED;
+                return commitPixels(mp, dimensionId, region, tileChunk, createdTileChunk,
+                        localTcX, localTcZ, tile, loadNew, update)
+                        ? Outcome.COMMITTED : Outcome.SKIPPED_SETTINGS;
             }
         } catch (Throwable t) {
             if (t instanceof Error err && !(t instanceof AssertionError)) throw err;
@@ -1029,13 +1090,20 @@ final class XaeroMapCompat {
         }
     }
 
-    /** The decompiled per-tile commit sequence, verbatim order (plan §1). */
-    private void commitPixels(Object mp, Object dimensionId, Object region, Object tileChunk,
-                              boolean createdTileChunk, int localTcX, int localTcZ,
-                              XaeroTileExtractor.PreparedTile tile) throws Throwable {
+    /** The decompiled per-tile commit sequence, verbatim order (plan §1); false when the
+     *  native per-chunk switches refuse the tile (writeChunk pc 577-604: a NEW tile needs
+     *  "Load New Chunks", an EXISTING one "Update Chunks" — the tile chunk creation before
+     *  this point mirrors the native order too). */
+    private boolean commitPixels(Object mp, Object dimensionId, Object region, Object tileChunk,
+                                 boolean createdTileChunk, int localTcX, int localTcZ,
+                                 XaeroTileExtractor.PreparedTile tile,
+                                 boolean loadNew, boolean update) throws Throwable {
         int insideX = tile.chunkX() & 3;
         int insideZ = tile.chunkZ() & 3;
         Object mapTile = this.h.getTile.invoke(tileChunk, insideX, insideZ);
+        if (mapTile == null ? !loadNew : !update) {
+            return false;
+        }
         if (mapTile == null) {
             Object pool = this.h.getTilePool.invoke(mp);
             String dimensionToken = (String) this.h.getCurrentDimension.invoke(mp);
@@ -1063,7 +1131,7 @@ final class XaeroMapCompat {
                 this.h.setBlock.invoke(mapTile, x, z, block);
             }
         }
-        this.h.setWorldInterpretationVersion.invoke(mapTile, 1);
+        this.h.setWorldInterpretationVersion.invoke(mapTile, this.h.interpretationVersion);
         this.h.setWrittenCave.invoke(mapTile, SURFACE_LAYER,
                 (int) this.h.getCaveModeDepthConfig.invoke(mp));
         this.h.tileChunkSetChanged.invoke(tileChunk, true);
@@ -1088,6 +1156,7 @@ final class XaeroMapCompat {
         // save cache for a region with cache not prepared", 3 crashes/hour live).
         notePendingUpdate(mp, dimensionId, region, tileChunk, localTcX, localTcZ,
                 tile.chunkX() >> 2, tile.chunkZ() >> 2);
+        return true;
     }
 
     // ---- the rebuild phase (plan §15) ----
@@ -1367,6 +1436,26 @@ final class XaeroMapCompat {
         final MethodHandle newMapTileChunk;
         final MethodHandle tileChunkGetLoadState;
         final MethodHandle tileChunkSetLoadState;
+        // ---- OPTIONAL surface (plan §16, the compatibility sweep): each group resolves
+        // best-effort and is null when this Xaero lacks it — a miss never raises the
+        // 1.42.0 floor, it just leaves that gate open (the pre-§16 behavior). ----
+        /** {@code WorldMap.crashHandler} + {@code CrashHandler.getCrashedBy()}. */
+        record CrashGate(MethodHandle crashHandler, MethodHandle getCrashedBy) {}
+        /** The native ladder's settings read: {@code WorldMap.INSTANCE.getConfigs()
+         *  .getClientConfigManager().getEffective(WorldMapProfiledConfigOptions.X)} —
+         *  the channel/manager classes live in the jarjar'd xaerolib, bound by
+         *  name+arity because its version differs per line. */
+        record SettingsGate(MethodHandle instance, MethodHandle getConfigs,
+                            MethodHandle getClientConfigManager, MethodHandle getEffective,
+                            MethodHandle loadNewChunks, MethodHandle updateChunks) {}
+        final CrashGate crashGate;
+        final SettingsGate settingsGate;
+        /** {@code MapTile.CURRENT_WORLD_INTERPRETATION_VERSION}, read live (a javac literal
+         *  would silently lag a bump); 1 when unreadable. */
+        final int interpretationVersion;
+        /** Which optional groups did not bind, for the diag line; null = all bound. */
+        final String optionalMissing;
+
         final MethodHandle tileChunkSetChanged;
         final MethodHandle tileChunkWasChanged;
         final MethodHandle tileChunkUpdateBuffers;
@@ -1597,6 +1686,53 @@ final class XaeroMapCompat {
                                     boolean.class))
                     .asType(MethodType.methodType(void.class, Object.class, Object.class,
                             int.class, int.class, boolean.class));
+
+            // ---- optional groups ----
+            StringBuilder missing = new StringBuilder();
+            CrashGate crash = null;
+            try {
+                Class<?> worldMapClass = resolver.resolve("xaero.map.WorldMap");
+                Class<?> crashHandlerClass = resolver.resolve("xaero.map.CrashHandler");
+                crash = new CrashGate(
+                        lookup.unreflectGetter(worldMapClass.getField("crashHandler"))
+                                .asType(MethodType.methodType(Object.class)),
+                        methodByName(lookup, crashHandlerClass, "getCrashedBy", 0));
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                missing.append("crash-gate ");
+            }
+            SettingsGate settings = null;
+            try {
+                Class<?> worldMapClass = resolver.resolve("xaero.map.WorldMap");
+                Class<?> channelClass = resolver.resolve("xaero.lib.common.config.channel.ConfigChannel");
+                Class<?> managerClass = resolver.resolve("xaero.lib.client.config.ClientConfigManager");
+                Class<?> optionsClass = resolver.resolve("xaero.map.common.config.option.WorldMapProfiledConfigOptions");
+                settings = new SettingsGate(
+                        lookup.unreflectGetter(worldMapClass.getField("INSTANCE"))
+                                .asType(MethodType.methodType(Object.class)),
+                        methodByName(lookup, worldMapClass, "getConfigs", 0),
+                        methodByName(lookup, channelClass, "getClientConfigManager", 0),
+                        methodByName(lookup, managerClass, "getEffective", 1),
+                        lookup.unreflectGetter(optionsClass.getField("LOAD_NEW_CHUNKS"))
+                                .asType(MethodType.methodType(Object.class)),
+                        lookup.unreflectGetter(optionsClass.getField("UPDATE_CHUNKS"))
+                                .asType(MethodType.methodType(Object.class)));
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                missing.append("settings-gate ");
+            }
+            int version = 1;
+            try {
+                version = tileClass.getField("CURRENT_WORLD_INTERPRETATION_VERSION").getInt(null);
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                missing.append("interpretation-version ");
+            }
+            this.crashGate = crash;
+            this.settingsGate = settings;
+            this.interpretationVersion = version;
+            this.optionalMissing = missing.isEmpty() ? null : missing.toString().trim();
+            if (this.optionalMissing != null) {
+                LSSLogger.warn("Xaero map bridge: optional Xaero surface not bound on this version ("
+                        + this.optionalMissing + ") — those gates stay open");
+            }
         }
 
         /** Exact-typed no-arg virtual, adapted to an Object receiver. */
