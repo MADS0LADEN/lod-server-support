@@ -1385,3 +1385,80 @@ Recorded, not changed:
   on at least one line.
 - **Iris shadow-pass double-fire** can run the frame slice twice per frame —
   each invocation is capped and allowance-metered, so the ceiling holds.
+
+## 18. The dropped-tile heal (2026-08-24, field-test round 4 — far-radius drops)
+
+Field report (26.2 and expected on all lines, 91-minute 34 GB fill session):
+`written=892459, dropped=159512` — ~15% of all tiles dropped, visibly missing
+from the map, onset ~5979 blocks (~chunk ring 374) and "a lot" beyond. The §14
+round widened the survival window (8192-entry queue, 8-deep load window,
+priority front-inserts) but the far-radius regime still overwhelms it: a ring
+at r≈380 crosses ~95 regions at once, a re-stream over EXISTING map files is
+expensive-load-bound at the loader's ~10/s drain, and Xaero's limiter parks
+far regions between loads — tiles pile up awaiting their regions and the
+bounded queue evicts the oldest (plus ladder-ready `DEFER_CAP` expiries). The
+drops were PERMANENT: the positions are stamped client-side and nothing ever
+re-serves them.
+
+Why not report at drop time: `LSSApi.reportIngestFailure` is the designed
+bounded re-serve channel (`ColumnStateMap.MAX_INGEST_FAILURES` = 3, then the
+position parks) — but re-serves land ~1-2 s after a report, while a far-radius
+saturation phase persists for minutes; naive report-on-drop burns all three
+retries into the same full queue and parks the holes anyway (with 2-3× the
+serve traffic as pure waste).
+
+The heal (`enableXaeroMapBridgeHeal`, client config, default ON; inert with
+the bridge off):
+
+- **The ledger**: dropped positions are remembered per region — a
+  `DroppedLedger` of 1024 bits over the region's 32×32 chunk grid (~160 B),
+  keyed by region in insertion order, guarded by `queueLock` (decode-thread
+  evictions and the offerColumn full-queue pre-gate record; main-thread
+  deferral expiries record via a brief lock). Capped at `LEDGER_MAX_REGIONS`
+  (4096, ≈ a radius-1000 disc): beyond it the oldest region's holes stay
+  permanent — the pre-§18 behavior.
+- **Flush only when committable**: after the drain and before the grants
+  (`healPhase`), regions that COMMITTED this pump flush their ledger sets
+  first (the region is provably accepting writes); then ONE further ledger
+  region per pump is probed under the commit probe's monitors — loaded (state
+  2) flushes now (plus a `registerVisit` to hold the park off), requestable/
+  parked joins the GRANT list at zero cluster size (real queue work outranks
+  it in the largest-first window sort) and stays at the ledger head so the
+  granted load flushes within a few pumps (a 100-probe belt rotates a wedged
+  head to the tail; a head in another dimension rotates immediately and
+  flushes after the player returns). Reports run inline on the main thread,
+  ≤ `LEDGER_FLUSH_PER_PUMP` (256) per pump; bits are cleared under the lock,
+  reports fire outside it. The heal phase is skipped while the rebuild hard
+  cap has commits paused — never add re-serves to an overloaded pump.
+- **Stale-dimension drain drops report immediately** (no ledger): their region
+  is only ever probed under the CURRENT map dimension, so a ledger entry would
+  rot; the re-serve lands after the player returns to that dimension.
+- **Teardowns never heal**: every `clearQueue` caller (session end, world-id
+  change, the death latch, the enable toggle, both-switches-off) clears the
+  ledger uncounted.
+- **The idle pump keeps running**: the pump's empty-early-return now also
+  requires an empty ledger — post-saturation (empty queue, no owed rebuilds)
+  the heal phase is what drains the backlog, at up to 20 probed regions/s and
+  the loader's ~10/s for loads, i.e. a 159k-drop session heals in a couple of
+  minutes of idling near the terrain.
+- **Bounds**: each healed position costs exactly one re-serve (one column,
+  ~30 KB) when it can land; re-dropped positions re-enter the ledger and burn
+  one of their 3 client retries per cycle — the client cap is the loop bound,
+  and it now bounds honest attempts instead of being burned by timing.
+  Client-side `ingest_failed` climbing during heavy map fills is EXPECTED with
+  the heal on (each report counts there).
+- **Instruments**: diag gains `dropped_overflow=`/`dropped_expired=` (the old
+  `dropped=` aggregate hid which class fired — the field report's 159k was
+  indistinguishable), `heal_pending=` (ledger positions owed) and
+  `heal_reported=`; all in `counterForTest` + the house-style pin. Seams:
+  `maxQueue`, `deferCap` (the §18 tests drive overflow/expiry without 8192
+  offers).
+
+Expected field shape on the 26.2 rig: during the far fill `heal_pending` grows
+into the thousands while `dropped_overflow` climbs; after the fill both drain
+toward zero as `heal_reported` catches up to the drop count, `ingest_failed`
+climbs by ≈ the same amount, and the map holes fill in. A `heal_pending` stuck
+high with `load_requests` flat means the probe/grant leg regressed; stuck with
+loads climbing means Xaero's loader is refusing (limiter pressure — check the
+region cache setting).
+
