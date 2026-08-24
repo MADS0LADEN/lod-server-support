@@ -101,11 +101,16 @@ CFR decompile output in `cfr-out262/`, XaeroPlus clone). Key findings:
   cave-mode-only); biome sampled at topHeight; void column =
   `write(AIR, worldBottomY, worldBottomY, biome, 0, false, false)`; slopes may
   stay `slopeUnknown` (self-heal at render).
-- **No direct `updateBuffers` needed**: `setChanged(true)` +
+- ~~**No direct `updateBuffers` needed**: `setChanged(true)` +
   `setToUpdateBuffers(true)` is sufficient — Xaero's `LeafRegionTexture.preUpload`
-  sweep performs the GPU work under its own locks/budget. This also shrinks the
-  reflective surface (no `BlockTintProvider`/`MapUpdateFastConfig`/
-  `BiomeColorCalculator` handles).
+  sweep performs the GPU work under its own locks/budget.~~ **SUPERSEDED by §15
+  (field-test round 3)**: the flag is consumed by the sweep with NO `isResting()`
+  check, i.e. possibly after the region was queued for cache-saving on prepared
+  textures — the saver then throws. The native writer only ever un-prepares a
+  region INSIDE its `isResting` gate (`updateBuffers` directly, at the (3,3)
+  chunk / the bottom neighbor); the bridge now does the same, coalesced per
+  tile chunk. `BlockTintProvider`/`MapUpdateFastConfig` joined the bound
+  surface for it.
 - **Persistence**: the MapRunner sweep saves being-written, terrain-bearing
   regions on its own cadence (`hasHadTerrain` propagates from
   `tileChunk.setHasHadTerrain()`), force-flushing on dimension finish. No
@@ -156,9 +161,10 @@ CFR decompile output in `cfr-out262/`, XaeroPlus clone). Key findings:
    same locks, the same gate ladder, and the same lifecycle flags. Where the
    decompiled `writeChunk` and this plan disagree, **the decompile is
    normative** — mirror it (CFR output is in the research scratchpad;
-   re-decompile on Xaero updates). No direct `updateBuffers`:
-   `setChanged(true)` + `setToUpdateBuffers(true)` and let Xaero's preUpload
-   sweep do GPU work (§1).
+   re-decompile on Xaero updates). Texture rebuilds are OURS, like the native
+   writer's: `updateBuffers` under the same gates, coalesced per tile chunk
+   (§15) — never the `setToUpdateBuffers` flag (its sweep-side consumption
+   escapes `isResting`, the cache-not-prepared crash).
 4. **Two-stage pipeline, budgeted.** Stage 1 (LSS decode thread, inside the
    consumer callback): extract a compact immutable `PreparedTile` — per pixel:
    floor BlockState, height, topHeight, biome, block-light byte, plus the fluid
@@ -366,8 +372,12 @@ was in the original list — REMOVED by §14, never resolved as-built).
 `canRequestReload_unsynced()`, `setAllCachePrepared(boolean)`, `getChunk(...)`.
 `MapTileChunk`: ctor, `getTile`/`setTile(int, int, MapTile,
 BlockStateShortShapeCache, MapProcessor)`, `setLoadState(byte)`,
-`setChanged(boolean)`, `setToUpdateBuffers(boolean)`, `setHasHadTerrain()`,
-`getLoadState()`, `getLeafTexture()` (+ `shouldDownloadFromPBO()`).
+`setChanged(boolean)`, `wasChanged()`, `updateBuffers(MapProcessor,
+BlockTintProvider, OverlayManager, boolean, BlockStateShortShapeCache,
+MapUpdateFastConfig)` (§15 — replaced `setToUpdateBuffers(boolean)`, which is
+never bound now), `setHasHadTerrain()`, `getLoadState()`, `getLeafTexture()`
+(+ `shouldDownloadFromPBO()`). Rebuild inputs (§15): `MapProcessor.
+getWorldBlockTintProvider()` and the `MapUpdateFastConfig(MapProcessor)` ctor.
 `MapTile`: ctor/pool source, `setBlock`, `getBlock`,
 `setWorldInterpretationVersion(int)`, `setWrittenCave(int, int)`,
 `setWrittenOnce`, `setLoaded`. `MapBlock`: ctor, `prepareForWriting(int)`,
@@ -386,9 +396,9 @@ MapRegion,int,int,boolean)` (the createdTileChunk block), `MapProcessor.
 getCaveModeDepthConfig()` (setWrittenCave's live depth — mirroring the config
 avoids a spurious native rewrite delta), `MapTileChunk.includeInSave()`,
 `MapRegion.setChunk(int,int,MapTileChunk)`. Deliberately ABSENT:
-`updateBuffers`, `addToRefresh`, `BlockTintProvider`, `MapUpdateFastConfig`,
-`BiomeColorCalculator` (§1 — Xaero's own sweeps handle textures/refresh/save
-once the flags are set), and — since §14 — the ENTIRE shared load-pacing
+`addToRefresh`, `BiomeColorCalculator` (Xaero's own sweeps handle
+refresh/save; `updateBuffers` + its two input types were absent until §15
+made the rebuild ours), and — since §14 — the ENTIRE shared load-pacing
 surface: `shouldAllowAnotherRegionToLoad`/`getNextToLoadByViewing` (the
 branch-region monitor deadlock class, gone structurally) AND
 `setNextToLoadByViewing` (the 3-Opus fold: the loader never reads the token —
@@ -429,7 +439,10 @@ BUCKET per pump for region-scoped flavors, one per entry for tile-chunk-scoped
 DROPS, never attempts), `commit_failures` — split out because it is the only
 pre-death failure signal, unlike the benign drop flavors — `load_requests`,
 `queued` gauge, `regions_waiting` gauge — waiting regions as PROBED by the last
-pump, a lower bound under budget truncation) + `state` (active / unavailable
+pump, a lower bound under budget truncation; since §15 `buffer_updates` (texture
+rebuilds run), `pending_updates` gauge (rebuilds owed) and `dropped_updates`
+(owed rebuilds dropped: wrong dimension / unloaded or replaced tile chunk /
+a region that never rested for ~60 s)) + `state` (active / unavailable
 / dead / disabled), surfaced ONLY in the client `/lss diag` conditional line
 (comma-separated, the house style) — no exporter/soak schema churn. The
 `unavailable` state is the RESOLVE-FAILED case (Xaero present, internals
@@ -805,3 +818,101 @@ rigor) over the first cut. All findings folded; the decisive reshapes:
   requestLoad is impossible (remove+add(0) dedupe + canRequestReload guard);
   unbounded toLoad growth is impossible; the filter walk was ~1× not 9×
   isChunkLoaded per entry (nativelyWritable short-circuits on the center).
+
+## 15. Field-test round 3 (2026-08-23, the saver crash — AMENDS §1/§2.3/§4/§6 in place)
+
+Three client crashes in ~1 h on the lss-test-1.21.11 instance (Xaero WM 1.45.0,
+bridge `state=active`, `commit_failures=0` in every pre-crash diag), all the
+same shape and all off the MapRunner thread:
+`RuntimeException: Trying to save cache for a region with cache not prepared:
+(…) 1_-6 L0 xaero.map.region.MapRegion@… 2 64` (then `-11_9 … 3 64`,
+`-1_-7 … 2 64`) — `MapSaveLoad.run`'s cache section (1.45.0 line 1191). Three
+different regions, loadStates 2/3/2: not a corrupt region, a protocol race.
+
+**Mechanism (1.45.0 bytecode, javap — every claim below is from it):**
+
+- The render loop (`MapProcessor.onRenderProcess`, ALL `toProcess` regions each
+  frame, under the region monitor) queues a region for caching when
+  `shouldCache && recacheHasBeenRequested && isAllCachePrepared && !isRefreshing`
+  (`MapSaveLoad.requestCache`). The saver later pops it and THROWS if
+  `!isAllCachePrepared()` — there is no re-check, no requeue.
+- `MapTileChunk.updateBuffers` (the 64×64 texture rebuild; render-thread-only —
+  it throws "Wrong thread!" otherwise) ends with `region.setAllCachePrepared(false)`.
+  So any rebuild landing between the queueing and the pop crashes the saver.
+- What keeps the NATIVE writer out of that window: `MapRegion.isResting()` =
+  `loadState ∉ {1,3} && !recacheHasBeenRequested`, and `writeChunk` writes (and
+  rebuilds — `updateBuffers` directly on the written tile chunk at inside (3,3)
+  and on the bottom neighbor, both inside the same `isResting` gate) ONLY while
+  resting. A cache request implies `recacheHasBeenRequested`, so a native
+  rebuild can never flip a queued region. (Its right/bottom-right neighbors are
+  only FLAGGED — the same exposure, which is why this crash class exists
+  upstream at all; rare natively because those flags are consumed within a
+  frame for the player's own region.)
+- The bridge's v1 pattern (§1, "no direct updateBuffers needed") set
+  `setToUpdateBuffers(true)` on EVERY written tile chunk and left the rebuild to
+  `LeafRegionTexture.preUpload`. That sweep is gated by the writer-pause
+  monitors but NOT by `isResting` — and it runs under a per-frame upload
+  budget, so the flag can linger for frames. Sequence: commit (flag set,
+  `beingWritten`) → the saver saves the region (`recacheHasBeenRequested`,
+  `shouldCache`, `beingWritten=false`) → the render loop sees the textures
+  still prepared+uploaded from before, queues the cache → a later frame's sweep
+  consumes our flag → `updateBuffers` → `allCachePrepared=false` → the saver pops
+  → throw. At LOD scale (hundreds of regions written across many pumps, each
+  saved several times while still being written) the window is hit constantly.
+
+**Fix — the rebuild is OURS, like the native writer's, coalesced per tile chunk:**
+
+- The flag is never set. `commitPixels` leaves the tile chunk in the native
+  transient state (`changed=true`, unflagged — every non-(3,3) native chunk
+  write sits there too) and records it in `pendingUpdates` (keyed by tile-chunk
+  coords, last-touch ordered).
+- `flushPendingUpdates` runs at the top of every pump ladder pass (before the
+  commit drain; ALSO when the queue is empty and when the bridge was just
+  disabled — a rebuild owed to a written tile chunk must never be dropped).
+  A rebuild is DUE when its tile chunk went `UPDATE_IDLE_PUMPS` (40, ~2 s)
+  without a new tile, or it is the oldest beyond `PENDING_UPDATES_SOFT_CAP`
+  (256), or it stalled before. Each due rebuild re-runs the writer's own
+  region gates — `writerThreadPauseSync` + `!isWritingPaused()`, the region
+  monitor, `isResting()` — so it can never land inside the cache window (the
+  whole point); a not-resting region keeps the entry for a later pump (a
+  region that never rests for `UPDATE_MAX_STALL_PUMPS` ≈ 60 s drops it,
+  counted — the texture self-heals on reload); an unloaded (loadState≠2) or
+  replaced tile chunk drops it (a reload rebuilds its own textures); a wrong-
+  dimension entry drops it (the pixel recipe reads the CURRENT world). Then:
+  `setBeingWritten(true)` (a save may have reset it since the commit — the
+  rebuilt texture must reach the region cache, and the save path is what
+  requests the recache), `if (wasChanged()) { updateBuffers(mp,
+  getWorldBlockTintProvider(), getOverlayManager(), false /* the writer's
+  detailed-debug flag, log-only */, getBlockStateShortShapeCache(),
+  new MapUpdateFastConfig(mp)); setChanged(false); }` — exactly the native
+  call, args resolved once per flush like the native per-pass config snapshot.
+- Budgets: the rebuild phase has its own `UPDATE_NANOS_BUDGET` (2 ms, ≥1 per
+  pump) so the commit budget is untouched; at `PENDING_UPDATES_HARD_CAP` (1024)
+  owed rebuilds, COMMITS pause until the flush drains (never an unbounded set).
+  Cost model: a rebuild is the expensive half of a native write (4096 pixels
+  through `getPixelColour`, biome blending included); per-tile direct calls
+  would have been 16 rebuilds per tile chunk — coalescing over the spiral's
+  ~4-tiles-per-ring-per-tile-chunk delivery lands at ~1-4, on the same order as
+  what Xaero's own sweep was doing for the v1 flags, now on the pump's tick
+  budget instead of Xaero's frame budget. Cost is visible: `buffer_updates` /
+  `pending_updates` / `dropped_updates` in the diag line (§6).
+- Handles: `MapTileChunk.updateBuffers` (6-arg) + `wasChanged()`,
+  `MapProcessor.getWorldBlockTintProvider()`, `MapUpdateFastConfig(MapProcessor)`
+  — all verified against the 1.21.11 1.45.0 jar (FQN-identical on every line;
+  `setToUpdateBuffers` is no longer bound). The stub `updateBuffers` enforces
+  both region monitors and mirrors the `setAllCachePrepared(false)` side
+  effect, so the test pins assert the real invariant (the flip happens only
+  under the gates).
+- Pins (XaeroMapCompatTest, the rebuild-phase block): flag never set + no
+  rebuild at commit; rebuild after the idle window under the gates with
+  `beingWritten` re-armed and the change consumed after; per-tile-chunk
+  coalescing; not-resting waits, permanent stall drops; hard cap pauses
+  commits and the flush-before-drain order frees them; soft cap forces only
+  the overflow; unloaded/replaced drops; native-consumed change skips;
+  flush after disable and on an empty queue; session end clears; dimension
+  change drops; rebuild throws count toward the death latch.
+
+Owed: the live re-test on the lss-test-1.21.11 instance (the crash reproduced
+within ~20-40 min of map browsing each time; a clean hour with
+`buffer_updates` climbing and `commit_failures=0` closes it), then the port to
+every line (xplat-only + stubs/tests — no line flavor points).

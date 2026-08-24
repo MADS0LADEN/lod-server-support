@@ -1,5 +1,6 @@
 package xaero.map;
 
+import xaero.map.biome.BlockTintProvider;
 import xaero.map.cache.BlockStateShortShapeCache;
 import xaero.map.file.MapSaveLoad;
 import xaero.map.highlight.MapRegionHighlightsPreparer;
@@ -27,6 +28,7 @@ public class MapProcessor {
     public MapTilePool tilePool = new MapTilePool();
     public OverlayManager overlayManager = new OverlayManager();
     public BlockStateShortShapeCache shapeCache = new BlockStateShortShapeCache();
+    public BlockTintProvider tintProvider = new BlockTintProvider();
     public MapRegionHighlightsPreparer highlightsPreparer = new MapRegionHighlightsPreparer();
     public final java.util.Map<Long, MapRegion> regions = new java.util.HashMap<>();
     public boolean leafMapRegionReturnsNull;
@@ -80,6 +82,8 @@ public class MapProcessor {
     public OverlayManager getOverlayManager() { return this.overlayManager; }
 
     public BlockStateShortShapeCache getBlockStateShortShapeCache() { return this.shapeCache; }
+
+    public BlockTintProvider getWorldBlockTintProvider() { return this.tintProvider; }
 
     public MapRegionHighlightsPreparer getMapRegionHighlightsPreparer() { return this.highlightsPreparer; }
 

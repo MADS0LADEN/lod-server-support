@@ -62,8 +62,13 @@ import java.util.function.BooleanSupplier;
  * called (the loader itself never reads it — it is purely the pacing token of
  * the four native consumers, and pointing it at a far bridge region vetoed all
  * four; left alone, native requests front-insert AHEAD of our batch, the right
- * priority). GPU work stays Xaero's: the bridge only flags
- * {@code setToUpdateBuffers}, never calls {@code updateBuffers}.
+ * priority). Texture rebuilds ({@code MapTileChunk.updateBuffers} — the
+ * expensive half of a native write) are OURS to run, exactly like the native
+ * writer's: coalesced per tile chunk by {@link #flushPendingUpdates} under the
+ * same gates (plan §15, the cache-not-prepared crash). The
+ * {@code setToUpdateBuffers} flag is NEVER set: Xaero's preUpload sweep consumes
+ * it with no {@code isResting()} check, i.e. possibly after the region was queued
+ * for cache-saving on prepared textures — the saver then throws.
  *
  * <p><b>Registration lifecycle</b> (review MAJOR): the consumer is what holds the
  * handshake's CAPABILITY_VOXEL_COLUMNS bit ({@code LSSApi.hasVoxelConsumers()}),
@@ -103,6 +108,26 @@ final class XaeroMapCompat {
      *  most one window per pump; requests are idempotent (an already-queued
      *  region answers not-requestable), so the excess is bounded and harmless. */
     static final int MAX_OUTSTANDING_LOADS = 8;
+    /** Buffer-update coalescing (plan §15). A committed tile chunk's texture rebuild
+     *  ({@code MapTileChunk.updateBuffers} — a 64×64-pixel recolor, the expensive
+     *  half of a native write) is deferred until its tiles stop arriving for this
+     *  many pumps (~2 s), so the 16 spiral-delivered tiles of a tile chunk cost
+     *  ~1-4 rebuilds instead of 16. Meanwhile the tile chunk sits in the native
+     *  writer's own transient state (changed=true, no flag — the (3,3) rule leaves
+     *  every non-final chunk write there too). */
+    static final int UPDATE_IDLE_PUMPS = 40;
+    /** Above this many owed rebuilds the oldest become due at once (bounds the
+     *  stale-texture window under a flood). */
+    static final int PENDING_UPDATES_SOFT_CAP = 256;
+    /** At this many owed rebuilds COMMITS pause until the flush drains — a region
+     *  that never rests (a stuck saver) must not grow the set without bound. */
+    static final int PENDING_UPDATES_HARD_CAP = 1024;
+    /** A due rebuild whose region stays not-resting this long (~60 s) is dropped,
+     *  counted: the texture self-heals on the region's next reload. */
+    static final int UPDATE_MAX_STALL_PUMPS = 1200;
+    /** Rebuild budget per pump, separate from the commit budget; at least one
+     *  rebuild runs per pump so the set always drains. */
+    static final long UPDATE_NANOS_BUDGET = 2_000_000L;
     /** Consecutive failures (commit-side or extraction-side) before the bridge
      *  latches dead for the SESSION (re-armed at disconnect). */
     static final int THROW_LATCH = 5;
@@ -247,6 +272,20 @@ final class XaeroMapCompat {
     private final AtomicInteger consecutiveExtractFailures = new AtomicInteger();
     /** The per-pump time budget — a field so tests can neutralize MethodHandle warmup. */
     long pumpNanosBudget = PUMP_NANOS_BUDGET;
+    /** The rebuild-phase seams (plan §15) — fields so tests can drive the windows. */
+    long updateNanosBudget = UPDATE_NANOS_BUDGET;
+    int updateIdlePumps = UPDATE_IDLE_PUMPS;
+    int pendingUpdatesSoftCap = PENDING_UPDATES_SOFT_CAP;
+    int pendingUpdatesHardCap = PENDING_UPDATES_HARD_CAP;
+    int updateMaxStallPumps = UPDATE_MAX_STALL_PUMPS;
+    /** Tile chunks committed but not yet texture-rebuilt, keyed by tile-chunk
+     *  coords and ordered by LAST TOUCH (a re-touch re-inserts at the tail, so
+     *  idle-due entries are always a prefix). Main thread only. */
+    private final LinkedHashMap<Long, PendingUpdate> pendingUpdates = new LinkedHashMap<>();
+    private long pumpCount; // main thread only
+    private final AtomicLong bufferUpdates = new AtomicLong();
+    private final AtomicLong droppedUpdates = new AtomicLong();
+    private volatile int pendingUpdatesGauge;
     /** Rotating drain start (the IncomingRequestRouter M4 precedent): without it a
      *  permanently-deferring queue prefix starves committable entries forever. */
     private int drainRotation; // main thread only
@@ -254,6 +293,28 @@ final class XaeroMapCompat {
      *  pump — a diag gauge, and a lower bound under budget truncation (buckets the
      *  commit loop never reached are unknown). */
     private volatile int regionsWaiting;
+
+    /** A committed tile chunk owed its texture rebuild (plan §15). */
+    private static final class PendingUpdate {
+        final Object dimension;
+        final Object region;
+        final Object tileChunk;
+        final int localTcX;
+        final int localTcZ;
+        long lastTouchPump;
+        /** Pump at which a DUE rebuild first found its region not resting; -1 = never. */
+        long stalledSincePump = -1;
+
+        PendingUpdate(Object dimension, Object region, Object tileChunk,
+                      int localTcX, int localTcZ, long pump) {
+            this.dimension = dimension;
+            this.region = region;
+            this.tileChunk = tileChunk;
+            this.localTcX = localTcX;
+            this.localTcZ = localTcZ;
+            this.lastTouchPump = pump;
+        }
+    }
 
     private static final class Entry {
         volatile XaeroTileExtractor.PreparedTile tile; // replaced under queueLock (latest wins)
@@ -305,6 +366,8 @@ final class XaeroMapCompat {
      */
     void onSessionEnd() {
         clearQueue();
+        this.pendingUpdates.clear(); // the old world's tile chunks — never touch them again
+        this.pendingUpdatesGauge = 0;
         this.regionsWaiting = 0;
         this.dead = false;
         this.consecutiveFailures = 0;
@@ -475,6 +538,9 @@ final class XaeroMapCompat {
             case "dropped_expired" -> this.droppedExpired.get();
             case "commit_failures" -> this.commitFailures.get();
             case "load_requests" -> this.loadRequests.get();
+            case "buffer_updates" -> this.bufferUpdates.get();
+            case "dropped_updates" -> this.droppedUpdates.get();
+            case "pending_updates" -> this.pendingUpdatesGauge;
             default -> throw new IllegalArgumentException(name);
         };
     }
@@ -490,7 +556,10 @@ final class XaeroMapCompat {
                 + ", dropped=" + dropped
                 + ", commit_failures=" + this.commitFailures.get()
                 + ", load_requests=" + this.loadRequests.get()
-                + ", regions_waiting=" + this.regionsWaiting;
+                + ", regions_waiting=" + this.regionsWaiting
+                + ", buffer_updates=" + this.bufferUpdates.get()
+                + ", pending_updates=" + this.pendingUpdatesGauge
+                + ", dropped_updates=" + this.droppedUpdates.get();
     }
 
     // ---- the pump (main client thread) ----
@@ -498,14 +567,18 @@ final class XaeroMapCompat {
     void pump() {
         maybeRegister();
         if (this.dead) return;
+        this.pumpCount++;
         if (!this.enabled.getAsBoolean()) {
             clearQueue(); // the live toggle: flipping off drops the backlog immediately
-            return;
-        }
-        synchronized (this.queueLock) {
-            if (this.queue.isEmpty()) {
-                this.regionsWaiting = 0;
-                return;
+            // ...but rebuilds already OWED to committed tile chunks still flush —
+            // dropping them would leave written tiles invisible until a reload.
+            if (this.pendingUpdates.isEmpty()) return;
+        } else {
+            synchronized (this.queueLock) {
+                if (this.queue.isEmpty() && this.pendingUpdates.isEmpty()) {
+                    this.regionsWaiting = 0;
+                    return;
+                }
             }
         }
         try {
@@ -555,6 +628,8 @@ final class XaeroMapCompat {
                 dimensionId = this.h.getCurrentDimensionId.invoke(mapWorld);
                 if (this.levelOps.dimension(world) != dimensionId) return;
             }
+            flushPendingUpdates(mp, dimensionId);
+            if (this.dead) return;
             drainEntries(mp, saveLoad, world, dimensionId);
         }
     }
@@ -612,6 +687,11 @@ final class XaeroMapCompat {
             Long regionKey = bucketKeys.get((startIndex + n) % size);
             var bucket = buckets.get(regionKey);
             for (var pending : bucket) {
+                if (this.pendingUpdates.size() >= this.pendingUpdatesHardCap) {
+                    // Owed rebuilds at the hard cap (plan §15): commits pause until
+                    // the flush drains — the set must never grow without bound.
+                    break bucketLoop;
+                }
                 if (progressed && (commits >= MAX_COMMITS_PER_PUMP
                         || System.nanoTime() - start > this.pumpNanosBudget)) {
                     break bucketLoop;
@@ -634,7 +714,7 @@ final class XaeroMapCompat {
                     continue;
                 }
                 progressed = true;
-                var outcome = commitEntry(mp, pending.tile());
+                var outcome = commitEntry(mp, dimensionId, pending.tile());
                 switch (outcome) {
                     case COMMITTED -> {
                         removeIfCurrent(pending.key(), pending.entry(), pending.tile());
@@ -822,7 +902,8 @@ final class XaeroMapCompat {
      * here, classified from {@code canRequestReload_unsynced()} + loadState in the
      * same monitor read.
      */
-    private Outcome commitEntry(Object mp, XaeroTileExtractor.PreparedTile tile) {
+    private Outcome commitEntry(Object mp, Object dimensionId,
+                                XaeroTileExtractor.PreparedTile tile) {
         try {
             int chunkX = tile.chunkX();
             int chunkZ = tile.chunkZ();
@@ -881,7 +962,7 @@ final class XaeroMapCompat {
                     return Outcome.DEFERRED_TILE;
                 }
 
-                commitPixels(mp, region, tileChunk, createdTileChunk,
+                commitPixels(mp, dimensionId, region, tileChunk, createdTileChunk,
                         localTcX, localTcZ, tile);
                 return Outcome.COMMITTED;
             }
@@ -893,7 +974,7 @@ final class XaeroMapCompat {
     }
 
     /** The decompiled per-tile commit sequence, verbatim order (plan §1). */
-    private void commitPixels(Object mp, Object region, Object tileChunk,
+    private void commitPixels(Object mp, Object dimensionId, Object region, Object tileChunk,
                               boolean createdTileChunk, int localTcX, int localTcZ,
                               XaeroTileExtractor.PreparedTile tile) throws Throwable {
         int insideX = tile.chunkX() & 3;
@@ -941,10 +1022,148 @@ final class XaeroMapCompat {
             Object highlights = this.h.getMapRegionHighlightsPreparer.invoke(mp);
             this.h.highlightsPrepare.invoke(highlights, region, localTcX, localTcZ, false);
         }
-        // No direct updateBuffers (GPU work stays in Xaero's preUpload sweep) — the
-        // native right/bottom-right neighbor pattern: flag, then consume the change.
-        this.h.setToUpdateBuffers.invoke(tileChunk, true);
-        this.h.tileChunkSetChanged.invoke(tileChunk, false);
+        // The native writer ends a write by rebuilding the tile chunk's texture
+        // INSIDE this gate (updateBuffers, then setChanged(false)); ours is
+        // coalesced per tile chunk (plan §15) — the change stays marked and the
+        // rebuild runs from flushPendingUpdates under these same gates. NEVER the
+        // setToUpdateBuffers flag: Xaero's preUpload sweep consumes it with no
+        // isResting() check, i.e. possibly after the region was queued for
+        // cache-saving on prepared textures — the saver then throws ("Trying to
+        // save cache for a region with cache not prepared", 3 crashes/hour live).
+        notePendingUpdate(dimensionId, region, tileChunk, localTcX, localTcZ,
+                tile.chunkX() >> 2, tile.chunkZ() >> 2);
+    }
+
+    // ---- the rebuild phase (plan §15) ----
+
+    private void notePendingUpdate(Object dimensionId, Object region, Object tileChunk,
+                                   int localTcX, int localTcZ, int tileChunkX, int tileChunkZ) {
+        long key = ((long) tileChunkX << 32) | (tileChunkZ & 0xFFFFFFFFL);
+        var existing = this.pendingUpdates.remove(key); // re-insert at the tail = last touch
+        if (existing != null && existing.tileChunk == tileChunk) {
+            existing.lastTouchPump = this.pumpCount;
+            existing.stalledSincePump = -1; // the commit gate just passed: the stall ended
+            this.pendingUpdates.put(key, existing);
+        } else {
+            this.pendingUpdates.put(key, new PendingUpdate(dimensionId, region, tileChunk,
+                    localTcX, localTcZ, this.pumpCount));
+        }
+        this.pendingUpdatesGauge = this.pendingUpdates.size();
+    }
+
+    private enum UpdateResult { DONE, NOT_READY, DROPPED, FAILED }
+
+    /** The per-flush rebuild inputs, resolved once (the native onRender builds one
+     *  {@code MapUpdateFastConfig} per pass the same way). */
+    private static final class RebuildArgs {
+        Object tint;
+        Object overlayManager;
+        Object shapeCache;
+        Object fastConfig;
+    }
+
+    /**
+     * Run the owed rebuilds that are DUE — idle for {@link #updateIdlePumps}, or
+     * the oldest beyond the soft cap, or previously stalled — oldest-touch first,
+     * within {@link #updateNanosBudget} (at least one per pump). Each rebuild
+     * re-runs the writer's region gates ({@code writerThreadPauseSync} +
+     * {@code !isWritingPaused()}, the region monitor, {@code isResting()}): a
+     * not-resting region (being saved / cache pending — exactly the state the
+     * flag-consuming sweep ignored) keeps the entry for a later pump; an
+     * unloaded or replaced tile chunk drops it (a reload rebuilds its own
+     * textures); a rebuild on the wrong dimension drops it (the pixel recipe
+     * reads the CURRENT world). A tile chunk the native writer already consumed
+     * ({@code !wasChanged()}) needs nothing.
+     */
+    private void flushPendingUpdates(Object mp, Object dimensionId) {
+        if (this.pendingUpdates.isEmpty()) {
+            this.pendingUpdatesGauge = 0;
+            return;
+        }
+        long start = System.nanoTime();
+        var args = new RebuildArgs();
+        int done = 0;
+        int overflow = this.pendingUpdates.size() - this.pendingUpdatesSoftCap;
+        var it = this.pendingUpdates.values().iterator();
+        while (it.hasNext()) {
+            if (done > 0 && System.nanoTime() - start > this.updateNanosBudget) break;
+            var pu = it.next();
+            boolean due = overflow-- > 0
+                    || this.pumpCount - pu.lastTouchPump >= this.updateIdlePumps
+                    || pu.stalledSincePump >= 0;
+            if (!due) break; // touch order: nothing after this one is idle-due either
+            if (pu.dimension != dimensionId) {
+                it.remove();
+                this.droppedUpdates.incrementAndGet();
+                continue;
+            }
+            switch (rebuildTileChunk(mp, pu, args)) {
+                case DONE -> {
+                    it.remove();
+                    done++;
+                }
+                case DROPPED -> {
+                    it.remove();
+                    this.droppedUpdates.incrementAndGet();
+                }
+                case NOT_READY -> {
+                    if (pu.stalledSincePump < 0) {
+                        pu.stalledSincePump = this.pumpCount;
+                    } else if (this.pumpCount - pu.stalledSincePump >= this.updateMaxStallPumps) {
+                        it.remove();
+                        this.droppedUpdates.incrementAndGet();
+                    }
+                    done++; // budget-counted progress: a stalled prefix must not spin the loop
+                }
+                case FAILED -> it.remove();
+            }
+            if (this.dead) break;
+        }
+        this.pendingUpdatesGauge = this.pendingUpdates.size();
+    }
+
+    private UpdateResult rebuildTileChunk(Object mp, PendingUpdate pu, RebuildArgs args) {
+        try {
+            Object writerPause = this.h.writerThreadPauseSync.invoke(pu.region);
+            synchronized (writerPause) {
+                if ((boolean) this.h.regionIsWritingPaused.invoke(pu.region)) {
+                    return UpdateResult.NOT_READY;
+                }
+                synchronized (pu.region) {
+                    if ((byte) this.h.getLoadState.invoke(pu.region) != 2
+                            || this.h.regionGetChunk.invoke(pu.region, pu.localTcX, pu.localTcZ)
+                            != pu.tileChunk) {
+                        return UpdateResult.DROPPED;
+                    }
+                    if (!(boolean) this.h.isResting.invoke(pu.region)) {
+                        return UpdateResult.NOT_READY;
+                    }
+                    if ((boolean) this.h.tileChunkWasChanged.invoke(pu.tileChunk)) {
+                        // A save may have reset beingWritten since the commit; the
+                        // rebuilt texture must still reach the region's cache, and
+                        // the save path is what requests it (set-never-clear, as
+                        // in the commit).
+                        this.h.setBeingWritten.invoke(pu.region, true);
+                        if (args.fastConfig == null) {
+                            args.tint = this.h.getWorldBlockTintProvider.invoke(mp);
+                            args.overlayManager = this.h.getOverlayManager.invoke(mp);
+                            args.shapeCache = this.h.getBlockStateShortShapeCache.invoke(mp);
+                            args.fastConfig = this.h.newMapUpdateFastConfig.invoke(mp);
+                        }
+                        // The boolean is the writer's detailed-debug flag (log-only).
+                        this.h.tileChunkUpdateBuffers.invoke(pu.tileChunk, mp, args.tint,
+                                args.overlayManager, false, args.shapeCache, args.fastConfig);
+                        this.h.tileChunkSetChanged.invoke(pu.tileChunk, false);
+                        this.bufferUpdates.incrementAndGet();
+                    }
+                    return UpdateResult.DONE;
+                }
+            }
+        } catch (Throwable t) {
+            if (t instanceof Error err && !(t instanceof AssertionError)) throw err;
+            noteFailure(t);
+            return UpdateResult.FAILED;
+        }
     }
 
     private void noteFailure(Throwable t) {
@@ -1015,7 +1234,10 @@ final class XaeroMapCompat {
         final MethodHandle tileChunkGetLoadState;
         final MethodHandle tileChunkSetLoadState;
         final MethodHandle tileChunkSetChanged;
-        final MethodHandle setToUpdateBuffers;
+        final MethodHandle tileChunkWasChanged;
+        final MethodHandle tileChunkUpdateBuffers;
+        final MethodHandle getWorldBlockTintProvider;
+        final MethodHandle newMapUpdateFastConfig;
         final MethodHandle setHasHadTerrain;
         final MethodHandle includeInSave;
         final MethodHandle getLeafTexture;
@@ -1059,6 +1281,8 @@ final class XaeroMapCompat {
             Class<?> leafTextureClass = resolver.resolve("xaero.map.region.texture.LeafRegionTexture");
             Class<?> shapeCacheClass = resolver.resolve("xaero.map.cache.BlockStateShortShapeCache");
             Class<?> highlightsClass = resolver.resolve("xaero.map.highlight.MapRegionHighlightsPreparer");
+            Class<?> tintProviderClass = resolver.resolve("xaero.map.biome.BlockTintProvider");
+            Class<?> fastConfigClass = resolver.resolve("xaero.map.region.MapUpdateFastConfig");
 
             this.getCurrentSession = lookup.findStatic(sessionClass, "getCurrentSession",
                     MethodType.methodType(sessionClass)).asType(MethodType.methodType(Object.class));
@@ -1105,6 +1329,12 @@ final class XaeroMapCompat {
                     MethodType.methodType(highlightsClass), Object.class);
             this.getCaveModeDepthConfig = virtual(lookup, processorClass, "getCaveModeDepthConfig",
                     MethodType.methodType(int.class), int.class);
+            this.getWorldBlockTintProvider = virtual(lookup, processorClass,
+                    "getWorldBlockTintProvider",
+                    MethodType.methodType(tintProviderClass), Object.class);
+            this.newMapUpdateFastConfig = lookup.findConstructor(fastConfigClass,
+                            MethodType.methodType(void.class, processorClass))
+                    .asType(MethodType.methodType(Object.class, Object.class));
 
             this.isCacheOnlyMode = virtual(lookup, mapWorldClass, "isCacheOnlyMode",
                     MethodType.methodType(boolean.class), boolean.class);
@@ -1156,9 +1386,14 @@ final class XaeroMapCompat {
             this.tileChunkSetChanged = lookup.findVirtual(tileChunkClass, "setChanged",
                             MethodType.methodType(void.class, boolean.class))
                     .asType(MethodType.methodType(void.class, Object.class, boolean.class));
-            this.setToUpdateBuffers = lookup.findVirtual(tileChunkClass, "setToUpdateBuffers",
-                            MethodType.methodType(void.class, boolean.class))
-                    .asType(MethodType.methodType(void.class, Object.class, boolean.class));
+            this.tileChunkWasChanged = virtual(lookup, tileChunkClass, "wasChanged",
+                    MethodType.methodType(boolean.class), boolean.class);
+            this.tileChunkUpdateBuffers = lookup.findVirtual(tileChunkClass, "updateBuffers",
+                            MethodType.methodType(void.class, processorClass, tintProviderClass,
+                                    overlayManagerClass, boolean.class, shapeCacheClass,
+                                    fastConfigClass))
+                    .asType(MethodType.methodType(void.class, Object.class, Object.class,
+                            Object.class, Object.class, boolean.class, Object.class, Object.class));
             this.setHasHadTerrain = virtual(lookup, tileChunkClass, "setHasHadTerrain",
                     MethodType.methodType(void.class), void.class);
             this.includeInSave = virtual(lookup, tileChunkClass, "includeInSave",
