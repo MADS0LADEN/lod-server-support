@@ -88,4 +88,8 @@ public class MapProcessor {
     public MapRegionHighlightsPreparer getMapRegionHighlightsPreparer() { return this.highlightsPreparer; }
 
     public int getCaveModeDepthConfig() { return 30; }
+    /** The rendered layer (Integer.MAX_VALUE = surface); a cave layer makes the bridge wait. */
+    public int currentCaveLayer = Integer.MAX_VALUE;
+
+    public int getCurrentCaveLayer() { return this.currentCaveLayer; }
 }

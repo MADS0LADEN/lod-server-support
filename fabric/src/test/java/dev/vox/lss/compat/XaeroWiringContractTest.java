@@ -40,6 +40,12 @@ class XaeroWiringContractTest {
         assertTrue(glue.substring(disconnectBody, end).contains("ModCompat.onDisconnect()"),
                 "onDisconnect must call ModCompat.onDisconnect() — queue/latch/registration"
                         + " teardown (a stale queue can leak one tile into the NEXT server's map)");
+        // The offer re-check under the queue lock (sweep C M2) is sound only because the
+        // session gate flips BEFORE the bridge clears its queue — pin the order.
+        String body = glue.substring(disconnectBody, end);
+        assertTrue(body.indexOf("sessionGate.onDisconnect()") >= 0
+                        && body.indexOf("sessionGate.onDisconnect()") < body.indexOf("ModCompat.onDisconnect()"),
+                "sessionGate.onDisconnect() must precede ModCompat.onDisconnect()");
     }
 
     @Test
@@ -54,5 +60,20 @@ class XaeroWiringContractTest {
                 "clientTick must forward to the bridge's pump");
         assertTrue(modCompat.contains("XaeroMapCompat.onDisconnect()"),
                 "onDisconnect must forward to the bridge's session teardown");
+
+    }
+
+    /**
+     * The height derivation is PER-LINE data (26.x: getMinY/getMaxY()+1; 1.21.1:
+     * getMinBuildHeight/getMaxBuildHeight, already exclusive) — the only test reaching
+     * buildConsumer passes a null level, so the expression is pinned here (sweep C) and
+     * this literal is edited on each line's port.
+     */
+    @Test
+    void theConsumerPassesThisLinesWorldHeightExpression() throws IOException {
+        String compat = Files.readString(SourcePaths.mainSource(
+                "dev/vox/lss/compat/XaeroMapCompat.java"));
+        assertTrue(compat.contains("level.getMinY(), level.getMaxY() + 1, columnData"),
+                "the consumer's world-height arguments moved — a lost +1 silently drops the top section");
     }
 }

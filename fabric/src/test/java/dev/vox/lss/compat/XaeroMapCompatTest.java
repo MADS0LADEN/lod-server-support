@@ -226,6 +226,7 @@ class XaeroMapCompatTest {
                         + " report every arriving column as an ingest failure (re-serve"
                         + " churn for a map problem)");
         this.bridge.onSessionEnd();
+        this.bridge.pump(); // the registration settle is the main-thread half (sweep C)
         assertTrue(this.registered.isEmpty(),
                 "session end releases the capability bit for the next handshake");
         this.enabled = true;
@@ -1147,6 +1148,7 @@ class XaeroMapCompatTest {
         this.bridge.pump();
         assertEquals(1, this.bridge.counterForTest("pending_updates"));
         this.bridge.onSessionEnd();
+        this.bridge.pump(); // the owed-set drop is the main-thread half (sweep C)
         assertEquals(0, this.bridge.counterForTest("pending_updates"));
         assertEquals(1, this.bridge.counterForTest("dropped_updates"), "lost, counted");
         pumpIdleWindow();
@@ -1224,8 +1226,9 @@ class XaeroMapCompatTest {
         pumpIdleWindow();
         assertEquals(1, replacement.bufferUpdates, "the replacement is rebuilt");
         assertEquals(0, old.bufferUpdates);
-        assertEquals(0, this.bridge.counterForTest("dropped_updates"),
-                "reusing the old entry would have failed its identity check and dropped");
+        assertEquals(0, this.bridge.counterForTest("dropped_updates"));
+        assertEquals(1, this.bridge.counterForTest("dropped_unloaded"),
+                "the old tile chunk's owed rebuild is counted where it goes: a reload rebuilds its own");
     }
 
     @Test
@@ -1542,6 +1545,107 @@ class XaeroMapCompatTest {
     // ---- the compatibility sweep (plan §16): the native ladder's other gates ----
 
     @Test
+    void anOffThreadSessionEndOnlyTouchesThreadSafeStateAndSettlesOnTheNextPump() throws Exception {
+        // Fabric fires DISCONNECT from netty's channelInactive on an abrupt close while the
+        // main thread may be inside pump() (sweep C MAJOR): the owed-rebuild map and the
+        // registration flag are main-thread-only, so they settle at the next pump.
+        this.bridge.updateIdlePumps = 1000;
+        offer(64, 64);
+        offer(65, 64); // same tile chunk
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("pending_updates"));
+        this.enabled = false;
+        var t = new Thread(this.bridge::onSessionEnd, "netty-ish");
+        t.start();
+        t.join();
+        assertEquals(0, this.bridge.queuedForTest(), "the queue clear is lock-protected: immediate");
+        assertEquals(1, this.bridge.counterForTest("pending_updates"), "the owed set waits for the main thread");
+        assertEquals(1, this.registered.size(), "so does the registration settle");
+        this.bridge.pump();
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
+        assertEquals(1, this.bridge.counterForTest("dropped_updates"));
+        assertTrue(this.registered.isEmpty(), "settled on the main thread");
+    }
+
+    @Test
+    void aTileExtractedAcrossTheSessionEndCannotEnterTheQueue() {
+        // Decode thread passed offerColumn's gate, the session ended (gate off + queue
+        // cleared), the extraction finishes: the enqueue re-checks under the lock.
+        this.sessionActive = false;
+        this.bridge.offerPrepared(OVERWORLD, tile(64, 64));
+        assertEquals(0, this.bridge.queuedForTest(),
+                "one tile of the previous server must never reach the next server's map");
+        this.sessionActive = true;
+        this.enabled = false;
+        this.bridge.offerPrepared(OVERWORLD, tile(64, 64));
+        assertEquals(0, this.bridge.queuedForTest());
+    }
+
+    @Test
+    void negativeCoordinatesMapToTheRightTileChunkRegionAndInsidePosition() {
+        // Xaero's own convention is arithmetic shift (writeChunk >>3, writeMap &7); a
+        // "cleanup" to /4 or floorMod would pass every positive-quadrant test.
+        offer(-61, -3); // chunk (-61,-3): tile chunk (-16,-1), inside (3,1), region (-2,-1), local (0,7)
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("written"));
+        var events = XaeroStubEvents.snapshot();
+        assertTrue(events.contains("processor.getLeafMapRegion layer=" + Integer.MAX_VALUE + " -2,-1"), events.toString());
+        assertTrue(events.contains("tileChunk.new -16,-1"), events.toString());
+        assertTrue(events.contains("tileChunk.setTile 3,1"), events.toString());
+        var region = this.processor.regions.get((-2L << 32) | (-1L & 0xFFFFFFFFL));
+        assertNotNull(region, "region key packs the negative z like PositionUtil");
+        assertNotNull(region.getChunk(0, 7));
+    }
+
+    @Test
+    void aCaveLayerViewMakesTheBridgeWaitButOwedRebuildsStillRun() {
+        this.bridge.updateIdlePumps = 1;
+        offer(64, 64);
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("pending_updates"));
+        this.processor.currentCaveLayer = 3; // auto cave mode / the Nether by default
+        offer(68, 64);
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("written"), "surface writes wait while a cave layer renders");
+        assertEquals(1, this.bridge.queuedForTest(), "retained, not dropped");
+        assertEquals(1, this.bridge.counterForTest("cave_layer_waits"));
+        assertEquals(1, this.bridge.counterForTest("buffer_updates"), "the owed rebuild still ran");
+        this.processor.currentCaveLayer = Integer.MAX_VALUE;
+        this.bridge.pump();
+        assertEquals(2, this.bridge.counterForTest("written"));
+    }
+
+    @Test
+    void aRefusedNewTileRollsItsCreatedTileChunkBack() {
+        xaero.map.common.config.option.WorldMapProfiledConfigOptions.LOAD_NEW_CHUNKS.value = false;
+        offer(64, 64);
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("skipped_settings"));
+        assertNull(theRegion().getChunk(0, 0),
+                "the native rollback (writeChunk pc 1526-1537): no empty tile chunk left installed");
+        xaero.map.common.config.option.WorldMapProfiledConfigOptions.LOAD_NEW_CHUNKS.value = true;
+        offer(64, 64);
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("written"));
+        assertNotNull(theRegion().getChunk(0, 0).getTile(0, 0));
+    }
+
+    @Test
+    void owedRebuildsAreKeyedByDimensionToo() {
+        this.bridge.updateIdlePumps = 1000;
+        offer(64, 64);
+        this.bridge.pump();
+        this.processor.mapWorld.currentDimensionId = NETHER;
+        this.clientDimension = NETHER;
+        this.bridge.offerPrepared(NETHER, tile(64, 64)); // same tile-chunk coords, other dimension
+        this.bridge.pump();
+        assertEquals(2, this.bridge.counterForTest("written"));
+        assertEquals(2, this.bridge.counterForTest("pending_updates"),
+                "the Overworld entry must survive the Nether's same-coords commit");
+        assertEquals(0, this.bridge.counterForTest("dropped_unloaded"));
+    }
+
+    @Test
     void aCrashedXaeroIsNeverTouched() {
         offer(64, 64);
         xaero.map.WorldMap.crashHandler.crashedBy = new RuntimeException("Xaero latched");
@@ -1559,7 +1663,6 @@ class XaeroMapCompatTest {
 
     @Test
     void loadNewChunksOffRefusesNewTilesAndUpdateChunksOffRefusesRewrites() {
-        var options = xaero.map.common.config.option.WorldMapProfiledConfigOptions.class;
         // A new tile needs "Load New Chunks".
         xaero.map.common.config.option.WorldMapProfiledConfigOptions.LOAD_NEW_CHUNKS.value = false;
         offer(64, 64);
@@ -1568,8 +1671,7 @@ class XaeroMapCompatTest {
         assertEquals(1, this.bridge.counterForTest("skipped_settings"));
         assertEquals(0, this.bridge.queuedForTest(), "refused entries drop (a re-serve refills them)");
         var region = theRegion();
-        assertNotNull(region.getChunk(0, 0), "the tile chunk was created before the per-chunk gate — the native order");
-        assertNull(region.getChunk(0, 0).getTile(0, 0));
+        assertNull(region.getChunk(0, 0), "the created tile chunk is rolled back (sweep B m3)");
         assertEquals(0, this.bridge.counterForTest("pending_updates"), "nothing owed for a refused tile");
         // Switched back on: the tile writes.
         xaero.map.common.config.option.WorldMapProfiledConfigOptions.LOAD_NEW_CHUNKS.value = true;
@@ -1586,7 +1688,30 @@ class XaeroMapCompatTest {
         offer(65, 64);
         this.bridge.pump();
         assertEquals(2, this.bridge.counterForTest("written"));
-        assertNotNull(options);
+    }
+
+    @Test
+    void aForeignSwitchValueOrAThrowingReadLeavesBothSwitchesOpen() {
+        var manager = xaero.map.WorldMap.INSTANCE.configs.manager;
+        manager.override = "not a boolean";
+        offer(64, 64);
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("written"), "an unknown value shape reads as ON (never fail closed)");
+        manager.override = null;
+        manager.throwing = true;
+        offer(68, 64);
+        this.bridge.pump();
+        assertEquals(2, this.bridge.counterForTest("written"), "a throwing read is contained: both ON");
+        assertEquals(0, this.bridge.counterForTest("commit_failures"), "and it is NOT a commit failure — it must never latch the bridge dead");
+        assertTrue(this.bridge.describe().contains("settings_gate=broken"));
+        manager.throwing = false;
+        xaero.map.common.config.option.WorldMapProfiledConfigOptions.LOAD_NEW_CHUNKS.value = false;
+        offer(72, 64);
+        this.bridge.pump();
+        assertEquals(3, this.bridge.counterForTest("written"), "broken stays broken for the session: the switch is not re-read");
+        this.bridge.onSessionEnd();
+        this.bridge.pump();
+        assertFalse(this.bridge.describe().contains("settings_gate=broken"), "session-scoped");
     }
 
     @Test
@@ -1620,7 +1745,9 @@ class XaeroMapCompatTest {
         var handles = XaeroMapCompat.Handles.resolve(withoutOptional);
         assertNull(handles.crashGate);
         assertNull(handles.settingsGate);
-        assertEquals(1, handles.interpretationVersion);
+        // (interpretation-version and cave-layer resolve off classes the mandatory surface
+        // needs, so their unbound paths are Tier-1-unreachable through a ClassResolver —
+        // covered only by the owed live `optional_unbound` diag check.)
         assertEquals("crash-gate settings-gate", handles.optionalMissing);
         var reduced = new XaeroMapCompat(handles, this.fakeLevelOps, () -> this.enabled,
                 () -> this.sessionActive, this.registered::add, this.registered::remove);
@@ -1662,7 +1789,8 @@ class XaeroMapCompatTest {
                 && line.contains(", dropped=") && line.contains(", commit_failures=")
                 && line.contains(", regions_waiting=") && line.contains(", buffer_updates=")
                 && line.contains(", pending_updates=") && line.contains(", dropped_updates=")
-                && line.contains(", dropped_unloaded=") && line.contains(", skipped_settings="), line);
+                && line.contains(", dropped_unloaded=") && line.contains(", skipped_settings=")
+                && line.contains(", cave_layer_waits="), line);
         assertFalse(line.contains("xaero_crashed"), "the crash token appears only while latched");
         assertFalse(line.contains("optional_unbound"), "every optional group binds against the stubs");
         this.enabled = false;

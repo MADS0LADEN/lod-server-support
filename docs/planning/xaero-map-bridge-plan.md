@@ -386,6 +386,10 @@ getWorldBlockTintProvider()` and the `MapUpdateFastConfig(MapProcessor)` ctor.
 `addOverlay(Overlay)`. `Overlay`: ctor `(BlockState, byte, boolean)`,
 `increaseOpacity(int)`. `OverlayManager.getOriginal(Overlay)`.
 
+**Floor: Xaero World Map 1.42.0** (§16.1 — `setTile`'s 5-arg shape, the
+`MapUpdateFastConfig(MapProcessor)` ctor and `getCaveModeDepthConfig()` all arrived
+there; every member above is byte-identical 1.42.0 → 1.45.0).
+
 Exact arities/owners come from the decompiled sequence at implementation time
 (§2.3's decompile-is-normative rule); resolve all-or-nothing. Members ADDED at
 implementation because the decompiled sequence uses them (impl review: each is
@@ -1031,3 +1035,189 @@ precision note above). Refuted wording fixed in place (the region monitor, the
   session-end count, the rebuild path never sets the flag. Reviewer A's other test
   gaps were already covered by the review-B fold (zero budget, two regions,
   stall reset, latch release).
+
+## 16. Compatibility sweep (2026-08-23, three Opus lenses — surface × versions, Xaero runtime, MC/loader side)
+
+Scope: the bridge on main @ 0ee4b62f (post-§15) against **132 Modrinth jars** — every
+Xaero World Map release ≥1.40.0 for 26.2 / 26.1.2 / 1.21.11 / 1.21.10 / 1.21.1 on both
+loaders, plus 1.38.8–1.39.12 as a below-floor probe — and pc-level reading of 1.45.0
+(1.44.2 drift-checked; minimap 26.4.2; the nested xaerolib). Raw matrices/tooling:
+`scratchpad/xaero-sweep/{surface,protocol,extract}/` (session-scoped). Everything
+below that says "fixed" landed on `fix/xaero-sweep`.
+
+### 16.1 The surface across versions (sweep A)
+
+- **Floor = Xaero World Map 1.42.0 on every line, both loaders**, a clean step:
+  everything ≥1.42.0 resolves all 65 bindings; everything below misses the same three
+  (`MapProcessor.getCaveModeDepthConfig` added 1.42.0, `MapUpdateFastConfig(MapProcessor)`
+  was a no-arg ctor, `MapTileChunk.setTile` was 4-arg). Below-floor failure is TOTAL and
+  graceful (`Handles.resolve` throws inside the ctor, no consumer registers, diag
+  `state=unavailable`). Two of the box's own instances (`smp`, `smp-old`: 1.40.6 /
+  1.41.0) were silently bridge-off — the warn text and the README now name the floor.
+- **No resolves-but-misbehaves version**: every method the bridge's correctness rests
+  on (`writeChunk`'s ladder + post-write block, `isResting`, `canRequestReload_unsynced`,
+  `setTile`/`updateBuffers`, `MapBlock.write`, `requestLoad`, `MapSaveLoad.run`,
+  `preUpload`/`postUpload`, `onRenderProcess`) is byte-identical 1.42.0 → 1.45.0.
+  `SURFACE_LAYER` (`ldc 2147483647`), loadState 2/3/4 and `CURRENT_WORLD_INTERPRETATION_
+  VERSION == 1` hold across the range. NeoForge builds are class-identical to Fabric for
+  all 17 bridge classes (60 same-version pairs compared); mod id `xaeroworldmap` in all
+  132 (Better PVP is the minimap-side variant and still depends on it). The minimap has no
+  `xaero.map` classes or mixins; it reads regions read-only under the same
+  `renderThreadPauseSync`.
+- **Fixed — two native ladder gates the "verbatim" mirror had omitted** (bound
+  OPTIONALLY: a miss leaves the gate open and never raises the floor; diag shows
+  `optional_unbound=…`; A's follow-up verified all eleven optional members resolve on
+  every jar ≥1.40.0 — the config chain lives in the jarjar'd xaerolib, whose version
+  moves independently per line (1.0.25 → 1.7.1; 26.2 on its own track), hence bound by
+  name+arity): (1) `WorldMap.crashHandler.getCrashedBy() != null` — the native writer's
+  FIRST gate (`onRender` pc 4-10); the bridge kept mutating tiles into a latched crash
+  (diag `xaero_crashed=true` while it holds). (2) The user's/server's map-writing
+  switches `LOAD_NEW_CHUNKS` / `UPDATE_CHUNKS`, read exactly as `onRender` reads them
+  (`WorldMap.INSTANCE.getConfigs().getClientConfigManager().getEffective(...)` — the
+  effective value consults the SERVER-synced config first, so this is also "the server
+  forbade map writing") and applied as `writeChunk` applies them (pc 577-604): a NEW
+  tile needs Load New Chunks, an EXISTING one Update Chunks; refusals count
+  `skipped_settings`; both off drops the backlog (owed rebuilds still flush).
+- Fixed — `MapTile.CURRENT_WORLD_INTERPRETATION_VERSION` is read reflectively (=1 on all
+  132 jars; the native writer emits a literal 1 too, so the two constants merely agree
+  today — a Xaero bump would now reach our tiles).
+- Not done: a floor reduction to 1.40.0 (three call-site branches for no correctness
+  gain). Owed: ONE live NeoForge check that `Class.forName` reaches the nested xaerolib
+  classes (no `module-info`, single game layer — expected to, never run).
+
+### 16.2 Xaero's runtime state machine (sweep B)
+
+- MAJOR-1/2 there = the shipping 1.21.1 tag (`port/xaero-1.21.1`) lacking §15/§16 —
+  `port/sodium-1.21.1` already carries §15; §16 is cherry-picked to every port branch
+  with this round. Nothing new to design.
+- **Fixed — a regression §16's switch gate introduced (m3)**: a tile chunk created for a
+  write the switches then refused stayed installed empty (~13 KB, never terrain-marked,
+  poisoned for later pumps). Now rolled back like native (`writeChunk` pc 1526-1537:
+  `region.setChunk(lx, lz, null)`).
+- **Fixed — the cave-layer gate (m1, also sweep C N1)**: `MapProcessor.updateCaveStart`
+  returns the surface sentinel only when cave mode is off for the dimension, and the
+  default cave-mode type is LAYERED — so underground (auto cave mode) and in the Nether
+  the map renders a cave layer while the bridge wrote the surface layer: invisible, yet
+  creating regions, front-inserting load requests, forcing saves and holding MapLimiter
+  slots. The ladder now WAITS while `getCurrentCaveLayer() != SURFACE_LAYER`
+  (optional bind; entries retained, owed rebuilds still flush; diag
+  `cave_layer_waits`). Consequence, documented: Nether LOD terrain reaches the map only
+  when the user views the Nether's surface layer; a cave-layer write is a v-next item
+  (§8.2).
+- **Fixed — `pendingUpdates` keyed without the dimension (m2)**: the End/Nether reuse
+  the Overworld's tile-chunk coords around the origin, so a same-coords commit evicted
+  the other dimension's owed rebuild uncounted. The key carries the dimension; a
+  replaced tile chunk's evicted entry counts `dropped_unloaded`.
+- **Fixed — light range (m7)**: `MapBlock.getParametres` packs `light << 8` UNMASKED
+  beside the height bits and the loader masks on read (a one-way file corruption); the
+  extractor already yields a nibble — the write site clamps as the belt.
+- Recorded, not changed: (m4) the grant phase front-inserts up to 8 loads per pump via
+  `requestLoad(region, cause)` = `prioritize=true`, ahead of the map's and minimap's
+  own viewing loads (native grants ONE per pass); the §14 window was live-tested at 8 —
+  a `prioritize=false` variant or a per-pump cap is the follow-up if map panning feels
+  delayed during a fill. (m5) Bridge-touched regions are un-evictable by `MapLimiter`
+  while `beingWritten` (native's own set-never-clear; bounded by the 60 s save cadence +
+  the 1024 owed-rebuild cap) — a retention cost, not a leak. (m6) `topHeight` is
+  persisted as one unsigned byte (a negative topY reloads wrong; native feeds the same
+  field; cosmetic — comment at the extractor). (m9) the minimap's static
+  `SupportXaeroWorldmap.seedsUsed` grows per rendered tile chunk with the slime overlay
+  on — Xaero's.
+- **Lock invariants the bridge must keep (m8, verified acyclic today)**: the MapRunner
+  holds `processorThreadPauseSync → MapProcessor.this → uiSync` and THEN takes
+  `renderThreadPauseSync` (across `FileChannel.tryLock` and `Thread.sleep`) — so nothing
+  holding `renderThreadPauseSync` (the whole pump) may take `MapProcessor.this`,
+  `uiSync` or `processorThreadPauseSync`, or call `changeWorld` / `checkForWorldUpdate`
+  / `forceClean` / `setMainValues`. And **never `setBeingWritten(false)`**:
+  `MapSaveLoad.run` throws on the MapRunner for a `toSave` region that reports
+  `!isBeingWritten()` — straight into the crash handler.
+- Verified CLEAN: null biome at every consumer (`MapBlock.write`, the texture palette,
+  `BiomeColorCalculator`, `MapPixel`) — identical to native's own unknown-biome
+  sentinel; `topHeight <= height` encoded + handled; void pixels → VOID_COLOR;
+  `setTile` requires all 256 blocks (the bridge writes all 256); pool `get` synchronized,
+  `clean` nulls slots; `prepareForWriting` resets slopes; `increaseOpacity` clamps;
+  the format round trip (`writtenCaveStart` full int, depth byte, save version 7/8,
+  unknown biomes survive by string, `loadRegion` catches Throwable, world-save region
+  files never touched, `loadRegion` flags every tile chunk `toUpdateBuffers` so "a
+  reload rebuilds its own textures" is CONFIRMED); the full monitor graph acyclic with
+  the bridge's order, nothing waits/sleeps under `renderThreadPauseSync`,
+  `requestLoad` cannot block, `highlightsPrepare` is main-thread-only (we are); the
+  minimap never touches `MapTile`/`MapBlock`; `LSSApi.dispatchColumn` isolates the
+  consumer; concurrent `PalettedContainer` reads are safe.
+
+### 16.3 The MC-facing side (sweep C)
+
+- **Fixed — session end on the netty thread (M1)**: Fabric's `ConnectionMixin` fires
+  `ClientPlayConnectionEvents.DISCONNECT` from `channelInactive` on an abrupt close
+  (timeout, reset, server death) while the main thread may be inside `pump()`;
+  `onSessionEnd` cleared the main-thread-only owed-rebuild map and flipped the
+  registration flag from there (a `LinkedHashMap` under concurrent mutation = CME at
+  best, a corrupted chain = client hang at worst). NeoForge fires its event from
+  `Minecraft.disconnect` (main thread) — the loaders are NOT thread-equivalent here.
+  `onSessionEnd` now does only the lock-protected half (queue clear, latches) and sets
+  `sessionEndPending`; the main-thread half settles at the top of the next pump (which
+  runs on the title screen).
+- **Fixed — a tile extracted across the session end (M2)**: the decode thread passed
+  `offerColumn`'s gate, the session ended (gate off, queue cleared), the 50-400 µs
+  extraction finished and enqueued; on the title screen the pump idles, and on the next
+  join the stale-dimension filter cannot see it (`minecraft:overworld` is the same
+  interned key on every server) — one tile of server A committed into server B's saved
+  map. `offerPrepared` re-checks dead/enabled/session under the queue lock (the gate
+  flips before the clear and both serialize on that monitor).
+- N3 (the byte cap binds first — ~740 overlay-heavy ocean tiles — and the decode-thread
+  pre-check only knows the count cap) — recorded, NOT changed: the tile's size is
+  unknown before extraction, and past the byte cap the enqueue evicts the OLDEST entry,
+  so the extraction is not wasted (a review of the attempted fix showed a base-size
+  pre-check never trips once the queue sits just under the cap). The NeoForge client
+  wiring is pinned (N2:
+  `ClientTickEvent.Post` → pump, `LoggingOut` → disconnect, `LoggingIn` → join,
+  `ModCompat.init()`); the tooltip carries the floor, the "downloaded while off is not
+  backfilled — /lss clearcache" caveat and the "takes effect on the next join without
+  Voxy" caveat (N6); pins for negative coordinates (Xaero's own arithmetic-shift
+  convention), the per-line world-height expression (a lost `+1` silently drops the top
+  section) and the void column's null biome (N7).
+- Recorded, not changed: (N4) an absent section costs 16 wasted iterations per pixel
+  under a lone high block (a `sectionAbsent` skip is a v-next perf item); (N5) overlay
+  runs split on BlockState where native splits on particle sprite — sub-fluid cosmetic
+  only. Decode-thread cost model: a land tile ≈ 30-60 µs / 5 KB, a deep-ocean tile ≈
+  250-400 µs / 110 KB, serial with Voxy ingest on the single decode executor — the byte
+  pre-check is the limiter that now engages.
+- Verified CLEAN: the pixel recipe opcode-by-opcode against `loadPixel`/`loadPixelHelp`
+  /`getSectionBasedHeight`/`isGlowing`/`isInvisible`/`shouldOverlay` (light at h+1,
+  fluid branch, deep-run extension, void shape, biome at topH, the glowing cast);
+  LSS never culls a block-lit section so an absent section IS light 0; synthetic air
+  sections cannot shift the scan start; `getMapColor` ignores its arguments on 26.2;
+  XVER fallback states map as stone; masked columns map the replacement; the consumer
+  is swallow-all and cannot depress Voxy's backlog gauge; **all five ports** verified
+  against their loom-resolved mojmap jars (light call per line, the 1.21.1 exclusive
+  max height, `HalfTransparentBlock` family identical, no Java 22+ construct in the
+  21-target trees); **NeoForge 1.21.1 will activate** (modId, all 66 members in the
+  outer jar) — that half of the standing "one live check per loader" debt is closed by
+  inspection; the pump runs last in `onEndClientTick` on both loaders. (The two
+  sweeps counted the surface as 65 bindings / 66 members — same set, one member
+  bound twice.)
+
+### 16.4 What the sweep did NOT cover
+
+The 1.21.11 minimap build (26.4.2/26.2 was analysed); Xaero versions below 1.40.0
+(out of scope — the floor is 1.42.0, so 1.40.0-1.41.x is ALSO below it, verified
+bridge-off there); live behavior of the xaerolib-nested config chain on NeoForge
+(owed — the live signal is `optional_unbound` absent from `/lss diag` on both
+loaders); the m4 load-priority follow-up under a real fill.
+
+### 16.5 Review fold (2026-08-23, 2-Opus over the sweep fold)
+
+The release-lens reviewer caught: two pins asserting opposite things about a
+refused new tile (the switch test predated the rollback — fixed); the both-off
+shortcut ran the owed-rebuild flush BEFORE the ladder's `mainStuffSync` dimension
+gates and read the dimension off-monitor (the gates are hoisted above the settings
+read; the flush uses the validated id); the settings read failed CLOSED on a
+foreign value shape and a throwing read latched the bridge dead through
+`noteFailure` (now: non-Boolean = ON, a throw is contained, warned once, latches
+`settings_gate=broken` for the session — diag-visible); `skipped_settings`
+undercounted the both-off drop (`clearQueue` returns the count); `regions_waiting`
+went stale on the cave-layer wait; the M2 re-check's load-bearing call order
+(`sessionGate.onDisconnect()` before `ModCompat.onDisconnect()`) is pinned; the
+byte-cap test's loop is bounded with its premise asserted; the height pin is its
+own per-line test; the tooltip no longer names `/lss clearcache` (the VSS rebrand
+cannot rewrite a slash command); the `interpretation-version`/`cave-layer`
+unbound paths are Tier-1-unreachable (recorded, live-checked via `optional_unbound`).
