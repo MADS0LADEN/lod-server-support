@@ -12,8 +12,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,6 +41,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * the {@code Component} one, so the non-JDK-parameter overload's existence is asserted
  * here and the preference itself in {@code LegacySodiumPageTest}.
  *
+ * <p>Modrinth's NeoForge artifacts can be jarjar WRAPPERS (the 1.21.10 0.7.3 build: the
+ * mod's classes sit in {@code META-INF/jarjar/<mod>.jar}, the outer jar holds only
+ * metadata + nested libraries) — {@link #openGolden} descends into the nested jar that
+ * carries the caffeine prefix, so the check reads real classes on every artifact shape.
+ *
  * <p>Offline boxes skip (assumption); under {@code CI=true} a missing jar FAILS — a
  * mistyped coordinate must never void the golden arm silently (review). The modern arm
  * is only expected where the line pins a 0.8+ artifact ({@code lss.sodiumModernGoldenExpected}).
@@ -50,7 +57,8 @@ class SodiumLegacySurfaceResolvesTest {
         Path jar = goldenJar("lss.sodiumLegacyGoldenJar", true);
         String prefix = SodiumGeneration.CAFFEINE_PREFIX.replace('.', '/');
         List<String> missing = new ArrayList<>();
-        try (ZipFile zip = new ZipFile(jar.toFile())) {
+        try (ZipFile zip = openGolden(jar, SodiumGeneration.resourceOf(
+                SodiumGeneration.CAFFEINE_PREFIX + SodiumGeneration.LEGACY_SCREEN_SUFFIX))) {
             Map<String, ClassNode> nodes = new HashMap<>();
             check(zip, prefix, LegacySodiumPage.SURFACE, nodes, missing);
             // The 0.7 overload hazard: a second setTooltip/1 whose parameter is NOT a JDK
@@ -73,7 +81,7 @@ class SodiumLegacySurfaceResolvesTest {
                 "true".equals(System.getProperty("lss.sodiumModernGoldenExpected", "false")));
         String prefix = SodiumGeneration.CAFFEINE_PREFIX.replace('.', '/');
         List<String> missing = new ArrayList<>();
-        try (ZipFile zip = new ZipFile(jar.toFile())) {
+        try (ZipFile zip = openGolden(jar, SodiumGeneration.resourceOf(SodiumGeneration.MODERN_ENTRY_POINT))) {
             check(zip, prefix, SodiumConfigScreens.MODERN_SURFACE, new HashMap<>(), missing);
             // and the probe's own premise: the public config API entry point is there
             if (zip.getEntry(SodiumGeneration.resourceOf(SodiumGeneration.MODERN_ENTRY_POINT)) == null) {
@@ -81,6 +89,39 @@ class SodiumLegacySurfaceResolvesTest {
             }
         }
         assertTrue(missing.isEmpty(), "SodiumConfigScreens.MODERN_SURFACE members absent from " + jar + ": " + missing);
+    }
+
+    /**
+     * The zip to read classes from: the jar itself when it carries the generation's
+     * probe class ({@code SodiumOptionsGUI} / the 0.8 {@code ConfigEntryPoint} — a bare
+     * package-prefix test is not enough: the 0.7.3 NeoForge wrapper ships a few
+     * {@code net/caffeinemc/mods/sodium} entries flat and the client classes nested),
+     * else the first {@code META-INF/jarjar/*.jar} nested inside it that does (extracted
+     * to a temp file — {@link ZipFile} needs a real file). A jar with neither is
+     * returned as-is so every member reports missing, naming the jar.
+     */
+    private static ZipFile openGolden(Path jar, String probeEntry) throws IOException {
+        try (ZipFile outer = new ZipFile(jar.toFile())) {
+            if (outer.getEntry(probeEntry) != null) {
+                return new ZipFile(jar.toFile());
+            }
+            for (ZipEntry e : Collections.list(outer.entries())) {
+                if (!e.getName().startsWith("META-INF/jarjar/") || !e.getName().endsWith(".jar")) {
+                    continue;
+                }
+                Path tmp = Files.createTempFile("sodium-golden-nested", ".jar");
+                tmp.toFile().deleteOnExit();
+                try (InputStream in = outer.getInputStream(e)) {
+                    Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
+                }
+                ZipFile nested = new ZipFile(tmp.toFile());
+                if (nested.getEntry(probeEntry) != null) {
+                    return nested;
+                }
+                nested.close();
+            }
+        }
+        return new ZipFile(jar.toFile());
     }
 
     private static Path goldenJar(String property, boolean expected) {
