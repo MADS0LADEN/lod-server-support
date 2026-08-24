@@ -845,12 +845,64 @@ class XaeroMapCompatTest {
         assertTrue(tileChunk.lastUpdateCache == this.processor.shapeCache);
         assertNotNull(tileChunk.lastUpdateConfig);
         assertFalse(tileChunk.lastUpdateDebug, "the writer's detailed-debug flag is log-only: false");
+        assertFalse(events.stream().anyMatch(e -> e.startsWith("tileChunk.setToUpdateBuffers")),
+                "the rebuild phase never sets the flag either (the §15 invariant in both phases)");
+    }
+
+    @Test
+    void owedRegionsAreKeptVisitedSoXaeroCannotParkThem() {
+        // LeafRegionTexture.postUpload parks a region (loadState 3, tiles released) once it
+        // is not being written, 1 s passed since its last visit and no tile chunk carries
+        // the flag — the flag WAS the park guard (review A MAJOR); the visit is ours now.
+        this.bridge.updateIdlePumps = 1000;
+        offer(64, 64);
+        offer(68, 64);
+        this.bridge.pump();
+        var region = theRegion();
+        int visits = region.visits;
+        this.bridge.pump();
+        this.bridge.pump();
+        assertEquals(2, region.visits - visits, "one visit per owed REGION per pump, not per entry");
+        region.loadState = 0; // unloaded: never visit a region that is not loaded
+        visits = region.visits;
+        this.bridge.pump();
+        assertEquals(0, region.visits - visits);
+    }
+
+    @Test
+    void theFlushBorrowsTheCommitBudgetOnlyWhenTheQueueIsEmptyOrTheSetIsPastTheSoftCap() {
+        this.bridge.updateIdlePumps = 1;
+        this.bridge.updateNanosBudget = 0;
+        this.bridge.updateBorrowNanos = Long.MAX_VALUE;
+        this.bridge.pendingUpdatesSoftCap = 100;
+        offer(64, 64);
+        offer(68, 64);
+        offer(72, 64);
+        this.bridge.pump();
+        offer(96, 64); // a queued entry the drain will NOT reach: its region is busy
+        var other = new MapRegion();
+        other.resting = false;
+        this.processor.regions.put((3L << 32) | 2L, other);
+        this.bridge.pump(); // queue non-empty, set under the soft cap: budget 0 → one rebuild
+        assertEquals(1, this.bridge.counterForTest("buffer_updates"));
+        this.bridge.pendingUpdatesSoftCap = 1; // past the soft cap: half the borrow → all
+        this.bridge.pump();
+        assertEquals(3, this.bridge.counterForTest("buffer_updates"),
+                "past the soft cap the flush borrows half the commit budget (Long.MAX_VALUE/2):"
+                        + " both remaining entries rebuild in one pump");
+        offer(76, 64);
+        this.bridge.pendingUpdatesSoftCap = 100;
+        this.bridge.pump(); // commits (19,16)
+        this.bridge.queueLockedClearForTest();
+        this.bridge.pump(); // queue EMPTY: the whole borrow → everything due rebuilds
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
     }
 
     @Test
     void aZeroRebuildBudgetStillRebuildsOnePerPumpAndResumes() {
         this.bridge.updateIdlePumps = 1;
         this.bridge.updateNanosBudget = 0;
+        this.bridge.updateBorrowNanos = 0; // pin truncation: no borrowing
         offer(64, 64);
         offer(68, 64);
         this.bridge.pump();
@@ -867,6 +919,7 @@ class XaeroMapCompatTest {
     void aNotReadyRegionIsProbedOncePerFlushAndConsumesNoProgress() {
         this.bridge.updateIdlePumps = 2;
         this.bridge.updateNanosBudget = 0;
+        this.bridge.updateBorrowNanos = 0; // pin truncation: no borrowing
         offer(64, 64);
         offer(68, 64);
         offer(72, 64); // three tile chunks of region (2,2)
@@ -898,6 +951,7 @@ class XaeroMapCompatTest {
         // commits into its tile chunk. The reset makes it wait a FRESH idle window.
         this.bridge.updateIdlePumps = 3;
         this.bridge.updateNanosBudget = 0; // one removing outcome per pump
+        this.bridge.updateBorrowNanos = 0; // pin truncation: no borrowing
         offer(96, 64);            // F: tile chunk (24,16), region (3,2) — the OLDER entry
         this.bridge.pump();       // pump 1
         offer(64, 64);            // E: tile chunk (16,16), region (2,2)
@@ -1033,13 +1087,21 @@ class XaeroMapCompatTest {
         region.setChunk(0, 0, new MapTileChunk(region, 16, 16)); // replaced
         this.bridge.pump();
         this.bridge.pump();
-        assertEquals(1, this.bridge.counterForTest("dropped_updates"));
+        assertEquals(1, this.bridge.counterForTest("dropped_unloaded"));
         offer(68, 64);
         this.bridge.pump();
         region.loadState = 0; // unloaded
         this.bridge.pump();
         this.bridge.pump();
-        assertEquals(2, this.bridge.counterForTest("dropped_updates"));
+        assertEquals(2, this.bridge.counterForTest("dropped_unloaded"));
+        region.loadState = 2;
+        offer(72, 64);
+        this.bridge.pump();
+        region.getChunk(2, 0).loadState = 0; // a tile-chunk-only teardown (deleteTexturesAndBuffers)
+        this.bridge.pump();
+        this.bridge.pump();
+        assertEquals(3, this.bridge.counterForTest("dropped_unloaded"));
+        assertEquals(0, this.bridge.counterForTest("dropped_updates"), "its own counter — a parking race must be tellable apart");
         assertEquals(0, this.bridge.counterForTest("pending_updates"));
         assertFalse(XaeroStubEvents.snapshot().stream().anyMatch(e -> e.startsWith("tileChunk.updateBuffers")),
                 "a reload rebuilds its own textures — never touch a foreign tile chunk");
@@ -1081,6 +1143,7 @@ class XaeroMapCompatTest {
         assertEquals(1, this.bridge.counterForTest("pending_updates"));
         this.bridge.onSessionEnd();
         assertEquals(0, this.bridge.counterForTest("pending_updates"));
+        assertEquals(1, this.bridge.counterForTest("dropped_updates"), "lost, counted");
         pumpIdleWindow();
         assertFalse(XaeroStubEvents.snapshot().stream().anyMatch(e -> e.startsWith("tileChunk.updateBuffers")),
                 "the old world's tile chunks are never touched again");
@@ -1204,7 +1267,12 @@ class XaeroMapCompatTest {
         }
         this.bridge.pump();
         this.bridge.pump();
-        assertTrue(this.bridge.deadForTest(), "a throwing rebuild is a commit-side failure");
+        assertTrue(this.bridge.deadForTest(), "a throwing rebuild is a commit-side failure"
+                + " (commit_failures=" + this.bridge.counterForTest("commit_failures")
+                + " dropped_updates=" + this.bridge.counterForTest("dropped_updates")
+                + " dropped_unloaded=" + this.bridge.counterForTest("dropped_unloaded")
+                + " pending=" + this.bridge.counterForTest("pending_updates")
+                + " buffer_updates=" + this.bridge.counterForTest("buffer_updates") + ")");
         assertTrue(this.bridge.counterForTest("commit_failures") >= XaeroMapCompat.THROW_LATCH);
         assertEquals(XaeroMapCompat.THROW_LATCH, this.bridge.counterForTest("dropped_updates"),
                 "owed and never rebuilt: buffer_updates + dropped_updates accounts for every entry");
@@ -1473,7 +1541,8 @@ class XaeroMapCompatTest {
         assertTrue(line.contains(", written=") && line.contains(", defer_events=")
                 && line.contains(", dropped=") && line.contains(", commit_failures=")
                 && line.contains(", regions_waiting=") && line.contains(", buffer_updates=")
-                && line.contains(", pending_updates=") && line.contains(", dropped_updates="), line);
+                && line.contains(", pending_updates=") && line.contains(", dropped_updates=")
+                && line.contains(", dropped_unloaded="), line);
         this.enabled = false;
         assertTrue(this.bridge.describe().contains("state=disabled"));
     }

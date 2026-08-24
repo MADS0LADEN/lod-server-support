@@ -837,10 +837,14 @@ different regions, loadStates 2/3/2: not a corrupt region, a protocol race.
   frame, under the region monitor) queues a region for caching when
   `shouldCache && recacheHasBeenRequested && isAllCachePrepared && !isRefreshing`
   (`MapSaveLoad.requestCache`). The saver later pops it and THROWS if
-  `!isAllCachePrepared()` — there is no re-check, no requeue.
+  `!isAllCachePrepared()` — no requeue (`requestCache` has ONE call site, inside
+  the region monitor).
 - `MapTileChunk.updateBuffers` (the 64×64 texture rebuild; render-thread-only —
-  it throws "Wrong thread!" otherwise) ends with `region.setAllCachePrepared(false)`.
-  So any rebuild landing between the queueing and the pop crashes the saver.
+  it throws "Wrong thread!" otherwise) does `region.setAllCachePrepared(false)`
+  near its START (pc 109, before the 4096-pixel pass). So any rebuild landing
+  between the queueing and the pop crashes the saver. (The pop re-checks
+  `shouldCache && recacheHasBeenRequested && !skipCaching` — failing THAT takes a
+  cancel path; the unprepared check itself has no such exit.)
 - What keeps the NATIVE writer out of that window: `MapRegion.isResting()` =
   `loadState ∉ {1,3} && !recacheHasBeenRequested`, and `writeChunk` writes (and
   rebuilds — `updateBuffers` directly on the written tile chunk at inside (3,3)
@@ -902,9 +906,14 @@ different regions, loadStates 2/3/2: not a corrupt region, a protocol race.
   `MapProcessor.getWorldBlockTintProvider()`, `MapUpdateFastConfig(MapProcessor)`
   — all verified against the 1.21.11 1.45.0 jar (FQN-identical on every line;
   `setToUpdateBuffers` is no longer bound). The stub `updateBuffers` enforces
-  both region monitors and mirrors the `setAllCachePrepared(false)` side
-  effect, so the test pins assert the real invariant (the flip happens only
-  under the gates).
+  the writer-pause AND region monitors and mirrors the `setAllCachePrepared(false)`
+  side effect, so the test pins assert the real invariant (the flip happens only
+  under the gates). Precision (review A): the native writer holds only
+  `writerThreadPauseSync` at its own `updateBuffers` calls (the region monitor is
+  released after the write); the bridge's additional region-monitor hold is a
+  chosen tightening, safe because the jar's only two nesting orders are both
+  render-thread-only (no inversion possible) and `updateBuffers` never takes a
+  foreign region's monitor (`getNeighbourTileChunk(..., allowOtherRegions=false)`).
 - Pins (XaeroMapCompatTest, the rebuild-phase block): flag never set + no
   rebuild at commit; rebuild after the idle window under the gates with
   `beingWritten` re-armed and the change consumed after; per-tile-chunk
@@ -916,8 +925,18 @@ different regions, loadStates 2/3/2: not a corrupt region, a protocol race.
 
 Owed: the live re-test on the lss-test-1.21.11 instance (the crash reproduced
 within ~20-40 min of map browsing each time; a clean hour with
-`buffer_updates` climbing and `commit_failures=0` closes it), then the port to
-every line (xplat-only + stubs/tests — no line flavor points).
+`buffer_updates` climbing, `pending_updates` NOT pinned at the hard cap and
+`commit_failures=0` closes it), then the port to every line (xplat-only +
+stubs/tests — no line flavor points). How to read a recurrence (review A): the
+bridge no longer sets the flag anywhere, but Xaero itself does — the native
+writer's right/bottom-right neighbor flags, and `MapProcessor.handleRefresh`
+(after a save that found the region `!isAllCachePrepared()`) flags every
+terrain-bearing tile chunk of the region — and both go through the same
+`isResting`-blind sweep. A recurrence therefore points at Xaero's own flags (a
+region saved while a bridge rebuild was still owed makes the refresh path more
+likely), not at a bridge rebuild; keep rebuild latency well inside the save
+cadence (the idle window + the age ceiling are seconds; a hard-cap backlog is
+what would stretch it).
 
 ### 15.1 Review fold (2026-08-23, 2-Opus over PR #237 — review B landed first)
 
@@ -966,3 +985,49 @@ is called with `allowOtherRegions=false`) and does not arm our own `DEFERRED_TIL
   texture that the region cache may hold until the next native write or reload
   (Reviewer B's one unverifiable claim — the live hour on 1.21.11 is the check);
   `describeRendersTheHouseStyle` remains a token-presence pin (pre-existing).
+
+### 15.2 Review fold — reviewer A (protocol / deadlock lens, verified pc-level)
+
+Reviewer A re-derived §15 from the jar and VERIFIED the exclusion argument end to
+end (`requestCache`'s single call site and guards, the saver's pop + throw, the
+sweep's gates, the native writer's post-write block, the save section's
+`isBeingWritten` throw-on-false at pc 1611 — which our set-never-clear cannot
+trip — and `toSave`'s dedupe), and found NO lock-order inversion (§15's
+precision note above). Refuted wording fixed in place (the region monitor, the
+"ends with", the "no re-check"). Folded:
+
+- **MAJOR — the flag was also Xaero's park guard.** `LeafRegionTexture.postUpload`
+  parks a region (`setLoadState(3)`, `tileChunk.clean()` releasing its 16 tiles)
+  once it is not being written, 1 s has passed since `registerVisit`, and no tile
+  chunk is flagged `toUpdateBuffers`. With the flag never set, a save that reset
+  `beingWritten` plus one quiet second could park a tile chunk whose rebuild was
+  still owed → `loadState != 2` → dropped, texture never built (blank until a
+  reload; a re-written tile chunk could even be cached pre-rewrite). The flush now
+  keeps every region with an owed rebuild VISITED each pump — `registerVisit`
+  once per region under the region monitor, the writer's own signal — so Xaero
+  cannot park it under us; pinned (`owedRegionsAreKeptVisitedSoXaeroCannotParkThem`).
+- **MAJOR — the 2 ms rebuild budget could pin commits at the hard cap**: the flush
+  now borrows the commit budget once the queue is empty (commits need nothing)
+  and half of it while the owed set is past the soft cap (`UPDATE_BORROW_NANOS`,
+  saturating add — the seams take `Long.MAX_VALUE`, which is how the latch test
+  caught the overflow); the frame-hook lever is recorded in the constant's
+  javadoc for the case the live counters show `pending_updates` pinned.
+- MAJOR (interpretation) — Xaero's own `handleRefresh` flags: recorded in the
+  "owed" paragraph so a live recurrence is read correctly.
+- MINOR — `rebuildTileChunk` checks the TILE CHUNK's loadState too (a tile-chunk-only
+  teardown leaves the region's untouched); unloaded/parked/replaced drops count
+  `dropped_unloaded` (own counter — a parking race must be tellable apart from the
+  stall/dimension/session drops); the dead latch clears the owed set on the next
+  pump's dead path (NOT inside `noteFailure` — that runs inside the flush's own
+  iteration, and clearing there tore the map out from under the iterator);
+  `onSessionEnd` counts the owed rebuilds it discards (accepted: the last ≤2 s of
+  commits before a disconnect may reach the region cache with a stale texture —
+  no best-effort flush against a world that is going away); a hard-capped drain
+  pass keeps the last `regions_waiting` gauge instead of writing 0; the stub's
+  "both monitors" javadoc reworded as the bridge's tightening.
+- Pins added: keep-visited (once per region per pump; never for an unloaded
+  region), budget borrowing (none under the soft cap with a non-empty queue, half
+  past it, all of it on an empty queue), the tile-chunk teardown drop, the
+  session-end count, the rebuild path never sets the flag. Reviewer A's other test
+  gaps were already covered by the review-B fold (zero budget, two regions,
+  stall reset, latch release).

@@ -78,9 +78,14 @@ public class MapTileChunk {
     }
 
     /** FAITHFUL side effect (decompiled): the leaf texture is re-marked to upload and
-     *  the region's cache flag drops — exactly the flip the saver throws on when it
-     *  lands after a cache request. The real method also hard-throws off the render
-     *  thread; the native writer calls it under BOTH region monitors. */
+     *  the region's cache flag drops (near the START of the real method, before the
+     *  4096-pixel pass) — exactly the flip the saver throws on when it lands after a
+     *  cache request. The real method also hard-throws off the render thread. The
+     *  monitor pin is the BRIDGE's chosen tightening, not Xaero's contract: the
+     *  native writer holds only writerThreadPauseSync at its updateBuffers calls
+     *  (the region monitor is released after the write) — the bridge additionally
+     *  holds the region monitor, which is safe (review A: the only nesting orders in
+     *  the jar are both render-thread-only). */
     public void updateBuffers(MapProcessor processor, BlockTintProvider tint,
                               OverlayManager overlayManager, boolean detailedDebug,
                               BlockStateShortShapeCache cache, MapUpdateFastConfig config) {
