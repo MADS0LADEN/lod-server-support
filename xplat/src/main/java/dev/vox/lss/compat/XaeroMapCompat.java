@@ -122,11 +122,20 @@ final class XaeroMapCompat {
     /** At this many owed rebuilds COMMITS pause until the flush drains — a region
      *  that never rests (a stuck saver) must not grow the set without bound. */
     static final int PENDING_UPDATES_HARD_CAP = 1024;
-    /** A due rebuild whose region stays not-resting this long (~60 s) is dropped,
-     *  counted: the texture self-heals on the region's next reload. */
+    /** A due rebuild whose region stays not-ready this long (~60 s — not resting,
+     *  writer-paused, or the player is in another dimension) is dropped, counted.
+     *  Accepted residual: the tile chunk keeps its stale texture (changed=true,
+     *  unflagged) until the region's next native write or reload. */
     static final int UPDATE_MAX_STALL_PUMPS = 1200;
-    /** Rebuild budget per pump, separate from the commit budget; at least one
-     *  rebuild runs per pump so the set always drains. */
+    /** Absolute ceiling on coalescing: a tile chunk re-touched more often than the
+     *  idle window (a slow trickle) still rebuilds this many pumps (~8 s) after its
+     *  FIRST commit — the map must never show a written tile chunk blank
+     *  indefinitely (review B). */
+    static final int UPDATE_MAX_DEFER_PUMPS = 4 * UPDATE_IDLE_PUMPS;
+    /** Rebuild budget per pump, separate from the commit budget; the first REMOVING
+     *  outcome (rebuilt/dropped/failed) of a pump is exempt from it, so the set
+     *  always drains — not-ready verdicts are memoized per region and cost no
+     *  budget. */
     static final long UPDATE_NANOS_BUDGET = 2_000_000L;
     /** Consecutive failures (commit-side or extraction-side) before the bridge
      *  latches dead for the SESSION (re-armed at disconnect). */
@@ -278,6 +287,7 @@ final class XaeroMapCompat {
     int pendingUpdatesSoftCap = PENDING_UPDATES_SOFT_CAP;
     int pendingUpdatesHardCap = PENDING_UPDATES_HARD_CAP;
     int updateMaxStallPumps = UPDATE_MAX_STALL_PUMPS;
+    int updateMaxDeferPumps = UPDATE_MAX_DEFER_PUMPS;
     /** Tile chunks committed but not yet texture-rebuilt, keyed by tile-chunk
      *  coords and ordered by LAST TOUCH (a re-touch re-inserts at the tail, so
      *  idle-due entries are always a prefix). Main thread only. */
@@ -294,24 +304,33 @@ final class XaeroMapCompat {
      *  commit loop never reached are unknown). */
     private volatile int regionsWaiting;
 
-    /** A committed tile chunk owed its texture rebuild (plan §15). */
+    /** A committed tile chunk owed its texture rebuild (plan §15). Bound to the
+     *  Xaero session that produced it (processor identity + world id — review B:
+     *  a server-initiated reconfiguration skips the disconnect event, and a
+     *  {@code ResourceKey} alone is identity-stable across servers). */
     private static final class PendingUpdate {
+        final Object processor;
+        final String worldId;
         final Object dimension;
         final Object region;
         final Object tileChunk;
         final int localTcX;
         final int localTcZ;
+        final long firstTouchPump;
         long lastTouchPump;
-        /** Pump at which a DUE rebuild first found its region not resting; -1 = never. */
+        /** Pump at which a DUE rebuild first found its region not ready; -1 = never. */
         long stalledSincePump = -1;
 
-        PendingUpdate(Object dimension, Object region, Object tileChunk,
-                      int localTcX, int localTcZ, long pump) {
+        PendingUpdate(Object processor, String worldId, Object dimension, Object region,
+                      Object tileChunk, int localTcX, int localTcZ, long pump) {
+            this.processor = processor;
+            this.worldId = worldId;
             this.dimension = dimension;
             this.region = region;
             this.tileChunk = tileChunk;
             this.localTcX = localTcX;
             this.localTcZ = localTcZ;
+            this.firstTouchPump = pump;
             this.lastTouchPump = pump;
         }
     }
@@ -566,7 +585,15 @@ final class XaeroMapCompat {
 
     void pump() {
         maybeRegister();
-        if (this.dead) return;
+        if (this.dead) {
+            // A dead bridge must not pin Xaero's regions/tile chunks (each leaf
+            // texture holds a direct buffer) for the rest of the session (review B).
+            if (!this.pendingUpdates.isEmpty()) {
+                this.pendingUpdates.clear();
+                this.pendingUpdatesGauge = 0;
+            }
+            return;
+        }
         this.pumpCount++;
         if (!this.enabled.getAsBoolean()) {
             clearQueue(); // the live toggle: flipping off drops the backlog immediately
@@ -1030,14 +1057,15 @@ final class XaeroMapCompat {
         // isResting() check, i.e. possibly after the region was queued for
         // cache-saving on prepared textures — the saver then throws ("Trying to
         // save cache for a region with cache not prepared", 3 crashes/hour live).
-        notePendingUpdate(dimensionId, region, tileChunk, localTcX, localTcZ,
+        notePendingUpdate(mp, dimensionId, region, tileChunk, localTcX, localTcZ,
                 tile.chunkX() >> 2, tile.chunkZ() >> 2);
     }
 
     // ---- the rebuild phase (plan §15) ----
 
-    private void notePendingUpdate(Object dimensionId, Object region, Object tileChunk,
-                                   int localTcX, int localTcZ, int tileChunkX, int tileChunkZ) {
+    private void notePendingUpdate(Object mp, Object dimensionId, Object region, Object tileChunk,
+                                   int localTcX, int localTcZ, int tileChunkX, int tileChunkZ)
+            throws Throwable {
         long key = ((long) tileChunkX << 32) | (tileChunkZ & 0xFFFFFFFFL);
         var existing = this.pendingUpdates.remove(key); // re-insert at the tail = last touch
         if (existing != null && existing.tileChunk == tileChunk) {
@@ -1045,7 +1073,10 @@ final class XaeroMapCompat {
             existing.stalledSincePump = -1; // the commit gate just passed: the stall ended
             this.pendingUpdates.put(key, existing);
         } else {
-            this.pendingUpdates.put(key, new PendingUpdate(dimensionId, region, tileChunk,
+            // A replaced tile chunk (Xaero reloaded the region) gets a FRESH entry —
+            // the old object's rebuild would fail its identity check and drop.
+            this.pendingUpdates.put(key, new PendingUpdate(mp,
+                    (String) this.h.getCurrentWorldId.invoke(mp), dimensionId, region, tileChunk,
                     localTcX, localTcZ, this.pumpCount));
         }
         this.pendingUpdatesGauge = this.pendingUpdates.size();
@@ -1054,25 +1085,35 @@ final class XaeroMapCompat {
     private enum UpdateResult { DONE, NOT_READY, DROPPED, FAILED }
 
     /** The per-flush rebuild inputs, resolved once (the native onRender builds one
-     *  {@code MapUpdateFastConfig} per pass the same way). */
+     *  {@code MapUpdateFastConfig} per pass the same way), plus the per-flush memo
+     *  of regions already found not ready — up to 64 tile chunks share one region
+     *  and one verdict, and re-taking the writer-pause + region monitors per tile
+     *  chunk is the per-entry-probe pattern plan §14 removed (review B MAJOR). */
     private static final class RebuildArgs {
         Object tint;
         Object overlayManager;
         Object shapeCache;
         Object fastConfig;
+        final java.util.Set<Object> notReadyRegions =
+                java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
     }
 
     /**
      * Run the owed rebuilds that are DUE — idle for {@link #updateIdlePumps}, or
-     * the oldest beyond the soft cap, or previously stalled — oldest-touch first,
-     * within {@link #updateNanosBudget} (at least one per pump). Each rebuild
-     * re-runs the writer's region gates ({@code writerThreadPauseSync} +
-     * {@code !isWritingPaused()}, the region monitor, {@code isResting()}): a
-     * not-resting region (being saved / cache pending — exactly the state the
-     * flag-consuming sweep ignored) keeps the entry for a later pump; an
-     * unloaded or replaced tile chunk drops it (a reload rebuilds its own
-     * textures); a rebuild on the wrong dimension drops it (the pixel recipe
-     * reads the CURRENT world). A tile chunk the native writer already consumed
+     * older than {@link #updateMaxDeferPumps} (the trickle ceiling), or the oldest
+     * beyond the soft cap, or previously stalled — oldest-touch first, within
+     * {@link #updateNanosBudget} (the first removing outcome of a pump is exempt,
+     * so the set always drains). Each rebuild re-runs the writer's region gates
+     * ({@code writerThreadPauseSync} + {@code !isWritingPaused()}, the region
+     * monitor, {@code isResting()}) — ONCE per region per flush for a not-ready
+     * verdict (memoized, no budget): a not-resting region (being saved / cache
+     * pending — exactly the state the flag-consuming sweep ignored) keeps its
+     * entries for a later pump, as does another dimension's region (the pixel
+     * recipe reads the CURRENT dimension's shading; the entries wait for the
+     * player's return); either drops after {@link #updateMaxStallPumps}. An
+     * unloaded or replaced tile chunk, or an entry from a previous Xaero session
+     * (processor identity / world id), drops at once — a reload rebuilds its own
+     * textures. A tile chunk the native writer already consumed
      * ({@code !wasChanged()}) needs nothing.
      */
     private void flushPendingUpdates(Object mp, Object dimensionId) {
@@ -1082,28 +1123,41 @@ final class XaeroMapCompat {
         }
         long start = System.nanoTime();
         var args = new RebuildArgs();
-        int done = 0;
+        String worldId;
+        try {
+            worldId = (String) this.h.getCurrentWorldId.invoke(mp);
+        } catch (Throwable t) {
+            if (t instanceof Error err && !(t instanceof AssertionError)) throw err;
+            noteFailure(t);
+            return;
+        }
+        int removed = 0;
         int overflow = this.pendingUpdates.size() - this.pendingUpdatesSoftCap;
         var it = this.pendingUpdates.values().iterator();
         while (it.hasNext()) {
-            if (done > 0 && System.nanoTime() - start > this.updateNanosBudget) break;
+            if (removed > 0 && System.nanoTime() - start > this.updateNanosBudget) break;
             var pu = it.next();
             boolean due = overflow-- > 0
                     || this.pumpCount - pu.lastTouchPump >= this.updateIdlePumps
+                    || this.pumpCount - pu.firstTouchPump >= this.updateMaxDeferPumps
                     || pu.stalledSincePump >= 0;
-            if (!due) break; // touch order: nothing after this one is idle-due either
-            if (pu.dimension != dimensionId) {
-                it.remove();
-                this.droppedUpdates.incrementAndGet();
-                continue;
+            if (!due) continue; // touch order makes idle-due a prefix, but the age ceiling is not
+            UpdateResult result;
+            if (pu.processor != mp || !java.util.Objects.equals(pu.worldId, worldId)) {
+                result = UpdateResult.DROPPED; // a previous Xaero session's objects
+            } else if (pu.dimension != dimensionId) {
+                result = UpdateResult.NOT_READY;
+            } else {
+                result = rebuildTileChunk(mp, pu, args);
             }
-            switch (rebuildTileChunk(mp, pu, args)) {
+            switch (result) {
                 case DONE -> {
                     it.remove();
-                    done++;
+                    removed++;
                 }
                 case DROPPED -> {
                     it.remove();
+                    removed++;
                     this.droppedUpdates.incrementAndGet();
                 }
                 case NOT_READY -> {
@@ -1111,11 +1165,15 @@ final class XaeroMapCompat {
                         pu.stalledSincePump = this.pumpCount;
                     } else if (this.pumpCount - pu.stalledSincePump >= this.updateMaxStallPumps) {
                         it.remove();
+                        removed++;
                         this.droppedUpdates.incrementAndGet();
                     }
-                    done++; // budget-counted progress: a stalled prefix must not spin the loop
                 }
-                case FAILED -> it.remove();
+                case FAILED -> {
+                    it.remove();
+                    removed++;
+                    this.droppedUpdates.incrementAndGet(); // owed, never rebuilt
+                }
             }
             if (this.dead) break;
         }
@@ -1123,10 +1181,12 @@ final class XaeroMapCompat {
     }
 
     private UpdateResult rebuildTileChunk(Object mp, PendingUpdate pu, RebuildArgs args) {
+        if (args.notReadyRegions.contains(pu.region)) return UpdateResult.NOT_READY;
         try {
             Object writerPause = this.h.writerThreadPauseSync.invoke(pu.region);
             synchronized (writerPause) {
                 if ((boolean) this.h.regionIsWritingPaused.invoke(pu.region)) {
+                    args.notReadyRegions.add(pu.region);
                     return UpdateResult.NOT_READY;
                 }
                 synchronized (pu.region) {
@@ -1136,6 +1196,7 @@ final class XaeroMapCompat {
                         return UpdateResult.DROPPED;
                     }
                     if (!(boolean) this.h.isResting.invoke(pu.region)) {
+                        args.notReadyRegions.add(pu.region);
                         return UpdateResult.NOT_READY;
                     }
                     if ((boolean) this.h.tileChunkWasChanged.invoke(pu.tileChunk)) {

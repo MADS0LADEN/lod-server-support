@@ -20,6 +20,12 @@ public class MapTileChunk {
     public boolean setTileThrows; // arms the throw-latch tests
     public boolean updateBuffersThrows; // arms the rebuild-side latch tests
     public int bufferUpdates;
+    public MapProcessor lastUpdateProcessor;
+    public BlockTintProvider lastUpdateTint;
+    public OverlayManager lastUpdateOverlay;
+    public boolean lastUpdateDebug;
+    public BlockStateShortShapeCache lastUpdateCache;
+    public MapUpdateFastConfig lastUpdateConfig;
 
     public MapTileChunk(MapRegion region, int tileChunkX, int tileChunkZ) {
         this.region = region;
@@ -84,6 +90,12 @@ public class MapTileChunk {
         }
         if (this.updateBuffersThrows) throw new IllegalStateException("armed updateBuffers throw");
         this.bufferUpdates++;
+        this.lastUpdateProcessor = processor;
+        this.lastUpdateTint = tint;
+        this.lastUpdateOverlay = overlayManager;
+        this.lastUpdateDebug = detailedDebug;
+        this.lastUpdateCache = cache;
+        this.lastUpdateConfig = config;
         this.region.setAllCachePrepared(false);
         dev.vox.lss.compat.XaeroStubEvents.record("tileChunk.updateBuffers " + this.tileChunkX
                 + "," + this.tileChunkZ + (detailedDebug ? " debug" : ""));

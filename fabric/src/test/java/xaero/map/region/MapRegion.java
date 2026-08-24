@@ -27,7 +27,12 @@ public class MapRegion extends LeveledRegion<Object> {
         }
     }
 
+    /** Gate probes (writer-pause monitor acquisitions) — the flush must probe a
+     *  not-ready region ONCE per pump, not once per owed tile chunk. */
+    public int gateProbes;
+
     public boolean isWritingPaused() {
+        this.gateProbes++;
         if (!Thread.holdsLock(this.writerThreadPauseSync)) {
             throw new IllegalStateException("region.isWritingPaused outside"
                     + " writerThreadPauseSync — the save-race exclusion's monitor");

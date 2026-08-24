@@ -346,8 +346,9 @@ construction under it is proven — SectionConstructionPinTest et al.):
   ONE paced requestLoad with setBeingWritten(true) first and defers without
   burning deferral budget; ladder-ready deferral cap drops); commit-sequence
   order against a recording stub (worldInterpretationVersion before setTile;
-  setBeingWritten never cleared; setChanged + setToUpdateBuffers, no
-  updateBuffers call); latest-wins + bounds; config-off clears; throw latch
+  setBeingWritten never cleared; ~~setChanged + setToUpdateBuffers, no
+  updateBuffers call~~ — INVERTED by §15: no flag ever, the rebuild coalesced into
+  the pump's flush phase under the writer gates); latest-wins + bounds; config-off clears; throw latch
   kills after 5; a throwing commit NEVER escapes the consumer callback and
   NEVER reports ingest failure (pin: the report seam records zero calls).
 
@@ -536,7 +537,8 @@ version-before-setTile, slopeUnknown), handle-set corrections, the
 both-writers-skip window edge, tile-chunk creation details (setLoadState 2,
 setAllCachePrepared false, registerVisit, PBO gate). Verified: all needed
 members public; FQNs identical 26.2 ↔ 1.21.1; boundary self-heal both
-directions; no cache-prepared crash workaround needed.
+directions; ~~no cache-prepared crash workaround needed~~ (FALSIFIED live — §15: the
+flag-consuming sweep escapes `isResting`; the bridge now runs the rebuild itself).
 
 Reviewer B (project lens) — 2 MAJORs, both folded: dimension write-context
 pinning (resolved by mirroring the native mainStuffSync equality — wrong-
@@ -916,3 +918,51 @@ Owed: the live re-test on the lss-test-1.21.11 instance (the crash reproduced
 within ~20-40 min of map browsing each time; a clean hour with
 `buffer_updates` climbing and `commit_failures=0` closes it), then the port to
 every line (xplat-only + stubs/tests — no line flavor points).
+
+### 15.1 Review fold (2026-08-23, 2-Opus over PR #237 — review B landed first)
+
+Reviewer B (cost / handles / pins) verified the four new members against all nine
+Xaero jars on the box (1.44.2 + every 1.45.0 incl. the NeoForge 1.21.1 build —
+identical descriptors; 1.40.x/1.41.0 already failed the 5-arg `setTile` bind, so the
+floor is unchanged), traced the soft-cap/hard-cap/flush-before-drain pins as real,
+confirmed `updateBuffers` takes no cross-region monitor (`getNeighbourTileChunk`
+is called with `allowOtherRegions=false`) and does not arm our own `DEFERRED_TILE`
+(`setShouldDownloadFromPBO(false)`). Folded:
+
+- **MAJOR — the death latch pinned Xaero objects**: `pump()` returned before the
+  flush while `pendingUpdates` (≤1024 strong refs to regions + tile chunks, each
+  leaf texture a direct buffer) stayed populated until disconnect. A dead pump now
+  clears the map (main thread; the decode-side latch never touches it).
+- **MAJOR — per-tile-chunk gate re-probe**: the flush re-took the writer-pause +
+  region monitors for every owed entry — up to 64 per region, one verdict — the
+  per-entry-probe pattern §14 removed; and `NOT_READY` counted as budget progress,
+  so a not-resting prefix could burn the whole rebuild budget doing nothing while
+  the hard cap paused commits. Now a not-ready verdict is memoized per region per
+  flush (no monitors for its siblings) and only REMOVING outcomes count toward the
+  budget's forward-progress guard (the javadoc/constant wording corrected: "the
+  first removing outcome is exempt", not "one rebuild per pump").
+- MINOR — session identity: a server-initiated reconfiguration skips the disconnect
+  event and a `ResourceKey` is identity-stable across servers, so an old world's
+  entry could pass every gate on the NEW world's objects. `PendingUpdate` now
+  carries the `MapProcessor` identity + `getCurrentWorldId()`; a mismatch DROPS.
+- MINOR — foreign dimension: dropping at once left a stale texture for a quick
+  portal trip; entries now WAIT (NOT_READY, no probe) and drop only after the
+  60 s stall window — the same accepted residual as a never-resting region.
+- MINOR — age ceiling `UPDATE_MAX_DEFER_PUMPS` (160 ≈ 8 s from the FIRST commit):
+  a tile chunk trickled into more often than the idle window can no longer defer
+  its rebuild indefinitely; the flush walks past not-due entries instead of
+  breaking (the ceiling is not a touch-order prefix; ≤1024 cheap checks).
+- MINOR — accounting: `FAILED` now counts `dropped_updates` (owed and never
+  rebuilt), so `buffer_updates + dropped_updates` reconciles every entry.
+- MINOR — pins added: the zero-budget flush (one removing outcome per pump, resumes),
+  probed-ONCE-per-flush + no progress consumed (stub `gateProbes`), the stall-clock
+  reset on a re-touch under budget truncation (the only reachable path), a replaced
+  tile chunk gets a fresh entry, the trickle ceiling, session identity (processor
+  AND world id), the dead-latch release, and the exact `updateBuffers` argument
+  identities + `debug=false` (every parameter is Object-erased behind the handle —
+  a transposition would only surface live as a 5-failure latch).
+- Recorded, not changed: the accepted residual that a DROPPED rebuild (60 s stall /
+  long dimension absence / a previous session) leaves `changed=true` with a stale
+  texture that the region cache may hold until the next native write or reload
+  (Reviewer B's one unverifiable claim — the live hour on 1.21.11 is the check);
+  `describeRendersTheHouseStyle` remains a token-presence pin (pre-existing).
