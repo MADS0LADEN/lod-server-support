@@ -143,6 +143,9 @@ public final class ClientOptionCatalog {
     // ---- Far players (E2, FARP §3.3): its own page — a distinct feature with its own
     //      privacy semantics, not another LOD slider. Every option here persists AND
     //      pushes the prefs NOW (E2 review M2/m4) — SaveHook.SAVE_AND_PUSH_FAR_PLAYER_PREFS.
+    //      The renderer-only options are RENDER_AVAILABLE-gated (hidden on NeoForge v1,
+    //      whose render path is a stub); "Share My Position" is the prefs carrier and is
+    //      never hidden — a NeoForge user's opt-out must stay deliverable.
     private static PageSpec farPlayersPage() {
         var push = SaveHook.SAVE_AND_PUSH_FAR_PLAYER_PREFS;
 
@@ -157,6 +160,7 @@ public final class ClientOptionCatalog {
                 .defaultValue(true)
                 .bind(c -> c.farPlayersEnabled, (c, v) -> c.farPlayersEnabled = v)
                 .saveHook(push)
+                .visibility(Visibility.RENDER_AVAILABLE)
                 .build();
 
         // "Share your position with other players' LOD view" — the E2 defaults
@@ -179,6 +183,7 @@ public final class ClientOptionCatalog {
                 .bind(c -> c.farPlayersNameTags, (c, v) -> c.farPlayersNameTags = v)
                 .enabledBy(ID_FAR_PLAYERS_ENABLED)
                 .saveHook(push)
+                .visibility(Visibility.RENDER_AVAILABLE)
                 .build();
 
         var render = IntSpec.builder(ID_FAR_PLAYERS_RENDER_DISTANCE)
@@ -191,6 +196,7 @@ public final class ClientOptionCatalog {
                 .bind(c -> c.farPlayersMaxRenderDistanceBlocks, (c, v) -> c.farPlayersMaxRenderDistanceBlocks = v)
                 .enabledBy(ID_FAR_PLAYERS_ENABLED)
                 .saveHook(push)
+                .visibility(Visibility.RENDER_AVAILABLE)
                 .build();
 
         // The coexist override — only meaningful (and only shown) with SeeU installed.

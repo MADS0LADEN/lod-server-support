@@ -44,6 +44,21 @@ class ClientMenuEntrypointContractTest {
         assertTrue(exists, "the ModMenu switch is reflective and belongs on every line");
     }
 
+    /** The plan's headline ("adding an option is a one-file change") for the renderer T1
+     *  cannot classload: no hand-written option, key or id in the walker source. */
+    @Test
+    void theModernWalkerCarriesNoHandWrittenOptions() throws IOException {
+        if (!exists("fabric/src/main/java/dev/vox/lss/config/LSSConfigMenu.java")) {
+            return; // a 0.7-only line
+        }
+        String src = SodiumGenerationTest.stripComments(Files.readString(
+                ClientOptionCatalogTest.locate("fabric/src/main/java/dev/vox/lss/config/LSSConfigMenu.java")));
+        assertTrue(src.contains("ClientOptionCatalog.pages()"), "the walker must iterate the catalog");
+        assertTrue(!src.contains("\"lss.config."), "translation keys come from the catalog, never literals");
+        assertTrue(!src.replace("\"lss:icon.png\"", "").contains(".parse(\"lss:"),
+                "option ids come from the catalog (the icon fallback is the one literal)");
+    }
+
     @Test
     void theLegacyMixinConfigIsListedAndPresent() throws IOException {
         assertTrue(modJson().getAsJsonArray("mixins").toString().contains("\"lss-sodium-legacy.mixins.json\""));

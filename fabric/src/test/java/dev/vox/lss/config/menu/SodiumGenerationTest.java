@@ -78,10 +78,26 @@ class SodiumGenerationTest {
         for (String tree : new String[]{"fabric", "neoforge"}) {
             String src = stripComments(Files.readString(ClientOptionCatalogTest.locate(
                     tree + "/src/main/java/dev/vox/lss/config/menu/SodiumGeneration.java")));
-            assertFalse(src.contains("Class.forName") || src.contains("loadClass("),
+            assertFalse(CLASS_LOAD.matcher(src).find(),
                     tree + ": the probe must be a RESOURCE lookup — a class load of the legacy"
                             + " screen before mixin application defines it past the hook");
         }
+    }
+
+    /** Every spelling of a class load (review): Class.forName, loadClass(...), findClass(...),
+     *  and the ::loadClass method reference. */
+    static final java.util.regex.Pattern CLASS_LOAD = java.util.regex.Pattern.compile(
+            "Class\\s*\\.\\s*forName|\\.\\s*loadClass\\s*\\(|\\.\\s*findClass\\s*\\(|::\\s*loadClass");
+
+    @Test
+    void theLegacyPrefixIgnoringModernSeesThroughAForeignApiJar() {
+        // A foreign jar shipping the 0.8 API interface beside a 0.6/0.7 Sodium flips the
+        // generation to MODERN — the hook (which already runs inside the legacy screen)
+        // must still find its prefix.
+        assertEquals(SodiumGeneration.CAFFEINE_PREFIX,
+                SodiumGeneration.legacyPrefixWith(Set.of(MODERN, LEGACY_CAFFEINE)::contains));
+        assertNull(SodiumGeneration.legacyPrefixWith(Set.of(MODERN)::contains));
+        assertNull(SodiumGeneration.legacyPrefixWith(r -> { throw new IllegalStateException(); }));
     }
 
     /** Code only — the javadoc legitimately names the barred call to explain the rule. */

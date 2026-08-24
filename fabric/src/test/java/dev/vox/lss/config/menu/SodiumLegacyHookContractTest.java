@@ -52,8 +52,9 @@ class SodiumLegacyHookContractTest {
             assertEquals(1, injects, tree + ": exactly one inject (no MC-inherited targets)");
             assertTrue(src.contains("LegacySodiumPage.build()"), tree + ": the body delegates to the reflective builder");
             assertTrue(src.contains("implements LegacyOptionsScreenHandle"), tree + ": the deep-link handle");
-            assertFalse(SodiumGenerationTest.stripComments(src).contains("Class.forName"),
+            assertFalse(SodiumGenerationTest.CLASS_LOAD.matcher(SodiumGenerationTest.stripComments(src)).find(),
                     tree + ": no class loads in the hook");
+            assertTrue(src.contains("catch (Throwable t)"), tree + ": the page-list write is contained (doctrine D9)");
         }
     }
 
@@ -67,6 +68,10 @@ class SodiumLegacyHookContractTest {
             assertTrue(cfg.getAsJsonArray("client").toString().contains("\"SodiumLegacyOptionsHook\""),
                     tree + ": the hook must be listed under client");
             assertFalse(cfg.has("mixins"), tree + ": client-only — never on a dedicated server's common list");
+            // A require miss is an InjectionError that ESCAPES required:false (review) — the
+            // tracer's non-required config made the same call: 0, degrade silently.
+            assertEquals(0, cfg.getAsJsonObject("injectors").get("defaultRequire").getAsInt(),
+                    tree + ": defaultRequire 0 — a missing constructor target must degrade, never crash");
         }
     }
 

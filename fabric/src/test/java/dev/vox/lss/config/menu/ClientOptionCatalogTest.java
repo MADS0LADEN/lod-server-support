@@ -144,13 +144,54 @@ class ClientOptionCatalogTest {
     }
 
     @Test
-    void theSeeuOverrideIsTheOnlyHiddenOption() {
-        var hidden = allOptions().stream().filter(o -> o.visibility() != Visibility.ALWAYS).toList();
-        assertEquals(1, hidden.size());
-        assertEquals(ClientOptionCatalog.ID_FAR_PLAYERS_WITH_SEEU, hidden.get(0).id());
-        assertEquals(Visibility.SEEU_ONLY, hidden.get(0).visibility());
-        assertTrue(hidden.get(0).visibility().test(new MenuContext(true, false, true)));
-        assertFalse(hidden.get(0).visibility().test(new MenuContext(true, true, false)));
+    void exactlyTheSeeuOverrideAndTheRendererOnlyOptionsAreConditional() {
+        var seeuOnly = allOptions().stream().filter(o -> o.visibility() == Visibility.SEEU_ONLY).map(OptionSpec::id).toList();
+        assertEquals(List.of(ClientOptionCatalog.ID_FAR_PLAYERS_WITH_SEEU), seeuOnly);
+        var renderOnly = allOptions().stream().filter(o -> o.visibility() == Visibility.RENDER_AVAILABLE).map(OptionSpec::id).toList();
+        assertEquals(List.of(ClientOptionCatalog.ID_FAR_PLAYERS_ENABLED, ClientOptionCatalog.ID_FAR_PLAYERS_NAME_TAGS,
+                ClientOptionCatalog.ID_FAR_PLAYERS_RENDER_DISTANCE), renderOnly,
+                "the three renderer-only options hide where nothing renders (NeoForge v1)");
+        assertEquals(Visibility.ALWAYS, ClientOptionCatalog.find(ClientOptionCatalog.ID_FAR_PLAYERS_SHARE_SELF).orElseThrow().visibility(),
+                "Share My Position is the prefs carrier — never hidden");
+        assertTrue(Visibility.SEEU_ONLY.test(new MenuContext(true, false, true, true)));
+        assertFalse(Visibility.SEEU_ONLY.test(new MenuContext(true, true, false, true)));
+        assertTrue(Visibility.RENDER_AVAILABLE.test(new MenuContext(false, false, false, true)));
+        assertFalse(Visibility.RENDER_AVAILABLE.test(new MenuContext(true, true, true, false)));
+    }
+
+    @Test
+    void theShippedShapeIsPinned() {
+        // ids, in display order (the 0.8+ API keys per-option state by id — never renumber)
+        assertEquals(List.of("lss:receive_server_lods", "lss:lod_distance", "lss:column_rate_limit",
+                        "lss:join_slow_start", "lss:xaero_map_bridge", "lss:far_players_enabled",
+                        "lss:far_players_share_self", "lss:far_players_name_tags",
+                        "lss:far_players_render_distance", "lss:far_players_with_seeu"),
+                allOptions().stream().map(OptionSpec::id).toList());
+        // group shape + titles
+        assertEquals(List.of(1, 1, 2, 1), ClientOptionCatalog.pages().get(0).groups().stream().map(g -> g.options().size()).toList());
+        assertEquals(List.of(5), ClientOptionCatalog.pages().get(1).groups().stream().map(g -> g.options().size()).toList());
+        assertEquals("lss.config.page", ClientOptionCatalog.pages().get(0).titleKey());
+        assertEquals("lss.config.far_players.page", ClientOptionCatalog.pages().get(1).titleKey());
+        // impacts: HIGH on the master toggle, none on the LOD-distance slider, LOW elsewhere
+        for (OptionSpec o : allOptions()) {
+            Impact expected = switch (o.id()) {
+                case "lss:receive_server_lods" -> Impact.HIGH;
+                case "lss:lod_distance" -> null;
+                default -> Impact.LOW;
+            };
+            assertEquals(expected, o.impact(), o.id());
+        }
+        // ranges — and Sodium's own SliderControl invariant: (max - min) % step == 0, which a
+        // violation turns into a thrown page build (both tabs lost, not one slider)
+        var distance = (OptionSpec.IntSpec) ClientOptionCatalog.find("lss:lod_distance").orElseThrow();
+        assertEquals(List.of(0, dev.vox.lss.common.LSSConstants.MAX_LOD_DISTANCE, 1), List.of(distance.min(), distance.max(), distance.step()));
+        var render = (OptionSpec.IntSpec) ClientOptionCatalog.find("lss:far_players_render_distance").orElseThrow();
+        assertEquals(List.of(0, 16384, 128), List.of(render.min(), render.max(), render.step()));
+        for (OptionSpec o : allOptions()) {
+            if (o instanceof OptionSpec.IntSpec i) {
+                assertEquals(0, (i.max() - i.min()) % i.step(), o.id() + ": Sodium requires (max-min) divisible by step");
+            }
+        }
     }
 
     @Test
@@ -178,14 +219,14 @@ class ClientOptionCatalogTest {
     @Test
     void conditionalTooltipsFlipWithTheContext() {
         var slow = ClientOptionCatalog.find(ClientOptionCatalog.ID_JOIN_SLOW_START).orElseThrow();
-        assertEquals("lss.config.join_slow_start.tooltip", slow.tooltip().resolve(new MenuContext(true, false, false)));
-        assertEquals("lss.config.join_slow_start.tooltip.governor_off", slow.tooltip().resolve(new MenuContext(false, false, false)));
+        assertEquals("lss.config.join_slow_start.tooltip", slow.tooltip().resolve(new MenuContext(true, false, false, true)));
+        assertEquals("lss.config.join_slow_start.tooltip.governor_off", slow.tooltip().resolve(new MenuContext(false, false, false, true)));
         var xaero = ClientOptionCatalog.find(ClientOptionCatalog.ID_XAERO_MAP_BRIDGE).orElseThrow();
-        assertEquals("lss.config.xaero_map_bridge.tooltip", xaero.tooltip().resolve(new MenuContext(true, true, false)));
-        assertEquals("lss.config.xaero_map_bridge.tooltip.not_installed", xaero.tooltip().resolve(new MenuContext(true, false, false)));
+        assertEquals("lss.config.xaero_map_bridge.tooltip", xaero.tooltip().resolve(new MenuContext(true, true, false, true)));
+        assertEquals("lss.config.xaero_map_bridge.tooltip.not_installed", xaero.tooltip().resolve(new MenuContext(true, false, false, true)));
         var fp = ClientOptionCatalog.find(ClientOptionCatalog.ID_FAR_PLAYERS_ENABLED).orElseThrow();
-        assertEquals("lss.config.far_players_enabled.tooltip", fp.tooltip().resolve(new MenuContext(true, false, false)));
-        assertEquals("lss.config.far_players_enabled.tooltip.seeu", fp.tooltip().resolve(new MenuContext(true, false, true)));
+        assertEquals("lss.config.far_players_enabled.tooltip", fp.tooltip().resolve(new MenuContext(true, false, false, true)));
+        assertEquals("lss.config.far_players_enabled.tooltip.seeu", fp.tooltip().resolve(new MenuContext(true, false, true, true)));
         assertEquals(2, slow.tooltip().keys().size());
         assertEquals(1, ClientOptionCatalog.find(ClientOptionCatalog.ID_RECEIVE_SERVER_LODS).orElseThrow().tooltip().keys().size());
     }

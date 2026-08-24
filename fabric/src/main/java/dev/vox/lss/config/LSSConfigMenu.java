@@ -7,6 +7,7 @@ import dev.vox.lss.config.menu.Label;
 import dev.vox.lss.config.menu.MenuContext;
 import dev.vox.lss.config.menu.OptionSpec;
 import dev.vox.lss.config.menu.PageSpec;
+import dev.vox.lss.config.menu.SaveHook;
 import net.caffeinemc.mods.sodium.api.config.ConfigEntryPoint;
 import net.caffeinemc.mods.sodium.api.config.StorageEventHandler;
 import net.caffeinemc.mods.sodium.api.config.option.OptionImpact;
@@ -19,6 +20,8 @@ import net.fabricmc.loader.api.ModContainer;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 
+import java.util.EnumMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -52,6 +55,14 @@ public class LSSConfigMenu implements ConfigEntryPoint {
                 .orElse("LOD Server Support");
         var mod = builder.registerModOptions(LSSConstants.MOD_ID, displayName, version)
                 .setIcon(iconFromMetadata(container));
+        // ONE handler per SaveHook, shared by every option that uses it: Sodium keeps the
+        // pending handlers in an identity Set and fires each once per Apply, so per-option
+        // lambdas would save the file once per changed option (implementation review) —
+        // and the legacy renderer's two storage proxies are the same shape (plan D8).
+        Map<SaveHook, StorageEventHandler> handlers = new EnumMap<>(SaveHook.class);
+        for (SaveHook hook : SaveHook.values()) {
+            handlers.put(hook, () -> hook.run(cfg));
+        }
 
         for (PageSpec pageSpec : ClientOptionCatalog.pages()) {
             var page = builder.createOptionPage();
@@ -63,7 +74,7 @@ public class LSSConfigMenu implements ConfigEntryPoint {
                     if (!spec.visibility().test(ctx)) {
                         continue;
                     }
-                    group.addOption(buildOption(builder, spec, cfg, ctx));
+                    group.addOption(buildOption(builder, spec, cfg, ctx, handlers.get(spec.saveHook())));
                     any = true;
                 }
                 if (any) {
@@ -75,8 +86,8 @@ public class LSSConfigMenu implements ConfigEntryPoint {
     }
 
     private static OptionBuilder buildOption(ConfigBuilder builder, OptionSpec spec,
-                                             LSSClientConfig cfg, MenuContext ctx) {
-        StorageEventHandler save = () -> spec.saveHook().run(cfg);
+                                             LSSClientConfig cfg, MenuContext ctx,
+                                             StorageEventHandler save) {
         Identifier id = Identifier.parse(spec.id());
         StatefulOptionBuilder<?> option = switch (spec) {
             case OptionSpec.BoolSpec s -> {

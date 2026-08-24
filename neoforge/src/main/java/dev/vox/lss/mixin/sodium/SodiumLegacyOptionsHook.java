@@ -45,11 +45,17 @@ public abstract class SodiumLegacyOptionsHook implements LegacyOptionsScreenHand
 
     @Inject(method = "<init>", at = @At("RETURN"))
     private void lss$injectOptionPages(CallbackInfo ci) {
-        List<Object> built = LegacySodiumPage.build();
-        if (!built.isEmpty()) {
-            this.pages.addAll(built);
+        List<Object> built = LegacySodiumPage.build();   // never throws
+        if (built.isEmpty()) {
+            return;
         }
-        this.lss$injected = built;
+        try {
+            this.pages.addAll(built);   // a mutable ArrayList on every known Sodium (javap)
+            this.lss$injected = built;
+        } catch (Throwable t) {
+            // Inside Sodium's constructor: contain, never crash the screen (doctrine D9).
+            LegacySodiumPage.noteInjectFailure(t);
+        }
     }
 
     @Override

@@ -41,7 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class LegacySodiumPageTest {
 
-    private static final MenuContext PLAIN = new MenuContext(true, false, false);
+    private static final MenuContext PLAIN = new MenuContext(true, false, false, true);
 
     private LegacySodiumPage.Handles handles;
 
@@ -66,6 +66,40 @@ class LegacySodiumPageTest {
         assertFalse(handles.enabledIsStatic(), "0.6+ setEnabled takes a BooleanSupplier");
         assertTrue(handles.storageClass().isInterface());
         assertTrue(handles.formatterClass().isInterface());
+    }
+
+    /** 0.7's two setTooltip/1 overloads: the resolver must bind the Component one — the stub
+     *  declares the Function overload FIRST and throws if it is ever invoked. */
+    @Test
+    void theResolverPrefersTheComponentTooltipOverload() throws Throwable {
+        assertEquals(net.minecraft.network.chat.Component.class,
+                LegacySodiumPage.method(OptionImpl.Builder.class, "setTooltip", 1, false,
+                        net.minecraft.network.chat.Component.class).getParameterTypes()[0]);
+        // and the whole build survives the decoy (a bound Function overload would throw)
+        assertEquals(2, LegacySodiumPage.buildWith(handles, new LSSClientConfig(), PLAIN, "LSS", h -> { }).size());
+    }
+
+    static class StaticEnabledBuilder {
+        public StaticEnabledBuilder setEnabled(boolean enabled) {
+            return this;
+        }
+    }
+
+    /** Sodium 0.5's setEnabled(boolean): detected by parameter type (the static-greying arm). */
+    @Test
+    void aSodiumZeroPointFiveStyleSetEnabledIsDetectedAsStatic() throws Exception {
+        assertEquals(boolean.class, LegacySodiumPage.method(StaticEnabledBuilder.class, "setEnabled", 1, false,
+                java.util.function.BooleanSupplier.class).getParameterTypes()[0]);
+    }
+
+    @Test
+    void hiddenRendererHidesTheRendererOnlyFarPlayerOptions() throws Throwable {
+        List<Object> pages = LegacySodiumPage.buildWith(handles, new LSSClientConfig(),
+                new MenuContext(true, false, false, false), "LSS", h -> { });
+        OptionPage far = (OptionPage) pages.get(1);
+        assertEquals(List.of("lss.config.far_players_share_self"),
+                far.getOptions().stream().map(o -> o.getName().getString()).toList(),
+                "NeoForge v1 (no renderer): only the prefs carrier stays");
     }
 
     @Test
@@ -94,7 +128,7 @@ class LegacySodiumPageTest {
     @Test
     void seeuRevealsTheOverrideAndFlipsTheTooltip() throws Throwable {
         List<Object> pages = LegacySodiumPage.buildWith(handles, new LSSClientConfig(),
-                new MenuContext(true, false, true), "VSS", h -> { });
+                new MenuContext(true, false, true, true), "VSS", h -> { });
         OptionPage far = (OptionPage) pages.get(1);
         assertEquals(5, far.getGroups().get(0).getOptions().size());
         assertEquals("lss.config.far_players_enabled.tooltip.seeu",
@@ -186,9 +220,11 @@ class LegacySodiumPageTest {
 
     @Test
     void aThrowingSodiumDegradesToNoPages() {
-        // The production path: the probe finds the stub screen resource → LEGACY under
-        // the caffeine prefix → real resolve against the stubs → the build throws.
-        assertEquals(SodiumGeneration.Kind.LEGACY, SodiumGeneration.detect());
+        // The production path: the stub screen resource is on the class path → the legacy
+        // prefix resolves (ignoring the 0.8 API stubs the walker test also puts there — the
+        // hook runs inside the legacy screen's own constructor, which is proof enough) →
+        // real resolve against the stubs → the build throws.
+        assertEquals(SodiumGeneration.CAFFEINE_PREFIX, SodiumGeneration.legacyPrefixIgnoringModern());
         OptionImpl.FAIL_BUILD = true;
         assertEquals(List.of(), LegacySodiumPage.build());
         OptionImpl.FAIL_BUILD = false;

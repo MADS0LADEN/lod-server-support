@@ -67,15 +67,23 @@ public final class LegacySodiumPage {
     public static final String TICK_BOX_CONTROL = ".client.gui.options.control.TickBoxControl";
     public static final String SLIDER_CONTROL = ".client.gui.options.control.SliderControl";
     public static final String VALUE_FORMATTER = ".client.gui.options.control.ControlValueFormatter";
+    /** The screen itself — bound by the constructor hook ({@code pages}, the one ctor) and
+     *  the ModMenu deep-link ({@code createScreen}, {@code currentPage}), not by this builder. */
+    public static final String OPTIONS_SCREEN = SodiumGeneration.LEGACY_SCREEN_SUFFIX;
 
-    public enum MemberKind { STATIC_METHOD, METHOD, CONSTRUCTOR, INTERFACE_METHOD, ENUM }
+    public enum MemberKind { STATIC_METHOD, METHOD, CONSTRUCTOR, INTERFACE_METHOD, ENUM, FIELD }
 
     /** One resolved member: owner (relative class name), kind, name, parameter count. */
     public record Member(String owner, MemberKind kind, String name, int arity) {
     }
 
-    /** Every member the builder binds — the resolves-test's checklist. */
+    /** Every member the legacy STACK binds by name — this builder, the constructor hook
+     *  and the ModMenu deep-link — the resolves-test's checklist against real bytecode. */
     public static final List<Member> SURFACE = List.of(
+            new Member(OPTIONS_SCREEN, MemberKind.FIELD, "pages", 0),
+            new Member(OPTIONS_SCREEN, MemberKind.FIELD, "currentPage", 0),
+            new Member(OPTIONS_SCREEN, MemberKind.CONSTRUCTOR, "<init>", 1),
+            new Member(OPTIONS_SCREEN, MemberKind.STATIC_METHOD, "createScreen", 1),
             new Member(OPTION_IMPL, MemberKind.STATIC_METHOD, "createBuilder", 2),
             new Member(OPTION_IMPL, MemberKind.METHOD, "getValue", 0),
             new Member(OPTION_IMPL_BUILDER, MemberKind.METHOD, "setName", 1),
@@ -97,7 +105,7 @@ public final class LegacySodiumPage {
             new Member(VALUE_FORMATTER, MemberKind.INTERFACE_METHOD, "format", 1));
 
     /** The resolved handles for one Sodium prefix. */
-    record Handles(String prefix, ClassLoader loader,
+    record Handles(String prefix,
                    MethodHandle createBuilder, MethodHandle getValue,
                    MethodHandle setName, MethodHandle setTooltip, MethodHandle setBinding,
                    MethodHandle setControl, MethodHandle setImpact, MethodHandle setEnabled,
@@ -142,16 +150,22 @@ public final class LegacySodiumPage {
         if (resolveFailed) {
             throw new IllegalStateException("legacy Sodium options surface unresolved (latched)");
         }
-        String prefix = SodiumGeneration.legacyPrefix();
+        // The hook runs INSIDE the legacy screen's constructor, which is proof enough that
+        // the legacy screen exists — never let a foreign 0.8-API jar's presence (a MODERN
+        // probe answer) veto the page here (implementation review).
+        String prefix = SodiumGeneration.legacyPrefixIgnoringModern();
         if (prefix == null) {
-            throw new IllegalStateException("no legacy Sodium detected");
+            throw new IllegalStateException("no legacy Sodium options screen on the class path");
         }
         try {
             h = resolve(prefix, LegacySodiumPage.class.getClassLoader());
-        } catch (ReflectiveOperationException | RuntimeException e) {
+        } catch (Throwable e) {
+            // Errors too (NoClassDefFoundError / IllegalAccessError from a half-present or
+            // modularized Sodium): latch, warn once, and let build() stay quiet about it.
             resolveFailed = true;
-            LSSLogger.warn("LSS options page: this Sodium's internal options API has a different"
-                    + " shape — settings page skipped, config files still work (" + e + ")");
+            buildFailureLogged = true;
+            LSSLogger.warn("LSS options page: this Sodium (" + prefix + ") has a different internal"
+                    + " options API shape — settings page skipped, config files still work (" + e + ")");
             throw e;
         }
         handles = h;
@@ -176,7 +190,7 @@ public final class LegacySodiumPage {
         }
         var lookup = MethodHandles.publicLookup();
         Method setEnabled = method(builder, "setEnabled", 1, false, BooleanSupplier.class);
-        return new Handles(prefix, loader,
+        return new Handles(prefix,
                 lookup.unreflect(method(optionImpl, "createBuilder", 2, true, Class.class, storage)),
                 lookup.unreflect(method(optionImpl, "getValue", 0, false)),
                 lookup.unreflect(method(builder, "setName", 1, false, Component.class)),
@@ -283,32 +297,72 @@ public final class LegacySodiumPage {
         return h.build().invoke(b);
     }
 
+    // The two proxies are the boundaries where SODIUM calls INTO us — from its Apply loop
+    // and from every slider render frame, neither of which catches (javap 0.6.13/0.7.3).
+    // Nothing shipped can throw here (JsonConfig.save() contains its own IO, the prefs
+    // push is guarded, indices are clamp-bounded), so containment + a once-bounded WARN is
+    // defense in depth for the house doctrine: nothing optional may crash a client.
+
     private static Object storageProxy(Handles h, LSSClientConfig cfg, SaveHook hook, Consumer<SaveHook> onSave) {
         return Proxy.newProxyInstance(h.storageClass().getClassLoader(), new Class<?>[]{h.storageClass()},
-                (proxy, method, args) -> switch (method.getName()) {
-                    case "getData" -> cfg;
-                    case "save" -> {
-                        onSave.accept(hook);
-                        yield null;
+                (proxy, method, args) -> {
+                    switch (method.getName()) {
+                        case "getData":
+                            return cfg;
+                        case "save":
+                            try {
+                                onSave.accept(hook);
+                            } catch (Throwable t) {
+                                warnOnce("saving from the Sodium settings screen failed", t);
+                            }
+                            return null;
+                        // The screen keeps dirty storages in a HashSet (review A-2): identity
+                        // semantics, never the handler's default null.
+                        case "hashCode":
+                            return System.identityHashCode(proxy);
+                        case "equals":
+                            return proxy == args[0];
+                        case "toString":
+                            return "LssOptionStorage[" + hook + "]";
+                        default:
+                            warnOnce("unexpected OptionStorage call " + method.getName(), null);
+                            return null;
                     }
-                    // The screen keeps dirty storages in a HashSet (review A-2): identity
-                    // semantics, never the handler's default null.
-                    case "hashCode" -> System.identityHashCode(proxy);
-                    case "equals" -> proxy == args[0];
-                    case "toString" -> "LssOptionStorage[" + hook + "]";
-                    default -> throw new UnsupportedOperationException("OptionStorage." + method.getName());
                 });
     }
 
     private static Object formatterProxy(Handles h, IntFunction<Label> label) {
         return Proxy.newProxyInstance(h.formatterClass().getClassLoader(), new Class<?>[]{h.formatterClass()},
-                (proxy, method, args) -> switch (method.getName()) {
-                    case "format" -> component(label.apply((Integer) args[0]));
-                    case "hashCode" -> System.identityHashCode(proxy);
-                    case "equals" -> proxy == args[0];
-                    case "toString" -> "LssValueFormatter";
-                    default -> throw new UnsupportedOperationException("ControlValueFormatter." + method.getName());
+                (proxy, method, args) -> {
+                    switch (method.getName()) {
+                        case "format":
+                            try {
+                                return component(label.apply((Integer) args[0]));
+                            } catch (Throwable t) {
+                                warnOnce("formatting a slider value failed", t);
+                                return Component.literal(String.valueOf(args[0]));
+                            }
+                        case "hashCode":
+                            return System.identityHashCode(proxy);
+                        case "equals":
+                            return proxy == args[0];
+                        case "toString":
+                            return "LssValueFormatter";
+                        default:
+                            warnOnce("unexpected ControlValueFormatter call " + method.getName(), null);
+                            return null;
+                    }
                 });
+    }
+
+    private static volatile boolean proxyFailureLogged;
+
+    private static void warnOnce(String what, Throwable t) {
+        if (proxyFailureLogged) {
+            return;
+        }
+        proxyFailureLogged = true;
+        LSSLogger.warn("LSS options page: " + what + (t == null ? "" : " (" + t + ")"));
     }
 
     private static Component component(Label label) {
@@ -376,10 +430,16 @@ public final class LegacySodiumPage {
         return true;
     }
 
+    /** The constructor hook's containment sink: log once, keep the screen. */
+    public static void noteInjectFailure(Throwable t) {
+        warnOnce("could not add the pages to Sodium's settings screen", t);
+    }
+
     /** Test seam: forget the memoized handles and latches. */
     static void resetForTests() {
         handles = null;
         resolveFailed = false;
         buildFailureLogged = false;
+        proxyFailureLogged = false;
     }
 }

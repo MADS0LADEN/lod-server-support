@@ -238,8 +238,11 @@ class NeoForgeModuleContractTest {
         assertTrue(config.contains("\"SodiumLegacyOptionsHook\""));
         assertTrue(exists("neoforge/src/main/java/dev/vox/lss/mixin/sodium/SodiumLegacyOptionsHook.java"),
                 "the config lists a hook whose neoforge twin source must exist");
-        assertTrue(config.contains("\"required\": false"),
+        // (no gson on this module's test classpath — whitespace-tolerant regexes)
+        assertTrue(Pattern.compile("\"required\"\\s*:\\s*false").matcher(config).find(),
                 "non-required — an apply failure degrades to no options page");
+        assertTrue(Pattern.compile("\"defaultRequire\"\\s*:\\s*0\\b").matcher(config).find(),
+                "defaultRequire 0 — a require miss is an Error that escapes required:false");
     }
 
     /** Repo-relative resolution surviving both the Gradle CWD (module dir) and repo root. */

@@ -13,9 +13,12 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -23,61 +26,113 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The review-scoped "golden arm" (sodium-options-page-generations-plan.md §4): every
- * row of {@link LegacySodiumPage#SURFACE} — the member table the reflective builder
- * binds — is checked by NAME + ARITY against the REAL legacy Sodium bytecode, read as a
- * zip with ASM from the jar Gradle's plain {@code sodiumLegacyGolden} configuration
- * resolved (gradle.properties {@code sodium_legacy_golden}; never on any classpath —
- * the stub package would shadow it, and a Sodium jar on the T1 runtime would register
- * as a mod). Descriptor-agnostic on purpose: MC type names differ per line.
+ * member the LEGACY STACK binds by name ({@link LegacySodiumPage#SURFACE} — the
+ * reflective builder, the constructor hook's shadowed field + ctor, the deep-link's
+ * {@code createScreen}/{@code currentPage}) is checked against the REAL Sodium 0.6/0.7
+ * bytecode, and every member the MODERN deep-link binds
+ * ({@link SodiumConfigScreens#MODERN_SURFACE}) against the line's own 0.8+ artifact —
+ * both read as zips with ASM from the jars Gradle's plain {@code sodiumLegacyGolden} /
+ * {@code sodiumModernGolden} configurations resolved (never on any classpath: the stub
+ * packages would shadow them, and a Sodium jar on the T1 runtime would register as a
+ * mod). Descriptor-agnostic on purpose (MC type names differ per line) — except the one
+ * overload that matters: 0.7 has TWO {@code setTooltip/1}s and the resolver must pick
+ * the {@code Component} one, so the non-JDK-parameter overload's existence is asserted
+ * here and the preference itself in {@code LegacySodiumPageTest}.
  *
- * <p>Skips itself (assumption) when the jar is not available — offline builds still
- * run Tier 1; CI resolves it. This is the automated proof that the table matches real
- * bytecode; the live gate stays the only end-to-end proof.
+ * <p>Offline boxes skip (assumption); under {@code CI=true} a missing jar FAILS — a
+ * mistyped coordinate must never void the golden arm silently (review). The modern arm
+ * is only expected where the line pins a 0.8+ artifact ({@code lss.sodiumModernGoldenExpected}).
  */
 class SodiumLegacySurfaceResolvesTest {
 
     @Test
-    void everySurfaceMemberExistsInTheRealJar() throws IOException {
-        String jarPath = System.getProperty("lss.sodiumLegacyGoldenJar", "");
-        Assumptions.assumeTrue(!jarPath.isBlank() && Files.isRegularFile(Path.of(jarPath)),
-                "sodiumLegacyGolden jar not resolved (offline?) — skipping the real-bytecode check");
+    void everyLegacySurfaceMemberExistsInTheRealJar() throws IOException {
+        Path jar = goldenJar("lss.sodiumLegacyGoldenJar", true);
         String prefix = SodiumGeneration.CAFFEINE_PREFIX.replace('.', '/');
         List<String> missing = new ArrayList<>();
-        try (ZipFile zip = new ZipFile(jarPath)) {
+        try (ZipFile zip = new ZipFile(jar.toFile())) {
             Map<String, ClassNode> nodes = new HashMap<>();
-            for (LegacySodiumPage.Member m : LegacySodiumPage.SURFACE) {
-                ClassNode node = nodes.computeIfAbsent(m.owner(), owner -> {
-                    String entryName = prefix + owner.replace('.', '/') + ".class";
-                    ZipEntry e = zip.getEntry(entryName);
-                    if (e == null) {
-                        return null;
-                    }
-                    try (InputStream in = zip.getInputStream(e)) {
-                        ClassNode n = new ClassNode();
-                        new ClassReader(in.readAllBytes()).accept(n, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG);
-                        return n;
-                    } catch (IOException ex) {
-                        throw new java.io.UncheckedIOException(ex);
-                    }
-                });
-                if (node == null) {
-                    missing.add(m.owner() + " (class)");
-                    continue;
-                }
-                boolean ok = switch (m.kind()) {
-                    case STATIC_METHOD -> hasMethod(node, m.name(), m.arity(), true);
-                    case METHOD -> hasMethod(node, m.name(), m.arity(), false);
-                    case CONSTRUCTOR -> hasMethod(node, "<init>", m.arity(), false);
-                    case INTERFACE_METHOD -> (node.access & Opcodes.ACC_INTERFACE) != 0
-                            && hasMethod(node, m.name(), m.arity(), false);
-                    case ENUM -> (node.access & Opcodes.ACC_ENUM) != 0;
-                };
-                if (!ok) {
-                    missing.add(m.owner() + "#" + m.name() + "/" + m.arity() + " (" + m.kind() + ")");
-                }
+            check(zip, prefix, LegacySodiumPage.SURFACE, nodes, missing);
+            // The 0.7 overload hazard: a second setTooltip/1 whose parameter is NOT a JDK
+            // type (Function<T,Component>) — if the jar has such an overload, the resolver's
+            // Component preference is what keeps the page alive; pin its existence so the
+            // preference test's premise is real on this jar.
+            ClassNode builder = nodes.get(LegacySodiumPage.OPTION_IMPL_BUILDER);
+            assertTrue(builder != null && builder.methods.stream().anyMatch(m -> m.name.equals("setTooltip")
+                            && Type.getArgumentTypes(m.desc).length == 1
+                            && !Type.getArgumentTypes(m.desc)[0].getInternalName().startsWith("java/")),
+                    "OptionImpl$Builder must carry a setTooltip/1 whose parameter is the (non-JDK) Component"
+                            + " type — the resolver prefers it over 0.7's Function overload");
+        }
+        assertTrue(missing.isEmpty(), "LegacySodiumPage.SURFACE members absent from " + jar + ": " + missing);
+    }
+
+    @Test
+    void everyModernDeepLinkMemberExistsInTheLinesSodium() throws IOException {
+        Path jar = goldenJar("lss.sodiumModernGoldenJar",
+                "true".equals(System.getProperty("lss.sodiumModernGoldenExpected", "false")));
+        String prefix = SodiumGeneration.CAFFEINE_PREFIX.replace('.', '/');
+        List<String> missing = new ArrayList<>();
+        try (ZipFile zip = new ZipFile(jar.toFile())) {
+            check(zip, prefix, SodiumConfigScreens.MODERN_SURFACE, new HashMap<>(), missing);
+            // and the probe's own premise: the public config API entry point is there
+            if (zip.getEntry(SodiumGeneration.resourceOf(SodiumGeneration.MODERN_ENTRY_POINT)) == null) {
+                missing.add(SodiumGeneration.MODERN_ENTRY_POINT + " (the MODERN probe resource)");
             }
         }
-        assertTrue(missing.isEmpty(), "LegacySodiumPage.SURFACE members absent from " + jarPath + ": " + missing);
+        assertTrue(missing.isEmpty(), "SodiumConfigScreens.MODERN_SURFACE members absent from " + jar + ": " + missing);
+    }
+
+    private static Path goldenJar(String property, boolean expected) {
+        String jarPath = System.getProperty(property, "");
+        boolean present = !jarPath.isBlank() && Files.isRegularFile(Path.of(jarPath));
+        if ("true".equals(System.getenv("CI")) && expected) {
+            assertTrue(present, "CI must resolve " + property + " (gradle.properties) — a mistyped"
+                    + " coordinate silently voids the golden arm");
+        }
+        Assumptions.assumeTrue(present, property + " not resolved (offline?) — skipping the real-bytecode check");
+        return Path.of(jarPath);
+    }
+
+    private static void check(ZipFile zip, String prefix, List<LegacySodiumPage.Member> surface,
+                              Map<String, ClassNode> nodes, List<String> missing) {
+        Set<String> impactNames = Arrays.stream(Impact.values()).map(Enum::name).collect(Collectors.toSet());
+        for (LegacySodiumPage.Member m : surface) {
+            ClassNode node = nodes.computeIfAbsent(m.owner(), owner -> read(zip, prefix + owner.replace('.', '/') + ".class"));
+            if (node == null) {
+                missing.add(m.owner() + " (class)");
+                continue;
+            }
+            boolean ok = switch (m.kind()) {
+                case STATIC_METHOD -> hasMethod(node, m.name(), m.arity(), true);
+                case METHOD -> hasMethod(node, m.name(), m.arity(), false);
+                case CONSTRUCTOR -> hasMethod(node, "<init>", m.arity(), false);
+                case INTERFACE_METHOD -> (node.access & Opcodes.ACC_INTERFACE) != 0
+                        && hasMethod(node, m.name(), m.arity(), false);
+                // An enum row checks the constants the catalog's Impact maps BY NAME (a renamed
+                // Sodium constant would throw at valueOf → no page).
+                case ENUM -> (node.access & Opcodes.ACC_ENUM) != 0
+                        && node.fields.stream().map(f -> f.name).collect(Collectors.toSet()).containsAll(impactNames);
+                case FIELD -> node.fields.stream().anyMatch(f -> f.name.equals(m.name()));
+            };
+            if (!ok) {
+                missing.add(m.owner() + "#" + m.name() + "/" + m.arity() + " (" + m.kind() + ")");
+            }
+        }
+    }
+
+    private static ClassNode read(ZipFile zip, String entryName) {
+        ZipEntry e = zip.getEntry(entryName);
+        if (e == null) {
+            return null;
+        }
+        try (InputStream in = zip.getInputStream(e)) {
+            ClassNode n = new ClassNode();
+            new ClassReader(in.readAllBytes()).accept(n, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG);
+            return n;
+        } catch (IOException ex) {
+            throw new java.io.UncheckedIOException(ex);
+        }
     }
 
     private static boolean hasMethod(ClassNode node, String name, int arity, boolean isStatic) {
@@ -88,7 +143,7 @@ class SodiumLegacySurfaceResolvesTest {
             if (((m.access & Opcodes.ACC_STATIC) != 0) != isStatic) {
                 continue;
             }
-            if ((m.access & Opcodes.ACC_PUBLIC) == 0) {
+            if ((m.access & Opcodes.ACC_PUBLIC) == 0 && !name.equals("<init>")) {
                 continue;
             }
             return true;

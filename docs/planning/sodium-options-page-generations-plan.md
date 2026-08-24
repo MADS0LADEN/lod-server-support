@@ -1,9 +1,8 @@
 # Sodium options page across Sodium generations — plan
 
-Status: PLAN v1.1 (2026-08-23) — v1.0 reviewed by two Fable agents the same day
-(§9, all five MAJORs folded in place below). Lands on MAIN under
-`docs/planning/`; the code lands main-first (Phases 1-2) and rides the normal
-delta-port to the support lines (Phase 3).
+Status: IMPLEMENTED on main (PR #236, 2026-08-23) — plan v1.1 (2-Fable plan review, §9)
+built as §10, then a 1-Fable + 4-Opus implementation review folded (§11); Phase 3 (the
+line ports) follows the §12 checklist.
 
 ## 0. Goal
 
@@ -108,12 +107,15 @@ presence, which is what makes a runtime probe unambiguous.
 string-targeted mixin whose target class is absent is a WARN ("@Mixin target
 was not found"), never a crash, in any config; a `@Pseudo` mixin declares the
 target may be absent and is skipped silently. `MixinInfo` checks
-`isClassLoaded(target)` while reading declared targets: **any `Class.forName`
-of the target class before mixin application** (e.g. from a presence probe run
-at entrypoint time, or inside a config plugin) defines the class through the
+`isClassLoaded(target)` while reading declared targets — which happens at config
+PREPARE (the first transform after the DEFAULT phase, BEFORE any mod entrypoint):
+**a `Class.forName` of the target class inside that window** (a config plugin's
+`onLoad`/`shouldApplyMixin` — the v1.0 design) defines the class through the
 transformer BEFORE our hook is attached — the hook then never applies, no
-crash, no page, invisible to stub tests. `.class` RESOURCE lookups define
-nothing and are exempt from JPMS encapsulation.
+crash, no page, invisible to stub tests. A later load (entrypoint/click time) is
+transformed with the hook; a `.class` RESOURCE lookup is safe everywhere (defines
+nothing, runs no static init, exempt from JPMS encapsulation) — implementation
+review A-5 corrected the v1.1 "entrypoint-time" wording.
 
 ### 1.3 Repo facts that shape the design
 
@@ -434,9 +436,11 @@ them fails to COMPILE, not merge). Phase-3 pre-flight per line: fast-forward
   0.6→0.7 and those Sodium lines are FINAL (§1.1), so the target is frozen; the
   reflective build fails soft with a named WARN, and the resolves-test reds at
   build time if the pinned artifact ever changes.
-- **Reese's Sodium Options on legacy.** `<init>` injection covers its page-list
-  handoff (it consumes the same `OptionPage` type). Not a v1 gate; check once
-  on the 1.21.10 instance if RSO is present.
+- **Reese's Sodium Options on legacy** — verified against RSO 1.8.0 bytecode
+  (implementation review): its `postInit` swaps the screen for its own, built
+  from the constructed `SodiumOptionsGUI`'s `pages` — our tabs carry over; only
+  the ModMenu deep-link's pre-init page selection is dropped (RSO opens on its
+  own tab). Page yes, deep-link no; nothing to gate.
 - **The modern deep-link still binds internal 0.8 classes** — unchanged risk,
   now reflective and fail-soft instead of a compile-time bind.
 - **Dual generation on 1.21.1 cannot double-register**: with 0.8.12 present the
@@ -544,3 +548,60 @@ Built as planned in v1.1 with these recorded specifics:
   `release_check.py` OK on all six jars. The 26.2 page eyeball + the per-line live
   gates (§4) are OWED — main's own runtime is MODERN, so the legacy stack is dormant
   there by construction.
+
+## 11. Implementation review record (2026-08-23, 1-Fable + 4-Opus over PR #236)
+
+| # | Sev | Finding | Fold |
+|---|---|---|---|
+| O1-1 / O3-1 | MAJOR | `.gitignore`'s bare `net/` silently excluded the 12 `net/caffeinemc` test stubs — a clean checkout could not compile the tests | `git add -f` + the `!**/src/**/net/` carve-out (the `libs/` precedent) |
+| O3-2 | MAJOR | `neoforge-support-plan.md` §5.4 (normative) still listed the Sodium screen as a NeoForge non-feature | §5.4 amended |
+| O2-1 | MAJOR | the golden arm self-skipped green on a mistyped/unresolvable coordinate | `CI=true` → FAIL; lenient artifact views (no Project capture); `inputs.files` |
+| O2-2 / F-4 | MAJOR | the 0.7 `setTooltip` overload preference had no coverage | stub declares the `Function` overload FIRST (throws if bound); `method()` unit pin; the resolves-test asserts a non-JDK `setTooltip/1` exists |
+| O2-3 | MAJOR | stub `OptionGroup.Builder.build()` lacked Sodium's `Validate.notEmpty` — the skip-empty-group guard was unpinned | stub throws like the real one |
+| O1-2 / O4-1 | MINOR | the modern walker built one `StorageEventHandler` per option → one `cfg.save()` per changed option | two shared handlers (`EnumMap` over `SaveHook`), pinned by `LSSConfigMenuTest` |
+| O1-3 / F-2 | MINOR | the shipping 0.8+ walker and the modern deep-link had no tests | `LSSConfigMenuTest` over recording `api/config` stubs; `SodiumConfigScreens.MODERN_SURFACE` + the modern arm of the resolves-test against the line's own artifact |
+| O1-4 | MINOR | the NeoForge legacy page advertised three far-player options that are no-ops there | `FarPlayerRenderer.RENDER_AVAILABLE` twins → `MenuContext.farPlayerRenderAvailable` → `Visibility.RENDER_AVAILABLE` on show/tags/render-limit (Share My Position never hidden) |
+| O2-4 / F-1 / O3-5 | MINOR | the hook's `pages`/ctor and the deep-link's `createScreen`/`currentPage` were outside the golden arm; the ENUM row checked only `ACC_ENUM` | `FIELD` kind + the screen's rows in `SURFACE`; the ENUM row checks `Impact`'s constant names |
+| O2-6 | MINOR | the class-load scan was a two-substring check | `CLASS_LOAD` regex (forName / loadClass / findClass / `::loadClass`), applied to the probe AND the hook |
+| O2-7 / O2-8 | MINOR | the lang pin compared values only; the fabric jar did not require the lang file | key-set compare (+ selftest negative); fabric required row (+ negative); selftest 92 |
+| O4-2 | MINOR | the two proxies were uncontained boundaries into Sodium's Apply/render code | handlers contain + warn once; unknown method → null |
+| O4-3 | MINOR | `handles()` latched on exceptions only; double WARN on resolve failure | `catch (Throwable)`, single WARN |
+| O4-4 | MINOR | `handles()` gated on `detect()==LEGACY`, so a foreign 0.8-API jar beside 0.6/0.7 would drop the page | `SodiumGeneration.legacyPrefixIgnoringModern()` for the hook path |
+| O4-5 / O3-9 | NIT | `defaultRequire: 1` — a require miss is an `InjectionError` that escapes `required:false` | `0` (the tracer's precedent), pinned on both loaders |
+| F-3 | NIT | `pages.addAll` was the one uncontained statement inside Sodium's constructor | try/catch + once-WARN |
+| F-5 / O3-3 / O3-4 / O3-7 | NIT | prose: "entrypoint-time" → plugin-time; README's ModMenu-on-NeoForge claim; forward-dated README; stale pointers in two plans | fixed |
+| O2-10 / O2-13 / O2-11 / O3-8 / O3-11 / O3-12 | NIT | static-enabled arm untested; walker purity unpinned; raw-substring JSON pin; dead `Handles.loader`; import order; vssJar comments | fixed |
+| O1-8 | NIT (pre-existing) | zh_cn/zh_tw lack the three Xaero keys | not in scope — recorded |
+
+Verdicts: Fable lead mergeable; Opus runtime mergeable; Opus fidelity / tests /
+conventions needs-fixes → all folded above.
+
+## 12. Phase 3 port checklist (from review O3, verified against the v0.12.0 tags)
+
+Port BASE per line = the `v0.12.0+mc<line>` tag (= `port/xaero-<line>`); fast-forward
+`support/<line>` first. All six catalog-bound config fields exist at every tag; the
+lang key sets equal main's; `FarPlayerClientSupport`/`LoaderServices.isModLoaded` are
+xplat everywhere.
+
+**Conflicts common to all four lines** (mechanical): `gradle.properties` (main's R2-6
+block is main-only — append `sodium_legacy_golden` at EOF; `sodium_version` for the
+modern golden arm exists only where the line pins one: add it or leave the modern arm
+unresolvable), `fabric/build.gradle` dep hunk (hard-coded Sodium/ModMenu literals per
+line — insert the two golden deps after them; the `configurations` and `test` hunks
+apply clean), `README.md` (the NeoForge client-paths block is main-only — place the
+paragraph before "Compatible with [AntiXray]…"), `per-version-surfaces.md` (rows 11/13
+line-flavored; append the new row — it is row 15 on 1.21.1), the two
+`lss-sodium-legacy.mixins.json` (`compatibilityLevel` JAVA_25 on 26.1, JAVA_21 on
+1.21.11/1.21.1/1.21.10 — edit BOTH trees identically, the twin pin includes the JSON).
+
+**Applies clean**: CLAUDE.md bullet, pre-authorized-cuts row, fabric.mod.json mixins
+block, neoforge.mods.toml, both neoforge/build.gradle hunks, ToolchainContractTest,
+ConfigValidationTest, NeoForgeModuleContractTest, all new source/test files, the
+`RateSliderStops` rename, release_check.py (except 1.21.10).
+
+| Line | Extra |
+|---|---|
+| 26.1 | nothing beyond the common set; legacy stack dormant |
+| 1.21.11 | JAVA_21 configs |
+| 1.21.1 | JAVA_21 configs; `LSSConfigMenu` whole-file conflict → take the new file, then `Identifier`→`ResourceLocation` at 7 sites (import, `id`, `dep`, `iconFromMetadata` return, `tryParse`, `parse("lss:icon.png")`); `SodiumConfigScreens`/`LSSModMenuIntegration` need no edit; hand-edit `suggests.sodium` `>=0.8.13-beta.2` → `*`; surfaces row = 15; the line's CLAUDE.md banner ("no Sodium page there" / "LIVE … config_api_user") reworded; BOTH generations + BOTH loaders light up — the live gates matter most here |
+| 1.21.10 | JAVA_21 configs; `LSSConfigMenu` modify/delete → KEEP DELETED; `LSSModMenuIntegration` modify/delete → TAKE (`ClientMenuEntrypointContractTest` requires it) → restore the `modmenu` entrypoint + `modCompileOnly "maven.modrinth:modmenu:16.0.1"` + `suggests` `sodium`/`modmenu` `*`; `release_check.py` `FABRIC_ONLY_CLASS_PREFIXES` conflict → keep main's post-image (both `LSSConfigMenu` and `LSSModMenuIntegration` listed); `sodium_legacy_golden=mc1.21.10-0.7.3-neoforge`; amend Decision 2 in `mc1.21.10-line-notes.md` + README line 21 + release notes. FIRST — the pure-legacy proof |

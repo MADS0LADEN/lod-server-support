@@ -3,7 +3,7 @@
   "package": "dev.vox.lss.mixin.sodium",
   "compatibilityLevel": "JAVA_25",
   "injectors": {
-    "defaultRequire": 1
+    "defaultRequire": 0
   },
   "client": [
     "SodiumLegacyOptionsHook"

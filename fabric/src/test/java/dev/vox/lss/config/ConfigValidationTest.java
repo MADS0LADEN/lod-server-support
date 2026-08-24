@@ -1,7 +1,7 @@
 package dev.vox.lss.config;
 
-import dev.vox.lss.config.menu.RateSliderStops;
 import dev.vox.lss.common.LSSConstants;
+import dev.vox.lss.config.menu.RateSliderStops;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;

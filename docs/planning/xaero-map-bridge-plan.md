@@ -286,7 +286,7 @@ CFR decompile output in `cfr-out262/`, XaeroPlus clone). Key findings:
     signatures mapping-proof: our class literals remap per line at build, Xaero
     targets the same runtime names, and Xaero's own FQNs are identical on all
     five lines (§1). The Sodium menu addition is the only per-line divergence
-    (the 1.21.10 line has no Sodium page — config-file key still works there;
+    (the 1.21.10 line had no Sodium page at the time — SUPERSEDED 2026-08-23 by sodium-options-page-generations-plan.md, which renders the same catalog on Sodium 0.6/0.7; config-file key still works there;
     the port drops the menu hunk, exactly like the rest of its Sodium cut).
 
 ## 3. Components

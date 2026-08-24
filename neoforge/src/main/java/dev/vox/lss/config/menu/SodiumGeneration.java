@@ -17,14 +17,17 @@ import java.util.function.Predicate;
  *   <li>{@code NONE}: no Sodium (or an unrecognized one) — no page, config files only.</li>
  * </ul>
  *
- * <p>WHY A RESOURCE LOOKUP: Mixin reads every config's declared targets at bootstrap and
- * refuses a target that is ALREADY LOADED; a {@code Class.forName} of the legacy screen
- * from an entrypoint would define the class through the transforming loader BEFORE our
- * constructor hook is attached — the hook then never applies, no crash, no page, and no
- * stub test can see it (the plan review's A-1/B-2). {@code getResource} defines
- * nothing and, being a {@code .class} resource, is exempt from JPMS encapsulation on
- * NeoForge's module layer. {@code SodiumLegacyHookContractTest} pins that this file
- * contains no {@code Class.forName}.
+ * <p>WHY A RESOURCE LOOKUP: Mixin reads every config's declared targets while PREPARING
+ * the configs (the first transform after the DEFAULT phase, before any mod entrypoint)
+ * and refuses a target that is ALREADY LOADED; a {@code Class.forName} of the legacy
+ * screen from inside that window — a config plugin's {@code onLoad}/{@code shouldApplyMixin},
+ * the v1.0 design — defines the class through the transforming loader BEFORE our
+ * constructor hook is attached: the hook never applies, no crash, no page, and no stub
+ * test can see it (the plan review's A-1/B-2). A probe that runs later (entrypoint or
+ * click time) is safe, but a resource lookup is safe EVERYWHERE: {@code getResource}
+ * defines nothing, runs no static initializer, and — being a {@code .class} resource —
+ * is exempt from JPMS encapsulation on NeoForge's module layer.
+ * {@code SodiumGenerationTest} pins that this file contains no class load.
  *
  * <p>Same-FQN TWIN in the neoforge tree — keep byte-identical (pinned).
  */
@@ -34,7 +37,9 @@ public final class SodiumGeneration {
 
     /** Sodium 0.6+ package root. */
     public static final String CAFFEINE_PREFIX = "net.caffeinemc.mods.sodium";
-    /** Sodium 0.5 package root (the frozen 1.20.1 line; probed for completeness). */
+    /** Sodium 0.5 package root (the frozen 1.20.1 line; probed for completeness — NOTE a
+     *  revived 1.20.1 also needs a second {@code SodiumLegacyOptionsHook} target for this
+     *  prefix and the contract test widened; the probe alone does not light the page). */
     public static final String JELLYSQUID_PREFIX = "me.jellysquid.mods.sodium";
     /** Relative to a prefix: the legacy options screen (0.5-0.7). */
     public static final String LEGACY_SCREEN_SUFFIX = ".client.gui.SodiumOptionsGUI";
@@ -60,6 +65,30 @@ public final class SodiumGeneration {
         return current().legacyPrefix();
     }
 
+    /**
+     * The legacy prefix WITHOUT the modern short-circuit — for callers that already hold
+     * proof the legacy screen exists (its own constructor hook): a foreign jar shipping
+     * the 0.8 API interface beside a 0.6/0.7 Sodium would otherwise flip {@link #detect()}
+     * to MODERN and silently drop the page (implementation review). Null when no legacy
+     * screen resource is present under either prefix.
+     */
+    public static String legacyPrefixIgnoringModern() {
+        return legacyPrefixWith(SodiumGeneration::resourcePresent);
+    }
+
+    static String legacyPrefixWith(Predicate<String> resourcePresent) {
+        try {
+            for (String prefix : new String[]{CAFFEINE_PREFIX, JELLYSQUID_PREFIX}) {
+                if (resourcePresent.test(resourceOf(prefix + LEGACY_SCREEN_SUFFIX))) {
+                    return prefix;
+                }
+            }
+        } catch (Throwable t) {
+            // contained — see detectWith
+        }
+        return null;
+    }
+
     static Detected current() {
         Detected d = detected;
         if (d == null) {
@@ -75,10 +104,9 @@ public final class SodiumGeneration {
             if (resourcePresent.test(resourceOf(MODERN_ENTRY_POINT))) {
                 return new Detected(Kind.MODERN, null);
             }
-            for (String prefix : new String[]{CAFFEINE_PREFIX, JELLYSQUID_PREFIX}) {
-                if (resourcePresent.test(resourceOf(prefix + LEGACY_SCREEN_SUFFIX))) {
-                    return new Detected(Kind.LEGACY, prefix);
-                }
+            String legacy = legacyPrefixWith(resourcePresent);
+            if (legacy != null) {
+                return new Detected(Kind.LEGACY, legacy);
             }
         } catch (Throwable t) {
             // A probe must never take the client down: unknown = NONE.
