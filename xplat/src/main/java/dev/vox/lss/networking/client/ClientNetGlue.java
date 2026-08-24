@@ -385,4 +385,11 @@ public final class ClientNetGlue {
         // main client thread, no-op unless Xaero is present with queued tiles.
         dev.vox.lss.compat.ModCompat.clientTick();
     }
+
+    /** Per-frame body (render thread) — the Xaero bridge's texture-rebuild slice
+     *  (xaero-map-bridge-plan.md §17): one budgeted recolor per frame, Xaero's own
+     *  sweep cadence, so rebuild cost never bunches on the client tick. */
+    public static void onRenderFrame() {
+        dev.vox.lss.compat.ModCompat.renderFrame();
+    }
 }
