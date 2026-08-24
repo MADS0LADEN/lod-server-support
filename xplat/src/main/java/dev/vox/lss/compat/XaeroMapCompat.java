@@ -152,8 +152,21 @@ final class XaeroMapCompat {
      *  commit budget doubled the pump ceiling — visible stutter during map fills.
      *  One rebuild per frame is Xaero's own sweep grain: at 60-120 fps that is
      *  60-120 tile chunks/s ≈ 1000-2000 coalesced tiles/s of drain — above the
-     *  serve rate — while a frame never pays more than one recolor. */
+     *  serve rate. This is the BASE of the per-frame cap (§17.1 review fold): under
+     *  backlog pressure while frames are SCARCE (≤1 since the last pump, fps ≲ 2×
+     *  tick rate — a long frame absorbs a few recolors) it rises to 2 past the soft
+     *  cap and 3 past half the hard cap, and the interval ALLOWANCE (the §15.2
+     *  budget-with-borrow per pump, metered by measured recolor nanos) is the
+     *  wall-rate ceiling either way — a 144 Hz client pays the same rate the tick
+     *  fallback would, spread across frames. */
     static final int FRAME_MAX_REBUILDS = 1;
+    /** Not-ready region probes exempt from the flush budget (§17.1): under the
+     *  production 2 ms budget the floor never binds (a probe is ~µs); it exists so a
+     *  fully-not-ready owed set cannot walk hundreds of region monitors per FRAME
+     *  with the budget never consulted (no removing outcome = the §15 exemption
+     *  never disarms). Under a degenerate zero budget, ready work behind more than
+     *  this many not-ready regions waits for the tick fallback — accepted. */
+    static final int FLUSH_PROBE_EXEMPT_FLOOR = 8;
     /** Consecutive failures (commit-side or extraction-side) before the bridge
      *  latches dead for the SESSION (re-armed at disconnect). */
     static final int THROW_LATCH = 5;
@@ -329,9 +342,21 @@ final class XaeroMapCompat {
      *  — the live stutter instruments (diag {@code rebuild_ms=}/{@code rebuild_max_us=}). */
     private final AtomicLong rebuildNanos = new AtomicLong();
     private volatile long rebuildNanosMax;
-    /** A frame flush ran since the last pump — that pump skips its rebuild fallback.
-     *  Main thread only (frames and ticks share the render thread). */
+    /** A frame flush ran (or fast-out-armed) since the last pump — consumed into
+     *  {@link #frameActiveThisPump} at the TOP of {@code pump()} (§17.1: a pump that
+     *  returns at a ladder gate must not leave it armed for a later one). Main
+     *  thread only (frames and ticks share the render thread). */
     private boolean frameFlushRan;
+    /** The marker's per-pump snapshot — the value {@code tickFlush} acts on. */
+    private boolean frameActiveThisPump;
+    /** Nanos of {@code updateBuffers} the frame slice spent since the last pump —
+     *  the interval's allowance meter (§17.1): frames stop recoloring once it
+     *  reaches the budget-with-borrow, so a high-fps client pays the same wall
+     *  rate the tick fallback would. Main thread only. */
+    private long rebuildSpentSinceLastPumpNanos;
+    /** Frames seen since the last pump — the per-frame cap's pressure bumps apply
+     *  only while frames are SCARCE (≤1 per tick). Main thread only. */
+    private int framesSinceLastPump;
     private final AtomicLong droppedUpdates = new AtomicLong();
     /** Owed rebuilds whose region/tile chunk Xaero unloaded, parked or replaced
      *  first — its own counter (review A) so the live test can tell a parking race
@@ -477,6 +502,10 @@ final class XaeroMapCompat {
         this.regionsWaiting = 0;
         this.consecutiveFailures = 0;
         this.frameFlushRan = false;
+        this.frameActiveThisPump = false;
+        this.rebuildSpentSinceLastPumpNanos = 0;
+        this.framesSinceLastPump = 0;
+        this.rebuildNanosMax = 0; // session-scoped worst recolor; the total stays lifetime
         this.lastWorldId = null;
         if (this.registered && !this.enabled.getAsBoolean()) {
             this.deregistrar.accept(this.consumer);
@@ -665,6 +694,8 @@ final class XaeroMapCompat {
             case "load_requests" -> this.loadRequests.get();
             case "buffer_updates" -> this.bufferUpdates.get();
             case "frame_flushes" -> this.frameFlushes.get();
+            case "rebuild_nanos_total" -> this.rebuildNanos.get();
+            case "rebuild_nanos_max" -> this.rebuildNanosMax;
             case "dropped_updates" -> this.droppedUpdates.get();
             case "dropped_unloaded" -> this.droppedUnloaded.get();
             case "skipped_settings" -> this.skippedSettings.get();
@@ -716,6 +747,12 @@ final class XaeroMapCompat {
             return;
         }
         this.pumpCount++;
+        // §17.1 (review fold): the frame marker is consumed HERE, once per pump — and
+        // the interval allowance / frame-scarcity meters re-arm.
+        this.frameActiveThisPump = this.frameFlushRan;
+        this.frameFlushRan = false;
+        this.rebuildSpentSinceLastPumpNanos = 0;
+        this.framesSinceLastPump = 0;
         if (!this.enabled.getAsBoolean()) {
             clearQueue(); // the live toggle: flipping off drops the backlog immediately
             // ...but rebuilds already OWED to committed tile chunks still flush —
@@ -847,25 +884,57 @@ final class XaeroMapCompat {
     }
 
     /**
-     * Per-frame flush (plan §17): the texture-rebuild phase runs at FRAME cadence —
-     * Xaero's own sweep scheduling — instead of bunched on the client tick, at most
-     * {@link #frameMaxRebuilds} recolor(s) per call. Mirrors the pump ladder's gate
-     * envelope exactly down to the dimension equality (a rebuild must never run under
-     * weaker gates than the pump's flush did); the settings and cave-layer gates sit
-     * BELOW the flush in the pump ladder (rebuilds are owed debt to already-committed
-     * tile chunks, not new writes) and are skipped here for the same reason. Never
-     * drains commits, never grants loads, never visits regions (tick-side — the 1 s
-     * park guard needs only pump cadence), and defers the world-change queue drop to
-     * the pump (it returns instead). Shares the pump's containment + death latch.
+     * Per-frame flush (plan §17/§17.1): the texture-rebuild phase runs at FRAME
+     * cadence — Xaero's own sweep scheduling — instead of bunched on the client
+     * tick, at most a pressure-capped few recolors per call (base
+     * {@link #frameMaxRebuilds}; scarce-frame bumps; allowance-bounded). Mirrors the
+     * pump ladder's gate envelope exactly down to the dimension equality (a rebuild
+     * must never run under weaker gates than the pump's flush did); the settings and
+     * cave-layer gates sit BELOW the flush in the pump ladder (rebuilds are owed
+     * debt to already-committed tile chunks, not new writes) and are skipped here
+     * for the same reason. Never drains commits, never grants loads, never visits
+     * regions (tick-side — the 1 s park guard needs only pump cadence), and defers
+     * the world-change queue drop to the pump (it returns instead). Shares the
+     * pump's containment + death latch.
      */
     void frameFlush() {
         if (this.dead || this.sessionEndPending || this.pendingUpdates.isEmpty()) return;
+        this.framesSinceLastPump++;
+        // §17.1 fast-outs, both arming the stand-down marker WITHOUT the reflective
+        // ladder (safe: a tick flush with nothing due — or after this interval's
+        // allowance was spent on real recolors — is a no-op either way):
+        // (1) nothing can be due yet;
+        if (nothingDueAtHead()) {
+            this.frameFlushRan = true;
+            return;
+        }
+        // (2) the interval's allowance is spent — but only after a REAL recolor this
+        // interval (spent == 0 must fall through, or a degenerate zero budget would
+        // stand the tick down forever and void the always-drains exemption).
+        if (this.rebuildSpentSinceLastPumpNanos > 0
+                && this.rebuildSpentSinceLastPumpNanos >= rebuildBudgetWithBorrow()) {
+            this.frameFlushRan = true;
+            return;
+        }
         try {
             frameLadder();
         } catch (Throwable t) {
             if (t instanceof Error err && !(t instanceof AssertionError)) throw err;
             noteFailure(t);
         }
+    }
+
+    /** True when no owed rebuild can be due this pump, judged from the HEAD entry
+     *  (touch order makes it the oldest last-touch, so its idle window binds first)
+     *  — the frame slice's cheap pre-ladder skip for the ~2 s coalescing window
+     *  (§17.1). The age/stall legs also read only the head: a non-head entry due by
+     *  age or stall waits at most one idle window extra — accepted slack. */
+    private boolean nothingDueAtHead() {
+        if (this.pendingUpdates.size() > this.pendingUpdatesSoftCap) return false;
+        var head = this.pendingUpdates.values().iterator().next();
+        return this.pumpCount - head.lastTouchPump < this.updateIdlePumps
+                && this.pumpCount - head.firstTouchPump < this.updateMaxDeferPumps
+                && head.stalledSincePump < 0;
     }
 
     private void frameLadder() throws Throwable {
@@ -902,10 +971,24 @@ final class XaeroMapCompat {
                 if (this.levelOps.dimension(world) != dimensionId) return;
             }
             // Past every gate the pump's flush would have run under: the tick's
-            // rebuild fallback stands down until the next pump.
+            // rebuild fallback stands down until the next pump. §17.1: the per-frame
+            // cap grows under backlog pressure ONLY while frames are scarce (a long
+            // frame absorbs a few recolors; at high fps one per frame already outruns
+            // the serve rate), and the flush budget is the interval allowance's
+            // remainder, so a multi-rebuild frame stays inside the wall rate the
+            // tick fallback would have paid.
             this.frameFlushRan = true;
             this.frameFlushes.incrementAndGet();
-            flushPendingUpdates(mp, dimensionId, this.updateNanosBudget, this.frameMaxRebuilds, false);
+            int pending = this.pendingUpdates.size();
+            boolean scarce = this.framesSinceLastPump <= 1;
+            int cap = this.frameMaxRebuilds
+                    + (scarce && pending > this.pendingUpdatesSoftCap ? 1 : 0)
+                    + (scarce && pending > this.pendingUpdatesHardCap / 2 ? 1 : 0);
+            long remaining = Math.max(1L,
+                    rebuildBudgetWithBorrow() - this.rebuildSpentSinceLastPumpNanos);
+            long rebuildNanosBefore = this.rebuildNanos.get();
+            flushPendingUpdates(mp, dimensionId, remaining, cap, false);
+            this.rebuildSpentSinceLastPumpNanos += this.rebuildNanos.get() - rebuildNanosBefore;
         }
     }
 
@@ -1383,6 +1466,7 @@ final class XaeroMapCompat {
         Object shapeCache;
         Object fastConfig;
         int rebuilt; // actual updateBuffers calls this flush (the frame cap's meter)
+        int probes; // rebuildTileChunk entries past the memo — the scan-bound meter
         final java.util.Set<Object> notReadyRegions =
                 java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
     }
@@ -1408,26 +1492,28 @@ final class XaeroMapCompat {
      * textures. A tile chunk the native writer already consumed
      * ({@code !wasChanged()}) needs nothing.
      */
-    /** The tick pump's flush call: consumes the frame marker — with frames flushing,
-     *  the tick runs ZERO rebuilds (drops/bookkeeping only); with no frame since the
-     *  last pump (loading screens, hidden window, headless test JVMs) it falls back
-     *  to the full pre-§17 budget-with-borrow rebuild behavior. */
-    private void tickFlush(Object mp, Object dimensionId) {
-        boolean frameActive = this.frameFlushRan;
-        this.frameFlushRan = false;
-        long budget;
-        if (frameActive) {
-            budget = this.updateNanosBudget; // bounds the cheap-class scan only
-        } else {
-            boolean queueEmpty;
-            synchronized (this.queueLock) {
-                queueEmpty = this.queue.isEmpty();
-            }
-            long borrow = queueEmpty ? this.updateBorrowNanos
-                    : this.pendingUpdates.size() > this.pendingUpdatesSoftCap ? this.updateBorrowNanos / 2 : 0;
-            budget = borrow > Long.MAX_VALUE - this.updateNanosBudget
-                    ? Long.MAX_VALUE : this.updateNanosBudget + borrow; // saturating (the seams take MAX)
+    /** The interval's rebuild allowance: the §15.2 budget-with-borrow math, shared
+     *  by the tick fallback and the frame slice's allowance ceiling (§17.1). */
+    private long rebuildBudgetWithBorrow() {
+        boolean queueEmpty;
+        synchronized (this.queueLock) {
+            queueEmpty = this.queue.isEmpty();
         }
+        long borrow = queueEmpty ? this.updateBorrowNanos
+                : this.pendingUpdates.size() > this.pendingUpdatesSoftCap ? this.updateBorrowNanos / 2 : 0;
+        return borrow > Long.MAX_VALUE - this.updateNanosBudget
+                ? Long.MAX_VALUE : this.updateNanosBudget + borrow; // saturating (the seams take MAX)
+    }
+
+    /** The tick pump's flush call: with frames flushing (the marker consumed at the
+     *  top of {@link #pump}) the tick runs ZERO rebuilds — drops/bookkeeping only,
+     *  never a recolor bunched onto the tick; with no frame since the last pump
+     *  (loading screens, hidden window, headless test JVMs) it falls back to the
+     *  full §15 budget-with-borrow rebuild behavior. */
+    private void tickFlush(Object mp, Object dimensionId) {
+        boolean frameActive = this.frameActiveThisPump;
+        long budget = frameActive ? this.updateNanosBudget // bounds the cheap-class scan only
+                : rebuildBudgetWithBorrow();
         flushPendingUpdates(mp, dimensionId, budget, frameActive ? 0 : Integer.MAX_VALUE, true);
     }
 
@@ -1452,7 +1538,14 @@ final class XaeroMapCompat {
         int overflow = this.pendingUpdates.size() - this.pendingUpdatesSoftCap;
         var it = this.pendingUpdates.values().iterator();
         while (it.hasNext()) {
-            if (removed > 0 && System.nanoTime() - start > budget) break;
+            // The §15 exemption: removing outcomes arm the budget check, and not-ready
+            // probes stay FREE up to a small floor (memoized per region, so the floor
+            // is distinct regions — the pin: ready work behind a not-ready region must
+            // not starve). Past the floor the budget applies even with zero removals
+            // (§17.1, review B m4: an all-not-ready set must not walk hundreds of
+            // region monitors unbounded at frame cadence on the render thread).
+            if ((removed > 0 || args.probes > FLUSH_PROBE_EXEMPT_FLOOR)
+                    && System.nanoTime() - start > budget) break;
             var pu = it.next();
             boolean due = overflow-- > 0
                     || this.pumpCount - pu.lastTouchPump >= this.updateIdlePumps
@@ -1530,6 +1623,7 @@ final class XaeroMapCompat {
 
     private UpdateResult rebuildTileChunk(Object mp, PendingUpdate pu, RebuildArgs args) {
         if (args.notReadyRegions.contains(pu.region)) return UpdateResult.NOT_READY;
+        args.probes++; // §17.1: probes past FLUSH_PROBE_EXEMPT_FLOOR arm the budget check
         try {
             Object writerPause = this.h.writerThreadPauseSync.invoke(pu.region);
             synchronized (writerPause) {

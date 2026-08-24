@@ -81,13 +81,17 @@ class XaeroWiringContractTest {
                         + " rebuild slice");
         String fabricGlue = Files.readString(SourcePaths.mainSource(
                 "dev/vox/lss/networking/client/LSSClientNetworking.java"));
-        // The event CLASS is per-line flavor (26.2 = LevelRenderEvents.END_MAIN, the
-        // 1.21.x/26.1 lines = WorldRenderEvents.END) — the invariant is that SOME
-        // frame-cadence event drives onRenderFrame.
-        assertTrue(fabricGlue.contains(".register(context -> ClientNetGlue.onRenderFrame())"),
-                "the Fabric per-frame registration is gone — rebuilds silently bunch back"
-                        + " onto the client tick (the NeoForge twin is pinned in"
-                        + " NeoForgeLoaderSeamContractTest)");
+        // The event CLASS is per-line flavor (26.2 = level.LevelRenderEvents.END_MAIN,
+        // the 1.21.x/26.1 lines = a WorldRenderEvents member) — the invariant is that a
+        // RENDER event drives onRenderFrame (§17.1 review fold: a bare call-site match
+        // would also pass on a tick registration, the exact regression this pin exists
+        // to catch; the lambda parameter name is not pinned).
+        assertTrue(java.util.regex.Pattern.compile(
+                        "RenderEvents\\s*\\.\\s*\\w+\\.register\\(\\s*\\w+ -> ClientNetGlue\\.onRenderFrame\\(\\)\\)")
+                        .matcher(fabricGlue).find(),
+                "the Fabric per-frame registration is gone or moved off a render event —"
+                        + " rebuilds silently bunch back onto the client tick (the NeoForge"
+                        + " twin is pinned in NeoForgeLoaderSeamContractTest)");
     }
 
     /**

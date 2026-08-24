@@ -1301,6 +1301,87 @@ The change:
   `NeoForgeLoaderSeamContractTest` (the `RenderFrameEvent.Post` listener).
 
 Worst-case pump during a fill returns to the §14 commit ceiling; the rebuild
-cost amortizes at ≤1 recolor per frame. The trade: below 20 fps the drain rate
-drops under what the tick fallback would have managed — accepted, the map
-trails instead of the client hitching.
+cost amortizes across frames. (The original closing claim here — "below 20 fps
+the drain drops and the tick fallback rescues it" — was INVERTED; §17.1 has the
+corrected scheduling analysis and the throughput fixes.)
+
+### 17.1 Review fold (2026-08-24, 2-Opus — lock-invariants lens + adversarial scheduling lens)
+
+Both reviewers converged on one core MAJOR family, from opposite ends:
+
+- **The tick fallback was unreachable at fps ≥ 20** (scheduling lens M1): MC runs
+  client ticks INSIDE the frame loop (ticks first, then render), so every pump is
+  preceded by a gate-passing frame and the boolean marker suppressed the fallback
+  at every pump. Drain was fps-proportional and NON-monotonic: ~20-30 recolors/s
+  in the 20-40 fps band (vs ~40-80/s pre-§17 saturated), recovering only BELOW
+  20 fps where multi-tick frames leave later pumps unmarked. Consequence chain
+  (invariants lens M1, the §15.2 valve disarmed): pendingUpdates → hard cap →
+  commits pause (`drainEntries` breaks) → queue (8192) overflows → dropped tiles
+  that LSS never re-serves (the consumer ingested them; by design no ingest
+  failure is reported for map problems) — permanent session map holes.
+- **No wall ceiling at high fps** (scheduling M2): one recolor per frame × 144-240
+  fps could burn 30-50% of EVERY frame budget during a fill — the same complaint
+  at a different grain.
+
+The fold (one mechanism answers both, keeping the no-tick-bunching goal):
+
+- **Interval allowance**: the §15.2 budget-with-borrow, re-armed at each pump and
+  metered by MEASURED recolor nanos (`rebuildSpentSinceLastPumpNanos`). Frames
+  stop recoloring once spent ≥ the allowance (fast-out, marker still armed) — the
+  high-fps wall ceiling equals what the tick fallback would have paid, spread one
+  recolor per frame. The `spent == 0` case always falls through: the first
+  recolor of an interval is never blocked, or a degenerate zero budget would
+  stand the tick down forever and void the §15 always-drains exemption (pinned).
+- **Scarce-frame pressure cap**: the per-frame cap is base 1, +1 past the soft
+  cap, +1 past half the hard cap — but the bumps apply ONLY while frames are
+  scarce (≤1 since the last pump, i.e. fps ≲ 2× tick rate, where a 25-50 ms
+  frame absorbs a few recolors and the fps × 1 drain would under-run the serve
+  rate). At high fps the cap stays 1 (one per frame already outruns the serve
+  rate; a multi-recolor 144 Hz frame would miss vsync). The frame flush budget is
+  the allowance's REMAINDER, so a multi-rebuild frame stays inside the interval
+  wall rate. The invariants lens's alternative — re-engaging the tick fallback
+  past the soft cap — was REJECTED: it re-creates the reported tick bunching
+  under exactly the fill pressure that triggers it.
+- **Marker consumed at the top of `pump()`** into `frameActiveThisPump`
+  (invariants m3): a pump that returns at a ladder gate no longer leaves a stale
+  marker for a later pump.
+- **Nothing-due head fast-out** (invariants m2): below the soft cap, the HEAD
+  entry (oldest last-touch — touch order) is checked for idle/age/stall due-ness
+  before the reflective ladder; most frames of the ~2 s coalescing window skip
+  the ~22 handle invokes + 2 monitors and just arm the marker (safe: a
+  nothing-due tick flush is a no-op either way). Accepted slack: a NON-head entry
+  due by age or stall waits at most one idle window (~2 s) extra.
+- **Probe floor** (scheduling m4, reconciled with the §15 pin
+  `aNotReadyRegionIsProbedOncePerFlushAndConsumesNoProgress`, which caught the
+  first cut of this fix): not-ready region probes stay budget-exempt up to
+  `FLUSH_PROBE_EXEMPT_FLOOR` (8) distinct regions per flush; past it the budget
+  applies even with zero removals, so a fully-not-ready set cannot walk hundreds
+  of region monitors unbounded at frame cadence.
+- **Instruments/pins**: `rebuild_nanos_total`/`rebuild_nanos_max` in
+  `counterForTest`, the three new diag tokens in the house-style pin,
+  `rebuild_max_us` session-scoped (reset at `settleSessionEnd`; the total stays
+  lifetime), and the Fabric wiring pin is now a regex requiring a RENDER event
+  (`RenderEvents.*.register(... onRenderFrame ...)`) — a tick-attached
+  registration no longer passes (scheduling m6). New tests: fallback re-engages
+  one pump after frames stop; a gated frame leaves the fallback armed; the
+  pressure cap; the allowance exhaust/re-arm cycle.
+
+Recorded, not changed:
+
+- **The overflow-holes chain is pre-existing and stays accepted**: at the hard
+  cap commits pause and queue overflow drops tiles permanently for the session
+  (healed by a dirty broadcast, rejoin re-serves after cache loss, or
+  `/lss reset`). The fold restores drain to ≈ the pre-§17 saturated wall rate at
+  every fps, so exposure is no worse than the §15 build; the flag-era build
+  (v0.12.0) had the same queue and the same drop path.
+- **Client-tick catch-up bursts** (≤10 ticks in one frame after a hitch): later
+  ticks of the burst see no intervening frame and each takes a full fallback
+  flush — up to ~10 × budget of recolors added to an already-late frame. The
+  §15 build behaved identically; gating it would starve the headless fallback.
+- **A renderer stack that fires no level-render event** degrades to the tick
+  fallback silently — i.e. exactly the §15/§16 build. The live detector is
+  `frame_flushes` climbing in `/lss diag`; the owed live check for this round is
+  explicitly: frame_flushes climbing WITH Sodium (+Iris if available) installed,
+  on at least one line.
+- **Iris shadow-pass double-fire** can run the frame slice twice per frame —
+  each invocation is capped and allowance-metered, so the ceiling holds.
