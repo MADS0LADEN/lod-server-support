@@ -52,6 +52,7 @@ Install **LOD Server Support** on **both** the **server** (LOD Server Support Fa
 
 - `/lss clearcache` - Clear the local column cache, forcing all chunks to be re-requested from the server
 - `/lss reset` - Wipe this server's LODs (local cache and Voxy's stored data) and re-stream them fresh
+- `/lss reset voxy-force` - Same, but for the case where another mod has redirected Voxy's storage (a replay mod, or any other storage override) and the ordinary reset therefore left Voxy's disk data alone. Shows both storage paths first and deletes nothing until you run `/lss reset voxy-force confirm`
 - `/lss diag` - Show client-side diagnostics (connection, throughput, scan progress, request budget)
 
 ## Configuration

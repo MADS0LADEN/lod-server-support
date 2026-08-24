@@ -78,13 +78,75 @@ public final class ModCompat {
     }
 
     /**
+     * The Voxy half's outcome PLUS the two storage roots the override cross-check
+     * compared (issue #4). Both roots are nullable and are populated only where the
+     * ladder actually read them — they exist so the feedback can name the directory the
+     * user may want to delete by hand, not as a contract that they are always known.
+     *
+     * @param liveRoot     the root the running Voxy instance reported, or null
+     * @param expectedRoot the root LSS derived for this connection, or null
+     * @param wipeDeclined true when the ladder reached the cross-check and REFUSED the
+     *                     disk wipe. This is deliberately not derivable from
+     *                     {@code outcome}: a wipe declined by the cross-check can still
+     *                     end UNAVAILABLE, SHUTDOWN_FAILED or RESTART_FAILED when a
+     *                     later rung fails, and those users need the "your LODs are
+     *                     still at &lt;path&gt;" report just as much (issue #4 follow-up).
+     *                     It mirrors exactly when the client log emits that report, so
+     *                     log and in-game feedback stay in step.
+     */
+    public record VoxyResetReport(VoxyResetOutcome outcome,
+                                  java.nio.file.Path liveRoot,
+                                  java.nio.file.Path expectedRoot,
+                                  boolean wipeDeclined) {
+        /** An outcome reached before (or without) reading either root. */
+        public static VoxyResetReport of(VoxyResetOutcome outcome) {
+            return new VoxyResetReport(outcome, null, null, false);
+        }
+    }
+
+    /**
+     * A NON-DESTRUCTIVE read of the same two roots — stage 1 of
+     * {@code /lss reset voxy-force}, which must show the user the path BEFORE anything
+     * is deleted (issue #4).
+     *
+     * @param voxyPresent      false = Voxy is not installed at all
+     * @param liveRoot         the running instance's root, or null if unreadable/absent
+     * @param expectedRoot     the root LSS derived for this connection, or null
+     * @param containedForWipe whether {@code liveRoot} would survive the containment
+     *                         fence — force does not lift it, so the prompt says so
+     */
+    public record VoxyStorageProbe(boolean voxyPresent,
+                                   java.nio.file.Path liveRoot,
+                                   java.nio.file.Path expectedRoot,
+                                   boolean containedForWipe) {
+        /** What the cross-check makes of these two roots. Shares its criterion with the
+         *  ladder, so the prompt can never disagree with what the wipe will do — and it
+         *  distinguishes "checked and disagreed" from "never checkable", which the
+         *  prompt must not conflate (issue #4 follow-up). */
+        public VoxyStorageOverride.Verdict verdict() {
+            return VoxyStorageOverride.verdict(liveRoot, expectedRoot);
+        }
+    }
+
+    /**
      * The {@code /lss reset} Voxy half: renderer-first teardown, per-server disk wipe,
      * instance rebuild (the {@code /voxy reload} sequence with the wipe inserted into
      * the down-window). Main client thread only. Every failure shape is contained to a
      * feedback-driving outcome — it must never cost the ingest bridge.
+     *
+     * @param forceWipe the user-confirmed {@code voxy-force} override: waives the
+     *                  derived-root cross-check ONLY. Containment still applies, and
+     *                  the default ({@code false}) path is unchanged.
      */
-    public static VoxyResetOutcome resetVoxyLods() {
-        if (!voxyLoaded) return VoxyResetOutcome.NOT_PRESENT;
-        return VoxyCompat.resetVoxyProduction();
+    public static VoxyResetReport resetVoxyLods(boolean forceWipe) {
+        if (!voxyLoaded) return VoxyResetReport.of(VoxyResetOutcome.NOT_PRESENT);
+        return VoxyCompat.resetVoxyProduction(forceWipe);
+    }
+
+    /** Reads the two storage roots without touching Voxy's lifecycle or the disk —
+     *  what {@code /lss reset voxy-force} shows before asking for confirmation. */
+    public static VoxyStorageProbe probeVoxyStorage() {
+        if (!voxyLoaded) return new VoxyStorageProbe(false, null, null, false);
+        return VoxyCompat.probeStorageProduction();
     }
 }

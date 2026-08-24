@@ -6,7 +6,12 @@ import dev.vox.lss.config.LSSClientConfig;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.Component;
 
+import com.mojang.brigadier.Command;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.mojang.brigadier.context.CommandContext;
+
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * The /lss client-command BODIES (N-3, neoforge-support-plan.md §1.1 item 5 —
@@ -15,6 +20,13 @@ import java.util.function.Consumer;
  * feedback sink. Each loader keeps only its thin brigadier tree against its
  * own source type (Fabric's {@code FabricClientCommandSource.sendFeedback},
  * NeoForge's client command source).
+ *
+ * <p>ONE subtree is shared rather than mirrored: {@link #resetSubtree} (issue #4). Once
+ * {@code reset} grew a second confirm-gated form it became four nodes whose
+ * (confirmed, force) pairs must agree across loaders, and a hand-copied tree on each
+ * side is a drift waiting to happen — the same reason the gametest entrypoint and
+ * plugin.yml carry contract tests. Sharing the builder makes the drift unrepresentable
+ * instead of merely detectable.
  */
 public final class ClientCommandActions {
 
@@ -41,8 +53,12 @@ public final class ClientCommandActions {
      * binds the live collaborators. Main client thread (client commands dispatch there —
      * the same thread Voxy's own command and login/disconnect mixins run on, so no
      * concurrent-lifecycle race).
+     *
+     * @param forceVoxyWipe issue #4's {@code voxy-force} form. It is two-stage like
+     *                      {@code confirm}: unconfirmed it only shows the storage roots.
      */
-    public static void runReset(Consumer<Component> feedback, boolean confirmed) {
+    public static void runReset(Consumer<Component> feedback, boolean confirmed,
+                                boolean forceVoxyWipe) {
         var manager = ClientNetGlue.getRequestManager();
         ResetCoordinator.run(new ResetCoordinator.Deps(
                 manager != null,
@@ -60,13 +76,49 @@ public final class ClientCommandActions {
                     }
                 },
                 dev.vox.lss.compat.ModCompat::resetVoxyLods,
+                dev.vox.lss.compat.ModCompat::probeVoxyStorage,
                 () -> {
                     if (manager != null) manager.flushCache();
                 },
                 ColumnCacheStore::clearAll,
                 FarPlayerClientSupport::resetAndResubscribe,
                 line -> feedback.accept(Component.literal(line).withStyle(ChatFormatting.GOLD))),
-                confirmed);
+                confirmed, forceVoxyWipe);
+    }
+
+    /**
+     * The whole {@code reset} subtree, built once for every loader:
+     *
+     * <pre>
+     *   reset                        -> plain reset
+     *   reset confirm                -> the destructive no-session form
+     *   reset voxy-force             -> issue #4 stage 1: show the storage roots only
+     *   reset voxy-force confirm     -> issue #4 stage 2: wipe the live root
+     * </pre>
+     *
+     * <p>Generic over the loader's command-source type; the caller supplies its own
+     * literal factory (Fabric's {@code ClientCommands::literal}, NeoForge's
+     * {@code Commands::literal}) and its own source-to-feedback adapter, and gets back a
+     * builder to hang on its own root node.
+     */
+    public static <S> LiteralArgumentBuilder<S> resetSubtree(
+            Function<String, LiteralArgumentBuilder<S>> literal,
+            Function<S, Consumer<Component>> feedback) {
+        return literal.apply("reset")
+                .executes(context -> dispatchReset(context, feedback, false, false))
+                .then(literal.apply("confirm")
+                        .executes(context -> dispatchReset(context, feedback, true, false)))
+                .then(literal.apply("voxy-force")
+                        .executes(context -> dispatchReset(context, feedback, false, true))
+                        .then(literal.apply("confirm")
+                                .executes(context -> dispatchReset(context, feedback, true, true))));
+    }
+
+    private static <S> int dispatchReset(CommandContext<S> context,
+                                         Function<S, Consumer<Component>> feedback,
+                                         boolean confirmed, boolean forceVoxyWipe) {
+        runReset(feedback.apply(context.getSource()), confirmed, forceVoxyWipe);
+        return Command.SINGLE_SUCCESS;
     }
 
     /** /lss trace. */
