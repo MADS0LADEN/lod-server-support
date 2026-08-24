@@ -16,6 +16,8 @@ public class MapRegion extends LeveledRegion<Object> {
     public boolean canRequestReload = true;
     public int visits;
     public Boolean beingWritten; // null until first set — pins "set true, never cleared"
+    /** The saver's cache precondition (real: LeveledRegion) — a rebuild flips it false. */
+    public boolean allCachePrepared = true;
     public final MapTileChunk[][] chunks = new MapTileChunk[8][8];
 
     private void requireRegionMonitor(String site) {
@@ -25,7 +27,12 @@ public class MapRegion extends LeveledRegion<Object> {
         }
     }
 
+    /** Gate probes (writer-pause monitor acquisitions) — the flush must probe a
+     *  not-ready region ONCE per pump, not once per owed tile chunk. */
+    public int gateProbes;
+
     public boolean isWritingPaused() {
+        this.gateProbes++;
         if (!Thread.holdsLock(this.writerThreadPauseSync)) {
             throw new IllegalStateException("region.isWritingPaused outside"
                     + " writerThreadPauseSync — the save-race exclusion's monitor");
@@ -72,6 +79,7 @@ public class MapRegion extends LeveledRegion<Object> {
     }
 
     public void setAllCachePrepared(boolean prepared) {
+        this.allCachePrepared = prepared;
         dev.vox.lss.compat.XaeroStubEvents.record("region.setAllCachePrepared " + prepared);
     }
 

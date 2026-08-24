@@ -42,8 +42,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *       DEFERS (entries retained), a stale-dimension entry DROPS, a loaded chunk
  *       SKIPS; the region-level save-race gate defers too;</li>
  *   <li>the decompiled commit sequence order, incl. setChanged(true) before
- *       setTile, worldInterpretationVersion before setTile, the flag-then-consume
- *       buffers pattern (no updateBuffers handle exists at all), the faithful
+ *       setTile, worldInterpretationVersion before setTile, NO setToUpdateBuffers
+ *       flag ever (Xaero's sweep consumes it outside isResting — the
+ *       cache-not-prepared crash, plan §15) with the texture rebuild coalesced
+ *       into the pump's flush phase under the writer gates, the faithful
  *       prepare→overlays→write per-pixel order (the stub's prepareForWriting
  *       clears overlays like the real one, so a wrong order wipes them), and
  *       {@code setBeingWritten} set-and-NEVER-cleared;</li>
@@ -82,10 +84,12 @@ class XaeroMapCompatTest {
     private final List<dev.vox.lss.api.VoxelColumnConsumer> registered = new ArrayList<>();
     private XaeroMapCompat bridge;
 
+    private ResourceKey<Level> clientDimension = OVERWORLD;
+
     private final XaeroMapCompat.LevelOps fakeLevelOps = new XaeroMapCompat.LevelOps() {
         @Override
         public Object dimension(Object world) {
-            return OVERWORLD;
+            return clientDimension;
         }
 
         @Override
@@ -122,6 +126,7 @@ class XaeroMapCompatTest {
                 this.registered::add,
                 this.registered::remove);
         this.bridge.pumpNanosBudget = Long.MAX_VALUE; // neutralize MethodHandle warmup
+        this.bridge.updateNanosBudget = Long.MAX_VALUE;
         this.bridge.maybeRegister();
     }
 
@@ -769,12 +774,510 @@ class XaeroMapCompatTest {
                         && writtenOnce > setTile && loaded > writtenOnce,
                 "commit order must mirror the decompiled writeChunk: " + events);
 
-        // Buffers: flag-then-consume, never a direct updateBuffers (no handle exists).
-        int toUpdate = events.lastIndexOf("tileChunk.setToUpdateBuffers true");
+        // Buffers: NO setToUpdateBuffers flag (Xaero's preUpload sweep consumes it with
+        // no isResting check — the "cache not prepared" saver crash, plan §15) and no
+        // rebuild at commit either: the change stays MARKED for the coalesced rebuild
+        // phase, which consumes it (pinned in the rebuild-phase tests below).
+        assertFalse(events.stream().anyMatch(e -> e.startsWith("tileChunk.setToUpdateBuffers")),
+                "the flag must never be set: " + events);
+        assertFalse(events.stream().anyMatch(e -> e.startsWith("tileChunk.updateBuffers")),
+                "no rebuild inside the commit (coalesced per tile chunk): " + events);
+        assertFalse(events.contains("tileChunk.setChanged false"),
+                "the change is consumed by the rebuild, not the commit: " + events);
+    }
+
+    // ---- the rebuild phase (plan §15: the cache-not-prepared crash) ----
+
+    private void pumpIdleWindow() {
+        for (int i = 0; i <= this.bridge.updateIdlePumps; i++) {
+            this.bridge.pump();
+        }
+    }
+
+    private MapRegion theRegion() {
+        assertEquals(1, this.processor.regions.size(), "one region in play");
+        return this.processor.regions.values().iterator().next();
+    }
+
+    private static long count(List<String> events, String event) {
+        return events.stream().filter(event::equals).count();
+    }
+
+    @Test
+    void theRebuildRunsUnderTheWriterGatesAfterTheIdleWindowAndReArmsBeingWritten() {
+        this.bridge.updateIdlePumps = 3;
+        offer(64, 64);
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("written"));
+        assertEquals(1, this.bridge.counterForTest("pending_updates"));
+        var region = theRegion();
+        MapTileChunk tileChunk = region.getChunk(0, 0);
+        assertTrue(tileChunk.wasChanged(), "the native transient: changed, unflagged");
+        this.bridge.pump();
+        assertFalse(XaeroStubEvents.snapshot().contains("tileChunk.updateBuffers 16,16"),
+                "inside the coalescing window nothing rebuilds yet");
+
+        // The saver reset beingWritten between the commit and the rebuild.
+        region.beingWritten = false;
+        pumpIdleWindow();
+        var events = XaeroStubEvents.snapshot();
+        int rebuilt = events.lastIndexOf("tileChunk.updateBuffers 16,16");
         int consumed = events.lastIndexOf("tileChunk.setChanged false");
-        assertTrue(toUpdate > loaded && consumed > toUpdate,
-                "buffers are flagged for Xaero's preUpload sweep, then the change is"
-                        + " consumed (the native neighbor pattern): " + events);
+        assertTrue(rebuilt >= 0 && consumed > rebuilt,
+                "rebuild (under both region monitors — the stub enforces), then the change"
+                        + " is consumed: " + events);
+        assertEquals(Boolean.TRUE, region.beingWritten,
+                "re-armed before the rebuild: the rebuilt texture must reach the cache, and"
+                        + " the save path is what requests it");
+        assertFalse(events.contains("region.setBeingWritten false"));
+        assertFalse(tileChunk.wasChanged());
+        assertFalse(region.allCachePrepared,
+                "the rebuild un-prepares the region — the flip the saver races on");
+        assertEquals(1, this.bridge.counterForTest("buffer_updates"));
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
+        assertEquals(1, tileChunk.bufferUpdates);
+        assertTrue(events.contains("fastConfig.new"), "the native per-pass config snapshot");
+        // The exact native argument list — every parameter is Object-erased behind the
+        // handle, so a transposition compiles and only surfaces live (review B).
+        assertTrue(tileChunk.lastUpdateProcessor == this.processor);
+        assertTrue(tileChunk.lastUpdateTint == this.processor.tintProvider);
+        assertTrue(tileChunk.lastUpdateOverlay == this.processor.overlayManager);
+        assertTrue(tileChunk.lastUpdateCache == this.processor.shapeCache);
+        assertNotNull(tileChunk.lastUpdateConfig);
+        assertFalse(tileChunk.lastUpdateDebug, "the writer's detailed-debug flag is log-only: false");
+        assertFalse(events.stream().anyMatch(e -> e.startsWith("tileChunk.setToUpdateBuffers")),
+                "the rebuild phase never sets the flag either (the §15 invariant in both phases)");
+    }
+
+    @Test
+    void owedRegionsAreKeptVisitedSoXaeroCannotParkThem() {
+        // LeafRegionTexture.postUpload parks a region (loadState 3, tiles released) once it
+        // is not being written, 1 s passed since its last visit and no tile chunk carries
+        // the flag — the flag WAS the park guard (review A MAJOR); the visit is ours now.
+        this.bridge.updateIdlePumps = 1000;
+        offer(64, 64);
+        offer(68, 64);
+        this.bridge.pump();
+        var region = theRegion();
+        int visits = region.visits;
+        this.bridge.pump();
+        this.bridge.pump();
+        assertEquals(2, region.visits - visits, "one visit per owed REGION per pump, not per entry");
+        region.loadState = 0; // unloaded: never visit a region that is not loaded
+        visits = region.visits;
+        this.bridge.pump();
+        assertEquals(0, region.visits - visits);
+    }
+
+    @Test
+    void theFlushBorrowsTheCommitBudgetOnlyWhenTheQueueIsEmptyOrTheSetIsPastTheSoftCap() {
+        this.bridge.updateIdlePumps = 1;
+        this.bridge.updateNanosBudget = 0;
+        this.bridge.updateBorrowNanos = Long.MAX_VALUE;
+        this.bridge.pendingUpdatesSoftCap = 100;
+        offer(64, 64);
+        offer(68, 64);
+        offer(72, 64);
+        this.bridge.pump();
+        offer(96, 64); // a queued entry the drain will NOT reach: its region is busy
+        var other = new MapRegion();
+        other.resting = false;
+        this.processor.regions.put((3L << 32) | 2L, other);
+        this.bridge.pump(); // queue non-empty, set under the soft cap: budget 0 → one rebuild
+        assertEquals(1, this.bridge.counterForTest("buffer_updates"));
+        this.bridge.pendingUpdatesSoftCap = 1; // past the soft cap: half the borrow → all
+        this.bridge.pump();
+        assertEquals(3, this.bridge.counterForTest("buffer_updates"),
+                "past the soft cap the flush borrows half the commit budget (Long.MAX_VALUE/2):"
+                        + " both remaining entries rebuild in one pump");
+        offer(76, 64);
+        this.bridge.pendingUpdatesSoftCap = 100;
+        this.bridge.pump(); // commits (19,16)
+        this.bridge.queueLockedClearForTest();
+        this.bridge.pump(); // queue EMPTY: the whole borrow → everything due rebuilds
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
+    }
+
+    @Test
+    void aZeroRebuildBudgetStillRebuildsOnePerPumpAndResumes() {
+        this.bridge.updateIdlePumps = 1;
+        this.bridge.updateNanosBudget = 0;
+        this.bridge.updateBorrowNanos = 0; // pin truncation: no borrowing
+        offer(64, 64);
+        offer(68, 64);
+        this.bridge.pump();
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("buffer_updates"),
+                "the first removing outcome is exempt from the budget — exactly one per pump");
+        assertEquals(1, this.bridge.counterForTest("pending_updates"));
+        this.bridge.pump();
+        assertEquals(2, this.bridge.counterForTest("buffer_updates"), "and the rest resumes next pump");
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
+    }
+
+    @Test
+    void aNotReadyRegionIsProbedOncePerFlushAndConsumesNoProgress() {
+        this.bridge.updateIdlePumps = 2;
+        this.bridge.updateNanosBudget = 0;
+        this.bridge.updateBorrowNanos = 0; // pin truncation: no borrowing
+        offer(64, 64);
+        offer(68, 64);
+        offer(72, 64); // three tile chunks of region (2,2)
+        this.bridge.pump(); // 1
+        offer(96, 64); // region (3,2), touched later — sits AFTER the three in touch order
+        this.bridge.pump(); // 2
+        var busy = this.processor.regions.get((2L << 32) | 2L);
+        var ready = this.processor.regions.get((3L << 32) | 2L);
+        assertNotNull(busy);
+        assertNotNull(ready);
+        busy.resting = false;
+        this.bridge.pump(); // 3: the three are due (stalled); (3,2) is not yet
+        assertEquals(0, this.bridge.counterForTest("buffer_updates"));
+        int probesBefore = busy.gateProbes;
+        this.bridge.pump(); // 4: all four due
+        assertEquals(1, busy.gateProbes - probesBefore,
+                "a not-ready region is probed ONCE per flush, not once per owed tile chunk"
+                        + " (the per-entry-probe pattern plan §14 removed)");
+        assertEquals(1, ready.getChunk(0, 0).bufferUpdates,
+                "not-ready verdicts consume no budget: the ready region behind them still"
+                        + " rebuilds in the same pump");
+        assertEquals(3, this.bridge.counterForTest("pending_updates"));
+    }
+
+    @Test
+    void aReTouchUnderBudgetTruncationResetsTheStallClock() {
+        // The only reachable re-touch of a STALLED entry: its region turns resting in a
+        // pump whose flush is truncated (budget) before reaching it, and the drain then
+        // commits into its tile chunk. The reset makes it wait a FRESH idle window.
+        this.bridge.updateIdlePumps = 3;
+        this.bridge.updateNanosBudget = 0; // one removing outcome per pump
+        this.bridge.updateBorrowNanos = 0; // pin truncation: no borrowing
+        offer(96, 64);            // F: tile chunk (24,16), region (3,2) — the OLDER entry
+        this.bridge.pump();       // pump 1
+        offer(64, 64);            // E: tile chunk (16,16), region (2,2)
+        this.bridge.pump();       // pump 2
+        var rF = this.processor.regions.get((3L << 32) | 2L);
+        var rE = this.processor.regions.get((2L << 32) | 2L);
+        assertNotNull(rF);
+        assertNotNull(rE);
+        rF.resting = false;
+        rE.resting = false;
+        this.bridge.pump();       // 3
+        this.bridge.pump();       // 4: F due → stalled
+        this.bridge.pump();       // 5: E due → stalled
+        assertEquals(0, this.bridge.counterForTest("buffer_updates"));
+        assertEquals(2, this.bridge.counterForTest("pending_updates"));
+        rF.resting = true;
+        rE.resting = true;
+        offer(65, 64);            // a second tile of E's tile chunk, for this pump's drain
+        this.bridge.pump();       // 6: flush rebuilds F (older) and stops; drain re-touches E
+        assertEquals(1, this.bridge.counterForTest("buffer_updates"));
+        assertEquals(1, this.bridge.counterForTest("pending_updates"));
+        this.bridge.pump();       // 7
+        this.bridge.pump();       // 8
+        assertEquals(1, this.bridge.counterForTest("buffer_updates"),
+                "the re-touch reset E's stall clock: it waits a fresh idle window instead of"
+                        + " rebuilding at once as a still-stalled entry would");
+        this.bridge.pump();       // 9: three pumps since the touch at 6
+        assertEquals(2, this.bridge.counterForTest("buffer_updates"));
+    }
+
+    @Test
+    void rebuildsCoalescePerTileChunkAcrossPumps() {
+        this.bridge.updateIdlePumps = 3;
+        offer(64, 64);
+        offer(65, 64);
+        this.bridge.pump();
+        offer(66, 65);
+        offer(67, 67); // tile chunk (16,16) touched again — its window restarts
+        this.bridge.pump();
+        offer(68, 64); // tile chunk (17,16)
+        this.bridge.pump();
+        assertEquals(5, this.bridge.counterForTest("written"));
+        assertEquals(2, this.bridge.counterForTest("pending_updates"));
+        pumpIdleWindow();
+        var events = XaeroStubEvents.snapshot();
+        assertEquals(1, count(events, "tileChunk.updateBuffers 16,16"),
+                "four tiles of one tile chunk → ONE rebuild: " + events);
+        assertEquals(1, count(events, "tileChunk.updateBuffers 17,16"));
+        assertEquals(2, this.bridge.counterForTest("buffer_updates"));
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
+    }
+
+    @Test
+    void aRebuildWaitsForARestingRegionAndAPermanentStallDrops() {
+        this.bridge.updateIdlePumps = 1;
+        this.bridge.updateMaxStallPumps = 3;
+        offer(64, 64);
+        this.bridge.pump();
+        var region = theRegion();
+        region.resting = false; // recache requested / being saved — the crash window
+        this.bridge.pump();
+        this.bridge.pump();
+        assertFalse(XaeroStubEvents.snapshot().contains("tileChunk.updateBuffers 16,16"),
+                "never un-prepare a region that may be queued for caching");
+        assertEquals(1, this.bridge.counterForTest("pending_updates"));
+        region.resting = true;
+        this.bridge.pump();
+        assertTrue(XaeroStubEvents.snapshot().contains("tileChunk.updateBuffers 16,16"));
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
+        assertEquals(0, this.bridge.counterForTest("dropped_updates"));
+
+        offer(68, 64);
+        this.bridge.pump();
+        region.resting = false;
+        for (int i = 0; i < 6; i++) {
+            this.bridge.pump();
+        }
+        assertFalse(XaeroStubEvents.snapshot().contains("tileChunk.updateBuffers 17,16"));
+        assertEquals(1, this.bridge.counterForTest("dropped_updates"),
+                "a region that never rests drops its owed rebuild, counted (its texture"
+                        + " self-heals on reload)");
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
+    }
+
+    @Test
+    void theHardCapPausesCommitsUntilRebuildsDrain() {
+        this.bridge.updateIdlePumps = 1;
+        this.bridge.pendingUpdatesHardCap = 2;
+        offer(64, 64);
+        offer(68, 64);
+        this.bridge.pump();
+        assertEquals(2, this.bridge.counterForTest("written"));
+        var region = theRegion();
+        region.resting = false;
+        offer(72, 64);
+        this.bridge.pump();
+        assertEquals(2, this.bridge.counterForTest("written"),
+                "at the hard cap commits pause — the owed set must never grow unbounded");
+        assertEquals(1, this.bridge.queuedForTest(), "the entry stays queued, not dropped");
+        assertEquals(0, this.bridge.counterForTest("dropped_expired"));
+        region.resting = true;
+        this.bridge.pump();
+        assertEquals(3, this.bridge.counterForTest("written"),
+                "the flush runs before the drain: drained rebuilds free the commit");
+        assertEquals(2, this.bridge.counterForTest("buffer_updates"));
+    }
+
+    @Test
+    void theSoftCapMakesTheOldestOwedRebuildDueAtOnce() {
+        this.bridge.updateIdlePumps = 1000;
+        this.bridge.pendingUpdatesSoftCap = 1;
+        offer(64, 64);
+        this.bridge.pump();
+        this.bridge.pump();
+        assertFalse(XaeroStubEvents.snapshot().contains("tileChunk.updateBuffers 16,16"),
+                "at the cap nothing is over it");
+        offer(68, 64);
+        this.bridge.pump(); // commits (17,16) — the flush ran before, saw 1 pending
+        this.bridge.pump(); // now 2 pending → the oldest is over the cap
+        var events = XaeroStubEvents.snapshot();
+        assertTrue(events.contains("tileChunk.updateBuffers 16,16"), events.toString());
+        assertFalse(events.contains("tileChunk.updateBuffers 17,16"),
+                "only the overflow is forced; the youngest keeps its window");
+        assertEquals(1, this.bridge.counterForTest("pending_updates"));
+    }
+
+    @Test
+    void anUnloadedOrReplacedTileChunkDropsItsOwedRebuild() {
+        this.bridge.updateIdlePumps = 1;
+        offer(64, 64);
+        this.bridge.pump();
+        var region = theRegion();
+        region.setChunk(0, 0, new MapTileChunk(region, 16, 16)); // replaced
+        this.bridge.pump();
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("dropped_unloaded"));
+        offer(68, 64);
+        this.bridge.pump();
+        region.loadState = 0; // unloaded
+        this.bridge.pump();
+        this.bridge.pump();
+        assertEquals(2, this.bridge.counterForTest("dropped_unloaded"));
+        region.loadState = 2;
+        offer(72, 64);
+        this.bridge.pump();
+        region.getChunk(2, 0).loadState = 0; // a tile-chunk-only teardown (deleteTexturesAndBuffers)
+        this.bridge.pump();
+        this.bridge.pump();
+        assertEquals(3, this.bridge.counterForTest("dropped_unloaded"));
+        assertEquals(0, this.bridge.counterForTest("dropped_updates"), "its own counter — a parking race must be tellable apart");
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
+        assertFalse(XaeroStubEvents.snapshot().stream().anyMatch(e -> e.startsWith("tileChunk.updateBuffers")),
+                "a reload rebuilds its own textures — never touch a foreign tile chunk");
+    }
+
+    @Test
+    void aChangeTheNativeWriterAlreadyConsumedNeedsNoRebuild() {
+        this.bridge.updateIdlePumps = 1;
+        offer(64, 64);
+        this.bridge.pump();
+        theRegion().getChunk(0, 0).changed = false; // native bottom-neighbor consumption
+        pumpIdleWindow();
+        assertFalse(XaeroStubEvents.snapshot().stream().anyMatch(e -> e.startsWith("tileChunk.updateBuffers")));
+        assertEquals(0, this.bridge.counterForTest("buffer_updates"));
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
+    }
+
+    @Test
+    void owedRebuildsFlushEvenAfterTheBridgeIsDisabledOrTheQueueEmpties() {
+        this.bridge.updateIdlePumps = 1;
+        offer(64, 64);
+        this.bridge.pump();
+        offer(68, 64); // queued, never committed
+        this.enabled = false;
+        this.bridge.pump();
+        this.bridge.pump();
+        assertEquals(0, this.bridge.queuedForTest(), "the live toggle still drops the backlog");
+        assertTrue(XaeroStubEvents.snapshot().contains("tileChunk.updateBuffers 16,16"),
+                "a rebuild owed to an already-written tile chunk still runs — dropping it"
+                        + " would leave written tiles invisible until a reload");
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
+    }
+
+    @Test
+    void sessionEndClearsOwedRebuilds() {
+        this.bridge.updateIdlePumps = 1;
+        offer(64, 64);
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("pending_updates"));
+        this.bridge.onSessionEnd();
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
+        assertEquals(1, this.bridge.counterForTest("dropped_updates"), "lost, counted");
+        pumpIdleWindow();
+        assertFalse(XaeroStubEvents.snapshot().stream().anyMatch(e -> e.startsWith("tileChunk.updateBuffers")),
+                "the old world's tile chunks are never touched again");
+    }
+
+    @Test
+    void anotherDimensionsOwedRebuildsWaitForTheReturnAndDropAfterTheStallWindow() {
+        this.bridge.updateIdlePumps = 1;
+        this.bridge.updateMaxStallPumps = 4;
+        offer(64, 64);
+        this.bridge.pump();
+        this.processor.mapWorld.currentDimensionId = NETHER;
+        this.clientDimension = NETHER;
+        this.bridge.pump();
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("pending_updates"),
+                "the pixel recipe reads the CURRENT dimension's shading — wait, don't rebuild");
+        assertEquals(0, this.bridge.counterForTest("dropped_updates"));
+        assertFalse(XaeroStubEvents.snapshot().stream().anyMatch(e -> e.startsWith("tileChunk.updateBuffers")));
+        // Back in time: the rebuild runs on return.
+        this.processor.mapWorld.currentDimensionId = OVERWORLD;
+        this.clientDimension = OVERWORLD;
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("buffer_updates"));
+        // Away past the stall window: dropped (counted) — the accepted residual.
+        offer(68, 64);
+        this.bridge.pump();
+        this.processor.mapWorld.currentDimensionId = NETHER;
+        this.clientDimension = NETHER;
+        for (int i = 0; i < 7; i++) this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("dropped_updates"));
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
+        assertEquals(1, this.bridge.counterForTest("buffer_updates"));
+    }
+
+    @Test
+    void aPreviousXaeroSessionsOwedRebuildsDropOnProcessorOrWorldIdentity() {
+        // A server-initiated reconfiguration skips the disconnect event (ClientNetGlue's
+        // documented residual); a ResourceKey alone is identity-stable across servers.
+        this.bridge.updateIdlePumps = 1;
+        offer(64, 64);
+        this.bridge.pump();
+        this.processor.currentWorldId = "another-server";
+        pumpIdleWindow();
+        assertEquals(1, this.bridge.counterForTest("dropped_updates"));
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
+        this.processor.currentWorldId = "stub-world";
+        offer(68, 64);
+        this.bridge.pump();
+        var fresh = new MapProcessor();
+        fresh.world = this.worldToken;
+        fresh.mainWorld = this.worldToken;
+        fresh.mapWorld.currentDimensionId = OVERWORLD;
+        WorldMapSession.current.processor = fresh;
+        pumpIdleWindow();
+        assertEquals(2, this.bridge.counterForTest("dropped_updates"),
+                "a new MapProcessor = a new Xaero session: the old objects are never touched");
+        assertFalse(XaeroStubEvents.snapshot().stream().anyMatch(e -> e.startsWith("tileChunk.updateBuffers")));
+    }
+
+    @Test
+    void aReplacedTileChunkGetsAFreshOwedEntry() {
+        this.bridge.updateIdlePumps = 2;
+        offer(64, 64);
+        this.bridge.pump();
+        var region = theRegion();
+        MapTileChunk old = region.getChunk(0, 0);
+        var replacement = new MapTileChunk(region, 16, 16); // Xaero reloaded the region
+        replacement.loadState = 2;
+        region.setChunk(0, 0, replacement);
+        offer(65, 64);
+        this.bridge.pump();
+        pumpIdleWindow();
+        assertEquals(1, replacement.bufferUpdates, "the replacement is rebuilt");
+        assertEquals(0, old.bufferUpdates);
+        assertEquals(0, this.bridge.counterForTest("dropped_updates"),
+                "reusing the old entry would have failed its identity check and dropped");
+    }
+
+    @Test
+    void aContinuousTrickleStillRebuildsAtTheAgeCeiling() {
+        this.bridge.updateIdlePumps = 3;
+        this.bridge.updateMaxDeferPumps = 6;
+        for (int i = 0; i < 8; i++) {
+            offer(64 + (i & 3), 64 + (i >> 2)); // a new tile of tile chunk (16,16) every pump
+            this.bridge.pump();
+            if (i < 5) {
+                assertEquals(0, this.bridge.counterForTest("buffer_updates"),
+                        "re-touched inside the idle window: coalescing holds (pump " + (i + 1) + ")");
+            }
+        }
+        assertTrue(this.bridge.counterForTest("buffer_updates") >= 1,
+                "the age ceiling forces the rebuild — a written tile chunk must never stay blank");
+    }
+
+    @Test
+    void theDeathLatchReleasesOwedRebuilds() {
+        this.bridge.updateIdlePumps = 1000;
+        offer(64, 64);
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("pending_updates"));
+        latchTheBridgeDead();
+        assertTrue(this.bridge.deadForTest(), "premise");
+        this.bridge.pump();
+        assertEquals(0, this.bridge.counterForTest("pending_updates"),
+                "a dead bridge must not pin Xaero's regions/tile chunks (direct texture buffers)"
+                        + " for the rest of the session");
+    }
+
+    @Test
+    void rebuildFailuresCountTowardTheDeathLatch() {
+        this.bridge.updateIdlePumps = 1;
+        for (int i = 0; i < XaeroMapCompat.THROW_LATCH; i++) {
+            offer(64 + 4 * i, 64); // five tile chunks of region (2,2)
+        }
+        this.bridge.pump();
+        assertEquals(XaeroMapCompat.THROW_LATCH, this.bridge.counterForTest("written"));
+        var region = theRegion();
+        for (int i = 0; i < XaeroMapCompat.THROW_LATCH; i++) {
+            region.getChunk(i, 0).updateBuffersThrows = true;
+        }
+        this.bridge.pump();
+        this.bridge.pump();
+        assertTrue(this.bridge.deadForTest(), "a throwing rebuild is a commit-side failure"
+                + " (commit_failures=" + this.bridge.counterForTest("commit_failures")
+                + " dropped_updates=" + this.bridge.counterForTest("dropped_updates")
+                + " dropped_unloaded=" + this.bridge.counterForTest("dropped_unloaded")
+                + " pending=" + this.bridge.counterForTest("pending_updates")
+                + " buffer_updates=" + this.bridge.counterForTest("buffer_updates") + ")");
+        assertTrue(this.bridge.counterForTest("commit_failures") >= XaeroMapCompat.THROW_LATCH);
+        assertEquals(XaeroMapCompat.THROW_LATCH, this.bridge.counterForTest("dropped_updates"),
+                "owed and never rebuilt: buffer_updates + dropped_updates accounts for every entry");
+        this.bridge.pump();
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
     }
 
     @Test
@@ -1037,7 +1540,9 @@ class XaeroMapCompatTest {
         assertTrue(line.startsWith("XaeroMap: state=active, queued="), line);
         assertTrue(line.contains(", written=") && line.contains(", defer_events=")
                 && line.contains(", dropped=") && line.contains(", commit_failures=")
-                && line.contains(", regions_waiting="), line);
+                && line.contains(", regions_waiting=") && line.contains(", buffer_updates=")
+                && line.contains(", pending_updates=") && line.contains(", dropped_updates=")
+                && line.contains(", dropped_unloaded="), line);
         this.enabled = false;
         assertTrue(this.bridge.describe().contains("state=disabled"));
     }
