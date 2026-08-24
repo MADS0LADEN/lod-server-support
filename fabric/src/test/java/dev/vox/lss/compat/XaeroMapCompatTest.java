@@ -945,7 +945,7 @@ class XaeroMapCompatTest {
         assertEquals(0, this.bridge.counterForTest("commit_failures"), "gates defer, never fail");
     }
 
-    // ---- the §18 dropped-tile heal ----
+    // ---- the §18 dropped-tile heal (+ the §18.1 review fold) ----
 
     @Test
     void anEvictedTileIsHealedOnceItsRegionCommits() {
@@ -955,9 +955,10 @@ class XaeroMapCompatTest {
         offer(66, 64); // over the cap: (64,64) — the oldest — is evicted into the ledger
         assertEquals(1, this.bridge.counterForTest("dropped_overflow"));
         assertEquals(1, this.bridge.counterForTest("heal_pending"));
+        assertEquals(1, this.bridge.counterForTest("heal_regions"));
         assertTrue(this.reports.isEmpty(), "no report at drop time — retries must not burn"
                 + " while the region bottleneck persists");
-        this.bridge.pump(); // the survivors commit; their region is committable → flush
+        this.bridge.pump(); // the survivors commit; queue drained + region committable → flush
         assertEquals(2, this.bridge.counterForTest("written"));
         assertEquals(0, this.bridge.counterForTest("heal_pending"));
         assertEquals(1, this.bridge.counterForTest("heal_reported"));
@@ -968,20 +969,20 @@ class XaeroMapCompatTest {
     }
 
     @Test
-    void theHealWaitsForItsRegionAndRidesTheGrantWindow() {
+    void theHealHoldsWhileSaturatedAndFlushesOnceItsRegionCommits() {
         this.processor.createdRegionLoadState = 0; // detection creates unloaded regions
         this.bridge.maxQueue = 1;
         offer(64, 64);
         offer(70, 64); // same region (2,2): (64,64) is evicted into the ledger
-        this.bridge.pump(); // the survivor awaits the region load; the heal probe joins the grant
+        this.bridge.pump(); // the survivor awaits its region load; the QUEUE is saturated
         assertEquals(0, this.bridge.counterForTest("written"));
-        assertTrue(this.bridge.counterForTest("load_requests") >= 1,
-                "the awaiting region must be load-requested");
+        assertTrue(this.bridge.counterForTest("load_requests") >= 1);
         assertEquals(1, this.bridge.counterForTest("heal_pending"),
-                "the ledger holds while its region is not committable");
+                "§18.1 A-M1: no heal work while the queue is shedding — a re-delivery"
+                        + " would be re-dropped");
         assertTrue(this.reports.isEmpty());
         theRegion().loadState = 2; // the load lands
-        this.bridge.pump(); // the survivor commits; the committed-region flush heals the drop
+        this.bridge.pump(); // the survivor commits, the queue drains: flush on the proof
         assertEquals(1, this.bridge.counterForTest("written"));
         assertEquals(0, this.bridge.counterForTest("heal_pending"));
         assertEquals(1, this.reports.size());
@@ -989,28 +990,30 @@ class XaeroMapCompatTest {
     }
 
     @Test
-    void anIdleBridgeStillDrainsItsLedger() {
+    void anIdleBridgeStillDrainsItsLedgerThroughTheGrantWindow() {
         this.processor.createdRegionLoadState = 0;
         this.bridge.updateIdlePumps = 1;
         this.bridge.maxQueue = 1;
-        offer(64, 64);  // region (2,2) — will be evicted into the ledger
+        offer(64, 64);  // region (2,2) — evicted into the ledger
         offer(96, 64);  // region (3,2) — survives
-        this.bridge.pump(); // (3,2) is unloaded too: both wait... load (3,2) first
+        this.bridge.pump(); // (3,2) awaits its load; heal held (queue saturated)
         this.processor.regions.get((3L << 32) | 2L).loadState = 2;
-        this.bridge.pump(); // (96,64) commits; rebuild owed
+        this.bridge.pump(); // (96,64) commits; probe grants the LEDGER region's load
         assertEquals(1, this.bridge.counterForTest("written"));
-        this.bridge.pump(); // the rebuild flushes: queue AND pendingUpdates now empty
+        long loads = this.bridge.counterForTest("load_requests");
+        assertTrue(loads >= 2, "idle heal must load-request the ledger region, got " + loads);
+        this.bridge.pump(); // rebuild flushes; ledger region still loading
         assertEquals(0, this.bridge.counterForTest("pending_updates"));
         assertEquals(1, this.bridge.counterForTest("heal_pending"));
         this.processor.regions.get((2L << 32) | 2L).loadState = 2; // the granted load lands
-        this.bridge.pump(); // idle except the ledger — the pump must still run the heal
+        this.bridge.pump(); // fully idle except the ledger — the pump must still heal
         assertEquals(0, this.bridge.counterForTest("heal_pending"),
                 "an idle bridge (empty queue, no owed rebuilds) must still drain its ledger");
         assertEquals(1, this.reports.size());
     }
 
     @Test
-    void theKillSwitchAndSessionTeardownEmptyTheHeal() {
+    void theKillSwitchAndSessionTeardownEmptyTheHealCounted() {
         this.healEnabled = false;
         this.bridge.maxQueue = 1;
         offer(64, 64);
@@ -1023,8 +1026,23 @@ class XaeroMapCompatTest {
         this.bridge.onSessionEnd();
         this.bridge.pump();
         assertEquals(0, this.bridge.counterForTest("heal_pending"),
-                "the ledger dies with the session, uncounted");
+                "the ledger dies with the session");
+        assertEquals(1, this.bridge.counterForTest("heal_abandoned"),
+                "abandoned heal debt must be visible (§18.1 A-m6)");
         assertTrue(this.reports.isEmpty(), "teardown never reports");
+    }
+
+    @Test
+    void aMidSessionKillSwitchFlipAbandonsTheLedgerCounted() {
+        this.bridge.maxQueue = 1;
+        offer(64, 64);
+        offer(70, 64); // (64,64) into the ledger
+        assertEquals(1, this.bridge.counterForTest("heal_pending"));
+        this.healEnabled = false;
+        this.bridge.pump(); // §18.1 A-m1: the phase must stop cleanly, counted
+        assertEquals(0, this.bridge.counterForTest("heal_pending"));
+        assertEquals(1, this.bridge.counterForTest("heal_abandoned"));
+        assertTrue(this.reports.isEmpty());
     }
 
     @Test
@@ -1039,6 +1057,83 @@ class XaeroMapCompatTest {
                 net.minecraft.world.level.Level.NETHER, this.reports.get(0)[0]);
         assertEquals(0, this.bridge.counterForTest("heal_pending"), "stale never enters the ledger");
         assertEquals(1, this.bridge.counterForTest("written"), "the current dimension's tile commits");
+    }
+
+    @Test
+    void aCrossDimensionConflictAbandonsTheOldSetCounted() {
+        this.bridge.maxQueue = 1;
+        offer(64, 64);
+        offer(70, 64); // (64,64) → ledger[(2,2)] as OVERWORLD
+        this.bridge.offerPrepared(net.minecraft.world.level.Level.NETHER, tile(65, 64));
+        // evicted (70,64) is OVERWORLD too — count 2 under the OVERWORLD set
+        assertEquals(2, this.bridge.counterForTest("heal_pending"));
+        this.bridge.offerPrepared(net.minecraft.world.level.Level.NETHER, tile(66, 64));
+        // evicts the NETHER (65,64): same region key, other dimension → the OVERWORLD
+        // set is DISCARDED counted, never reported (§18.1 A-MAJOR-2)
+        assertEquals(2, this.bridge.counterForTest("heal_abandoned"));
+        assertEquals(1, this.bridge.counterForTest("heal_pending"));
+        assertTrue(this.reports.isEmpty());
+    }
+
+    @Test
+    void aDeferralExpiryEntersTheLedgerAndForeignEntriesReportStale() {
+        this.bridge.deferCap = 1;
+        var region = new MapRegion();
+        region.resting = false; // region-scoped busy: the whole bucket defers
+        this.processor.regions.put((2L << 32) | 2L, region);
+        offer(64, 64);
+        this.bridge.offerPrepared(net.minecraft.world.level.Level.NETHER, tile(68, 64));
+        this.bridge.pump(); // burn 1 — under the cap
+        this.bridge.pump(); // burn 2 — both expire: ours to the ledger, the foreign one stale
+        assertEquals(2, this.bridge.counterForTest("dropped_expired"));
+        assertEquals(1, this.bridge.counterForTest("heal_pending"));
+        assertEquals(1, this.reports.size());
+        org.junit.jupiter.api.Assertions.assertSame(
+                net.minecraft.world.level.Level.NETHER, this.reports.get(0)[0]);
+        region.resting = true; // the saver finishes
+        this.bridge.pump(); // the idle probe finds the region committable → flush
+        assertEquals(0, this.bridge.counterForTest("heal_pending"));
+        assertEquals(2, this.reports.size());
+        assertEquals(64, this.reports.get(1)[1]);
+    }
+
+    @Test
+    void negativeCoordinatesRoundTripThroughTheLedger() {
+        this.bridge.maxQueue = 1;
+        offer(-33, -1);
+        offer(-34, -1); // same region (-2,-1): (-33,-1) is evicted
+        this.bridge.pump(); // the survivor commits → flush
+        assertEquals(1, this.bridge.counterForTest("written"));
+        assertEquals(1, this.reports.size());
+        assertEquals(-33, this.reports.get(0)[1], "chunkX must round-trip for negatives");
+        assertEquals(-1, this.reports.get(0)[2], "chunkZ must round-trip for negatives");
+    }
+
+    @Test
+    void theLedgerCapEvictsTheNewestRegionCounted() {
+        this.bridge.ledgerMaxRegions = 2;
+        this.bridge.maxQueue = 1;
+        offer(64, 64);
+        offer(96, 64);  // ledger [A=(2,2)]
+        offer(128, 64); // ledger [A, B=(3,2)]
+        offer(160, 64); // C=(4,2) drop: the cap evicts the NEWEST (B), never the head (§18.1 B-m6)
+        assertEquals(1, this.bridge.counterForTest("heal_abandoned"));
+        assertEquals(2, this.bridge.counterForTest("heal_pending"));
+        assertEquals(2, this.bridge.counterForTest("heal_regions"));
+    }
+
+    @Test
+    void aReDropAfterAReportCountsOnTheRedropMeter() {
+        this.bridge.maxQueue = 1;
+        offer(64, 64);
+        offer(70, 64); // (64,64) → ledger
+        this.bridge.pump(); // survivor commits → (64,64) reported (history marked)
+        assertEquals(1, this.bridge.counterForTest("heal_reported"));
+        assertEquals(0, this.bridge.counterForTest("heal_redropped"));
+        offer(64, 64); // the re-serve arrives...
+        offer(70, 64); // ...and is dropped AGAIN
+        assertEquals(1, this.bridge.counterForTest("heal_redropped"),
+                "the re-drop meter is the field's p estimate (§18.1 B-M2)");
     }
 
     private MapRegion theRegion() {
@@ -2090,7 +2185,9 @@ class XaeroMapCompatTest {
                 && line.contains(", cave_layer_waits=") && line.contains(", frame_flushes=")
                 && line.contains(", rebuild_ms=") && line.contains(", rebuild_max_us=")
                 && line.contains(", dropped_overflow=") && line.contains(", dropped_expired=")
-                && line.contains(", heal_pending=") && line.contains(", heal_reported="), line);
+                && line.contains(", heal_pending=") && line.contains(", heal_regions=")
+                && line.contains(", heal_reported=") && line.contains(", heal_redropped=")
+                && line.contains(", heal_abandoned="), line);
         assertFalse(line.contains("xaero_crashed"), "the crash token appears only while latched");
         assertFalse(line.contains("optional_unbound"), "every optional group binds against the stubs");
         this.enabled = false;

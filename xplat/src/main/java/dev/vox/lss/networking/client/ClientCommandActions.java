@@ -127,8 +127,9 @@ public final class ClientCommandActions {
         int empty = manager.getEmptyColumnCount();
         int dirty = manager.getDirtyColumnCount();
         feedback.accept(Component.literal(String.format(
-                "Columns: received=%d, empty=%d, dirty=%d, ingest_failed=%d",
-                receivedCols, empty, dirty, manager.getTotalIngestFailures()
+                "Columns: received=%d, empty=%d, dirty=%d, ingest_failed=%d, ingest_parked=%d",
+                receivedCols, empty, dirty, manager.getTotalIngestFailures(),
+                manager.getIngestParkedCount()
         )).withStyle(ChatFormatting.GRAY));
 
         // Responses line
