@@ -1,6 +1,7 @@
 ### Bug Fixes
 
 - **Fixes a client crash when writing LODs to Xaero's World Map** — Map writes could crash Xaero's map saver ("Trying to save cache for a region with cache not prepared"), about three times an hour on a busy client. The bridge now rebuilds map textures itself — one per rendered frame, on Xaero's own update cadence, so a busy map fill cannot stutter the client — and only while the map region is idle.
+- **Fixes far-away chunks missing from Xaero's World Map** — At large map distances many delivered tiles were dropped while their map regions waited to load, leaving permanent holes in the map. Dropped tiles are now re-requested automatically once their region can accept them (bounded — at most three attempts per position; disable with `enableXaeroMapBridgeHeal`).
 - **Map tiles can no longer leak between servers** — A tile still being prepared at the moment you disconnected could be written into the next server's saved map. It is now discarded with the rest of the session.
 - **Disconnecting abruptly no longer risks a client hang** — A timeout, connection reset or server crash tore the map bridge down from the network thread while the client was still using it. Teardown now completes on the main thread.
 - **The map bridge stops when Xaero has crashed internally** — It no longer keeps writing behind a map that Xaero has already given up on.
