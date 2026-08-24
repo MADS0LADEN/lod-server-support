@@ -107,6 +107,21 @@ public final class VoxyStorageOverride {
                 "  " + Brand.shortName() + "'s expected root: " + render(expectedRoot));
     }
 
+    /**
+     * A22 (issue #1): the seed-named store directory LSS derived for this connection,
+     * shown whenever there IS one so no report ever understates what {@code /lss reset}
+     * touches.
+     *
+     * <p>Phrased as a derivation and a target, never as an accomplished deletion — the
+     * same line is emitted on branches where the wipe step never ran (a failed
+     * {@code shutdownInstance} skips every wipe), and this class does not claim things
+     * that did not happen.
+     */
+    static String seedRootLine(Path seedRoot) {
+        return "  " + Brand.shortName() + "'s seed-derived root (a second wipe target): "
+                + render(seedRoot);
+    }
+
     /** Why the roots look the way they do — one sentence per {@link Verdict}, shared by
      *  both reports so a reworded cause changes in exactly one place. */
     static String causeLine(Verdict verdict) {
@@ -133,11 +148,19 @@ public final class VoxyStorageOverride {
      * case with "nothing to force-wipe", so offering it would send the user down a dead
      * end (issue #4 follow-up).
      *
+     * <p>A22 (issue #1): {@code seedRoot} is the seed-named root LSS derived for this
+     * connection, or null when there is none. The declined wipe is about the LIVE root only
+     * — a seed-named root is a root LSS derived itself, is NOT subject to the override
+     * cross-check, and may well have been cleared while the live root was spared, so it has
+     * to be named rather than left to the user to infer from a headline that is only true
+     * of the live root.
+     *
      * @param liveRoot     what the running Voxy instance reports, or null if unreadable
      * @param expectedRoot what LSS derived for this connection, or null if underivable
+     * @param seedRoot     the seed-named root LSS derived for this connection, or null
      */
     public static List<String> wipeSkippedLines(Path liveRoot, Path expectedRoot,
-                                                boolean offerForce) {
+                                                Path seedRoot, boolean offerForce) {
         Verdict verdict = verdict(liveRoot, expectedRoot);
         var out = new ArrayList<String>();
         out.add("Voxy's LOD store was NOT deleted: " + switch (verdict) {
@@ -148,6 +171,7 @@ public final class VoxyStorageOverride {
                     + " derived for this connection (fail-safe).";
         });
         out.addAll(rootLines(liveRoot, expectedRoot));
+        if (seedRoot != null) out.add(seedRootLine(seedRoot));
         out.add(causeLine(verdict));
         if (offerForce && liveRoot != null) {
             out.add("  To delete the live root anyway, run '/" + Brand.clientCommand()
@@ -171,16 +195,20 @@ public final class VoxyStorageOverride {
             return List.of("Voxy is not installed — there is no Voxy store to force-wipe.");
         }
         if (probe.liveRoot() == null) {
-            return List.of("Voxy's live storage root could not be read — there is nothing to "
+            var out = new ArrayList<String>();
+            out.add("Voxy's live storage root could not be read — there is nothing to "
                     + "force-wipe. Run '/" + Brand.clientCommand() + " reset' instead; it "
                     + "clears the root " + Brand.shortName() + " derives for this connection ("
                     + render(probe.expectedRoot()) + ").");
+            if (probe.seedRoot() != null) out.add(seedRootLine(probe.seedRoot()));
+            return List.copyOf(out);
         }
         Verdict verdict = probe.verdict();
         var out = new ArrayList<String>();
         out.add("FORCED Voxy wipe — this DELETES the directory below, overriding the "
                 + "storage-override safety check:");
         out.addAll(rootLines(probe.liveRoot(), probe.expectedRoot()));
+        if (probe.seedRoot() != null) out.add(seedRootLine(probe.seedRoot()));
         out.add(causeLine(verdict));
         switch (verdict) {
             case OVERRIDDEN -> out.add("  If that store belongs to ANOTHER server or to a "

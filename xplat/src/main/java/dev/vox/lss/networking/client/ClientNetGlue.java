@@ -13,10 +13,15 @@ import dev.vox.lss.networking.payloads.SoakDialectOverride;
 import dev.vox.lss.networking.payloads.VoxelColumnS2CPayload;
 import dev.vox.lss.networking.payloads.ZstdWireSupport;
 import dev.vox.lss.platform.LoaderServices;
+import dev.vox.lss.seed.ClientWorldSeed;
+import dev.vox.lss.seed.WorldSeedKey;
 import net.minecraft.client.Minecraft;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.storage.LevelResource;
+
+import java.util.LinkedHashSet;
+import java.util.List;
 
 /**
  * The loader-neutral CLIENT session glue (N-3, neoforge-support-plan.md §1.1 —
@@ -169,8 +174,17 @@ public final class ClientNetGlue {
 
     /**
      * Production {@link ClientSessionGate.ManagerFactory}: builds the per-session manager
-     * and resolves the cache-keying server address from the live client (multiplayer ip →
-     * LAN/local world dir → unknown).
+     * and resolves the cache partition key from the live client.
+     *
+     * <p>The ADDRESS derivation (multiplayer ip → LAN/local world dir → unknown) is
+     * unchanged and is still the answer for every session that does not qualify for
+     * issue #1's seed key; {@link WorldSeedKey#choose} decides which of the two applies,
+     * and with {@code useWorldSeedCacheKey} off it returns the address verbatim.
+     *
+     * <p>This is the SINGLE assignment point for the key: every one of the store's
+     * entries — including the coalescing key that does not route through
+     * {@code getServerDir()} — reads the one string set here, so the two shapes can
+     * never half-apply.
      */
     private static LodRequestManager createRequestManager(SessionConfigS2CPayload payload) {
         var manager = new LodRequestManager();
@@ -186,7 +200,28 @@ public final class ClientNetGlue {
         } else {
             serverAddr = "unknown";
         }
-        manager.onSessionConfig(payload, serverAddr);
+        // liveLssSession = true by construction: this factory only runs from
+        // ClientSessionGate on a session config a real LSS server sent, which is precisely
+        // the thing a replay playback cannot produce.
+        var seedContext = ClientWorldSeed.context(true);
+        String cacheKey = WorldSeedKey.choose(seedContext, serverAddr);
+        manager.onSessionConfig(payload, cacheKey);
+        // A22: the OTHER structure this same connection can have written under. The seed
+        // bucket is derived switch-INDEPENDENTLY (WorldSeedKey.keyableSeed), because the
+        // switch is exactly the thing that may have been different last session — and
+        // because seed 0 falls back, a server can legitimately own an address bucket and
+        // a seed bucket at once. /lss reset clears both or a surviving stamp set outlives
+        // the wipe of the columns it describes (stamps say "fresh", store is empty →
+        // permanent hole).
+        var buckets = new LinkedHashSet<String>();
+        buckets.add(serverAddr);
+        WorldSeedKey.seedKey(seedContext).ifPresent(buckets::add);
+        buckets.remove(cacheKey);
+        manager.setAlternateCacheKeys(List.copyOf(buckets));
+        if (!cacheKey.equals(serverAddr)) {
+            LSSLogger.info("Column cache keyed by world seed: " + cacheKey
+                    + " (address key " + serverAddr + " not used this session)");
+        }
         // Tier B v16 backward-compat: only a v16 session reaches here with protocolVersion() == 16
         // (the gate rejects a v16 config outright when enableV16ServerCompat is off, before the
         // factory runs), so this is the single place that combines "v16 session" with the client

@@ -117,6 +117,9 @@ final class ResetCoordinator {
      * by hand, so the feedback names both roots — the SAME lines the client log got, from
      * the same assembler.
      *
+     * <p>A22 (issue #1) adds the seed-derived root to the same lines when this connection
+     * has one, so the report never understates what {@code /lss reset} touched.
+     *
      * <p>The trigger is {@code wipeDeclined}, NOT the {@code RESET_WIPE_SKIPPED} outcome.
      * A wipe the cross-check refused can still finish as UNAVAILABLE, SHUTDOWN_FAILED or
      * RESTART_FAILED when a later rung fails, and the original #4 implementation gave
@@ -127,7 +130,7 @@ final class ResetCoordinator {
                                           boolean forceVoxyWipe) {
         if (!report.wipeDeclined()) return;
         VoxyStorageOverride.wipeSkippedLines(report.liveRoot(), report.expectedRoot(),
-                !forceVoxyWipe).forEach(deps.feedback());
+                report.seedRoot(), !forceVoxyWipe).forEach(deps.feedback());
     }
 
     /** The per-outcome Voxy prefix of the feedback line. The UNAVAILABLE and

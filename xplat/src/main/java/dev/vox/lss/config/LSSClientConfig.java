@@ -15,6 +15,36 @@ public class LSSClientConfig extends JsonConfig {
             load(LSSClientConfig.class, CANDIDATES, dev.vox.lss.platform.LoaderServices.get().configDir());
 
     public boolean receiveServerLods = true;
+    // Cache partition key (issue #1): key the column-stamp cache by the WORLD SEED
+    // instead of the connection address, so a proxy network reachable at several
+    // hostnames stops cold-filling one world once per entry address. The key format is
+    // "world-<16 lowercase hex>" — deliberately the same directory naming voxy-extra's
+    // seed mode writes, so the two mods' stores line up for human comparison (a shared
+    // literal, never a shared call: LSS reads no other mod's config and calls no other
+    // mod's API).
+    //
+    // DEFAULT FALSE, and the default is not timidity. LSS stores only STAMPS ("this
+    // column is fresh as of T"); the columns live in the LOD consumer. If LSS's
+    // partition is COARSER than the consumer's — which seed keying makes it whenever the
+    // consumer still partitions per address — LSS answers "already fresh", never
+    // re-asks, and the consumer's directory is empty: a permanent hole in the distant
+    // terrain that never self-heals. LSS cannot check how the consumer partitions
+    // (no cross-mod contract), so only YOU can say it is safe.
+    //
+    // Turn it on only when your LOD consumer also partitions its store by world seed.
+    //
+    // Never turn it on for a server that FAKES or ROTATES the hashed seed it sends at
+    // login: the key then changes every connection and each visit gets a fresh bucket
+    // (slower than the address key, never wrong). Servers with no real world — waiting
+    // rooms of the NanoLimbo family — send seed 0, which is ignored and falls back to
+    // the address key automatically; older AntiSeedCracker builds instead send a fixed
+    // 69, which is a legal seed hash and therefore cannot be detected, so those need the
+    // switch left off.
+    //
+    // Flipping it is safe in itself: '/lss reset' clears BOTH the address bucket and the
+    // seed bucket for the current connection, and the caches left under the other key
+    // are inert files, not corruption.
+    public boolean useWorldSeedCacheKey = false;
     public int lodDistanceChunks = 0;
     // The §3 unknown-identity fallback ladder's TERMINAL default (protocol 20,
     // cross-version-identity-encoding-plan.md): a v20 identity this client's registries

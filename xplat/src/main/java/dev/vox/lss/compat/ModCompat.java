@@ -85,6 +85,13 @@ public final class ModCompat {
      *
      * @param liveRoot     the root the running Voxy instance reported, or null
      * @param expectedRoot the root LSS derived for this connection, or null
+     * @param seedRoot     A22 (issue #1): the SEED-named store directory LSS derived for
+     *                     this connection — non-null only when the seed is usable AND
+     *                     that directory actually exists on disk, so it is null in every
+     *                     session where the LOD consumer does not partition by seed. It
+     *                     is an LSS-derived root like {@code expectedRoot}, not a root
+     *                     read from another mod: nothing here reads voxy-extra's config
+     *                     or calls its API — only the shared directory-name literal
      * @param wipeDeclined true when the ladder reached the cross-check and REFUSED the
      *                     disk wipe. This is deliberately not derivable from
      *                     {@code outcome}: a wipe declined by the cross-check can still
@@ -97,10 +104,11 @@ public final class ModCompat {
     public record VoxyResetReport(VoxyResetOutcome outcome,
                                   java.nio.file.Path liveRoot,
                                   java.nio.file.Path expectedRoot,
+                                  java.nio.file.Path seedRoot,
                                   boolean wipeDeclined) {
         /** An outcome reached before (or without) reading either root. */
         public static VoxyResetReport of(VoxyResetOutcome outcome) {
-            return new VoxyResetReport(outcome, null, null, false);
+            return new VoxyResetReport(outcome, null, null, null, false);
         }
     }
 
@@ -112,12 +120,15 @@ public final class ModCompat {
      * @param voxyPresent      false = Voxy is not installed at all
      * @param liveRoot         the running instance's root, or null if unreadable/absent
      * @param expectedRoot     the root LSS derived for this connection, or null
+     * @param seedRoot         A22: the seed-named root that a plain {@code /lss reset}
+     *                         would ALSO clear, or null when there is none
      * @param containedForWipe whether {@code liveRoot} would survive the containment
      *                         fence — force does not lift it, so the prompt says so
      */
     public record VoxyStorageProbe(boolean voxyPresent,
                                    java.nio.file.Path liveRoot,
                                    java.nio.file.Path expectedRoot,
+                                   java.nio.file.Path seedRoot,
                                    boolean containedForWipe) {
         /** What the cross-check makes of these two roots. Shares its criterion with the
          *  ladder, so the prompt can never disagree with what the wipe will do — and it
@@ -134,19 +145,24 @@ public final class ModCompat {
      * the down-window). Main client thread only. Every failure shape is contained to a
      * feedback-driving outcome — it must never cost the ingest bridge.
      *
-     * @param forceWipe the user-confirmed {@code voxy-force} override: waives the
-     *                  derived-root cross-check ONLY. Containment still applies, and
-     *                  the default ({@code false}) path is unchanged.
+     * @param forceWipe        the user-confirmed {@code voxy-force} override: waives the
+     *                         derived-root cross-check ONLY. Containment still applies, and
+     *                         the default ({@code false}) path is unchanged.
+     * @param lssSessionActive A22's replay / residual-state guard: without a live LSS
+     *                         session the seed-named root is not derived at all, because a
+     *                         replay playback carries the ORIGIN world's seed and can do so
+     *                         while a stale {@code Minecraft.currentServer} still looks
+     *                         remote. See {@link dev.vox.lss.seed.WorldSeedKey}.
      */
-    public static VoxyResetReport resetVoxyLods(boolean forceWipe) {
+    public static VoxyResetReport resetVoxyLods(boolean forceWipe, boolean lssSessionActive) {
         if (!voxyLoaded) return VoxyResetReport.of(VoxyResetOutcome.NOT_PRESENT);
-        return VoxyCompat.resetVoxyProduction(forceWipe);
+        return VoxyCompat.resetVoxyProduction(forceWipe, lssSessionActive);
     }
 
-    /** Reads the two storage roots without touching Voxy's lifecycle or the disk —
-     *  what {@code /lss reset voxy-force} shows before asking for confirmation. */
-    public static VoxyStorageProbe probeVoxyStorage() {
-        if (!voxyLoaded) return new VoxyStorageProbe(false, null, null, false);
-        return VoxyCompat.probeStorageProduction();
+    /** Reads the storage roots without touching Voxy's lifecycle or the disk — what
+     *  {@code /lss reset voxy-force} shows before asking for confirmation. */
+    public static VoxyStorageProbe probeVoxyStorage(boolean lssSessionActive) {
+        if (!voxyLoaded) return new VoxyStorageProbe(false, null, null, null, false);
+        return VoxyCompat.probeStorageProduction(lssSessionActive);
     }
 }

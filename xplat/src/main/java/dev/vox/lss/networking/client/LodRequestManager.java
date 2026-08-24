@@ -1191,9 +1191,41 @@ public class LodRequestManager {
         }
     }
 
+    /**
+     * A22 (issue #1): the OTHER cache bucket(s) this same connection can have written
+     * under — the address bucket when the session is seed-keyed, the seed bucket when it
+     * is not. Set once by the session factory, alongside the key itself.
+     *
+     * <p>Two structures exist because two things can change under one server: the
+     * {@code useWorldSeedCacheKey} switch, and whether the server sends a usable seed at
+     * all (the {@code seed == 0} sentinel falls back). A {@code /lss reset} that cleared
+     * only the ACTIVE bucket would leave the other one's stamps on disk, and after the
+     * next flip those stamps would declare terrain "fresh enough" for a store that had
+     * been wiped — a hole in the distant terrain that no re-scan heals.
+     */
+    private java.util.List<String> alternateCacheKeys = java.util.List.of();
+
+    /** @see #alternateCacheKeys */
+    public void setAlternateCacheKeys(java.util.List<String> keys) {
+        this.alternateCacheKeys = java.util.List.copyOf(keys);
+    }
+
+    /** Package-visible for the A22 flush test. */
+    java.util.List<String> alternateCacheKeysForTest() {
+        return this.alternateCacheKeys;
+    }
+
     public void flushCache() {
         if (this.serverAddress != null) {
             ColumnCacheStore.clearForServer(this.serverAddress);
+        }
+        // A22: same wipe, second structure. Unconditional and BEFORE the in-memory state
+        // is dropped, exactly like the active bucket — the ordering pin the reset
+        // sequence relies on is "stamps die with the store", and both buckets are stamps.
+        for (String key : this.alternateCacheKeys) {
+            if (key != null && !key.equals(this.serverAddress)) {
+                ColumnCacheStore.clearForServer(key);
+            }
         }
         this.pendingCacheLoad = null; // drop any in-flight load — its pre-clear result would resurrect flushed timestamps
         this.pendingSummaryFrame = null; // a frame buffered for the pre-flush state dies with it

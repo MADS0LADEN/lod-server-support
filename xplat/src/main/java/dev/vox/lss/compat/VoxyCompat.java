@@ -269,12 +269,14 @@ class VoxyCompat {
     record ResetHooks(java.util.function.Supplier<Object> instance,
                       java.util.function.Function<Object, java.nio.file.Path> storagePath,
                       java.util.function.Supplier<java.nio.file.Path> fallbackPath,
+                      java.util.function.Supplier<java.nio.file.Path> seedRoot,
                       java.util.function.Supplier<Runnable> rendererShutdown,
                       ThrowingRunnable shutdownInstance,
                       ThrowingRunnable createInstance,
                       java.util.function.Consumer<java.nio.file.Path> wipe,
                       Runnable gc,
-                      Runnable allChanged) {}
+                      Runnable allChanged) {
+}
 
     /**
      * The reset ladder — mirrors {@code /voxy reload}'s sequence
@@ -322,11 +324,19 @@ class VoxyCompat {
         }
         if (instance == null) {
             java.nio.file.Path derived = h.fallbackPath().get();
+            java.nio.file.Path seedRoot = readSeedRoot(h);
             if (derived != null) h.wipe().accept(derived);
+            // A22: the seed-named store is a root LSS derived for THIS connection, in the
+            // same class as `derived` — which this branch already wipes with no
+            // cross-check at all, under containment alone. Deduped against `derived`
+            // because wiping the same tree twice would log a phantom second wipe.
+            if (seedRoot != null && !VoxyStorageOverride.samePath(seedRoot, derived)) {
+                h.wipe().accept(seedRoot);
+            }
             // No cross-check happens on this branch and the log says nothing about one,
             // so the feedback must not either — the flag mirrors the log exactly.
             return new ModCompat.VoxyResetReport(
-                    ModCompat.VoxyResetOutcome.WIPED_NO_INSTANCE, null, derived, false);
+                    ModCompat.VoxyResetOutcome.WIPED_NO_INSTANCE, null, derived, seedRoot, false);
         }
         java.nio.file.Path liveRoot;
         try {
@@ -346,11 +356,49 @@ class VoxyCompat {
         java.nio.file.Path root =
                 VoxyStorageOverride.shouldWipeLiveRoot(liveRoot, expected, forceWipe)
                         ? liveRoot : null;
-        if (root == null) {
+        // A22 (issue #1): a SECOND wipe target, the seed-named store directory LSS derives
+        // for this connection. It is not subject to the live-root cross-check and does not
+        // relax it: the cross-check asks "may we delete a root VOXY chose?", this is a root
+        // LSS chose — the same class as `expected`, which the no-instance branch above
+        // already wipes under containment alone. It exists because the LOD consumer may
+        // partition its store by seed while LSS's own address derivation still names the
+        // address directory, and a /lss reset that cleared only one of the two would leave
+        // LODs behind under the other name.
+        //
+        // Replay safety is structural, not an added check: the hook only yields a path when
+        // a genuine remote ServerData is present (see ClientWorldSeed), and a Flashback /
+        // ReplayMod playback has none — that absence is precisely why those mods have to
+        // OVERRIDE Voxy's storage path in the first place. During a replay the hook returns
+        // null and this whole half is inert, leaving #4's protection exactly as it was.
+        java.nio.file.Path seedRoot = readSeedRoot(h);
+        // Two exclusions, both about not deleting the same tree twice or by the wrong
+        // authority. (1) It IS the root already being wiped -> one wipe, not two.
+        // (2) It is the LIVE root that the cross-check just REFUSED -> a directory #4
+        // declined must not become deletable merely because a second derivation happens to
+        // produce the same name. Unreachable today (Voxy's getStorageBasePath returns the
+        // address-derived basePath its constructor fixed, which voxy-extra's seed mode does
+        // not touch), so its only live input would be a storage override that happens to be
+        // named world-* — precisely what #4 exists to refuse.
+        java.nio.file.Path seedTarget =
+                seedRoot != null
+                        && !VoxyStorageOverride.samePath(seedRoot, root)
+                        && !(root == null && VoxyStorageOverride.samePath(seedRoot, liveRoot))
+                        ? seedRoot : null;
+        // NOTE deliberately NO "the live root is really our seed root, so wipe it anyway"
+        // branch. Voxy's getStorageBasePath() is a bare read of the basePath its constructor
+        // fixed from the ADDRESS, and voxy-extra's seed mode mixes into createStorage's
+        // setProperty without touching basePath — so under seed mode liveRoot still EQUALS
+        // the address derivation and the cross-check already MATCHES. Such a branch would be
+        // dead code whose only reachable input is a Flashback override that happens to be
+        // named world-*, i.e. exactly what #4 exists to refuse. Re-examine only if
+        // voxy-extra ever starts overriding basePath itself.
+        boolean wipeDeclined = root == null;
+        if (wipeDeclined) {
             // Step 1 above declined the wipe. The report is the user-facing half of #4:
             // both roots, the likely cause, and (unless they already forced) the override.
             LSSLogger.warn(String.join(System.lineSeparator(),
-                    VoxyStorageOverride.wipeSkippedLines(liveRoot, expected, !forceWipe)));
+                    VoxyStorageOverride.wipeSkippedLines(liveRoot, expected, seedTarget,
+                            !forceWipe)));
         } else if (forceWipe
                 && VoxyStorageOverride.verdict(liveRoot, expected)
                         != VoxyStorageOverride.Verdict.MATCHES) {
@@ -359,11 +407,11 @@ class VoxyCompat {
                     + "; the storage-override cross-check was waived on explicit user "
                     + "confirmation (containment still applies)");
         }
-        boolean wipeDeclined = root == null;
         Runnable rendererShutdown = h.rendererShutdown().get();
         if (rendererShutdown == null) {
             return new ModCompat.VoxyResetReport(
-                    ModCompat.VoxyResetOutcome.UNAVAILABLE, liveRoot, expected, wipeDeclined);
+                    ModCompat.VoxyResetOutcome.UNAVAILABLE, liveRoot, expected, seedTarget,
+                    wipeDeclined);
         }
         try {
             rendererShutdown.run();
@@ -373,7 +421,8 @@ class VoxyCompat {
             if (t instanceof VirtualMachineError vme) throw vme;
             LSSLogger.warn("Voxy reset: renderer shutdown failed — aborting the Voxy half", t);
             return new ModCompat.VoxyResetReport(
-                    ModCompat.VoxyResetOutcome.UNAVAILABLE, liveRoot, expected, wipeDeclined);
+                    ModCompat.VoxyResetOutcome.UNAVAILABLE, liveRoot, expected, seedTarget,
+                    wipeDeclined);
         }
         try {
             h.shutdownInstance().run();
@@ -388,16 +437,23 @@ class VoxyCompat {
                 if (t2 instanceof VirtualMachineError vme) throw vme;
                 LSSLogger.error("Voxy reset: createInstance failed after a failed shutdown", t2);
                 return new ModCompat.VoxyResetReport(
-                        ModCompat.VoxyResetOutcome.RESTART_FAILED, liveRoot, expected, wipeDeclined);
+                        ModCompat.VoxyResetOutcome.RESTART_FAILED, liveRoot, expected, seedTarget,
+                        wipeDeclined);
             }
             if (!runAllChangedContained(h)) {
                 return new ModCompat.VoxyResetReport(
-                        ModCompat.VoxyResetOutcome.RESTART_FAILED, liveRoot, expected, wipeDeclined);
+                        ModCompat.VoxyResetOutcome.RESTART_FAILED, liveRoot, expected, seedTarget,
+                        wipeDeclined);
             }
             return new ModCompat.VoxyResetReport(
-                    ModCompat.VoxyResetOutcome.SHUTDOWN_FAILED, liveRoot, expected, wipeDeclined);
+                    ModCompat.VoxyResetOutcome.SHUTDOWN_FAILED, liveRoot, expected, seedTarget,
+                    wipeDeclined);
         }
         if (root != null) h.wipe().accept(root);
+        // A22: inside the same instance-down window as the primary wipe, and skipped by the
+        // same shutdown-failed branch above — deleting over open storage handles is the
+        // Windows partial-wipe trap regardless of which name the directory carries.
+        if (seedTarget != null) h.wipe().accept(seedTarget);
         h.gc().run();
         try {
             h.createInstance().run();
@@ -407,16 +463,36 @@ class VoxyCompat {
             // by the ingest-failure parking caps. The feedback branch says "rejoin".
             LSSLogger.error("Voxy reset: createInstance failed — Voxy is down until rejoin", t);
             return new ModCompat.VoxyResetReport(
-                    ModCompat.VoxyResetOutcome.RESTART_FAILED, liveRoot, expected, wipeDeclined);
+                    ModCompat.VoxyResetOutcome.RESTART_FAILED, liveRoot, expected, seedTarget,
+                    wipeDeclined);
         }
         if (!runAllChangedContained(h)) {
             return new ModCompat.VoxyResetReport(
-                    ModCompat.VoxyResetOutcome.RESTART_FAILED, liveRoot, expected, wipeDeclined);
+                    ModCompat.VoxyResetOutcome.RESTART_FAILED, liveRoot, expected, seedTarget,
+                    wipeDeclined);
         }
         return new ModCompat.VoxyResetReport(
                 wipeDeclined ? ModCompat.VoxyResetOutcome.RESET_WIPE_SKIPPED
                         : ModCompat.VoxyResetOutcome.RESET,
-                liveRoot, expected, wipeDeclined);
+                liveRoot, expected, seedTarget, wipeDeclined);
+    }
+
+    /**
+     * A22: reads the seed-named root hook, containing any throw from it (it does NOT do
+     * path containment — that is {@link #isWipeContained}, applied later inside
+     * {@link #wipeVoxyStore}). The hook is defined to return null unless
+     * the directory ACTUALLY EXISTS, so an ordinary session — where no consumer stores
+     * under the seed name — produces null and the whole seed half stays inert. Existence
+     * lives in the hook rather than here so the ladder tests stay filesystem-free.
+     */
+    private static java.nio.file.Path readSeedRoot(ResetHooks h) {
+        try {
+            return h.seedRoot().get();
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError vme) throw vme;
+            LSSLogger.warn("Voxy reset: seed-derived root unavailable (" + t + ")");
+            return null;
+        }
     }
 
     /** The derived root read purely to enrich a message (issue #4 follow-up). Contained:
@@ -437,8 +513,9 @@ class VoxyCompat {
      * whether the live one would survive containment — WITHOUT touching the renderer,
      * the instance lifecycle, or the disk. The two-stage promise ("you see the path
      * before anything is deleted") is only worth as much as this method's restraint:
-     * it may call {@code instance}, {@code fallbackPath} and {@code storagePath}, and
-     * nothing else in {@link ResetHooks}.
+     * it may call {@code instance}, {@code fallbackPath}, {@code storagePath} and
+     * {@code seedRoot}, and nothing else in {@link ResetHooks}. ({@code seedRoot} is a
+     * read too: its only side effect is an existence check.)
      */
     static ModCompat.VoxyStorageProbe probeStorage(ResetHooks h, java.nio.file.Path gameDir) {
         Object instance;
@@ -447,7 +524,7 @@ class VoxyCompat {
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError vme) throw vme;
             LSSLogger.warn("Voxy storage probe: instance probe failed (" + t + ")");
-            return new ModCompat.VoxyStorageProbe(true, null, null, false);
+            return new ModCompat.VoxyStorageProbe(true, null, null, null, false);
         }
         java.nio.file.Path expected;
         try {
@@ -460,7 +537,7 @@ class VoxyCompat {
         if (instance == null) {
             // No live instance: the ordinary reset already wipes the derived root, so
             // there is no live root to force — the prompt says exactly that.
-            return new ModCompat.VoxyStorageProbe(true, null, expected, false);
+            return new ModCompat.VoxyStorageProbe(true, null, expected, readSeedRoot(h), false);
         }
         java.nio.file.Path live;
         try {
@@ -470,7 +547,7 @@ class VoxyCompat {
             LSSLogger.warn("Voxy storage probe: getStorageBasePath failed (" + t + ")");
             live = null;
         }
-        return new ModCompat.VoxyStorageProbe(true, live, expected,
+        return new ModCompat.VoxyStorageProbe(true, live, expected, readSeedRoot(h),
                 live != null && isWipeContained(live, gameDir));
     }
 
@@ -634,15 +711,17 @@ class VoxyCompat {
         }
     }
 
-    /** Production entry for {@link ModCompat#resetVoxyLods(boolean)}: resolve the domain,
+    /** Production entry for {@link ModCompat#resetVoxyLods(boolean, boolean)}: resolve the domain,
      *  build the production hooks, run the ladder. Main client thread only. */
-    static ModCompat.VoxyResetReport resetVoxyProduction(boolean forceWipe) {
+    static ModCompat.VoxyResetReport resetVoxyProduction(boolean forceWipe,
+                                                        boolean lssSessionActive) {
         if (!initResetDomain()) {
             return ModCompat.VoxyResetReport.of(ModCompat.VoxyResetOutcome.UNAVAILABLE);
         }
         var gameDir = dev.vox.lss.platform.LoaderServices.get().gameDir();
         return resetVoxy(productionHandleHooks(gameDir,
                 VoxyCompat::fallbackVoxyBasePath,
+                () -> existingSeedVoxyRoot(gameDir, lssSessionActive),
                 () -> net.minecraft.client.Minecraft.getInstance().levelRenderer,
                 () -> {
                     // 26.2's render-extract rework moved allChanged() off LevelRenderer
@@ -654,15 +733,18 @@ class VoxyCompat {
                 }), forceWipe);
     }
 
-    /** Production entry for {@link ModCompat#probeVoxyStorage()} — the same resolved
+    /** Production entry for {@link ModCompat#probeVoxyStorage(boolean)} — the same resolved
      *  handles the ladder uses, so the prompt cannot show a path the wipe would not
      *  target. The renderer/allChanged hooks are inert here: {@link #probeStorage}
      *  never calls them. */
-    static ModCompat.VoxyStorageProbe probeStorageProduction() {
-        if (!initResetDomain()) return new ModCompat.VoxyStorageProbe(true, null, null, false);
+    static ModCompat.VoxyStorageProbe probeStorageProduction(boolean lssSessionActive) {
+        if (!initResetDomain()) {
+            return new ModCompat.VoxyStorageProbe(true, null, null, null, false);
+        }
         var gameDir = dev.vox.lss.platform.LoaderServices.get().gameDir();
         return probeStorage(productionHandleHooks(gameDir,
                 VoxyCompat::fallbackVoxyBasePath,
+                () -> existingSeedVoxyRoot(gameDir, lssSessionActive),
                 () -> null,
                 () -> {}), gameDir);
     }
@@ -677,6 +759,7 @@ class VoxyCompat {
      */
     static ResetHooks productionHandleHooks(java.nio.file.Path gameDir,
                                             java.util.function.Supplier<java.nio.file.Path> fallbackPath,
+                                            java.util.function.Supplier<java.nio.file.Path> seedRoot,
                                             java.util.function.Supplier<Object> levelRendererSupplier,
                                             Runnable allChanged) {
         return new ResetHooks(
@@ -689,6 +772,7 @@ class VoxyCompat {
                     }
                 },
                 fallbackPath,
+                seedRoot,
                 () -> resolveRendererShutdown(levelRendererSupplier),
                 // Block-bodied ON PURPOSE: an EXPRESSION lambda (`() -> h.invokeExact()`)
                 // makes javac emit a ()Object call-site signature against the ()void
@@ -766,6 +850,48 @@ class VoxyCompat {
      * degrades to "wipes nothing / a wrong-but-contained subdir of .voxy", never data
      * loss outside the containment roots.
      */
+    /**
+     * A22 (issue #1): the seed-named store directory under Voxy's multiplayer saves root,
+     * {@code <gameDir>/.voxy/saves/world-<16 hex>}.
+     *
+     * <p>Derived from the seed LSS reads off its OWN connection plus the shared directory
+     * name literal ({@link dev.vox.lss.seed.WorldSeedKey#KEY_FORMAT}). Nothing here reads
+     * another mod's config, calls its API, or reflects on it — the agreement is a filename
+     * convention and nothing more, which is also why this is a hand-derived path rather
+     * than a question asked of anyone.
+     *
+     * <p>Pure and package-visible so the naming is testable without a filesystem.
+     */
+    static java.nio.file.Path seedVoxyRoot(java.nio.file.Path gameDir, long seed) {
+        return gameDir.resolve(".voxy").resolve("saves")
+                .resolve(dev.vox.lss.seed.WorldSeedKey.format(seed)).toAbsolutePath();
+    }
+
+    /**
+     * {@link #seedVoxyRoot} for the live connection, or null.
+     *
+     * <p>Null in every one of the cases that matter: <b>no live LSS session</b> (the replay /
+     * residual-state guard — a Flashback playback replays the ORIGIN world's login seed and
+     * can do so while a stale {@code Minecraft.currentServer} still looks remote, so without
+     * a live session nothing is derivable at all), no usable seed (single-player, Realms,
+     * seed 0, an unreadable accessor — {@link dev.vox.lss.seed.ClientWorldSeed}), or simply
+     * no such directory on disk — the ordinary case when the LOD consumer does not partition
+     * its store by seed.
+     */
+    private static java.nio.file.Path existingSeedVoxyRoot(java.nio.file.Path gameDir,
+                                                           boolean lssSessionActive) {
+        try {
+            var seed = dev.vox.lss.seed.ClientWorldSeed.keyableSeed(lssSessionActive);
+            if (seed.isEmpty()) return null;
+            var root = seedVoxyRoot(gameDir, seed.getAsLong());
+            return java.nio.file.Files.isDirectory(root) ? root : null;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError vme) throw vme;
+            LSSLogger.warn("Voxy reset: seed-derived root could not be resolved (" + t + ")");
+            return null;
+        }
+    }
+
     private static java.nio.file.Path fallbackVoxyBasePath() {
         var mc = net.minecraft.client.Minecraft.getInstance();
         java.nio.file.Path base = mc.gameDirectory.toPath().resolve(".voxy").resolve("saves");

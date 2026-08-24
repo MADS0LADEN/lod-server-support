@@ -75,8 +75,11 @@ public final class ClientCommandActions {
                                         + "(the wipe is IO-contained regardless)");
                     }
                 },
-                dev.vox.lss.compat.ModCompat::resetVoxyLods,
-                dev.vox.lss.compat.ModCompat::probeVoxyStorage,
+                // A22's replay / residual-state guard travels with the call: only this
+                // method knows whether a live LSS session backs the connection, and without
+                // one the Voxy half must not derive a seed-named wipe target at all.
+                forceWipe -> dev.vox.lss.compat.ModCompat.resetVoxyLods(forceWipe, manager != null),
+                () -> dev.vox.lss.compat.ModCompat.probeVoxyStorage(manager != null),
                 () -> {
                     if (manager != null) manager.flushCache();
                 },

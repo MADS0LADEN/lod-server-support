@@ -396,6 +396,7 @@ class VoxyCompatTest {
                 () -> { log.add("instance"); return instance; },
                 inst -> { log.add("storagePath"); return storageRoot; },
                 () -> { log.add("fallbackPath"); return fallbackRoot; },
+                () -> null, // A22 seedRoot: none in this scenario,
                 () -> {
                     log.add("resolveRenderer");
                     if (!rendererResolvable) return null;
@@ -500,6 +501,7 @@ class VoxyCompatTest {
                 () -> new Object(),
                 inst -> { throw new IllegalStateException("no path"); },
                 () -> null,
+                () -> null, // A22 seedRoot: none in this scenario,
                 () -> () -> log.add("rendererShutdown"),
                 () -> log.add("shutdownInstance"),
                 () -> log.add("createInstance"),
@@ -612,6 +614,7 @@ class VoxyCompatTest {
                 () -> { throw new IllegalStateException("probe dead"); },
                 inst -> java.nio.file.Path.of("x"),
                 () -> { log.add("fallbackPath"); return java.nio.file.Path.of("fb"); },
+                () -> null, // A22 seedRoot: none in this scenario,
                 () -> () -> {},
                 () -> log.add("shutdownInstance"),
                 () -> log.add("createInstance"),
@@ -633,6 +636,7 @@ class VoxyCompatTest {
                 () -> new Object(),
                 inst -> srv,
                 () -> srv,
+                () -> null, // A22 seedRoot: none in this scenario,
                 () -> () -> {},
                 () -> {},
                 () -> {},
@@ -668,6 +672,7 @@ class VoxyCompatTest {
                     () -> lifecycle.add("rendererShutdown"));
 
             var hooks = VoxyCompat.productionHandleHooks(game, () -> serverStore,
+                    () -> null, // A22 seedRoot: none in this scenario,
                     () -> null, () -> lifecycle.add("allChanged"));
             assertEquals(ModCompat.VoxyResetOutcome.RESET, resetVoxy(hooks));
             assertEquals(java.util.List.of("rendererShutdown", "shutdown", "create", "allChanged"),
@@ -798,6 +803,7 @@ class VoxyCompatTest {
                 () -> new Object(),
                 inst -> { throw new IllegalStateException("no path"); },
                 () -> java.nio.file.Path.of("derived"),
+                () -> null, // A22 seedRoot: none in this scenario,
                 () -> () -> log.add("rendererShutdown"),
                 () -> log.add("shutdownInstance"),
                 () -> log.add("createInstance"),
@@ -828,6 +834,7 @@ class VoxyCompatTest {
                 Object::new,
                 inst -> outside,
                 () -> game.resolve(".voxy").resolve("saves").resolve("current"),
+                () -> null, // A22 seedRoot: none in this scenario,
                 () -> () -> {},
                 () -> {},
                 () -> {},
@@ -854,6 +861,7 @@ class VoxyCompatTest {
                 Object::new,
                 inst -> live,
                 () -> saves.resolve("current.example.com"),
+                () -> null, // A22 seedRoot: none in this scenario,
                 () -> () -> {},
                 () -> {},
                 () -> {},
@@ -904,6 +912,7 @@ class VoxyCompatTest {
                 () -> { throw new IllegalStateException("probe blew up"); },
                 inst -> java.nio.file.Path.of("live"),
                 () -> java.nio.file.Path.of("derived"),
+                () -> null, // A22 seedRoot: none in this scenario,
                 () -> () -> {}, () -> {}, () -> {}, target -> {}, () -> {}, () -> {});
         var probe = VoxyCompat.probeStorage(throwingInstance, java.nio.file.Path.of("/g"));
         assertTrue(probe.voxyPresent());
@@ -914,6 +923,7 @@ class VoxyCompatTest {
                 Object::new,
                 inst -> { throw new IllegalStateException("no path"); },
                 () -> java.nio.file.Path.of("derived"),
+                () -> null, // A22 seedRoot: none in this scenario,
                 () -> () -> {}, () -> {}, () -> {}, target -> {}, () -> {}, () -> {});
         assertNull(VoxyCompat.probeStorage(throwingPath, java.nio.file.Path.of("/g")).liveRoot());
     }
@@ -948,6 +958,7 @@ class VoxyCompatTest {
                 Object::new,
                 inst -> { throw new IllegalStateException("no path"); },
                 () -> { log.add("fallbackPath"); return derived; },
+                () -> null, // A22 seedRoot: none in this scenario,
                 () -> () -> log.add("rendererShutdown"),
                 () -> log.add("shutdownInstance"),
                 () -> log.add("createInstance"),
@@ -972,6 +983,7 @@ class VoxyCompatTest {
                 Object::new,
                 inst -> { throw new IllegalStateException("no path"); },
                 () -> { throw new IllegalStateException("no game dir"); },
+                () -> null, // A22 seedRoot: none in this scenario,
                 () -> () -> {},
                 () -> {},
                 () -> {},

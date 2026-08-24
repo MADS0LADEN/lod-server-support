@@ -38,7 +38,7 @@ class VoxyStorageOverrideTest {
 
     @Test
     void skippedWipeReportNamesBothRootsAndTheLikelyCause() {
-        String text = joined(VoxyStorageOverride.wipeSkippedLines(LIVE, DERIVED, true));
+        String text = joined(VoxyStorageOverride.wipeSkippedLines(LIVE, DERIVED, null, true));
         assertTrue(text.contains(LIVE.toString()),
                 "the user cannot hand-delete a path we never printed: " + text);
         assertTrue(text.contains(DERIVED.toString()),
@@ -50,7 +50,7 @@ class VoxyStorageOverrideTest {
 
     @Test
     void skippedWipeReportOffersTheForceOverrideExactlyOnce() {
-        List<String> lines = VoxyStorageOverride.wipeSkippedLines(LIVE, DERIVED, true);
+        List<String> lines = VoxyStorageOverride.wipeSkippedLines(LIVE, DERIVED, null, true);
         assertEquals(1, lines.stream().filter(l -> l.contains("reset voxy-force")).count(),
                 "the escape hatch must be named, once: " + lines);
     }
@@ -58,7 +58,7 @@ class VoxyStorageOverrideTest {
     /** After a forced run the suggestion would be nonsense — the caller suppresses it. */
     @Test
     void skippedWipeReportCanSuppressTheForceSuggestion() {
-        String text = joined(VoxyStorageOverride.wipeSkippedLines(LIVE, DERIVED, false));
+        String text = joined(VoxyStorageOverride.wipeSkippedLines(LIVE, DERIVED, null, false));
         assertFalse(text.contains("voxy-force"),
                 "telling a user who just ran voxy-force to run voxy-force is noise: " + text);
         assertTrue(text.contains(LIVE.toString()), "the paths are still the point: " + text);
@@ -68,7 +68,7 @@ class VoxyStorageOverrideTest {
      *  headline would then be a lie. */
     @Test
     void unreadableLiveRootGetsItsOwnHeadlineAndPlaceholders() {
-        String text = joined(VoxyStorageOverride.wipeSkippedLines(null, DERIVED, true));
+        String text = joined(VoxyStorageOverride.wipeSkippedLines(null, DERIVED, null, true));
         assertTrue(text.contains("could not be read"), text);
         assertFalse(text.contains("does not match"),
                 "nothing was compared — do not claim a mismatch: " + text);
@@ -83,7 +83,7 @@ class VoxyStorageOverrideTest {
      *  compared is the dishonesty this pins (issue #4 follow-up). */
     @Test
     void anUnverifiableRootGetsItsOwnHeadlineAndCauseInsteadOfAnOverrideGuess() {
-        String text = joined(VoxyStorageOverride.wipeSkippedLines(LIVE, null, true));
+        String text = joined(VoxyStorageOverride.wipeSkippedLines(LIVE, null, null, true));
         assertTrue(text.contains("could not be verified"), text);
         assertFalse(text.contains("does not match"),
                 "nothing was compared — do not claim a mismatch: " + text);
@@ -97,7 +97,7 @@ class VoxyStorageOverrideTest {
      *  there would send the user down a dead end. */
     @Test
     void noLiveRootIsNeverOfferedTheForceOverride() {
-        String text = joined(VoxyStorageOverride.wipeSkippedLines(null, DERIVED, true));
+        String text = joined(VoxyStorageOverride.wipeSkippedLines(null, DERIVED, null, true));
         assertFalse(text.contains("voxy-force"),
                 "voxy-force cannot act on this branch — do not advertise it: " + text);
         assertTrue(text.contains(DERIVED.toString()),
@@ -106,7 +106,7 @@ class VoxyStorageOverrideTest {
 
     @Test
     void mismatchHeadlineSaysMismatch() {
-        String text = joined(VoxyStorageOverride.wipeSkippedLines(LIVE, DERIVED, true));
+        String text = joined(VoxyStorageOverride.wipeSkippedLines(LIVE, DERIVED, null, true));
         assertTrue(text.contains("does not match"), text);
         assertFalse(text.contains("could not be read"), text);
     }
@@ -114,7 +114,7 @@ class VoxyStorageOverrideTest {
     // ---- the voxy-force prompt (stage 1) ----
 
     private static ModCompat.VoxyStorageProbe probe(Path live, Path expected, boolean contained) {
-        return new ModCompat.VoxyStorageProbe(true, live, expected, contained);
+        return new ModCompat.VoxyStorageProbe(true, live, expected, null, contained);
     }
 
     @Test
@@ -172,7 +172,7 @@ class VoxyStorageOverrideTest {
     @Test
     void forcePromptDegradesHonestlyWithoutVoxyOrWithoutAReadableRoot() {
         String noVoxy = joined(VoxyStorageOverride.forcePromptLines(
-                new ModCompat.VoxyStorageProbe(false, null, null, false), true));
+                new ModCompat.VoxyStorageProbe(false, null, null, null, false), true));
         assertTrue(noVoxy.contains("Voxy is not installed"), noVoxy);
         assertFalse(noVoxy.contains("confirm"), "nothing to confirm: " + noVoxy);
 
@@ -212,16 +212,82 @@ class VoxyStorageOverrideTest {
     @Test
     void bothReportsShareTheSameRootLines() {
         var shared = VoxyStorageOverride.rootLines(LIVE, DERIVED);
-        assertTrue(VoxyStorageOverride.wipeSkippedLines(LIVE, DERIVED, true).containsAll(shared),
+        assertTrue(VoxyStorageOverride.wipeSkippedLines(LIVE, DERIVED, null, true).containsAll(shared),
                 "the skipped-wipe report must use the shared root lines");
         assertTrue(VoxyStorageOverride.forcePromptLines(probe(LIVE, DERIVED, true), true)
                         .containsAll(shared),
                 "the force prompt must use the very same two lines");
-        assertTrue(VoxyStorageOverride.wipeSkippedLines(LIVE, DERIVED, true)
+        assertTrue(VoxyStorageOverride.wipeSkippedLines(LIVE, DERIVED, null, true)
                         .contains(VoxyStorageOverride.causeLine(VoxyStorageOverride.Verdict.OVERRIDDEN)),
                 "and the very same cause sentence");
         assertTrue(VoxyStorageOverride.forcePromptLines(probe(LIVE, DERIVED, true), true)
                         .contains(VoxyStorageOverride.causeLine(VoxyStorageOverride.Verdict.OVERRIDDEN)),
                 "and the very same cause sentence");
+    }
+
+    // ---- A22 (issue #1): the seed-derived root ----
+
+    private static final Path SEED = Path.of("/games/mc/.voxy/saves/world-00000000000000ff");
+
+    @Test
+    void withNoSeedRootEveryReportIsCharacterIdenticalToPreA22() {
+        // The default shape (no LOD consumer storing under the seed name) must not gain a
+        // single line — the seed half is inert, not merely quiet.
+        assertEquals(VoxyStorageOverride.wipeSkippedLines(LIVE, DERIVED, null, true),
+                VoxyStorageOverride.wipeSkippedLines(LIVE, DERIVED, null, true));
+        assertEquals(VoxyStorageOverride.wipeSkippedLines(null, DERIVED, null, false),
+                VoxyStorageOverride.wipeSkippedLines(null, DERIVED, null, false));
+    }
+
+    @Test
+    void theSkippedWipeReportNamesTheSeedRootWhenThereIsOne() {
+        // A declined LIVE root and a cleared SEED root happen together: the seed-named
+        // store is LSS's own derivation and is not subject to the override cross-check.
+        // A report that named only the live root would leave the user believing nothing
+        // was touched.
+        String text = joined(VoxyStorageOverride.wipeSkippedLines(LIVE, DERIVED, SEED, true));
+        assertTrue(text.contains(SEED.toString()), text);
+        assertTrue(text.contains(LIVE.toString()), "the live root is still named: " + text);
+        assertTrue(text.contains(DERIVED.toString()), text);
+    }
+
+    @Test
+    void theSeedRootLineDoesNotClaimADeletionThatMayNotHaveHappened() {
+        // The same line is emitted on branches where the wipe step never ran (a failed
+        // shutdownInstance skips every wipe), so it must describe a TARGET, never a
+        // completed deletion — this class does not claim things that did not happen.
+        String line = VoxyStorageOverride.seedRootLine(SEED);
+        assertTrue(line.contains(SEED.toString()), line);
+        assertFalse(line.toLowerCase(java.util.Locale.ROOT).contains("deleted"), line);
+        assertFalse(line.toLowerCase(java.util.Locale.ROOT).contains("was cleared"), line);
+    }
+
+    @Test
+    void theForcePromptNamesTheSeedRootAsASecondTarget() {
+        String text = joined(VoxyStorageOverride.forcePromptLines(
+                new ModCompat.VoxyStorageProbe(true, LIVE, DERIVED, SEED, true), true));
+        assertTrue(text.contains(SEED.toString()),
+                "voxy-force promises to show what gets deleted — all of it: " + text);
+        assertTrue(text.contains("Nothing has been deleted"), text);
+    }
+
+    @Test
+    void theUnreadableLiveRootBranchStillNamesTheSeedRoot() {
+        // This branch tells the user to run a plain reset instead; the seed root is what
+        // that plain reset would actually clear, so withholding it would be misleading.
+        String text = joined(VoxyStorageOverride.forcePromptLines(
+                new ModCompat.VoxyStorageProbe(true, null, DERIVED, SEED, false), true));
+        assertTrue(text.contains(SEED.toString()), text);
+        assertFalse(text.contains("voxy-force confirm"),
+                "still no stage 2 offered on a branch that cannot act: " + text);
+    }
+
+    @Test
+    void theNoVoxyBranchIsUnaffectedBySeedRoots() {
+        assertEquals(VoxyStorageOverride.forcePromptLines(
+                        new ModCompat.VoxyStorageProbe(false, null, null, SEED, false), true),
+                VoxyStorageOverride.forcePromptLines(
+                        new ModCompat.VoxyStorageProbe(false, null, null, null, false), true),
+                "no Voxy means no store of any name");
     }
 }

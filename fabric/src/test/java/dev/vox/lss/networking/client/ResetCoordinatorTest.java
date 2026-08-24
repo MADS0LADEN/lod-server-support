@@ -28,9 +28,9 @@ class ResetCoordinatorTest {
 
     private ResetCoordinator.Deps deps(boolean managerActive, ModCompat.VoxyResetOutcome outcome) {
         return deps(managerActive,
-                new ModCompat.VoxyResetReport(outcome, LIVE, DERIVED,
+                new ModCompat.VoxyResetReport(outcome, LIVE, DERIVED, null,
                         outcome == ModCompat.VoxyResetOutcome.RESET_WIPE_SKIPPED),
-                new ModCompat.VoxyStorageProbe(true, LIVE, DERIVED, true));
+                new ModCompat.VoxyStorageProbe(true, LIVE, DERIVED, null, true));
     }
 
     private ResetCoordinator.Deps deps(boolean managerActive,
@@ -124,7 +124,7 @@ class ResetCoordinatorTest {
                 true,
                 () -> log.add("drain"),
                 force -> { throw new IllegalStateException("mixin drift"); },
-                () -> new ModCompat.VoxyStorageProbe(true, LIVE, DERIVED, true),
+                () -> new ModCompat.VoxyStorageProbe(true, LIVE, DERIVED, null, true),
                 () -> log.add("flush"),
                 () -> log.add("clearAll"),
                 () -> log.add("farp"),
@@ -153,8 +153,8 @@ class ResetCoordinatorTest {
     void wipeSkippedFeedbackCarriesBothStorageRoots() {
         ResetCoordinator.run(deps(true,
                 new ModCompat.VoxyResetReport(
-                        ModCompat.VoxyResetOutcome.RESET_WIPE_SKIPPED, LIVE, DERIVED, true),
-                new ModCompat.VoxyStorageProbe(true, LIVE, DERIVED, true)), false);
+                        ModCompat.VoxyResetOutcome.RESET_WIPE_SKIPPED, LIVE, DERIVED, null, true),
+                new ModCompat.VoxyStorageProbe(true, LIVE, DERIVED, null, true)), false);
         String text = allFeedback();
         assertTrue(text.contains(LIVE.toString()), "live root missing from feedback: " + text);
         assertTrue(text.contains(DERIVED.toString()), "derived root missing: " + text);
@@ -168,8 +168,9 @@ class ResetCoordinatorTest {
     @Test
     void successfulResetGetsNoOverrideDetailBlock() {
         ResetCoordinator.run(deps(true,
-                new ModCompat.VoxyResetReport(ModCompat.VoxyResetOutcome.RESET, LIVE, LIVE, false),
-                new ModCompat.VoxyStorageProbe(true, LIVE, LIVE, true)), false);
+                new ModCompat.VoxyResetReport(ModCompat.VoxyResetOutcome.RESET, LIVE, LIVE, null,
+                        false),
+                new ModCompat.VoxyStorageProbe(true, LIVE, LIVE, null, true)), false);
         assertEquals(1, feedback.size(), "one line, as before #4: " + feedback);
         assertFalse(allFeedback().contains("voxy-force"), allFeedback());
     }
@@ -234,8 +235,8 @@ class ResetCoordinatorTest {
     void forcedRunThatStillSkipsDoesNotSuggestForcingAgain() {
         ResetCoordinator.run(deps(true,
                 new ModCompat.VoxyResetReport(
-                        ModCompat.VoxyResetOutcome.RESET_WIPE_SKIPPED, null, DERIVED, true),
-                new ModCompat.VoxyStorageProbe(true, null, DERIVED, false)), true, true);
+                        ModCompat.VoxyResetOutcome.RESET_WIPE_SKIPPED, null, DERIVED, null, true),
+                new ModCompat.VoxyStorageProbe(true, null, DERIVED, null, false)), true, true);
         String text = allFeedback();
         assertTrue(text.contains("disk wipe was SKIPPED"), text);
         assertFalse(text.contains("voxy-force"), "already forced — the hint is noise: " + text);
@@ -259,8 +260,8 @@ class ResetCoordinatorTest {
             log.clear();
             feedback.clear();
             ResetCoordinator.run(deps(true,
-                    new ModCompat.VoxyResetReport(outcome, LIVE, DERIVED, true),
-                    new ModCompat.VoxyStorageProbe(true, LIVE, DERIVED, true)), false);
+                    new ModCompat.VoxyResetReport(outcome, LIVE, DERIVED, null, true),
+                    new ModCompat.VoxyStorageProbe(true, LIVE, DERIVED, null, true)), false);
             String text = allFeedback();
             assertTrue(text.contains(LIVE.toString()),
                     outcome + ": the LODs are still at this path and chat never said so: " + text);
@@ -280,8 +281,8 @@ class ResetCoordinatorTest {
             log.clear();
             feedback.clear();
             ResetCoordinator.run(deps(true,
-                    new ModCompat.VoxyResetReport(outcome, LIVE, DERIVED, false),
-                    new ModCompat.VoxyStorageProbe(true, LIVE, DERIVED, true)), false);
+                    new ModCompat.VoxyResetReport(outcome, LIVE, DERIVED, null, false),
+                    new ModCompat.VoxyStorageProbe(true, LIVE, DERIVED, null, true)), false);
             assertEquals(1, feedback.size(),
                     outcome + ": no cross-check refusal, so no report: " + feedback);
         }
