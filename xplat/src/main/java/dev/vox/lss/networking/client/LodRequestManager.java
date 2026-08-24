@@ -1016,6 +1016,12 @@ public class LodRequestManager {
      * it with ts=-1 — the server's honest re-resolution then re-serves it instead of
      * answering up-to-date. Main client thread only.
      */
+    /** Positions parked at the ingest-failure cap this session (§18.1 — the heal's
+     *  definitive permanent-hole count, diag {@code ingest_parked=}). */
+    public long getIngestParkedCount() {
+        return this.columns.ingestParkedCount();
+    }
+
     public void onIngestFailure(ResourceKey<Level> dimension, long packed) {
         if (this.lastDimension == null || !this.lastDimension.equals(dimension)) {
             // A report for another dimension (a consumer rejected asynchronously after the

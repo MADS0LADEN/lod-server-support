@@ -1385,3 +1385,138 @@ Recorded, not changed:
   on at least one line.
 - **Iris shadow-pass double-fire** can run the frame slice twice per frame —
   each invocation is capped and allowance-metered, so the ceiling holds.
+
+## 18. The dropped-tile heal (2026-08-24, field-test round 4 — far-radius drops)
+
+Field report (26.2 and expected on all lines, 91-minute 34 GB fill session):
+`written=892459, dropped=159512` — ~15% of all tiles dropped, visibly missing
+from the map, onset ~5979 blocks (~chunk ring 374) and "a lot" beyond. The §14
+round widened the survival window (8192-entry queue, 8-deep load window,
+priority front-inserts) but the far-radius regime still overwhelms it: a ring
+at r≈380 crosses ~95 regions at once, a re-stream over EXISTING map files is
+expensive-load-bound at the loader's ~10/s drain, and Xaero's limiter parks
+far regions between loads — tiles pile up awaiting their regions and the
+bounded queue evicts the oldest (plus ladder-ready `DEFER_CAP` expiries). The
+drops were PERMANENT: the positions are stamped client-side and nothing ever
+re-serves them.
+
+Why not report at drop time: `LSSApi.reportIngestFailure` is the designed
+bounded re-serve channel (`ColumnStateMap.MAX_INGEST_FAILURES` = 3, then the
+position parks) — but re-serves land ~1-2 s after a report, while a far-radius
+saturation phase persists for minutes; naive report-on-drop burns all three
+retries into the same full queue and parks the holes anyway (with 2-3× the
+serve traffic as pure waste).
+
+The heal (`enableXaeroMapBridgeHeal`, client config, default ON; inert with
+the bridge off):
+
+- **The ledger**: dropped positions are remembered per region — a
+  `DroppedLedger` of 1024 bits over the region's 32×32 chunk grid (~160 B),
+  keyed by region in insertion order, guarded by `queueLock` (decode-thread
+  evictions and the offerColumn full-queue pre-gate record; main-thread
+  deferral expiries record via a brief lock). Capped at `LEDGER_MAX_REGIONS`
+  (4096, ≈ a radius-1000 disc): beyond it the oldest region's holes stay
+  permanent — the pre-§18 behavior.
+- **Flush only when committable**: after the drain and before the grants
+  (`healPhase`), regions that COMMITTED this pump flush their ledger sets
+  first (the region is provably accepting writes); then ONE further ledger
+  region per pump is probed under the commit probe's monitors — loaded (state
+  2) flushes now (plus a `registerVisit` to hold the park off), requestable/
+  parked joins the GRANT list ONLY when the drain has no real waiting work
+  (§18.1) and stays at the ledger head so the granted load flushes within a
+  few pumps (a 100-probe belt rotates a wedged head to the tail; foreign-
+  dimension heads rotate through a bounded 8-entry scan and flush after the
+  player returns). Reports run inline on the main thread,
+  ≤ `LEDGER_FLUSH_PER_PUMP` (40 — matched to the client's ~800 col/s
+  re-serve channel, §18.1) per pump; bits are cleared under the lock, reports
+  fire outside it, each contained. The heal phase is skipped at the rebuild
+  hard cap, past the drain's nanos budget, and — the §18.1 headline — while
+  the QUEUE lacks headroom (size or bytes above half cap): the drop condition
+  is a global queue condition, so a region-only proof would re-serve straight
+  back into the saturated queue.
+- **Stale-dimension drain drops report immediately** (no ledger): their region
+  is only ever probed under the CURRENT map dimension, so a ledger entry would
+  rot; the re-serve lands after the player returns to that dimension.
+- **Teardowns never heal**: every `clearQueue` caller (session end, world-id
+  change, the death latch, the enable toggle, both-switches-off) clears the
+  ledger uncounted.
+- **The idle pump keeps running**: the pump's empty-early-return now also
+  requires an empty ledger — post-saturation (empty queue, no owed rebuilds)
+  the heal phase is what drains the backlog (see the corrected §18.1
+  arithmetic: ledger leg ~3-5 regions/s load-bound; the heal itself is
+  channel-bound at ~800 col/s).
+- **Bounds**: each healed position costs exactly one re-serve (one column,
+  ~30 KB) when it can land; re-dropped positions re-enter the ledger and burn
+  one of their 3 client retries per cycle — the client cap is the loop bound,
+  and it now bounds honest attempts instead of being burned by timing.
+  Client-side `ingest_failed` climbing during heavy map fills is EXPECTED with
+  the heal on (each report counts there).
+- **Instruments**: diag gains `dropped_overflow=`/`dropped_expired=` (the old
+  `dropped=` aggregate hid which class fired — the field report's 159k was
+  indistinguishable), `heal_pending=` (ledger positions owed) and
+  `heal_reported=`; all in `counterForTest` + the house-style pin. Seams:
+  `maxQueue`, `deferCap` (the §18 tests drive overflow/expiry without 8192
+  offers).
+
+Expected field shape on the 26.2 rig (arithmetic corrected by §18.1): during
+the far fill `heal_pending` grows into the thousands while `dropped_overflow`
+climbs — the heal deliberately does almost nothing yet (queue-headroom gate).
+After the fill, the ledger leg drains load-bound at ~3-5 regions/s (the probe
+is head-parked serial: request → in-flight pumps → flush), but the HEAL is
+bound by the client's re-serve channel (~800 col/s = WANT_SET_BUDGET × 1 Hz ≈
+the 25 MiB/s default cap): a 159k-drop session needs ≥3.5 min of idling near
+the terrain and re-downloads ~5 GB. SUCCESS is judged by `ingest_parked` (the
+client Columns diag line) staying ≈ 0 and `heal_redropped` staying low —
+`heal_reported` alone cannot distinguish a completed heal from one whose every
+re-delivery re-dropped and parked (§18.1 B-M2). `heal_pending` stuck high with
+`load_requests` flat means the probe/grant leg regressed; with loads climbing,
+Xaero's loader is refusing (limiter pressure — check the region cache
+setting). One `valve=` bump at heal onset is EXPECTED (the reopen valve trips
+once on ~139 reopened rings); the 4 Hz fast re-scan stays disarmed while
+retry marks exist, which is part of why the heal is 1 Hz-paced.
+
+### 18.1 Review fold (2026-08-24, 2-Opus — loop-safety/locks + field-effectiveness)
+
+Converged MAJOR family, both reviewers: the first cut's flush was mis-rated
+and mis-gated. (A-M1) "committable REGION" is not "admissible QUEUE" — during
+saturation commits continue while the queue sheds, so committed-region flushes
+fired ~5120 reports/s into a still-full queue, burning the 3-strike budget
+the design exists to protect (fix: the queue-headroom gate above). (B-M1) the
+flush ceiling 256/pump = 5120/s was 6.4× the ~800 col/s channel that consumes
+reports, so the committable proof went stale in a 100k+ report backlog whose
+re-deliveries landed minutes later (fix: `LEDGER_FLUSH_PER_PUMP` 40). B also
+corrected the design rationale: strikes count DELIVERIES, not reports
+(`onIngestFailed`'s `old == -1` absorbs duplicate reports free) — the gate's
+entire value is timing the re-DELIVERY into a non-saturated queue. (A-M2) the
+dimension-conflict path reported un-gated/un-capped under `queueLock` (and,
+via the bulk deferral-expiry site, under a Xaero monitor), and foreign
+dimensions could enter the ledger through that bulk site: foreign expiries now
+take the stale route, the conflict DISCARDS counted, and `reportWholeLedger`
+is deleted. (B-M2) outcome instruments added: `ingest_parked` (ColumnStateMap
+cap-park count — the definitive permanent-hole signal, on the client Columns
+diag line), `heal_redropped` (the re-drop probability meter: permanent loss ≈
+p³), `heal_regions`, `heal_abandoned` (teardowns/cap/conflicts/kill-switch,
+so a cut-short heal is visible). (B-M3) the drain/heal arithmetic above.
+
+Minors folded: the kill switch now stops an in-progress heal (abandon,
+counted); the probe requires `isResting` like the commit probe (a stuck saver
+must not draw re-serves that re-expire); the heal runs under the drain's
+nanos clock; per-report throws are contained (an LSS-side throw must never
+feed the XAERO bridge's death latch); the ledger cap evicts the NEWEST region,
+never the probe's head; ledger loads are granted only when the drain's
+waiting list is empty (no §14-window/`setBeingWritten` pressure while real
+work waits); the both-switches-off path now KEEPS the ledger (not a teardown
+— the heal resumes when map writing is switched back on); the orphaned
+Outcome javadoc moved back. Recorded, not changed: a foreign-dimension-only
+ledger keeps the idle pump running the reflective ladder (~tens of µs/tick,
+session-bounded, heals on return); `ColumnStateMap.ingestFailures`/
+`persistentRemovals` reach disc scale under a heavy heal (~5 MB, comment
+updated); the one-shot reopen-valve trip; duplicate `WaitingRegion`/in-flight
+under-count slack (§14's accepted one-window-per-pump bound); the 100-probe
+belt ships untested (6 lines, low risk — the bounded head scan covers the
+foreign-head half). Tests: the vacuous grant assert replaced (the ledger
+region's load is now asserted by count on an idle pump), plus pins for the
+headroom hold, the conflict discard, the deferral-expiry split, negative
+coordinates, the cap's newest-eviction, the re-drop meter, and the
+mid-session kill-switch flip.
+

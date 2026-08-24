@@ -791,6 +791,24 @@ class ConfigValidationTest {
     }
 
     @Test
+    void xaeroMapBridgeHealDefaultsOnAndRoundTripsThroughJson() {
+        // The §18 dropped-tile heal ships ON (the bridge itself stays opt-in — the heal
+        // is only consulted while the bridge runs, so the cautious default is the
+        // healing one, not a second opt-in).
+        var c = clientConfig();
+        assertTrue(c.enableXaeroMapBridgeHeal);
+        c.validate();
+        assertTrue(c.enableXaeroMapBridgeHeal, "validate() must not touch the boolean");
+        var gson = new com.google.gson.Gson();
+        String saved = gson.toJson(clientConfig());
+        assertTrue(saved.contains("\"enableXaeroMapBridgeHeal\":true"), saved);
+        var loaded = gson.fromJson(saved.replace(
+                "\"enableXaeroMapBridgeHeal\":true", "\"enableXaeroMapBridgeHeal\":false"),
+                dev.vox.lss.config.LSSClientConfig.class);
+        assertFalse(loaded.enableXaeroMapBridgeHeal, "a saved false must bind back as false");
+    }
+
+    @Test
     void scanPrefixRetentionDefaultsOnAndRoundTripsThroughJson() {
         // Scan prefix retention (docs/planning/scanner-reopened-rings-plan.md) ships ON —
         // a silent default-off revert would pass CI green (unit rigs set the seam

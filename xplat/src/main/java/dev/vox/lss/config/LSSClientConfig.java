@@ -94,6 +94,12 @@ public class LSSClientConfig extends JsonConfig {
     // Default OFF for v0.12.0 (user decision 2026-08-23): opt-in while the feature is new —
     // map writes are persistent saved data, so the surprise default is the cautious one.
     public boolean enableXaeroMapBridge = false;
+    // The bridge's dropped-tile heal (xaero-map-bridge-plan.md §18): tiles the bridge had
+    // to drop under far-radius region-load saturation (queue overflow / deferral expiry)
+    // are re-requested — bounded, at most 3 attempts per position — once their Xaero map
+    // region can actually accept them, instead of staying permanent map holes. Consulted
+    // only while the bridge itself is enabled; inert without the mod.
+    public boolean enableXaeroMapBridgeHeal = true;
     // Ingest-pressure request pacing (issue #71, docs/planning/ingest-backpressure-design.md):
     // scale the want-set budget down — and halt declarations entirely at a threshold — when a
     // registered LOD consumer reports a pending ingest backlog (Voxy's ingest queue depth via

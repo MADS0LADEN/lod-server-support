@@ -107,6 +107,15 @@ class ColumnStateMap {
     // Per-position ingest-failure counts; bounds the reject -> re-serve loop a permanently
     // failing consumer would otherwise drive forever (see onIngestFailed).
     private final Long2IntOpenHashMap ingestFailures = new Long2IntOpenHashMap();
+    /** Positions parked at {@link #MAX_INGEST_FAILURES} this session — the definitive
+     *  "this hole is now permanent" signal (the §18 Xaero heal's success criterion:
+     *  a completed heal and a total failure are otherwise indistinguishable from the
+     *  report/failure counters alone). */
+    private long ingestParked;
+
+    long ingestParkedCount() {
+        return this.ingestParked;
+    }
     // Positions whose last authoritative delivery was a 0-section CLEAR (content->air), mapped to
     // the PRE-CLEAR content stamp. If the consumer rejects a clear, onIngestFailed must re-request
     // with that pre-clear stamp (a real server-issued value, < the server's cached clear stamp) so
@@ -626,7 +635,10 @@ class ColumnStateMap {
         leaf.recomputeNeeds();
     }
 
-    /** Re-serve attempts allowed per position per session before parking it. */
+    /** Re-serve attempts allowed per position per session before parking it. Note
+     *  (§18.1): under the Xaero dropped-tile heal, {@code ingestFailures} can reach
+     *  disc scale (~150k entries ≈ 3 MB) in a heavy far-radius session — bounded by
+     *  the disc, no longer only by rare failures. */
     static final int MAX_INGEST_FAILURES = 3;
 
     /**
@@ -686,6 +698,7 @@ class ColumnStateMap {
 
         int priorFailures = this.ingestFailures.addTo(packed, 1);
         if (priorFailures + 1 > MAX_INGEST_FAILURES) {
+            this.ingestParked++;
             long parkPreStamp = this.clearedResync.getOrDefault(packed, -1L);
             if (parkPreStamp > 0) {
                 // Parking a lost CLEAR: the consumer still HOLDS the pre-clear content (it
