@@ -319,10 +319,18 @@ final class XaeroMapCompat {
     /** The settings read threw once this session: both switches read as ON from then on
      *  (warned once). Session-scoped like the other latches; reset at session end. */
     private volatile boolean settingsGateBroken;
-    /** Xaero has latched an internal crash (its CrashHandler) — the native writer's
-     *  first gate; the bridge idles until it clears (it never does: Xaero re-throws it
-     *  on the next render pass). Diag-visible. */
+    /** Xaero's CrashHandler holds a crash — the native writer's first gate. It is a
+     *  ONE-TICK shield: Xaero's worker died mid-tick, and {@code checkForCrashes} at
+     *  the next tick start nulls the field and re-throws it on the client thread (the
+     *  client is about to crash). The bridge must not touch Xaero in that window.
+     *  Diag-visible while it holds; session-scoped. */
     private volatile boolean xaeroCrashed;
+    /** Xaero's {@code getCurrentWorldId()} the last pump saw — a server-initiated
+     *  reconfiguration (play → configuration) fires neither loader's disconnect event,
+     *  so a world-id change is the ONE signal that the queue's tiles belong to a
+     *  previous world (reviewer: the owed-rebuild map already carries the id; the
+     *  queue did not). Main thread only. */
+    private String lastWorldId;
     private volatile int pendingUpdatesGauge;
     /** Rotating drain start (the IncomingRequestRouter M4 precedent): without it a
      *  permanently-deferring queue prefix starves committable entries forever. */
@@ -426,6 +434,7 @@ final class XaeroMapCompat {
         this.consecutiveExtractFailures.set(0);
         this.dead = false;
         this.settingsGateBroken = false;
+        this.xaeroCrashed = false;
         this.sessionEndPending = true;
     }
 
@@ -441,6 +450,7 @@ final class XaeroMapCompat {
         this.pendingUpdatesGauge = 0;
         this.regionsWaiting = 0;
         this.consecutiveFailures = 0;
+        this.lastWorldId = null;
         if (this.registered && !this.enabled.getAsBoolean()) {
             this.deregistrar.accept(this.consumer);
             this.registered = false;
@@ -734,10 +744,16 @@ final class XaeroMapCompat {
                     || (boolean) this.h.isCacheOnlyMode.invoke(mapWorld)) {
                 return;
             }
-            if (this.h.getCurrentWorldId.invoke(mp) == null
-                    || (boolean) this.h.ignoreWorld.invoke(mp, world)) {
+            String worldId = (String) this.h.getCurrentWorldId.invoke(mp);
+            if (worldId == null || (boolean) this.h.ignoreWorld.invoke(mp, world)) {
                 return;
             }
+            if (this.lastWorldId != null && !this.lastWorldId.equals(worldId)) {
+                // Xaero moved to another world under a live LSS session (the
+                // reconfiguration residual): the queued tiles are the OLD world's.
+                this.droppedStale.addAndGet(clearQueue());
+            }
+            this.lastWorldId = worldId;
             Object dimensionId;
             Object mainSync = this.h.mainStuffSync.invoke(mp);
             synchronized (mainSync) {
@@ -762,8 +778,13 @@ final class XaeroMapCompat {
                     Object manager = g.getClientConfigManager().invoke(g.getConfigs().invoke(g.instance().invoke()));
                     Object l = g.getEffective().invoke(manager, g.loadNewChunks().invoke());
                     Object u = g.getEffective().invoke(manager, g.updateChunks().invoke());
-                    loadNew = !(l instanceof Boolean b) || b;
-                    update = !(u instanceof Boolean b) || b;
+                    // Native ORs the dimension's world-save mode (singleplayer — LSS
+                    // reaches it through the LAN hook) into BOTH switches (onRender
+                    // pc 679-733) and its both-off return excludes it too.
+                    boolean worldSave = (boolean) g.isUsingWorldSave().invoke(
+                            g.getCurrentDimension().invoke(mapWorld));
+                    loadNew = !(l instanceof Boolean b) || b || worldSave;
+                    update = !(u instanceof Boolean b) || b || worldSave;
                 } catch (Throwable t) {
                     if (t instanceof Error err && !(t instanceof AssertionError)) throw err;
                     this.settingsGateBroken = true;
@@ -1185,7 +1206,9 @@ final class XaeroMapCompat {
                 var runs = tile.overlays()[i];
                 if (runs != null) {
                     for (var run : runs) {
-                        Object overlay = this.h.newOverlay.invoke(run.state(), run.light(), run.glowing());
+                        // Overlay.getParametres packs light << 4 unmasked too (sweep B m7).
+                        byte runLight = (byte) Math.max(0, Math.min(15, run.light()));
+                        Object overlay = this.h.newOverlay.invoke(run.state(), runLight, run.glowing());
                         this.h.increaseOpacity.invoke(overlay, run.opacity());
                         Object original = this.h.getOriginal.invoke(overlayManager, overlay);
                         this.h.addOverlay.invoke(block, original);
@@ -1520,7 +1543,8 @@ final class XaeroMapCompat {
          *  name+arity because its version differs per line. */
         record SettingsGate(MethodHandle instance, MethodHandle getConfigs,
                             MethodHandle getClientConfigManager, MethodHandle getEffective,
-                            MethodHandle loadNewChunks, MethodHandle updateChunks) {}
+                            MethodHandle loadNewChunks, MethodHandle updateChunks,
+                            MethodHandle getCurrentDimension, MethodHandle isUsingWorldSave) {}
         final CrashGate crashGate;
         final SettingsGate settingsGate;
         /** {@code MapProcessor.getCurrentCaveLayer()} — the layer the map RENDERS
@@ -1776,7 +1800,7 @@ final class XaeroMapCompat {
                         lookup.unreflectGetter(worldMapClass.getField("crashHandler"))
                                 .asType(MethodType.methodType(Object.class)),
                         methodByName(lookup, crashHandlerClass, "getCrashedBy", 0));
-            } catch (ReflectiveOperationException | RuntimeException e) {
+            } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
                 missing.append("crash-gate ");
             }
             SettingsGate settings = null;
@@ -1785,6 +1809,7 @@ final class XaeroMapCompat {
                 Class<?> channelClass = resolver.resolve("xaero.lib.common.config.channel.ConfigChannel");
                 Class<?> managerClass = resolver.resolve("xaero.lib.client.config.ClientConfigManager");
                 Class<?> optionsClass = resolver.resolve("xaero.map.common.config.option.WorldMapProfiledConfigOptions");
+                Class<?> dimensionClass = resolver.resolve("xaero.map.world.MapDimension");
                 settings = new SettingsGate(
                         lookup.unreflectGetter(worldMapClass.getField("INSTANCE"))
                                 .asType(MethodType.methodType(Object.class)),
@@ -1794,21 +1819,25 @@ final class XaeroMapCompat {
                         lookup.unreflectGetter(optionsClass.getField("LOAD_NEW_CHUNKS"))
                                 .asType(MethodType.methodType(Object.class)),
                         lookup.unreflectGetter(optionsClass.getField("UPDATE_CHUNKS"))
-                                .asType(MethodType.methodType(Object.class)));
-            } catch (ReflectiveOperationException | RuntimeException e) {
+                                .asType(MethodType.methodType(Object.class)),
+                        virtual(lookup, mapWorldClass, "getCurrentDimension",
+                                MethodType.methodType(dimensionClass), Object.class),
+                        virtual(lookup, dimensionClass, "isUsingWorldSave",
+                                MethodType.methodType(boolean.class), boolean.class));
+            } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
                 missing.append("settings-gate ");
             }
             int version = 1;
             try {
                 version = tileClass.getField("CURRENT_WORLD_INTERPRETATION_VERSION").getInt(null);
-            } catch (ReflectiveOperationException | RuntimeException e) {
+            } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
                 missing.append("interpretation-version ");
             }
             MethodHandle caveLayer = null;
             try {
                 caveLayer = virtual(lookup, processorClass, "getCurrentCaveLayer",
                         MethodType.methodType(int.class), int.class);
-            } catch (ReflectiveOperationException | RuntimeException e) {
+            } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
                 missing.append("cave-layer ");
             }
             this.getCurrentCaveLayer = caveLayer;

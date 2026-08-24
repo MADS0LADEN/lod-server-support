@@ -8,7 +8,11 @@ public class MapWorld {
     public boolean cacheOnlyMode;
     public ResourceKey<Level> currentDimensionId;
 
+    public final MapDimension currentDimension = new MapDimension();
+
     public boolean isCacheOnlyMode() { return this.cacheOnlyMode; }
+
+    public MapDimension getCurrentDimension() { return this.currentDimension; }
 
     public ResourceKey<Level> getCurrentDimensionId() { return this.currentDimensionId; }
 }

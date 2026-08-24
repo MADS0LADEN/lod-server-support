@@ -1221,3 +1221,26 @@ byte-cap test's loop is bounded with its premise asserted; the height pin is its
 own per-line test; the tooltip no longer names `/lss clearcache` (the VSS rebrand
 cannot rewrite a slash command); the `interpretation-version`/`cave-layer`
 unbound paths are Tier-1-unreachable (recorded, live-checked via `optional_unbound`).
+
+The protocol-lens reviewer (no MAJORs, verified the crash gate's placement, the
+per-tile switch rule byte-exact against `writeChunk` pc 582-624, the cave-layer
+value as the native writer's own `writingLayer` source, the session-end split, the
+`PendingKey` semantics and the both-off path under the dimension gates) added:
+singleplayer's `isUsingWorldSave()` is OR'd into BOTH switches like native
+(`onRender` pc 679-733 — reached through the LAN hook; two more optional members);
+a world-id change under a live LSS session (the reconfiguration residual: neither
+loader fires its disconnect event) drops the queued tiles (`dropped_stale`) — the
+owed-rebuild map already carried the id, the queue did not; the optional binds
+tolerate `LinkageError` (the nested xaerolib is the one cross-mod bind); the
+overlay light gets the same clamp as the block light; the crash-gate comment is
+corrected (a ONE-TICK shield before `checkForCrashes` re-throws on the client
+thread — not a persistent latch) and `xaero_crashed` is session-scoped; pins: the
+rollback runs under the region monitor (the stub records the lock state), a
+latched crash skips the owed-rebuild flush too, world-save mode opens both
+switches, the world-id drop, and the 2-arg `getEffective` overload the real
+manager declares (the 1-arg bind must not pick it). Recorded, not changed: the
+rollback is unconditional where native keeps a tile chunk carrying an
+undiscovered-structure highlight (cosmetic; re-prepared on the next native
+write/reload); decode-thread extraction still runs while writing is off / a cave
+layer renders (a volatile "off" flag for `offerColumn` if it shows live); the
+`getCurrentCaveLayer`-unbound path stays Tier-1-unreachable.

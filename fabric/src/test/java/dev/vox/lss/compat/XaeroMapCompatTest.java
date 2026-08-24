@@ -138,6 +138,8 @@ class XaeroMapCompatTest {
         xaero.map.common.config.option.WorldMapProfiledConfigOptions.LOAD_NEW_CHUNKS.value = true;
         xaero.map.common.config.option.WorldMapProfiledConfigOptions.UPDATE_CHUNKS.value = true;
         xaero.map.region.MapTile.CURRENT_WORLD_INTERPRETATION_VERSION = 1;
+        xaero.map.WorldMap.INSTANCE.configs.manager.override = null;
+        xaero.map.WorldMap.INSTANCE.configs.manager.throwing = false;
         XaeroStubEvents.clear();
         XaeroMapCompat.resetFacadeForTest();
     }
@@ -1199,7 +1201,11 @@ class XaeroMapCompatTest {
         assertEquals(0, this.bridge.counterForTest("pending_updates"));
         this.processor.currentWorldId = "stub-world";
         offer(68, 64);
-        this.bridge.pump();
+        this.bridge.pump(); // the world-id change itself drops this queued tile (reviewer 1 #8)...
+        assertEquals(0, this.bridge.counterForTest("written") - 1, "premise: dropped as stale, not written");
+        offer(68, 64);
+        this.bridge.pump(); // ...and the next offer commits
+        assertEquals(2, this.bridge.counterForTest("written"));
         var fresh = new MapProcessor();
         fresh.world = this.worldToken;
         fresh.mainWorld = this.worldToken;
@@ -1623,6 +1629,8 @@ class XaeroMapCompatTest {
         assertEquals(1, this.bridge.counterForTest("skipped_settings"));
         assertNull(theRegion().getChunk(0, 0),
                 "the native rollback (writeChunk pc 1526-1537): no empty tile chunk left installed");
+        assertTrue(XaeroStubEvents.snapshot().contains("region.setChunk 0,0 null locked"),
+                "the rollback runs under the region monitor (the bridge's tightening): " + XaeroStubEvents.snapshot());
         xaero.map.common.config.option.WorldMapProfiledConfigOptions.LOAD_NEW_CHUNKS.value = true;
         offer(64, 64);
         this.bridge.pump();
@@ -1712,6 +1720,54 @@ class XaeroMapCompatTest {
         this.bridge.onSessionEnd();
         this.bridge.pump();
         assertFalse(this.bridge.describe().contains("settings_gate=broken"), "session-scoped");
+    }
+
+    @Test
+    void worldSaveModeOpensBothSwitchesLikeNative() {
+        // onRender pc 679-733: loadNew |= isUsingWorldSave(), update |= isUsingWorldSave()
+        // (singleplayer — reached through the LAN hook); the both-off return excludes it.
+        xaero.map.common.config.option.WorldMapProfiledConfigOptions.LOAD_NEW_CHUNKS.value = false;
+        xaero.map.common.config.option.WorldMapProfiledConfigOptions.UPDATE_CHUNKS.value = false;
+        this.processor.mapWorld.currentDimension.usingWorldSave = true;
+        offer(64, 64);
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("written"));
+        assertEquals(0, this.bridge.counterForTest("skipped_settings"));
+    }
+
+    @Test
+    void aLatchedCrashSkipsTheOwedRebuildFlushToo() {
+        this.bridge.updateIdlePumps = 1;
+        offer(64, 64);
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("pending_updates"));
+        xaero.map.WorldMap.crashHandler.crashedBy = new RuntimeException("latched");
+        this.bridge.pump();
+        this.bridge.pump();
+        assertEquals(0, this.bridge.counterForTest("buffer_updates"), "touch NOTHING — the flush is behind the gate too");
+        assertEquals(1, this.bridge.counterForTest("pending_updates"));
+        xaero.map.WorldMap.crashHandler.crashedBy = null;
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("buffer_updates"));
+    }
+
+    @Test
+    void aWorldIdChangeUnderALiveSessionDropsTheQueuedTiles() {
+        // The reconfiguration residual: neither loader fires its disconnect event, the
+        // LSS session stays live, Xaero moves to another world.
+        offer(64, 64);
+        this.bridge.pump();
+        assertEquals(1, this.bridge.counterForTest("written"));
+        this.processor.leafMapRegionReturnsNull = true; // keep the next entries queued
+        offer(68, 64);
+        offer(72, 64);
+        this.bridge.pump();
+        assertEquals(2, this.bridge.queuedForTest());
+        long staleBefore = this.bridge.counterForTest("dropped_stale");
+        this.processor.currentWorldId = "another-world";
+        this.bridge.pump();
+        assertEquals(0, this.bridge.queuedForTest(), "the queued tiles were the OLD world's");
+        assertEquals(staleBefore + 2, this.bridge.counterForTest("dropped_stale"));
     }
 
     @Test

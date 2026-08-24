@@ -9,6 +9,11 @@ public class ClientConfigManager {
     public Object override;
     public boolean throwing;
 
+    /** The real class also declares a 2-arg overload — methodByName(…, 1) must pick this one. */
+    public Object getEffective(ConfigOption option, Object profile) {
+        throw new IllegalStateException("the 2-arg overload must never be bound");
+    }
+
     public Object getEffective(ConfigOption option) {
         if (this.throwing) throw new IllegalStateException("armed getEffective throw");
         if (this.override != null) return this.override;

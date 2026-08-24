@@ -85,5 +85,11 @@ public class MapRegion extends LeveledRegion<Object> {
 
     public MapTileChunk getChunk(int x, int z) { return this.chunks[x][z]; }
 
-    public void setChunk(int x, int z, MapTileChunk chunk) { this.chunks[x][z] = chunk; }
+    /** Records the monitor state: the bridge's rollback is a chosen tightening (native's
+     *  own pc-1526 rollback runs outside the region monitor), pinned as "locked". */
+    public void setChunk(int x, int z, MapTileChunk chunk) {
+        this.chunks[x][z] = chunk;
+        dev.vox.lss.compat.XaeroStubEvents.record("region.setChunk " + x + "," + z
+                + (chunk == null ? " null" : "") + (Thread.holdsLock(this) ? " locked" : " unlocked"));
+    }
 }
