@@ -58,9 +58,36 @@ class XaeroWiringContractTest {
                 "init must initialize the bridge");
         assertTrue(modCompat.contains("XaeroMapCompat.clientTick()"),
                 "clientTick must forward to the bridge's pump");
+        assertTrue(modCompat.contains("XaeroMapCompat.renderFrame()"),
+                "renderFrame must forward to the bridge's frame rebuild slice (plan §17)");
         assertTrue(modCompat.contains("XaeroMapCompat.onDisconnect()"),
                 "onDisconnect must forward to the bridge's session teardown");
 
+    }
+
+    /**
+     * The frame slice (plan §17) is the FOURTH wiring leg: without it every rebuild
+     * falls back to tick cadence — all behavioral tests stay green (the fallback IS
+     * the test path) while the live client stutters exactly like the pre-§17 build.
+     */
+    @Test
+    void theRenderFrameGlueDrivesTheRebuildSlice() throws IOException {
+        String glue = Files.readString(SourcePaths.mainSource(
+                "dev/vox/lss/networking/client/ClientNetGlue.java"));
+        int frameBody = glue.indexOf("public static void onRenderFrame()");
+        assertTrue(frameBody >= 0, "onRenderFrame moved — retarget this pin");
+        assertTrue(glue.indexOf("ModCompat.renderFrame()", frameBody) > frameBody,
+                "onRenderFrame must call ModCompat.renderFrame() — the frame-cadence"
+                        + " rebuild slice");
+        String fabricGlue = Files.readString(SourcePaths.mainSource(
+                "dev/vox/lss/networking/client/LSSClientNetworking.java"));
+        // The event CLASS is per-line flavor (26.2 = LevelRenderEvents.END_MAIN, the
+        // 1.21.x/26.1 lines = WorldRenderEvents.END) — the invariant is that SOME
+        // frame-cadence event drives onRenderFrame.
+        assertTrue(fabricGlue.contains(".register(context -> ClientNetGlue.onRenderFrame())"),
+                "the Fabric per-frame registration is gone — rebuilds silently bunch back"
+                        + " onto the client tick (the NeoForge twin is pinned in"
+                        + " NeoForgeLoaderSeamContractTest)");
     }
 
     /**

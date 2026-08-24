@@ -806,6 +806,78 @@ class XaeroMapCompatTest {
         }
     }
 
+    // ---- the frame slice (plan §17 — the stutter round) ----
+
+    @Test
+    void rebuildsRunOnTheFrameAndTheTickFallbackStandsDown() {
+        this.bridge.updateIdlePumps = 1;
+        offer(64, 64);
+        this.bridge.pump(); // commit; the rebuild is owed
+        this.bridge.frameFlush(); // not due yet — but the frame scheduler is now known alive
+        assertEquals(1, this.bridge.counterForTest("frame_flushes"));
+        assertEquals(0, this.bridge.counterForTest("buffer_updates"));
+        assertEquals(1, this.bridge.counterForTest("pending_updates"));
+        this.bridge.pump(); // due now, but a frame ran since the last pump
+        assertEquals(0, this.bridge.counterForTest("buffer_updates"),
+                "the tick fallback must stand down while frames are flushing");
+        assertEquals(1, this.bridge.counterForTest("pending_updates"));
+        this.bridge.frameFlush(); // the frame does the rebuild
+        assertEquals(1, this.bridge.counterForTest("buffer_updates"));
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
+        this.bridge.pump(); // marker consumed + nothing owed: no double rebuild
+        assertEquals(1, this.bridge.counterForTest("buffer_updates"));
+        assertTrue(this.bridge.describe().contains("frame_flushes=2"),
+                "the live diag must show the frame scheduler firing");
+    }
+
+    @Test
+    void aFrameRebuildsAtMostOneTileChunk() {
+        this.bridge.updateIdlePumps = 1;
+        offer(64, 64);
+        offer(96, 64); // a second tile chunk in a second region
+        this.bridge.pump(); // both commit
+        this.bridge.frameFlush(); // arms the marker; nothing due yet
+        this.bridge.pump(); // ages both to due; the tick stands down
+        assertEquals(0, this.bridge.counterForTest("buffer_updates"));
+        this.bridge.frameFlush();
+        assertEquals(1, this.bridge.counterForTest("buffer_updates"),
+                "one recolor per frame — the whole point of the frame slice");
+        assertEquals(1, this.bridge.counterForTest("pending_updates"));
+        this.bridge.frameFlush();
+        assertEquals(2, this.bridge.counterForTest("buffer_updates"));
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
+    }
+
+    @Test
+    void theFrameSliceRespectsTheGateEnvelopeAndNeverVisitsRegions() {
+        this.bridge.updateIdlePumps = 1000; // rebuilds stay owed all test
+        offer(64, 64);
+        offer(68, 64); // same region, two owed tile chunks
+        this.bridge.pump();
+        var region = theRegion();
+        int visits = region.visits;
+        this.bridge.frameFlush();
+        this.bridge.frameFlush();
+        assertEquals(0, region.visits - visits,
+                "the park guard is tick-side: frames must not add region visits");
+        assertEquals(2, this.bridge.counterForTest("frame_flushes"));
+        // A crashed Xaero is never touched — and the frame marker must not arm.
+        xaero.map.WorldMap.crashHandler.crashedBy = new RuntimeException("armed");
+        this.bridge.frameFlush();
+        assertEquals(2, this.bridge.counterForTest("frame_flushes"));
+        xaero.map.WorldMap.crashHandler.crashedBy = null;
+        this.processor.writingPaused = true;
+        this.bridge.frameFlush();
+        assertEquals(2, this.bridge.counterForTest("frame_flushes"),
+                "writer-paused: the frame slice defers exactly like the pump ladder");
+        this.processor.writingPaused = false;
+        assertEquals(0, this.bridge.counterForTest("commit_failures"),
+                "gates defer, never fail");
+        this.bridge.frameFlush();
+        assertEquals(3, this.bridge.counterForTest("frame_flushes"),
+                "gates clear again: the slice resumes");
+    }
+
     private MapRegion theRegion() {
         assertEquals(1, this.processor.regions.size(), "one region in play");
         return this.processor.regions.values().iterator().next();

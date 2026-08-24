@@ -140,6 +140,9 @@ class NeoForgeLoaderSeamContractTest {
                 "the disconnect settle must be registered on ClientPlayerNetworkEvent.LoggingOut");
         assertTrue(Pattern.compile("ClientPlayerNetworkEvent\\.LoggingIn\\.class,\\s*e -> ClientNetGlue\\.onJoin\\(\\)").matcher(boot).find(),
                 "the join hook must be registered on ClientPlayerNetworkEvent.LoggingIn");
+        assertTrue(Pattern.compile("RenderFrameEvent\\.Post\\.class,\\s*e -> ClientNetGlue\\.onRenderFrame\\(\\)").matcher(boot).find(),
+                "the per-frame Xaero rebuild slice must stay registered (plan §17) — without it"
+                        + " rebuilds silently bunch back onto the client tick and stutter");
         assertTrue(boot.contains("ModCompat.init();"), "the compat ladder (Xaero, Voxy) must be initialized");
     }
 }

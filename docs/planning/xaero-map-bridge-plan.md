@@ -1244,3 +1244,63 @@ undiscovered-structure highlight (cosmetic; re-prepared on the next native
 write/reload); decode-thread extraction still runs while writing is off / a cave
 layer renders (a volatile "off" flag for `offerColumn` if it shows live); the
 `getCurrentCaveLayer`-unbound path stays Tier-1-unreachable.
+
+## 17. The frame slice (2026-08-24) — rebuild cadence moved off the tick
+
+The first live session on the §15 build (1.21.11, the v0.12.1 staging) reported
+the saver crash gone and "really bad stuttering" in its place. Mechanism, from
+the §16 record's own cost note: §15 moved the texture rebuilds onto the CLIENT
+TICK — commit budget (2 ms) + rebuild budget (2 ms) + borrow (up to another
+2 ms once the queue empties) + the one-rebuild overshoot ≈ 5-7+ ms on a single
+tick, every tick, for the duration of a map fill. v0.12.0 never stuttered
+because the flag path handed the same recolors to Xaero's own sweep, which runs
+per FRAME in idle frame time. Review A's recorded escalation lever ("the next
+lever is a per-FRAME flush hook") is now pulled — as the default, not as a
+cap-pinned escalation.
+
+The change:
+
+- `XaeroMapCompat.renderFrame()` (static facade → `frameFlush()`): a per-frame
+  entry that fast-outs on dead / session-end-pending / no-owed-rebuilds, then
+  runs `frameLadder()` — the pump ladder's gate envelope verbatim down to the
+  `mainStuffSync` dimension equality (a rebuild must never run under weaker
+  gates than the pump's flush did). The settings and cave-layer gates sit BELOW
+  the flush in the pump ladder (rebuilds are owed debt to already-committed
+  tile chunks, not new writes) and are skipped for the same reason. A crashed
+  Xaero returns untouched (the pump owns the `xaero_crashed` diag flag); a
+  changed world id returns (the pump owns the queue drop). Shares the pump's
+  containment + death latch.
+- The frame flush runs `flushPendingUpdates` with `maxRebuilds =
+  FRAME_MAX_REBUILDS` (1) and NO region visits: one 64×64 recolor per frame is
+  Xaero's own sweep grain — at 60-120 fps that is 60-120 tile chunks/s
+  (~1000-2000 coalesced tiles/s of drain), above the serve rate, while a frame
+  never pays more than one recolor.
+- The tick pump's flush (`tickFlush`) consumes a `frameFlushRan` marker: with a
+  frame flush since the previous pump it passes `maxRebuilds = 0` —
+  session-identity drops and wrong-dimension stall bookkeeping only, never
+  `rebuildTileChunk`. With NO frame since the last pump (loading screens,
+  hidden window, headless test JVMs — and every pre-§17 T1 test, which is why
+  the §15 suite runs unchanged) it falls back to the full §15 behavior,
+  budget-with-borrow included. `keepOwedRegionsVisited` stays tick-side
+  unconditionally (the 1 s park guard needs only pump cadence).
+- Wiring: `ClientNetGlue.onRenderFrame()` → `ModCompat.renderFrame()`. Fabric
+  registers a level-render event (26.2: `LevelRenderEvents.END_MAIN` —
+  `WorldRenderEvents` no longer exists there; the 1.21.x/26.1 ports use
+  `WorldRenderEvents.END`; the event CLASS is line flavor and any end-of-frame
+  point works — the slice renders nothing, so unlike surfaces row 15 there is
+  no ordering invariant to verify on a port). NeoForge registers
+  `RenderFrameEvent.Post`.
+- Instruments (diag): `frame_flushes` (the scheduler is alive — absent-live it
+  means the render hook is not firing and the tick fallback is doing the work),
+  `rebuild_ms` (total inside `updateBuffers`), `rebuild_max_us` (worst single
+  recolor).
+- Pins: three behavioral tests (frame does the rebuild + the tick stands down;
+  the one-per-frame cap; the gate envelope + no frame-side visits) and the
+  wiring pins in `XaeroWiringContractTest` (glue forwarders + the Fabric
+  registration by CALL — the event name deliberately unpinned) and
+  `NeoForgeLoaderSeamContractTest` (the `RenderFrameEvent.Post` listener).
+
+Worst-case pump during a fill returns to the §14 commit ceiling; the rebuild
+cost amortizes at ≤1 recolor per frame. The trade: below 20 fps the drain rate
+drops under what the tick fallback would have managed — accepted, the map
+trails instead of the client hitching.

@@ -13,6 +13,7 @@ import net.minecraft.network.chat.Component;
 import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
+import net.neoforged.neoforge.client.event.RenderFrameEvent;
 import net.neoforged.neoforge.common.NeoForge;
 
 import java.util.function.Consumer;
@@ -45,6 +46,10 @@ public final class LSSNeoClientBootstrap {
                 e -> ClientNetGlue.onDisconnect());
         NeoForge.EVENT_BUS.addListener(ClientTickEvent.Post.class,
                 e -> ClientNetGlue.onEndClientTick());
+        // The Xaero bridge's per-frame rebuild slice (plan §17); fires every frame,
+        // cheap no-op without owed rebuilds.
+        NeoForge.EVENT_BUS.addListener(RenderFrameEvent.Post.class,
+                e -> ClientNetGlue.onRenderFrame());
         NeoForge.EVENT_BUS.addListener(RegisterClientCommandsEvent.class,
                 LSSNeoClientBootstrap::registerClientCommands);
 

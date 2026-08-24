@@ -27,6 +27,12 @@ public final class ModCompat {
         XaeroMapCompat.clientTick();
     }
 
+    /** Per-frame forwarder (render thread) — the Xaero bridge's texture-rebuild
+     *  slice: one recolor per frame (xaero-map-bridge-plan.md §17). */
+    public static void renderFrame() {
+        XaeroMapCompat.renderFrame();
+    }
+
     /** Disconnect forwarder — a session's queued map tiles never outlive it. */
     public static void onDisconnect() {
         XaeroMapCompat.onDisconnect();
