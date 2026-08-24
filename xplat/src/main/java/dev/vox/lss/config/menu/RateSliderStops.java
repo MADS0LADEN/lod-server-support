@@ -1,4 +1,4 @@
-package dev.vox.lss.config;
+package dev.vox.lss.config.menu;
 
 import java.util.ArrayList;
 
@@ -11,16 +11,18 @@ import java.util.ArrayList;
  * 100 up to 3200 (~59 stops): fine where users actually throttle, coarse where the
  * numbers stop mattering.
  *
- * <p>Kept Sodium-import-free so ConfigValidationTest can classload it under
- * fabric-loader-junit (Sodium is compileOnly — {@code LSSConfigMenu} itself cannot
- * load there): the test pins the round-trip invariant — every nonzero stop must
- * survive the {@code LSSClientConfig.validate()} clamp unchanged, so the lowest
- * nonzero stop IS the clamp floor. A curve edit that breaks that reds Tier 1, not a
- * user report of the UI lying about the saved value.
+ * <p>Sodium-import-free and in xplat since the options-page generations round
+ * (sodium-options-page-generations-plan.md D1): the curve is catalog DATA that every
+ * renderer (the 0.8+ config-API walker and the legacy reflective builder) consumes,
+ * and ConfigValidationTest classloads it under fabric-loader-junit to pin the
+ * round-trip invariant — every nonzero stop must survive the
+ * {@code LSSClientConfig.validate()} clamp unchanged, so the lowest nonzero stop IS
+ * the clamp floor. A curve edit that breaks that reds Tier 1, not a user report of
+ * the UI lying about the saved value.
  */
-final class RateSliderStops {
+public final class RateSliderStops {
 
-    static final int[] STOPS = buildStops();
+    public static final int[] STOPS = buildStops();
 
     private RateSliderStops() {
     }
@@ -39,7 +41,7 @@ final class RateSliderStops {
      *  values above the top stop — legal, inert — read as the top stop). 0 = off maps
      *  only to stop 0, and stop 0 only to off: a tiny nonzero rate must never display
      *  as "Unlimited", nor off as a throttle. */
-    static int nearestIndex(int rate) {
+    public static int nearestIndex(int rate) {
         if (rate <= 0) {
             return 0;
         }

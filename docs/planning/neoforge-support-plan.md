@@ -531,8 +531,10 @@ a §6-protocol decision entry (not silently), with §5.5 as the floor.
 
 Tier 3 (no framework), the full soak suite, benchmark harness arms,
 Folia-class platform validation, per-release live-rig burn-in (the Modrinth
-rig stays Fabric), the Sodium config screen (config file + `/lsslod set`
-instead), the LAN integrated-server hook (a LAN-published NeoForge integrated
+rig stays Fabric), the Sodium **0.8+ config-API** page (Phase 4 of
+sodium-options-page-generations-plan.md — the legacy 0.6/0.7 Sodium options TABS DO
+render on NeoForge since 2026-08-23, minus the renderer-only far-player options;
+config file + `/lsslod set` remain the full surface), the LAN integrated-server hook (a LAN-published NeoForge integrated
 server does not start the service). Recorded in CLAUDE.md so nobody chases
 the gaps as regressions.
 

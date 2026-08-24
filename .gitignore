@@ -22,6 +22,12 @@ libs/
 logs/
 fabric/config/
 net/
+# ...but never the real-package-name TEST STUBS under a source tree (the bare `net/`
+# above silently dropped fabric/src/test/java/net/caffeinemc/** from a commit once —
+# sodium-options-page-generations-plan.md review; git needs the directory re-included
+# before its files can be).
+!**/src/**/net/
+!**/src/**/net/**
 org/
 research/
 bin/

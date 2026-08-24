@@ -11,6 +11,11 @@ package dev.vox.lss.networking.client;
  */
 public final class FarPlayerRenderer {
 
+    /** Whether THIS loader's tree renders far players (the options catalog hides the
+     *  renderer-only options where it does not — sodium-options-page-generations-plan.md
+     *  implementation review). NeoForge v1: the render path is a no-op stub. */
+    public static final boolean RENDER_AVAILABLE = false;
+
     private FarPlayerRenderer() {
     }
 

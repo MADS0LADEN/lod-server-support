@@ -70,6 +70,11 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class FarPlayerRenderer {
 
+    /** Whether THIS loader's tree renders far players (the options catalog hides the
+     *  renderer-only options where it does not — sodium-options-page-generations-plan.md
+     *  implementation review). The NeoForge twin's render path is a no-op stub. */
+    public static final boolean RENDER_AVAILABLE = true;
+
     /** Proxy entity-id base: far above vanilla's server-assigned counter AND disjoint
      *  from SeeU's 1_000_000_000 block (both installed must never collide). Each id is
      *  additionally probed against the live level before use. */

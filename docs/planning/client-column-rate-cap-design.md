@@ -120,7 +120,7 @@ Properties that make this the right shape:
 
 ## 4. Sodium slider
 
-Mirror the `lod_distance` pattern in `LSSConfigMenu` exactly:
+Mirror the `lod_distance` pattern in `LSSConfigMenu` exactly (SUPERSEDED 2026-08-23: the slider is now catalog DATA in `xplat/config/menu/ClientOptionCatalog` and `RateSliderStops` lives in that package — sodium-options-page-generations-plan.md):
 
 - `builder.createIntegerOption(Identifier.parse("lss:column_rate_limit"))`, own group on
   the existing page, after the distance group.
@@ -164,7 +164,7 @@ Mirror the `lod_distance` pattern in `LSSConfigMenu` exactly:
 - Client diag/trace: surface the active cap and `rate_gated` in the existing client
   diagnostics line + `/lss trace` fields, so a weak-client report shows whether the knob
   is set and firing.
-- `fabric/.../config/LSSConfigMenu.java` — the slider (§4).
+- `fabric/.../config/LSSConfigMenu.java` — the slider (§4). (Since 2026-08-23: `xplat/config/menu/ClientOptionCatalog` — the walker is generic.)
 - `assets/lss/lang/en_us.json` — three keys.
 - No server, wire, Paper, or soak-schema changes. `WANT_SET_BUDGET` and
   `WantSetBudgetInvariantTest` untouched.

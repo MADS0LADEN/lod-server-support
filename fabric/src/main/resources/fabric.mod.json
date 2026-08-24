@@ -30,7 +30,8 @@
   },
   "mixins": [
     "lss.mixins.json",
-    "lss-trace.mixins.json"
+    "lss-trace.mixins.json",
+    "lss-sodium-legacy.mixins.json"
   ],
   "jars": [
     {

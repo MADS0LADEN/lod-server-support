@@ -38,6 +38,20 @@ configurations {
     storeDeps
 }
 
+configurations {
+    // sodium-options-page-generations-plan.md §4 — see the dependencies' comments.
+    sodiumLegacyGolden {
+        canBeConsumed = false
+        canBeResolved = true
+        transitive = false
+    }
+    sodiumModernGolden {
+        canBeConsumed = false
+        canBeResolved = true
+        transitive = false
+    }
+}
+
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
     implementation "net.fabricmc:fabric-loader:${project.loader_version}"
@@ -63,6 +77,18 @@ dependencies {
     localRuntime "com.github.luben:zstd-jni:1.5.7-3"
     compileOnly "maven.modrinth:sodium:${sodium_version}"
     compileOnly "maven.modrinth:modmenu:${modmenu_version}"
+    // The legacy (0.6/0.7) Sodium options surface SodiumLegacySurfaceResolvesTest checks
+    // LegacySodiumPage.SURFACE against by NAME + ARITY (sodium-options-page-generations-
+    // plan.md §4): a PLAIN configuration, resolved outside loom and never on any compile
+    // or test classpath (the test opens the jar as a zip — a Sodium class on the T1
+    // classpath would be shadowed by the stub package anyway). Offline or unresolvable
+    // = the test skips itself (see the test task below).
+    sodiumLegacyGolden "maven.modrinth:sodium:${sodium_legacy_golden}"
+    // The 0.8+ INTERNAL deep-link surface SodiumConfigScreens.MODERN_SURFACE binds by
+    // name (ConfigManager/Config/ModOptions/VideoSettingsScreen) — checked the same way
+    // against the line's own compile artifact (this configuration exists only where the
+    // line pins one; a 0.7-only line leaves it unresolvable and the test skips).
+    sodiumModernGolden "maven.modrinth:sodium:${sodium_version}"
     // Compat validation arm: -Pbenchmark.moonrise=true puts Moonrise on the dev runtime
     // (the same Modrinth version issue #69 was reported against), so the soak harness can
     // drive the full dirty pipeline — the SerializableChunkData.copyOf hook, broadcast,
@@ -84,6 +110,23 @@ dependencies {
 
 test {
     useJUnitPlatform()
+    // SodiumLegacySurfaceResolvesTest's inputs: the legacy (0.6/0.7) and modern (0.8+)
+    // Sodium jars (gradle.properties sodium_legacy_golden / sodium_version). LENIENT
+    // artifact views resolve at execution and simply yield nothing offline, so a
+    // disconnected box still runs Tier 1 (the test skips with an assumption — but under
+    // CI=true it FAILS instead: a mistyped coordinate must not void the golden arm
+    // silently). No Project reference is captured in the task action.
+    def legacyGolden = configurations.sodiumLegacyGolden.incoming.artifactView { lenient = true }.files
+    def modernGolden = configurations.sodiumModernGolden.incoming.artifactView { lenient = true }.files
+    inputs.property "sodium_legacy_golden", project.sodium_legacy_golden
+    inputs.property "sodium_version", project.sodium_version
+    inputs.files(legacyGolden).optional()
+    inputs.files(modernGolden).optional()
+    doFirst {
+        systemProperty 'lss.sodiumLegacyGoldenJar', legacyGolden.find { it.name.endsWith('.jar') }?.absolutePath ?: ''
+        systemProperty 'lss.sodiumModernGoldenJar', modernGolden.find { it.name.endsWith('.jar') }?.absolutePath ?: ''
+        systemProperty 'lss.sodiumModernGoldenExpected', 'true'
+    }
     // GameTestEntrypointContractTest reads these at runtime (repo-walk); without declaring
     // them as inputs, adding a gametest class or editing the entrypoint list leaves the
     // task UP-TO-DATE locally and the contract never re-checks.

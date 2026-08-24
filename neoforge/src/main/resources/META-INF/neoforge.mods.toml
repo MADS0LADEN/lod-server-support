@@ -14,6 +14,9 @@ description='''Voxy multiplayer support (unofficial). Enables players with Voxy 
 [[mixins]]
 config="lss.neoforge.mixins.json"
 
+[[mixins]]
+config="lss-sodium-legacy.mixins.json"
+
 [[dependencies.lss]]
     modId="neoforge"
     type="required"
