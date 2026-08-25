@@ -776,7 +776,9 @@ def check_vss_pair_paper(lss_jar, vss_jar, problems):
     (main/api-version/folia; name rebrands since 2026-08-13) must be byte-identical. And the rebrand must actually have
     happened: the VSS jar carries vsslod / vss.admin / the Voxy description and NONE of the
     LSS tokens; the LSS jar carries the LSS tokens. The command name + permission node are
-    LOCAL (never on the wire), so this rebrand does not affect LSS<->VSS compatibility."""
+    LOCAL (never on the wire), so this rebrand does not affect LSS<->VSS compatibility.
+    The dual-spelling nodes (farplayers privacy, service gate) are the exception in the other
+    direction: both spellings must SURVIVE in both jars."""
     vbase = os.path.basename(vss_jar)
     try:
         ltext = _read(lss_jar, "plugin.yml")
@@ -815,6 +817,13 @@ def check_vss_pair_paper(lss_jar, vss_jar, problems):
     # lss.farplayers.hidden is deliberately NOT in this list: BOTH brand spellings ship
     # in BOTH jars since 2026-08-13 (Bukkit's undeclared-node op default made the rename
     # + cross-brand enforcement silently hide ops) — see plugin.yml + the vssJar comment.
+    # lss.use is exempt for the identical reason (the per-player service gate,
+    # requireServicePermission): the Java enforcement requires lss.use AND vss.use, so a
+    # rename here would leave the VSS jar declaring only vss.use while lss.use — declared
+    # `default: true`, i.e. held by everyone — resolves as an UNDECLARED node against
+    # Bukkit's op default, silently narrowing it to ops. The dual-spelling check below
+    # pins both nodes POSITIVELY in both jars, which is what actually fires if someone
+    # widens the rewrite to a generic `lss.` rule.
     for tok in ("lsslod", "lss.admin",
                 "LOD Server Support admin", "Access to LSS admin"):
         if tok not in ltext:
@@ -823,10 +832,24 @@ def check_vss_pair_paper(lss_jar, vss_jar, problems):
         if tok in vtext:
             problems.append(f"{vbase}: VSS plugin.yml still contains LSS token {tok!r} "
                             "— the rebrand rewrite no-opped")
-    for tok in ("vsslod", "vss.admin", "vss.farplayers.hidden", "Voxy Server Side"):
+    for tok in ("vsslod", "vss.admin", "vss.farplayers.hidden", "vss.use", "Voxy Server Side"):
         if tok not in vtext:
             problems.append(f"{vbase}: VSS plugin.yml is missing expected VSS token {tok!r} "
                             "— the rebrand did not fully apply")
+    # Dual-spelling service-gate nodes: BOTH must survive in BOTH jars. This is the factory
+    # guard the rename-exemption comment above only describes — a widened rewrite (a generic
+    # `lss.` -> `vss.` rule, or someone adding lss.use to the rename list) would silently
+    # ship a VSS jar whose lss.use declaration is gone. The node is declared `default: true`
+    # (everyone holds it); undeclared, it falls back to Bukkit's op default — so the first
+    # operator to arm requireServicePermission would black out every non-op at once.
+    for jar_text, jar_name in ((ltext, os.path.basename(lss_jar)), (vtext, vbase)):
+        for tok in ("lss.use", "vss.use"):
+            if tok not in jar_text:
+                problems.append(f"{jar_name}: plugin.yml is missing the service-gate node "
+                                f"{tok!r} — BOTH brand spellings must be declared in BOTH "
+                                "jars (the enforcement requires both, and Bukkit resolves an "
+                                "undeclared node to the op default, so a missing declaration "
+                                "denies every non-op)")
 
 
 # ---------------------------------------------------------------- brand.properties + wire
@@ -1658,9 +1681,17 @@ def _selftest():
                           "    default: false\n"
                           "  vss.farplayers.hidden:\n"
                           "    description: hidden (VSS spelling)\n"
-                          "    default: false\n")
+                          "    default: false\n"
+                          # Service-gate nodes, same dual-spelling rule (default true).
+                          "  lss.use:\n"
+                          "    description: receive LOD data\n"
+                          "    default: true\n"
+                          "  vss.use:\n"
+                          "    description: receive LOD data (VSS spelling)\n"
+                          "    default: true\n")
         # Mirror vssJar's exact rewrites (2026-08-13 shape: name/author rebrand too; the
-        # farplayers node is deliberately NOT renamed — both spellings ship in both jars).
+        # farplayers + service-gate nodes are deliberately NOT renamed — both
+        # spellings ship in both jars).
         VSS_PLUGIN_YML = (LSS_PLUGIN_YML
             .replace("name: LodServerSupport", "name: VoxyServerSide", 1)
             .replace("description: LSS plugin.",
@@ -1904,8 +1935,11 @@ def _selftest():
                   "permissions:\n  lss.admin:\n"
                   "    description: Access to LSS admin commands\n    default: op\n"
                   "  lss.farplayers.hidden:\n    description: hidden\n    default: false\n"
-                  "  vss.farplayers.hidden:\n    description: hidden\n    default: false\n")
-        # The 2026-08-13 rewrite shape: name/author rebrand; farplayers nodes NOT renamed.
+                  "  vss.farplayers.hidden:\n    description: hidden\n    default: false\n"
+                  "  lss.use:\n    description: receive LOD data\n    default: true\n"
+                  "  vss.use:\n    description: receive LOD data\n    default: true\n")
+        # The 2026-08-13 rewrite shape: name/author rebrand; the dual-spelling
+        # farplayers + service-gate nodes are NOT renamed.
         PY_VSS = (PY_LSS
                   .replace("name: LodServerSupport", "name: VoxyServerSide", 1)
                   .replace("description: LSS plugin.",

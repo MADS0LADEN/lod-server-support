@@ -61,6 +61,7 @@ Config files are generated during first run at `config/lss-server-config.json` o
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `enabled` | `true` | Enable LOD distribution |
+| `requireServicePermission` | `false` | **Paper/Folia only.** Serve LOD data only to players who hold **both** the `lss.use` and `vss.use` permissions — everyone else is told LOD is unavailable and stops asking, with no session created. Both nodes default to **on for everyone**, so turning this key on by itself changes nothing; you then take a node away from whoever should not be served, and revoking *either* spelling is enough (LuckPerms: `/lp group default permission set lss.use false`, then grant it back to the groups you do want). `false` skips the check entirely |
 | `lodDistanceChunks` | `512` | Max LOD distance in chunks |
 | `mbPerSecondLimitPerPlayer` | `25.0` | Per-player bandwidth cap in MiB/s (decimals like `12.5` work), counted **before** compression |
 | `mbPerSecondLimitGlobal` | `75.0` | Total bandwidth cap across all players in MiB/s, counted **before** compression |
