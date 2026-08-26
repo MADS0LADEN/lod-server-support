@@ -1,7 +1,11 @@
 # v0.13.0 — manual-test run sheet + release staging (2026-08-26)
 
-Everything below is STAGED; nothing has been tagged or published. The release
-run is yours, after the manual pass. State at handover: main merged (PR #245);
+**RELEASED 2026-08-26**: all five tags pushed one at a time (main first), all
+five release.yml runs green, notes headers verified rendered on GitHub, 11
+Modrinth versions live (loader lists match v0.12.0's per line). Remaining
+post-release: VSS publish (expired MODRINTH_PAT) + the Modrinth live-server
+deploy of the released 26.2 fabric jar. The sections below are the staging
+record. State at handover: main merged (PR #245);
 four port PRs merged to the canonical line branches; all gates green per line
 (T1/T2/checker/pre-flight/release_check/CI incl. Tier 3 where the line has it;
 fresh-backfill smokes on 26.1, 1.21.11, 1.21.1; hybrid-boundary green on main);
