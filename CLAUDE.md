@@ -8,8 +8,7 @@ LOD Server Support (LSS) — distributes LOD chunk data from servers to clients 
 
 ## Support tiers (v0.11.0+; docs/planning/neoforge-support-plan.md is normative)
 
-**Full** — Fabric + Paper on main (26.2): complete gauntlets (T1/T2/T3), 22-scenario
-soaks ×3 platforms, live-rig burn-in, first-priority triage. **Correct, not
+**Full** — Fabric + Paper on main (26.2): complete gauntlets (T1/T2/T3), 23-scenario soaks ×3 platforms, live-rig burn-in, first-priority triage. **Correct, not
 perfect** — the 26.1/1.21.11 lines: full builds + T1/T2 and representative smoke
 soaks, no live rig, no exhaustive gauntlets. **Best-effort** — NeoForge and the
 whole MC 1.21.1 line: they track the mainline feature set, but feature cuts are
@@ -454,7 +453,7 @@ Scenarios needing a base world auto-run `fresh-backfill` first. warm-rejoin, dir
 
 - `scripts/soak.sh` — orchestrator (stage → validate → run → collect → check)
 - `scripts/soak-scenarios/<name>.json` + `<name>-config.json` — driver timeline + sparse server-config overrides
-- `scripts/check_soak.py` — stdlib Python invariant checker (`--validate` pre-flight, post-run laws, per-run completion gates — a missing server `end` row OR a missing client `disconnect` row means that JVM died mid-run, `client_run_completion_violations` — `--selftest` 265 in-memory pass/catch cases incl. all four oldest named checks, the disconnect gate, the quiescence client mirror, and the xray config-key type branches). **The harness is v17-only:** `players[].backlog` is a required schema field and `service.superseded`/`range_filtered` are required + monotonic, so it will correctly reject any pre-v17 recording — re-record rather than debug.
+- `scripts/check_soak.py` — stdlib Python invariant checker (`--validate` pre-flight, post-run laws, per-run completion gates — a missing server `end` row OR a missing client `disconnect` row means that JVM died mid-run, `client_run_completion_violations` — `--selftest` 270 in-memory pass/catch cases incl. all four oldest named checks, the disconnect gate, the quiescence client mirror, and the xray config-key type branches). **The harness is v17-only:** `players[].backlog` is a required schema field and `service.superseded`/`range_filtered` are required + monotonic, so it will correctly reject any pre-v17 recording — re-record rather than debug.
 - `scripts/soak_report.py` — stdlib post-run anomaly digest (spikes/stalls, concerning-vs-mechanism counters, high-water marks, cadence/TPS, law margins, cross-identity audits); a lens, never a gate (`--strict` to exit nonzero on any anomaly; `--compare`, `--selftest`)
 - `scripts/check_move_trace.py` — stdlib validator for the move-desync tracer's JSONL (`--validate FILE...`, `--selftest` — 36 pass/catch cases over the shared `scripts/testdata/move-trace-rows.jsonl` fixture the Tier 1 goldens write; run it on collected traces BEFORE analysis)
 - `scripts/release_check.py` — release-jar safety gate (no dev-only benchmark/soak packages ship, incl. inside nested Jar-in-Jar entries and dev/vox/lss/common namespaces; stale-jar ambiguity guard + `--version` pinning; version expansion; mappings-namespace manifest; glob hygiene). Wired into `.github/workflows/build.yml` alongside the three `--selftest` runs.
