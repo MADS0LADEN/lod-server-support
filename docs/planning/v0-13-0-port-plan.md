@@ -1,4 +1,4 @@
-# v0.13.0 — port the 2026-08-24/25 stack to every line and prep the release (v1)
+# v0.13.0 — port the 2026-08-24/25 stack to every line and prep the release (v1.1 — Fable review folded)
 
 **Status: PLANNED** (user directive 2026-08-25: plan → 1-Fable review → implement →
 2-Opus review per support branch → stage the manual-test rigs; the RELEASE RUN
@@ -52,7 +52,13 @@ default true, composes under `enableIngestBackpressure`).
 | 1.21.1 | `support/mc1.21.1` @ 751555fb | ~/projects/lss-port-1.21.1 | best-effort (ships NeoForge; NO Tier 3) |
 
 The unqualified `support/mc26.1`/`support/mc1.21.11` branches are STALE
-(v0.8.1-era) — never target them. Divergence check: SpiralScanner +
+(v0.8.1-era) — never target them. **§1 SHAs are ORIGIN refs (review MAJOR 1):
+the LOCAL same-named branches are v0.12.0-era and LOCKED by leftover
+`/tmp/.../scratchpad/port-*` worktrees from a prior session. Pre-step before
+any port: remove those four /tmp worktrees (`git worktree remove --force` +
+`git worktree prune` in the primary repo), fast-forward the four local branches
+to origin, and base every `port/v0.13-<line>` branch explicitly on
+`origin/<canonical>`.** Divergence check: SpiralScanner +
 XaeroMapCompat are byte-identical to main's base on 26.1/1.21.10/1.21.11
 (cherry-picks expected clean); **1.21.1's XaeroMapCompat is DIVERGED** (the
 line's level-height/Identifier adaptations) — §12/§12.8 picks WILL conflict
@@ -60,6 +66,12 @@ there and must be resolved preserving the line flavor (§3.1).
 
 ## §2 Main landing
 
+0. **Version scrub (review MAJOR 2)**: commit on `feat/hybrid-scan` BEFORE the
+   PR — `gradle.properties` `mod_version` 0.12.1→0.13.0 and README's Sodium-page
+   sentence "from v0.12.1"→"from v0.13.0" (v0.12.1 never exists; without this
+   every manual-rig jar self-reports 0.12.1 while carrying v0.13.0 behavior).
+   The SAME scrub lands per line as a port adaptation commit (README is
+   diverged per line, so the main hunk won't carry).
 1. PR `feat/hybrid-scan` → `main`, merged with **`--merge`** (never squash —
    the port cherry-picks reference these SHAs, and squash orphans any
    already-picked state). Title: "v0.13.0: hybrid scan + Xaero backpressure
@@ -110,22 +122,33 @@ experience banked). Per line, in its existing `lss-port-<line>` worktree:
 - **CLAUDE.md per line**: each line's copy gets the same three scanner-site
   updates + the bridge-paragraph §12.8/§12.9 rewrite + flake-catalog entries,
   merged into ITS banner/hand-mirrored facts — never wholesale-copied.
-- **RequestProcessingService** (2 lines): verify the hunk exists identically
-  per line; it is main-shaped on all four (files identical pre-port).
+- **Expected pick conflicts beyond CLAUDE.md/scripts (review m3/n7)**:
+  e7706744 edits the five `release-tag-v0.12.1*.txt` files which exist ONLY on
+  main → modify/delete conflicts ×5 per line, resolve KEEP-DELETED; README is
+  diverged on all four tips and the stack edits its Xaero paragraph → per-line
+  manual merge; `RequestProcessingService` is diverged on 1.21.11/1.21.10/
+  1.21.1 (the 2-line javadoc hunk lands, just not identically); the 10-line
+  comment-only `AbstractPlayerRequestState` hunk is in the verify set too.
 
 ## §4 Gates per line (before its review)
 
 - T1: `:fabric:test -x runGameTest` — full suite green.
 - T2: `:fabric:runGameTest` green.
 - Checker: `check_soak.py --selftest` OK + `--validate hybrid-boundary` PASS.
-- Full pre-flight: `CI=true ./gradlew :fabric:build :paper:test :paper:shadowJar
-  [-Pneoforge on 1.21.1: :neoforge:build] -Pmod_version=0.13.0` +
-  `python3 scripts/release_check.py --version 0.13.0` prints OK.
+- Full pre-flight: **run each line's CLAUDE.md pre-flight command VERBATIM**
+  with `-Pmod_version=0.13.0` + `release_check.py --version 0.13.0` OK (review
+  m4: 26.1/1.21.11/1.21.10 carry `-x runClientGameTest`, ALL four lines
+  include `:neoforge:build` for the contract suite — the uniform command in v1
+  both launched unintended Tier 3 runs and dropped a gate).
   (JAVA_HOME: Java 21 on the 1.21.1 line, Java 25 elsewhere — per line docs.)
-- Smoke soak: `fresh-backfill` on 26.1 AND 1.21.11 (the correct-not-perfect
-  tier's representative smoke; box idle, Xvfb). 1.21.10: T1/T2 only (its v0.12
-  precedent). 1.21.1: T1/T2 + NeoForge gametest smoke. hybrid-boundary runs on
+- Smoke soak: `fresh-backfill` on 26.1, 1.21.11 AND 1.21.1 (review m5 — the
+  stack is a client scanner rewrite and 1.21.1 has no Tier 3; that line ran
+  soaks for its v0.12.0 port too). 1.21.10: T1/T2 + its build.yml Tier 3 job.
+  1.21.1 additionally: the NeoForge gametest smoke. hybrid-boundary runs on
   MAIN only (already green — 30 min/run is not a per-line smoke).
+- **Port-branch CI green** (review m5): the §3 push fires build.yml per line —
+  a green run (including the line's Tier 3 job where it exists) is a §4 gate,
+  checked before the line's review folds.
 - One soak red = consult the line's flake catalog FIRST (the WSL2 clock-step
   and A7 environmental entries apply on every line).
 
@@ -134,8 +157,11 @@ experience banked). Per line, in its existing `lss-port-<line>` worktree:
 Per line, TWO Opus reviewers in parallel, then fold + re-gate:
 - **Lens A — pick fidelity/completeness**: diff every cherry-pick against its
   main-line source commit; every deviation must be a line adaptation with a
-  recorded reason; no dropped hunks (the §18-heal deletion COMPLETE on the
-  line — zero surviving heal symbols); the seven scenario/checker registration
+  recorded reason; no dropped hunks. The §18-heal deletion check names its
+  TARGETS (review m6 — the kept DropReporter self-heal legitimately says
+  "heal"): zero survivors of `enableXaeroMapBridgeHeal`, the ledger/owed
+  structures and heal counters, and the ConfigValidationTest heal-key test
+  renamed to the backpressure key. The seven scenario/checker registration
   points all present; the contract row sorted.
 - **Lens B — line-flavor correctness**: the adaptations compile against the
   LINE's MC APIs and preserve its recorded flavor points (1.21.1's banner
@@ -158,15 +184,17 @@ Findings fold on the port branch; a MAJOR re-runs that line's gates.
 
 ## §7 v0.13.0 release prep (staged — the RUN is the user's)
 
-- Write the five notes files `docs/planning/release-tag-v0.13.0[+mc<ver>].txt`
-  (admin/user-facing voice, present tense, ### headers): Features — hybrid
-  scanning (near terrain fills in clean rings around you, far terrain streams
-  region-by-region), Xaero map backpressure (the map keeps up with big
-  downloads instead of dropping tiles; brief download pauses while the map is
-  busy are normal); Bug fixes — Xaero saver crash, rebuild stutter; the Sodium
-  settings page on older Sodium versions; Configuration — the two new keys +
-  defaults. Platform qualifiers per line (1.21.1 mentions NeoForge + the
-  best-effort tier per line policy).
+- Write the five notes files `docs/planning/release-tag-v0.13.0[-mc<ver>].txt`
+  (dash-form filenames — the catalog convention, review n8). **STYLE (user
+  directive 2026-08-25): SHORT — a few SINGLE-LINE bullets, player/server-
+  operator voice, zero internal detail** (no section refs, counters, mechanism
+  narrative). Content: hybrid scanning (near terrain fills in clean rings, far
+  terrain streams efficiently), the Xaero map keeping up with big downloads
+  (no more dropped tiles), the Xaero saver crash fix, the rebuild-stutter fix,
+  the Sodium settings page on older Sodium versions, the two new config keys
+  in one line — plus the standing one-line Compatibility boilerplate (mixed
+  versions compatible both directions; Folia experimental — review n9).
+  Platform qualifiers per the existing rules; 1.21.1 names NeoForge + tier.
 - Stage (in each line's worktree, NOT executed): the pre-flight command line
   and the tag command `git tag -a v0.13.0[+mc<ver>] -F <notes> --cleanup=verbatim`.
 - Release-run reminders for the user (from the catalog): push tags ONE AT A
@@ -218,3 +246,20 @@ Findings fold on the port branch; a MAJOR re-runs that line's gates.
 review ×4 + folds + re-gates. 4. Tag/notes staging + v0.12.1 tag deletion.
 5. Instance + server staging. 6. Hand over the run sheet. Memory updates at
 each settled stage.
+
+## §11 Plan-review fold (1-Fable, 2026-08-25)
+
+2 MAJORs (origin-vs-stale-local canonical refs + the /tmp worktree locks — §1
+pre-step; the unscrubbed `mod_version=0.12.1`/README phantom-version references
+— §2 step 0 + per-line), 4 MINORs (the e7706744 notes-file modify/delete
+conflicts + README in the expected-conflict list; per-line-verbatim pre-flights;
+the port-branch CI gate + 1.21.1 fresh-backfill; the heal-deletion check named
+by target symbols), 3 NITs (server-surface accounting, dash-form notes
+filenames + the §12.5 pointer, the Compatibility boilerplate) — all folded
+above. Verified sound by the reviewer: the 18-commit range is linear
+(no merges), the stack is wire-neutral and line-portable (zero line-flavored
+MC-API tokens in the new code), the 1.21.1 XaeroMapCompat divergence is ONE
+call site (`getMinBuildHeight`/`getMaxBuildHeight` — far smaller than v1
+feared), and the registration-point/contract/config claims all check out.
+The user's release-notes style directive (short single-line user-focused
+bullets) is folded into §7 and recorded in memory `release-notes-style`.
