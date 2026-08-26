@@ -1,3 +1,10 @@
+# SUPERSEDED (2026-08-24, feat/xaero-backpressure — hybrid-scan-plan.md §12.5.1):
+# these notes advertise the §18 dropped-tile heal and enableXaeroMapBridgeHeal,
+# both DELETED by the §12 backpressure round. Do NOT push the locally-cut v0.12.1
+# tags with this text: either re-cut the five tags after §12 lands (recommended —
+# the same symptom is fixed by pacing, the stronger note) or record a retraction.
+# The user decides (§12.5.1).
+
 ### Bug Fixes
 
 - **Fixes a client crash when writing LODs to Xaero's World Map** — Map writes could crash Xaero's map saver ("Trying to save cache for a region with cache not prepared"), about three times an hour on a busy client. The bridge now rebuilds map textures itself — one per rendered frame, on Xaero's own update cadence, so a busy map fill cannot stutter the client — and only while the map region is idle.
