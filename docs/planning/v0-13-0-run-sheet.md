@@ -8,6 +8,17 @@ fresh-backfill smokes on 26.1, 1.21.11, 1.21.1; hybrid-boundary green on main);
 2-Opus port reviews folded (0 code MAJORs on every line); the five local
 v0.12.1 tags DELETED.
 
+> **Re-staged 2026-08-26 (2nd pass): NeoForge Sodium 0.8+ options page.** After the
+> lss-test-neo-1.21.1 rig moved to the Sodium 0.8.12/Connector stack, the native
+> NeoForge jar gained the LSS page on Sodium 0.8+ (`[modproperties.lss]`
+> `sodium:config_api_user`; 2-Opus reviewed, 0 MAJORs; stub-parity golden vs the real
+> sodium-neoforge artifact now runs in CI). Landed on support/mc1.21.1 (67ac5b1d +
+> 3851e1ee) and ported to main (PR #252), 26.1 (064139d3), 1.21.11 (f70c5469);
+> 1.21.10 is legacy-Sodium-only (nothing to port). Pre-flights re-run green on the
+> four touched lines; the 1.21.1 release notes gained the NeoForge bullet; the neo
+> rig and the :25569 test-server staging carry the fixed jar (running JVMs keep the
+> old renamed handle — relaunch/restart to pick it up).
+
 ## 1. Manual test — one line at a time (server ports collide across lines)
 
 Per line: start the test servers from that line's worktree, launch the matching
@@ -25,7 +36,7 @@ their original versions from the published releases).
 | 26.1 | ~/projects/lss-port-26.1 | lss-test-26.1 (Fabric + Voxy 0.2.18-26.1.2) |
 | 1.21.11 | ~/projects/lss-port-1.21.11 | lss-test-1.21.11 (Fabric + Voxy 0.2.9) |
 | 1.21.10 | ~/projects/lss-port-1.21.10 | lss-test-1.21.10 (Fabric + Voxy 0.2.9) |
-| 1.21.1 | ~/projects/lss-port-1.21.1 | lss-test-1.21.1 (Fabric) AND lss-test-neo-1.21.1 (NeoForge + fork Voxy; the standard neoforge jar — the nosqlite workaround died with the v0.11.0 jarJar fix) |
+| 1.21.1 | ~/projects/lss-port-1.21.1 | lss-test-1.21.1 (Fabric) AND lss-test-neo-1.21.1 (NeoForge on the Sodium 0.8.12/Connector stack — m3t4f1v3 Voxy 0.2.15 + Connector 2.0.0-beta.14 + Forgified FAPI; the fork/Sodium-0.6.13 pairing is parked .disabled; standard neoforge jar — the nosqlite workaround died with the v0.11.0 jarJar fix) |
 
 ### What to look for (the new surface)
 
@@ -41,6 +52,10 @@ their original versions from the published releases).
   and HOVER THE XAERO TOGGLE — the rewritten tooltip is long (~767 chars) and
   the legacy renderer has a fixed pane (review flag; if it clips, I'll shorten
   the string per line).
+- On lss-test-neo-1.21.1 (the Sodium 0.8.12/Connector stack): Sodium's Options
+  screen must show the LSS entry (NEW at the 2nd re-stage — was config-file-only
+  there). Options save; the far-player render rows are hidden (NeoForge does not
+  render far players; "Share My Position" stays).
 - A/B lever if anything looks wrong: `enableRegionScan=false` in
   lss-client-config.json reverts to the legacy walk; `enableXaeroMapBackpressure=false`
   disarms the map pacing.
