@@ -14,21 +14,18 @@ Per line: start the test servers from that line's worktree, launch the matching
 Prism instance, join :25564 (Fabric) and/or :25566 (Paper), fly around, run
 `/lss diag`. Stop the servers (Ctrl+C) before switching lines.
 
-| line | worktree (servers: `./test-server.sh`) | Prism instance | client jar installed |
-|---|---|---|---|
-| 26.2 | ~/projects/lss-main-deploy | lss-test-26.2 | refreshed from merged main |
-| 26.1 | ~/projects/lss-port-26.1 | 26.1.2 | 0.13.0 rc |
-| 1.21.11 | ~/projects/lss-port-1.21.11 | 1.21.11 | 0.13.0 rc |
-| 1.21.10 | ~/projects/lss-port-1.21.10 | (none exists — see note) | — |
-| 1.21.1 | ~/projects/lss-port-1.21.1 | 1.21.1 (needs stack check — see note) | see note |
+The rigs are the dedicated `lss-test-*` Prism instances (correction 2026-08-26:
+an earlier draft mapped your general-purpose instances — those are untouched;
+`26.1.2` and `1.21.11` briefly got rc jars by mistake and were restored to
+their original versions from the published releases).
 
-- **1.21.10**: no Prism instance exists. Its port is byte-identical to main's
-  stack, CI (incl. Tier 3) is green — say the word if you want an instance
-  created for an eyeball anyway.
-- **1.21.1**: the instance currently carries NO LSS jar (the NeoForge
-  fork-Voxy stack used a nosqlite variant historically). Left untouched — tell
-  me which shape you want installed (standard rc vs nosqlite) or install by
-  hand from `~/projects/lss-port-1.21.1/fabric/build/libs/`.
+| line | worktree (servers: `./test-server.sh`) | Prism instance(s), all carrying the 0.13.0 rc |
+|---|---|---|
+| 26.2 | ~/projects/lss-main-deploy | lss-test-26.2 (Fabric + Voxy 0.2.18) |
+| 26.1 | ~/projects/lss-port-26.1 | lss-test-26.1 (Fabric + Voxy 0.2.18-26.1.2) |
+| 1.21.11 | ~/projects/lss-port-1.21.11 | lss-test-1.21.11 (Fabric + Voxy 0.2.9) |
+| 1.21.10 | ~/projects/lss-port-1.21.10 | lss-test-1.21.10 (Fabric + Voxy 0.2.9) |
+| 1.21.1 | ~/projects/lss-port-1.21.1 | lss-test-1.21.1 (Fabric) AND lss-test-neo-1.21.1 (NeoForge + fork Voxy; the standard neoforge jar — the nosqlite workaround died with the v0.11.0 jarJar fix) |
 
 ### What to look for (the new surface)
 
