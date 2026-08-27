@@ -244,6 +244,82 @@ class VoxyCompat {
         }
     }
 
+    // ---- alias-corroboration storage probe (cache-alias-keying-and- ----
+    // ---- reset-override-plan.md §2.2)                                ----
+
+    // OWN two-handle failure domain (VoxyCommon.getInstance +
+    // VoxyClientInstance.getStorageBasePath), deliberately NOT initResetDomain: the
+    // reset domain's renderer-holder rung is the known-unstable name, and its
+    // all-or-nothing resolution would fail the corroboration probe on exactly the
+    // Voxy versions where only the reset COMMAND should degrade. Same lazy
+    // 0/1/-1 pattern as the reset domain.
+    private static volatile int storageProbeState;
+    private static MethodHandle storageProbeGetInstance;
+    private static MethodHandle storageProbeGetBasePath;
+
+    /** Test seam: forget the resolved storage-probe domain. */
+    static void resetStorageProbeForTest() {
+        storageProbeState = 0;
+    }
+
+    private static boolean initStorageProbe() {
+        int state = storageProbeState;
+        if (state != 0) return state > 0;
+        try {
+            var lookup = MethodHandles.lookup();
+            Class<?> voxyCommonClass = classResolver.resolve("me.cortex.voxy.commonImpl.VoxyCommon");
+            Class<?> voxyInstanceClass = classResolver.resolve("me.cortex.voxy.commonImpl.VoxyInstance");
+            Class<?> clientInstanceClass = classResolver.resolve("me.cortex.voxy.client.VoxyClientInstance");
+            var getInstanceH = lookup.findStatic(voxyCommonClass, "getInstance",
+                    MethodType.methodType(voxyInstanceClass))
+                    .asType(MethodType.methodType(Object.class));
+            var basePathH = lookup.findVirtual(clientInstanceClass, "getStorageBasePath",
+                    MethodType.methodType(java.nio.file.Path.class))
+                    .asType(MethodType.methodType(java.nio.file.Path.class, Object.class));
+            // Assign only once BOTH resolved — a partial chain must read as absent.
+            storageProbeGetInstance = getInstanceH;
+            storageProbeGetBasePath = basePathH;
+            storageProbeState = 1;
+            return true;
+        } catch (Throwable e) {
+            if (e instanceof VirtualMachineError vme) throw vme;
+            storageProbeState = -1;
+            LSSLogger.warn("Voxy storage probe unavailable on this Voxy version — "
+                    + "cacheAddressAliases will fall back per connection (" + e + ")");
+            return false;
+        }
+    }
+
+    /**
+     * The live Voxy storage root's directory NAME, or null on ANY failure — probe
+     * unresolvable, no live instance, a null/rootless path, or a throw (contained;
+     * VirtualMachineErrors propagate). The alias corroboration compares this against
+     * the group's canonical (fail closed on null — plan §2.2). One log line of its
+     * own per call site expectation: the observation itself is the record.
+     */
+    static String observeStorageDirName() {
+        if (!initStorageProbe()) return null;
+        try {
+            Object instance = (Object) storageProbeGetInstance.invokeExact();
+            if (instance == null) {
+                LSSLogger.info("Voxy storage probe: no live Voxy instance to observe");
+                return null;
+            }
+            var path = (java.nio.file.Path) storageProbeGetBasePath.invokeExact(instance);
+            if (path == null || path.getFileName() == null) {
+                LSSLogger.info("Voxy storage probe: the live instance reports no storage root");
+                return null;
+            }
+            String name = path.getFileName().toString();
+            LSSLogger.info("Voxy storage probe: live root directory is '" + name + "'");
+            return name;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError vme) throw vme;
+            LSSLogger.warn("Voxy storage probe failed (" + t + ") — treating as unobservable");
+            return null;
+        }
+    }
+
     // ---- /lss reset: Voxy teardown + wipe + rebuild (v0.11.0 stage D — ----
     // ---- client-reset-command-and-cache-relocation-plan.md Part 1)      ----
 

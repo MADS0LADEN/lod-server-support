@@ -38,6 +38,26 @@ public final class ModCompat {
         XaeroMapCompat.onDisconnect();
     }
 
+    /** Whether the Voxy ingest bridge registered a consumer this launch — the alias
+     *  corroboration's "is there a Voxy partition to be coarser than" input
+     *  (cache-alias-keying-and-reset-override-plan.md §2.2). */
+    public static boolean isVoxyBridgeActive() {
+        return voxyLoaded;
+    }
+
+    /** The live Voxy storage root's directory name, or null when unobservable —
+     *  see {@code VoxyCompat.observeStorageDirName} (its own two-handle domain). */
+    public static String observeVoxyStorageDirName() {
+        if (!voxyLoaded) return null;
+        return VoxyCompat.observeStorageDirName();
+    }
+
+    /** Whether the Xaero map bridge is ARMED (flag ∧ installed ∧ resolved) — the alias
+     *  corroboration's hard fallback gate (Xaero's map store is per-address). */
+    public static boolean isXaeroBridgeArmed() {
+        return XaeroMapCompat.isArmed();
+    }
+
     /** The conditional {@code /lss diag} Xaero line, or null when Xaero is not
      *  installed (a detected-but-unresolvable Xaero renders {@code state=unavailable}
      *  — the drift case must be visible, not mistaken for "not installed"). */
