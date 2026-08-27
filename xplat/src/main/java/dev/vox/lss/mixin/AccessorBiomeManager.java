@@ -5,7 +5,8 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.gen.Accessor;
 
 /**
- * Issue #1: the world seed, client-side, without a protocol change.
+ * The world axis (cache-alias-keying-and-reset-override-plan.md §1.3): the obfuscated
+ * seed, client-side, without a protocol change.
  *
  * <p>The chain (bytecode-verified on 26.2): the server writes
  * {@code BiomeManager.obfuscateSeed(level.getSeed())} into {@code CommonPlayerSpawnInfo},
@@ -25,8 +26,9 @@ import org.spongepowered.asm.mixin.gen.Accessor;
  *
  * <p>MUST be registered in BOTH loaders' mixin configs. A missing NeoForge entry does
  * not fail loudly — the {@code instanceof} in {@link dev.vox.lss.seed.ClientWorldSeed}
- * simply never matches and NeoForge silently keeps the address key while Fabric moves to
- * the seed key. {@code SeedAccessorContractTest} pins both files for that reason.
+ * simply never matches and NeoForge silently keeps the bare address bucket while
+ * Fabric uses the world sub-bucket. {@code SeedAccessorContractTest} pins both files
+ * for that reason.
  */
 @Mixin(BiomeManager.class)
 public interface AccessorBiomeManager {

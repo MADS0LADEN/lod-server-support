@@ -67,7 +67,7 @@ class SeedAccessorContractTest {
         assertTrue(clientNode(config).contains("\"" + MIXIN + "\""),
                 MIXIN + " missing from the client node of " + config + " — NeoForge would "
                         + "silently fall back to the address cache key while Fabric uses "
-                        + "the seed key");
+                        + "the world sub-bucket");
     }
 
     @Test
