@@ -24,36 +24,39 @@ public class LSSClientConfig extends JsonConfig {
     public boolean enableRegionScan = true;
 
     public boolean receiveServerLods = true;
-    // Cache partition key (issue #1): key the column-stamp cache by the WORLD SEED
-    // instead of the connection address, so a proxy network reachable at several
-    // hostnames stops cold-filling one world once per entry address. The key format is
-    // "world-<16 lowercase hex>" — deliberately the same directory naming voxy-extra's
-    // seed mode writes, so the two mods' stores line up for human comparison (a shared
-    // literal, never a shared call: LSS reads no other mod's config and calls no other
-    // mod's API).
-    //
-    // DEFAULT FALSE, and the default is not timidity. LSS stores only STAMPS ("this
-    // column is fresh as of T"); the columns live in the LOD consumer. If LSS's
-    // partition is COARSER than the consumer's — which seed keying makes it whenever the
-    // consumer still partitions per address — LSS answers "already fresh", never
-    // re-asks, and the consumer's directory is empty: a permanent hole in the distant
-    // terrain that never self-heals. LSS cannot check how the consumer partitions
-    // (no cross-mod contract), so only YOU can say it is safe.
-    //
-    // Turn it on only when your LOD consumer also partitions its store by world seed.
-    //
-    // Never turn it on for a server that FAKES or ROTATES the hashed seed it sends at
-    // login: the key then changes every connection and each visit gets a fresh bucket
-    // (slower than the address key, never wrong). Servers with no real world — waiting
-    // rooms of the NanoLimbo family — send seed 0, which is ignored and falls back to
-    // the address key automatically; older AntiSeedCracker builds instead send a fixed
-    // 69, which is a legal seed hash and therefore cannot be detected, so those need the
-    // switch left off.
-    //
-    // Flipping it is safe in itself: '/lss reset' clears BOTH the address bucket and the
-    // seed bucket for the current connection, and the caches left under the other key
-    // are inert files, not corruption.
-    public boolean useWorldSeedCacheKey = false;
+    // The two-axis cache key's WORLD AXIS (docs/planning/cache-alias-keying-and-
+    // reset-override-plan.md §2.3): a remote session's column-stamp cache bucket gains
+    // a ".world-<16 lowercase hex>" suffix derived from vanilla's obfuscated seed (the
+    // sha256-derived value every vanilla login already carries — never the raw seed),
+    // so ONE ADDRESS whose world changes — a pre-generated map reset, a multi-world
+    // rotation, a proxy backend switch — stops smearing every world's stamps into one
+    // bucket (a pre-generated reset otherwise leaves stale "up to date" terrain that
+    // never self-heals by wall clock). Default TRUE: (address, seed) can only be FINER
+    // than any consumer partition derivable from the address — stock Voxy's own
+    // partition is exactly this pair — so the safe direction holds without opt-in.
+    // The sub-key derives fresh at every session build and dimension entry; seedless
+    // sessions (waiting rooms sending seed 0, single-player, Realms, an unreadable
+    // accessor) keep the bare address bucket. The first seeded session per address
+    // adopts an existing bare bucket once (warm upgrade); false = bare legacy naming
+    // for NEW state, but NOT a rollback lever after adoption — the adopted bucket
+    // stays under its world name and a switched-off session starts cold.
+    public boolean useWorldSubBuckets = true;
+    // The two-axis cache key's ALIAS AXIS (plan §2.2): groups of addresses that name
+    // ONE server (proxy networks reachable at several hostnames), e.g.
+    //   "cacheAddressAliases": [["play.example.com", "alt.example.com", "eu.example.com"]]
+    // The FIRST entry of a group is canonical: every member connection shares the
+    // canonical entry's cache bucket, so the world cold-fills once instead of once per
+    // entry address. Matching is trim+lowercase only — no default-port strip (SRV
+    // resolution can make a.com and a.com:25565 different servers) — and the canonical
+    // must be port-free (voxy-extra substitutes it verbatim into a directory name).
+    // GUARDED per connection: with the Voxy ingest bridge active the group applies only
+    // when Voxy's own storage root corroborates it (voxy-extra's LoD Mirror configured
+    // with the same group, first entries identical) — an alias applied to LSS's stamps
+    // alone would leave them COARSER than Voxy's per-address store, a permanent hole.
+    // While the Xaero map bridge is armed the group never applies (Xaero has no alias
+    // support). Fallback is always the typed address: finer, never wrong. Malformed
+    // groups drop whole with one warning at load.
+    public java.util.List<java.util.List<String>> cacheAddressAliases = new java.util.ArrayList<>();
     public int lodDistanceChunks = 0;
     // The §3 unknown-identity fallback ladder's TERMINAL default (protocol 20,
     // cross-version-identity-encoding-plan.md): a v20 identity this client's registries
@@ -262,5 +265,19 @@ public class LSSClientConfig extends JsonConfig {
         } else {
             lodColumnsPerSecondLimit = Math.clamp(lodColumnsPerSecondLimit, 10, 100_000);
         }
+        // Alias-axis validation (cache-alias-keying-and-reset-override-plan.md §2.2):
+        // a malformed group drops WHOLE with one warning (the crossVersionBlockFallbacks
+        // fail-open convention) and the field is rewritten to the survivors, so session
+        // code re-reading it gets an already-clean shape (its re-validation is silent).
+        if (cacheAddressAliases == null) {
+            cacheAddressAliases = new java.util.ArrayList<>();
+        }
+        var survivingGroups = dev.vox.lss.networking.client.CacheKeyAliases.validated(
+                cacheAddressAliases, dev.vox.lss.common.LSSLogger::warn);
+        var cleaned = new java.util.ArrayList<java.util.List<String>>();
+        for (var group : survivingGroups) {
+            cleaned.add(new java.util.ArrayList<>(group.membersRaw()));
+        }
+        cacheAddressAliases = cleaned;
     }
 }

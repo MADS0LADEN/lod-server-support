@@ -71,6 +71,45 @@ class ClientResetSubtreeTest {
                 "voxy-force takes exactly 'confirm': " + force.getChildren());
     }
 
+    /** The node→(confirmed, force) mapping, executed against the dispatch seam: the
+     *  four forms must map to exactly the four flag pairs, or a loader could parse a
+     *  command into the wrong stage (plan §3.2's sink pin). */
+    @Test
+    void everyFormDispatchesItsExactFlagPair() throws Exception {
+        var calls = new java.util.ArrayList<String>();
+        var dispatcher = new CommandDispatcher<Object>();
+        dispatcher.register(LiteralArgumentBuilder.<Object>literal("lss")
+                .then(ClientCommandActions.resetSubtree(
+                        LiteralArgumentBuilder::literal, source -> component -> { },
+                        (feedback, confirmed, force) ->
+                                calls.add(confirmed + "/" + force))));
+        for (String command : List.of(
+                "lss reset",
+                "lss reset confirm",
+                "lss reset voxy-force",
+                "lss reset voxy-force confirm")) {
+            dispatcher.execute(command, new Object());
+        }
+        assertEquals(List.of("false/false", "true/false", "false/true", "true/true"), calls);
+    }
+
+    /** Both loaders must hang the SHARED subtree, not a hand-copied one — the whole
+     *  point of the builder (source-pinned, the gametest-entrypoint contract shape). */
+    @Test
+    void bothLoadersUseTheSharedSubtree() throws Exception {
+        for (String file : List.of(
+                "fabric/src/main/java/dev/vox/lss/networking/client/LSSClientCommands.java",
+                "neoforge/src/main/java/dev/vox/lss/neoforge/LSSNeoClientBootstrap.java")) {
+            String source = java.nio.file.Files.readString(
+                    dev.vox.lss.testutil.SourcePaths.repoFile(file));
+            assertTrue(source.contains("ClientCommandActions.resetSubtree("),
+                    file + " must build its reset tree through the shared subtree");
+            assertFalse(source.contains("literal(\"voxy-force\")"),
+                    file + " must not hand-roll the voxy-force literal beside the "
+                            + "shared builder");
+        }
+    }
+
     /** Every node is executable — a literal with no command is a dead end in game. */
     @Test
     void everyNodeInTheSubtreeIsExecutable() {

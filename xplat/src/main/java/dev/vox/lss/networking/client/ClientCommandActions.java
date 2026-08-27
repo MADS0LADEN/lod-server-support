@@ -75,17 +75,19 @@ public final class ClientCommandActions {
                                         + "(the wipe is IO-contained regardless)");
                     }
                 },
-                // A22's replay / residual-state guard travels with the call: only this
-                // method knows whether a live LSS session backs the connection, and without
-                // one the Voxy half must not derive a seed-named wipe target at all.
-                forceWipe -> dev.vox.lss.compat.ModCompat.resetVoxyLods(forceWipe, manager != null),
-                () -> dev.vox.lss.compat.ModCompat.probeVoxyStorage(manager != null),
+                dev.vox.lss.compat.ModCompat::resetVoxyLods,
+                dev.vox.lss.compat.ModCompat::probeVoxyStorage,
                 () -> {
                     if (manager != null) manager.flushCache();
                 },
                 ColumnCacheStore::clearAll,
                 FarPlayerClientSupport::resetAndResubscribe,
-                line -> feedback.accept(Component.literal(line).withStyle(ChatFormatting.GOLD))),
+                line -> feedback.accept(Component.literal(line).withStyle(ChatFormatting.GOLD)),
+                // The force grant's connection identity: the live ClientPacketListener
+                // (null = the no-session sentinel — a no-session grant matches only a
+                // still-no-session confirm).
+                () -> (Object) net.minecraft.client.Minecraft.getInstance().getConnection(),
+                System::nanoTime),
                 confirmed, forceVoxyWipe);
     }
 
@@ -107,20 +109,37 @@ public final class ClientCommandActions {
     public static <S> LiteralArgumentBuilder<S> resetSubtree(
             Function<String, LiteralArgumentBuilder<S>> literal,
             Function<S, Consumer<Component>> feedback) {
+        return resetSubtree(literal, feedback, ClientCommandActions::runReset);
+    }
+
+    /** The node→(confirmed, force) mapping — a dispatch seam so the contract test can
+     *  EXECUTE all four forms against a recorder (executing the production sink would
+     *  run a real reset). */
+    @FunctionalInterface
+    interface ResetDispatch {
+        void reset(Consumer<Component> feedback, boolean confirmed, boolean forceVoxyWipe);
+    }
+
+    static <S> LiteralArgumentBuilder<S> resetSubtree(
+            Function<String, LiteralArgumentBuilder<S>> literal,
+            Function<S, Consumer<Component>> feedback,
+            ResetDispatch dispatch) {
         return literal.apply("reset")
-                .executes(context -> dispatchReset(context, feedback, false, false))
+                .executes(context -> dispatchReset(context, feedback, dispatch, false, false))
                 .then(literal.apply("confirm")
-                        .executes(context -> dispatchReset(context, feedback, true, false)))
+                        .executes(context -> dispatchReset(context, feedback, dispatch, true, false)))
                 .then(literal.apply("voxy-force")
-                        .executes(context -> dispatchReset(context, feedback, false, true))
+                        .executes(context -> dispatchReset(context, feedback, dispatch, false, true))
                         .then(literal.apply("confirm")
-                                .executes(context -> dispatchReset(context, feedback, true, true))));
+                                .executes(context ->
+                                        dispatchReset(context, feedback, dispatch, true, true))));
     }
 
     private static <S> int dispatchReset(CommandContext<S> context,
                                          Function<S, Consumer<Component>> feedback,
+                                         ResetDispatch dispatch,
                                          boolean confirmed, boolean forceVoxyWipe) {
-        runReset(feedback.apply(context.getSource()), confirmed, forceVoxyWipe);
+        dispatch.reset(feedback.apply(context.getSource()), confirmed, forceVoxyWipe);
         return Command.SINGLE_SUCCESS;
     }
 
@@ -262,6 +281,13 @@ public final class ClientCommandActions {
                 manager.getGovernedRateLabel(), manager.getRateGated()
         )).withStyle(ChatFormatting.GRAY));
 
+        // The two-axis cache key (cache-alias-keying-and-reset-override-plan.md §2.1):
+        // both axes and the reason branch.
+        var cacheLine = manager.describeCacheKey();
+        if (cacheLine != null) {
+            feedback.accept(Component.literal("Cache: " + cacheLine)
+                    .withStyle(ChatFormatting.GRAY));
+        }
         // Xaero map bridge (issue #223, conditional slot — present only when Xaero's
         // World Map was detected at init; the Summary-line precedent).
         var xaeroLine = dev.vox.lss.compat.ModCompat.xaeroDiagLine();

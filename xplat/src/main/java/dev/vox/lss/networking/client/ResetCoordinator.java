@@ -4,7 +4,10 @@ import dev.vox.lss.common.Brand;
 import dev.vox.lss.compat.ModCompat;
 import dev.vox.lss.compat.VoxyStorageOverride;
 
+import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
 /**
@@ -25,22 +28,49 @@ import java.util.function.Supplier;
  * chunk loading — so it is gated on an explicit {@code confirm} token. With an active
  * LSS session the single-step command stands: the wipe is recoverable by construction.
  *
- * <p>Issue #4 adds a SECOND confirm-gated form, {@code reset voxy-force}, for the case
- * where a storage override made the Voxy disk wipe fail-safe out. It reuses the same
- * two-stage shape: unconfirmed it only PROBES (shows both storage roots and deletes
- * nothing); confirmed it runs this very sequence with the ladder's derived-root
- * cross-check waived. The default path — everything reachable without typing
- * {@code voxy-force} — is untouched.
+ * <h2>The force grant (plan §3.2)</h2>
+ * {@code reset voxy-force} is the escape hatch for a declined wipe, and its two stages
+ * are bound by a one-shot {@link ForceGrant}: stage 1 probes read-only, runs the
+ * containment fence READ-ONLY first (an outside-fence root prints "cannot be wiped even
+ * with force" and arms NOTHING), then shows "stage 2 deletes exactly: &lt;live root&gt;"
+ * and arms. Stage 2 proceeds only when a grant exists, is under 60 s old, matches the
+ * CONNECTION (listener object identity; null is the no-session sentinel), and
+ * {@code samePath}-equals the FRESHLY probed live root; the grant is consumed either
+ * way, and any mismatch re-prompts (re-arming where armable) and deletes nothing. A
+ * direct {@code confirm} with no grant IS stage 1. Disconnect clears the grant — but
+ * identity + disconnect are best-effort belts: <b>the stage-2 samePath re-probe is the
+ * shown==wiped invariant</b> (both stages run on the main client thread). Force waives
+ * exactly the derived-root comparison; the containment fence applies unchanged, and the
+ * no-session branch discloses the ALL-servers cache clear exactly like the plain path.
  */
 final class ResetCoordinator {
 
-    /** The Voxy half, parameterised by issue #4's force flag. */
+    /** The Voxy half, parameterised by the force flag. */
     @FunctionalInterface
     interface VoxyReset {
         ModCompat.VoxyResetReport reset(boolean forceWipe);
     }
 
-    /** Injectable dependencies; production wiring lives in {@link LSSClientCommands}. */
+    /** The armed stage-1 evidence: the exact root the user was shown, when, and for
+     *  which connection. One-shot — stage 2 consumes it valid or not. */
+    record ForceGrant(Path normalizedLiveRoot, long armedAtNanos, Object connectionIdentity) {
+    }
+
+    static final long FORCE_GRANT_TTL_NANOS = 60_000_000_000L;
+
+    private static final AtomicReference<ForceGrant> FORCE_GRANT = new AtomicReference<>();
+
+    /** DISCONNECT belt (the gate calls this): a grant never survives its connection. */
+    static void clearForceGrant() {
+        FORCE_GRANT.set(null);
+    }
+
+    /** Test seam: the currently armed grant, or null. */
+    static ForceGrant peekForceGrantForTest() {
+        return FORCE_GRANT.get();
+    }
+
+    /** Injectable dependencies; production wiring lives in {@code ClientCommandActions}. */
     record Deps(boolean managerActive,
                 Runnable drainAndAwaitDecode,
                 VoxyReset voxyReset,
@@ -48,7 +78,9 @@ final class ResetCoordinator {
                 Runnable lssFlush,
                 Runnable clearAllCaches,
                 Runnable farPlayerResubscribe,
-                Consumer<String> feedback) {}
+                Consumer<String> feedback,
+                Supplier<Object> connectionIdentity,
+                LongSupplier nanoTime) {}
 
     /** The default (never-forcing) entry point — {@code /lss reset [confirm]}. */
     static boolean run(Deps deps, boolean confirmed) {
@@ -59,12 +91,28 @@ final class ResetCoordinator {
      *  unconfirmed destructive branch replied with its prompt only). */
     static boolean run(Deps deps, boolean confirmed, boolean forceVoxyWipe) {
         if (forceVoxyWipe && !confirmed) {
-            // Stage 1 of the override: show the path that stage 2 would delete. The probe
-            // is read-only by construction — nothing is drained, torn down or deleted
-            // until the user comes back with the confirm token.
-            VoxyStorageOverride.forcePromptLines(deps.voxyStorageProbe().get(), deps.managerActive())
-                    .forEach(deps.feedback());
-            return false;
+            return forceStage1(deps);
+        }
+        if (forceVoxyWipe) {
+            // Stage 2: consume the grant EITHER WAY, then re-probe and demand the exact
+            // root the user was shown. The re-probe is the invariant; the TTL and the
+            // connection identity are the belts.
+            ForceGrant grant = FORCE_GRANT.getAndSet(null);
+            var probe = deps.voxyStorageProbe().get();
+            boolean valid = grant != null
+                    && deps.nanoTime().getAsLong() - grant.armedAtNanos() < FORCE_GRANT_TTL_NANOS
+                    && grant.connectionIdentity() == deps.connectionIdentity().get()
+                    && probe.liveRoot() != null
+                    && VoxyStorageOverride.samePath(grant.normalizedLiveRoot(), probe.liveRoot());
+            if (!valid) {
+                deps.feedback().accept(grant == null
+                        ? "No armed voxy-force confirmation — showing stage 1 instead "
+                                + "(nothing was deleted):"
+                        : "The voxy-force confirmation is no longer valid (expired, a "
+                                + "different connection, or the storage root changed) — "
+                                + "showing stage 1 again (nothing was deleted):");
+                return forceStage1(deps);
+            }
         }
         if (!deps.managerActive()) {
             if (!confirmed) {
@@ -98,6 +146,32 @@ final class ResetCoordinator {
         return true;
     }
 
+    /**
+     * Stage 1: read-only probe, fence pre-check, prompt — and arm the grant only for a
+     * root stage 2 could actually wipe (present AND inside the containment fence).
+     * Nothing is drained, torn down or deleted here.
+     */
+    private static boolean forceStage1(Deps deps) {
+        var probe = deps.voxyStorageProbe().get();
+        boolean armable = probe.voxyPresent()
+                && probe.liveRoot() != null
+                && probe.verdict() != VoxyStorageOverride.Verdict.NO_INSTANCE
+                && probe.verdict() != VoxyStorageOverride.Verdict.UNAVAILABLE
+                && probe.containedForWipe();
+        if (armable) {
+            FORCE_GRANT.set(new ForceGrant(
+                    probe.liveRoot().toAbsolutePath().normalize(),
+                    deps.nanoTime().getAsLong(),
+                    deps.connectionIdentity().get()));
+        } else {
+            // A dead-end prompt must not leave an earlier grant armed behind it.
+            FORCE_GRANT.set(null);
+        }
+        VoxyStorageOverride.forcePromptLines(probe, deps.managerActive(), armable)
+                .forEach(deps.feedback());
+        return false;
+    }
+
     /** The last containment belt (stage-D review m2): a throw escaping the Voxy half
      *  must never skip the LSS flush — a wiped Voxy plus surviving LSS stamps is the
      *  persisted-false-stamps hole the feedback branches exist to prevent. */
@@ -113,24 +187,20 @@ final class ResetCoordinator {
     }
 
     /**
-     * Issue #4: a declined disk wipe leaves LODs on disk that the user may want to remove
-     * by hand, so the feedback names both roots — the SAME lines the client log got, from
+     * A declined disk wipe leaves LODs on disk that the user may want to remove by
+     * hand, so the feedback names both roots — the SAME lines the client log got, from
      * the same assembler.
-     *
-     * <p>A22 (issue #1) adds the seed-derived root to the same lines when this connection
-     * has one, so the report never understates what {@code /lss reset} touched.
      *
      * <p>The trigger is {@code wipeDeclined}, NOT the {@code RESET_WIPE_SKIPPED} outcome.
      * A wipe the cross-check refused can still finish as UNAVAILABLE, SHUTDOWN_FAILED or
-     * RESTART_FAILED when a later rung fails, and the original #4 implementation gave
-     * those users a full report in the client log and not one word in chat. The flag is
-     * set exactly where the log emits, so the two cannot diverge.
+     * RESTART_FAILED when a later rung fails, and those users need the report just as
+     * much. The flag is set exactly where the log emits, so the two cannot diverge.
      */
     private static void emitStorageDetail(Deps deps, ModCompat.VoxyResetReport report,
                                           boolean forceVoxyWipe) {
         if (!report.wipeDeclined()) return;
-        VoxyStorageOverride.wipeSkippedLines(report.liveRoot(), report.expectedRoot(),
-                report.seedRoot(), !forceVoxyWipe).forEach(deps.feedback());
+        VoxyStorageOverride.wipeSkippedLines(report.verdict(), report.liveRoot(),
+                report.expectedRoot(), !forceVoxyWipe).forEach(deps.feedback());
     }
 
     /** The per-outcome Voxy prefix of the feedback line. The UNAVAILABLE and

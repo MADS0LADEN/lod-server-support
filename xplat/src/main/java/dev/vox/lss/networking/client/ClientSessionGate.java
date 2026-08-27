@@ -173,6 +173,10 @@ final class ClientSessionGate {
         this.v16CompatEnabled = enableV16ServerCompat;
         this.v19CompatEnabled = enableV19ServerCompat;
         V16ClientWire.reset();
+        // The alias axis's per-session latch resets HERE and not at disconnect: a
+        // play→config reconfiguration fires neither loader's disconnect, and JOIN is
+        // the one event that reliably brackets a play session (plan §2.1, §9 M-B2).
+        AliasLatch.resetForJoin();
 
         if (!receiveServerLods) return;
         if (localIntegratedServer) return;
@@ -486,6 +490,9 @@ final class ClientSessionGate {
         this.sessionVersion = 0;
         this.isV16Server = false;
         V16ClientWire.reset();
+        // A voxy-force grant never survives its connection (best-effort belt — the
+        // stage-2 samePath re-probe is the real invariant; plan §3.2).
+        ResetCoordinator.clearForceGrant();
         // A trace belongs to the session it was started in. It used to survive
         // disconnect, server switches and world reloads with no size cap and no
         // reminder — and its 1 Hz net event kept sending a ping packet to whatever

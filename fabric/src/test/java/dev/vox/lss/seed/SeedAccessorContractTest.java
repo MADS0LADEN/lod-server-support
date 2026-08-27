@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Issue #1: the {@code @Accessor} that reads the world seed must target a field that really
+ * The world axis (plan §2.3): the {@code @Accessor} that reads the obfuscated seed must target a field that really
  * exists, and must be registered on BOTH loaders.
  *
  * <p>Both halves exist because both failure modes are SILENT.
@@ -20,14 +20,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <ul>
  *   <li><b>A renamed field.</b> A source-text {@code contains} check would stay green
  *       through an MC bump that renames {@code biomeZoomSeed}, while the mixin quietly
- *       fails to apply and every session falls back to the address key. So the field is
+ *       fails to apply and every session falls back to the bare address bucket. So the field is
  *       pinned REFLECTIVELY against the real class, the
  *       {@code ChannelAccessorContractTest} shape — the source-text assertions below only
  *       pin that the accessor names the field explicitly, which is a different claim.</li>
  *   <li><b>A missing NeoForge entry.</b> Nothing crashes and nothing warns: the mixin never
  *       applies, the {@code instanceof} in {@link ClientWorldSeed} never matches, and
- *       NeoForge keeps the address key while Fabric moves to the seed key — same config,
- *       same server, two caches, no error anywhere. Pinning the FILES is also what lets
+ *       NeoForge keeps the bare address bucket while Fabric moves to the world
+ *       sub-bucket — same config, same server, two caches, no error anywhere. Pinning the FILES is also what lets
  *       this assert NeoForge behaviour without running NeoForge.</li>
  * </ul>
  */

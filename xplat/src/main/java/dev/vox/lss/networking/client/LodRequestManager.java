@@ -272,6 +272,16 @@ public class LodRequestManager {
     public void onSessionConfig(SessionConfigS2CPayload config, String serverAddress) {
         this.sessionConfig = config;
         this.serverAddress = serverAddress;
+        // Two-axis defaults (overridden by configureCacheKeying on the production
+        // path): the passed key IS the address component and no world axis applies —
+        // direct-drive rigs keep their exact bucket, byte for byte.
+        this.cacheAddressComponent = serverAddress;
+        this.resetSweepComponents = java.util.List.of();
+        this.addressAxisToken = "address";
+        this.worldContextSupplier = dev.vox.lss.seed.WorldSubKey.Context::disabled;
+        this.worldSubKey = java.util.Optional.empty();
+        this.worldAxisReason = "off";
+        this.preparedWorldBuckets.clear();
         // Safe default until the factory wires the Tier B decision for this session (a v18
         // session never re-enables it).
         this.v16GenerationDrive = false;
@@ -470,6 +480,7 @@ public class LodRequestManager {
             sendRegionSummaryRequest(currentDim, playerCx, playerCz);
         } else if (!this.cacheLoaded) {
             this.cacheLoaded = true;
+            rederiveCacheBucket(); // first cache-phase entry reads the live seed
             startAsyncCacheLoad(currentDim);
             sendRegionSummaryRequest(currentDim, playerCx, playerCz);
         }
@@ -1149,6 +1160,11 @@ public class LodRequestManager {
         this.lastPruneChunkZ = this.lastChunkZ;
         this.scanner.resetScanCounter();
         this.cacheLoaded = true;
+        // Per-dimension entry-time sub-key (plan §2.1): AFTER saveCache — the old
+        // dimension just saved under the key it loaded with — and BEFORE the new
+        // dimension's load, which reads the fresh derivation (per-world seeds arrive
+        // via the respawn packet that drove this dimension change).
+        rederiveCacheBucket();
         startAsyncCacheLoad(newDimension);
     }
 
@@ -1204,41 +1220,99 @@ public class LodRequestManager {
         }
     }
 
-    /**
-     * A22 (issue #1): the OTHER cache bucket(s) this same connection can have written
-     * under — the address bucket when the session is seed-keyed, the seed bucket when it
-     * is not. Set once by the session factory, alongside the key itself.
-     *
-     * <p>Two structures exist because two things can change under one server: the
-     * {@code useWorldSeedCacheKey} switch, and whether the server sends a usable seed at
-     * all (the {@code seed == 0} sentinel falls back). A {@code /lss reset} that cleared
-     * only the ACTIVE bucket would leave the other one's stamps on disk, and after the
-     * next flip those stamps would declare terrain "fresh enough" for a store that had
-     * been wiped — a hole in the distant terrain that no re-scan heals.
-     */
-    private java.util.List<String> alternateCacheKeys = java.util.List.of();
+    // ---- the two-axis cache key (cache-alias-keying-and-reset-override-plan.md §2.1) ----
 
-    /** @see #alternateCacheKeys */
-    public void setAlternateCacheKeys(java.util.List<String> keys) {
-        this.alternateCacheKeys = java.util.List.copyOf(keys);
+    /** The ADDRESS axis: sanitized/escaped, latched per session by the factory
+     *  (the alias decision); {@link #serverAddress} is the COMPOSED bucket. */
+    private String cacheAddressComponent;
+    /** The components {@code flushCache} sweeps (group members + connect spelling);
+     *  empty = the legacy single-bucket clear (direct-drive rigs). */
+    private java.util.List<String> resetSweepComponents = java.util.List.of();
+    private String addressAxisToken = "address";
+    /** The WORLD axis's live read — re-asked at every derive point, never latched
+     *  (plan §2.1: a latched sub-key would be coarser than Voxy across backend
+     *  switches and multi-world rotations). */
+    private java.util.function.Supplier<dev.vox.lss.seed.WorldSubKey.Context>
+            worldContextSupplier = dev.vox.lss.seed.WorldSubKey.Context::disabled;
+    private java.util.Optional<String> worldSubKey = java.util.Optional.empty();
+    private String worldAxisReason = "off";
+    /** Seeded buckets already queued for preparation this session (adoption + the
+     *  sibling cap run once per bucket, on the cache IO thread, ahead of any load). */
+    private final java.util.Set<String> preparedWorldBuckets = new java.util.HashSet<>();
+
+    /**
+     * Production wiring for the two-axis key (the session factory calls this right
+     * after {@link #onSessionConfig}): fixes the address axis for the session and
+     * derives the world axis FRESH — also queueing the seeded bucket's preparation
+     * (legacy adoption + the sibling cap) ahead of the session's first cache load on
+     * the store's single-FIFO IO thread.
+     */
+    void configureCacheKeying(String addressComponent, java.util.List<String> sweepComponents,
+                              String axisToken,
+                              java.util.function.Supplier<dev.vox.lss.seed.WorldSubKey.Context> worldContext) {
+        this.cacheAddressComponent = addressComponent;
+        this.resetSweepComponents = java.util.List.copyOf(sweepComponents);
+        this.addressAxisToken = axisToken;
+        this.worldContextSupplier = worldContext;
+        rederiveCacheBucket();
     }
 
-    /** Package-visible for the A22 flush test. */
-    java.util.List<String> alternateCacheKeysForTest() {
-        return this.alternateCacheKeys;
+    /**
+     * Re-derives the composed bucket from the LIVE world context — at session build and
+     * at every dimension/cache-phase entry (each dimension's save/load cycle uses its
+     * entry-time sub-key: the old dimension saves under the key it loaded with, the new
+     * one reads fresh). The previous sub-key carries forward ONLY when the fresh read
+     * is unreadable ({@link dev.vox.lss.seed.WorldSubKey#carryForward}) — never across
+     * a readable different seed.
+     */
+    private void rederiveCacheBucket() {
+        var context = this.worldContextSupplier.get();
+        if (dev.vox.lss.seed.WorldSubKey.carryForward(context)) {
+            this.worldAxisReason = this.worldSubKey.isPresent() ? "carried" : "unreadable";
+        } else {
+            this.worldSubKey = dev.vox.lss.seed.WorldSubKey.subKey(context);
+            this.worldAxisReason = this.worldSubKey.isPresent() ? "live" : bareReason(context);
+        }
+        this.serverAddress = dev.vox.lss.seed.WorldSubKey.composeBucket(
+                this.cacheAddressComponent, this.worldSubKey);
+        if (this.worldSubKey.isPresent() && this.preparedWorldBuckets.add(this.serverAddress)) {
+            ColumnCacheStore.prepareWorldBucketAsync(
+                    this.cacheAddressComponent, this.worldSubKey.get());
+        }
+    }
+
+    /** Why there is no world sub-key, for diag/log — from the context's first failing term. */
+    private static String bareReason(dev.vox.lss.seed.WorldSubKey.Context c) {
+        if (!c.subBucketsEnabled()) return "off";
+        if (c.singleplayer()) return "singleplayer";
+        if (c.realm()) return "realm";
+        if (!c.remoteServer()) return "not-remote";
+        if (!c.seedAvailable()) return "unreadable";
+        return "seed-0";
+    }
+
+    /** Both axes and the reason branch, for the {@code Cache:} diag line and the
+     *  per-connection INFO: {@code key=<bucket> (<axis>; world=<hex>|none — <reason>)}. */
+    public String describeCacheKey() {
+        if (this.serverAddress == null) return null;
+        return "key=" + this.serverAddress + " (" + this.addressAxisToken + "; world="
+                + this.worldSubKey.map(k -> k.substring("world-".length())).orElse("none")
+                + " — " + this.worldAxisReason + ")";
+    }
+
+    /** Test observability: the composed bucket key currently in effect. */
+    String cacheBucketForTest() {
+        return this.serverAddress;
     }
 
     public void flushCache() {
-        if (this.serverAddress != null) {
+        // The two-axis reset sweep (plan §2.4): every declared spelling of this server,
+        // bare bucket + world siblings, in ONE IO task. The legacy single-bucket clear
+        // survives only for direct-drive rigs that never configured the keying.
+        if (!this.resetSweepComponents.isEmpty()) {
+            ColumnCacheStore.clearForServers(this.resetSweepComponents);
+        } else if (this.serverAddress != null) {
             ColumnCacheStore.clearForServer(this.serverAddress);
-        }
-        // A22: same wipe, second structure. Unconditional and BEFORE the in-memory state
-        // is dropped, exactly like the active bucket — the ordering pin the reset
-        // sequence relies on is "stamps die with the store", and both buckets are stamps.
-        for (String key : this.alternateCacheKeys) {
-            if (key != null && !key.equals(this.serverAddress)) {
-                ColumnCacheStore.clearForServer(key);
-            }
         }
         this.pendingCacheLoad = null; // drop any in-flight load — its pre-clear result would resurrect flushed timestamps
         this.pendingSummaryFrame = null; // a frame buffered for the pre-flush state dies with it
