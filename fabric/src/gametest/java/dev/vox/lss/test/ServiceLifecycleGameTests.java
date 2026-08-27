@@ -1682,6 +1682,30 @@ public class ServiceLifecycleGameTests {
             helper.assertTrue(replies.size() == 5 && replies.get(4).enabled()
                             && service.getPlayers().get(uuid) != null,
                     "an armed gate over a holding player serves verbatim");
+
+            // 6. NO_CONSUMER both directions on the SHARED glue (§8 n17's xplat twin):
+            //    a caps=0 handshake under a DENYING gate replies enabled=false (the
+            //    gate rides the same evaluate input as the kill switch) without
+            //    burning the denial log or the memo; under a HOLDING gate the reply
+            //    stays enabled=true. Neither registers.
+            service.unregisterForServiceGate(uuid); // reset from step 5
+            long deniedBefore = gateState.permissionDeniedTotal();
+            dev.vox.lss.networking.server.ServerReceiverGlue.handleHandshake(
+                    new HandshakeC2SPayload(LSSConstants.PROTOCOL_VERSION, 0),
+                    mock, service, recorder,
+                    dev.vox.lss.common.compat.ViaProbe.NO_SIGNAL, nativeProto, deny);
+            helper.assertTrue(replies.size() == 6 && !replies.get(5).enabled(),
+                    "a DENIED consumer-less handshake advertises enabled=false");
+            helper.assertTrue(gateState.permissionDeniedTotal() == deniedBefore
+                            && !gateState.isDenied(uuid),
+                    "…but NO_CONSUMER is not a gate decision: no memo deposit, no count");
+            dev.vox.lss.networking.server.ServerReceiverGlue.handleHandshake(
+                    new HandshakeC2SPayload(LSSConstants.PROTOCOL_VERSION, 0),
+                    mock, service, recorder,
+                    dev.vox.lss.common.compat.ViaProbe.NO_SIGNAL, nativeProto, hold);
+            helper.assertTrue(replies.size() == 7 && replies.get(6).enabled(),
+                    "a HOLDING consumer-less handshake keeps enabled=true — the gate is "
+                            + "invisible to players it does not deny");
         } finally {
             config.requireServicePermission = savedArm;
             service.shutdown();
@@ -1757,6 +1781,24 @@ public class ServiceLifecycleGameTests {
                     "the replayed capabilities restore the far-player subscription");
             helper.assertTrue(!service.getServiceGateState().isDenied(uuid),
                     "the successful registration removed the memo entry");
+
+            // A remembered handshake whose rung became UNSERVABLE: the replay takes the
+            // production ladder's SILENT VERSION_MISMATCH rung and the entry stays
+            // dropped — no reply, no registration churn, no 0.1 Hz duplicate-config
+            // loop (plan §4.3's full-ladder proof).
+            service.unregisterForServiceGate(uuid);
+            service.getServiceGateState().rememberDenied(uuid, "mock", 17, // 17 never shipped
+                    LSSConstants.CAPABILITY_VOXEL_COLUMNS);
+            denying.set(false);
+            service.runServiceGateSweeps(config);
+            helper.assertTrue(!service.getServiceGateState().isDenied(uuid),
+                    "the unservable replay drops the entry (taken before the ladder ran)");
+            helper.assertTrue(service.getPlayers().get(uuid) == null,
+                    "…without registering anybody (VERSION_MISMATCH is the silent rung)");
+            service.runServiceGateSweeps(config);
+            helper.assertTrue(!service.getServiceGateState().isDenied(uuid)
+                            && service.getPlayers().get(uuid) == null,
+                    "…and it never loops: the entry is gone for good");
         } finally {
             config.requireServicePermission = savedArm;
             service.shutdown();

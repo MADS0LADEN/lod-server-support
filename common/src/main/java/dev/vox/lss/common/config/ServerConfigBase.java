@@ -46,7 +46,7 @@ public abstract class ServerConfigBase extends JsonConfig {
      * path is byte-for-byte what it was before the gate existed (no permission
      * backend is even consulted). Per-platform enforcement: Paper/Folia = Bukkit
      * permissions; Fabric = the fabric-permissions-api bridge (absent = everyone
-     * served, with a once-warn while armed); NeoForge = the native PermissionAPI
+     * served, with a once-warn within one recheck interval of arming); NeoForge = the native PermissionAPI
      * nodes. This is a fail-open ROLLOUT lever, not a security boundary — a dead
      * permission backend serves everyone.
      */

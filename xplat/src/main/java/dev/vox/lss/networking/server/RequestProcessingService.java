@@ -52,6 +52,7 @@ public class RequestProcessingService {
     /** The recheck cadence (plan §2.3): both sweeps run every 200 ticks (~10 s). */
     static final int PERMISSION_RECHECK_TICKS = 200;
     private int permissionRecheckCounter;
+    private boolean noProviderWarned;
     /** The sweep's permission read — seam-injected for tests (no live permission
      *  backend exists in any test JVM); production reads the LoaderServices seam with
      *  the doctrine default TRUE. A throwing probe is contained at the sweep site. */
@@ -824,6 +825,17 @@ public class RequestProcessingService {
     public void runServiceGateSweeps(LSSServerConfig config) {
         var gateState = this.serviceGateState;
         if (config.requireServicePermission) {
+            // The armed-gate-without-provider warn (plan §2.1/§8 N-2, as-built at the
+            // sweep so ONE site covers boot AND a runtime set arm — it fires within
+            // one recheck interval of either). Only Fabric can lack a backend
+            // (NeoForge registers native nodes; Paper is Bukkit): the LoaderServices
+            // token is "none" exactly when no fabric-permissions-api resolved.
+            if (!this.noProviderWarned && "none".equals(
+                    dev.vox.lss.platform.LoaderServices.get().permissionProviderToken())) {
+                this.noProviderWarned = true;
+                LSSLogger.warn("requireServicePermission is on but no permission provider "
+                        + "(fabric-permissions-api) is installed — serving everyone");
+            }
             for (var state : this.players.values()) {
                 UUID uuid = state.getPlayerUUID();
                 if (this.dialects.dialectOf(uuid)
@@ -865,21 +877,34 @@ public class RequestProcessingService {
                 unregisterForServiceGate(uuid);
                 LSSLogger.info("LOD service revoked for " + state.getPlayerName()
                         + ": requireServicePermission is on and a permission recheck found "
-                        + "a negative grant (either spelling denies) — the session was told "
+                        + "a negative grant on " + dev.vox.lss.common.LSSPermissions.SERVICE_LSS
+                        + " or " + dev.vox.lss.common.LSSPermissions.SERVICE_VSS
+                        + " (either spelling denies) — the session was told "
                         + dev.vox.lss.common.Brand.shortName() + " is disabled; it is re-offered automatically "
                         + "if the grant returns");
             }
+        } else {
+            // Disarmed: no streak may survive into a later re-arm (the two-sweep
+            // hysteresis must start fresh).
+            gateState.clearRevocationStreaks();
         }
         if (gateState.hasDenied()) {
             for (UUID uuid : gateState.deniedSnapshot()) {
                 if (this.players.containsKey(uuid)) {
-                    // Belt: a registration should already have removed the entry.
-                    gateState.onRegistered(uuid);
+                    // SKIP, never clear (implementation review, 2026-08-27): on Folia a
+                    // denied re-handshake deposits the memo on a region thread while the
+                    // unregister composite is still queued — clearing here would wipe the
+                    // deposit and strand the player past its own revocation. A genuinely
+                    // stale entry is retained one sweep and replays correctly on the
+                    // next (registration removed it in every non-race case anyway).
                     continue;
                 }
                 var player = this.server.getPlayerList().getPlayer(uuid);
                 if (player == null) {
-                    gateState.takeDenied(uuid); // offline: the memo is session-scoped
+                    // Offline: EVERYTHING gate-side is session-scoped — sweeping only
+                    // the memo would leak the log latch (a same-UUID rejoin would then
+                    // be denied silently) and any streak.
+                    gateState.onDisconnect(uuid);
                     continue;
                 }
                 boolean cleared;
@@ -899,8 +924,11 @@ public class RequestProcessingService {
                 var remembered = gateState.takeDenied(uuid);
                 if (remembered == null) continue;
                 LSSLogger.info("Re-offering " + dev.vox.lss.common.Brand.shortName() + " to "
-                        + remembered.playerName() + " (re-offer): the service permission "
-                        + "cleared, replaying the stored handshake");
+                        + remembered.playerName() + " (re-offer): "
+                        + (config.requireServicePermission
+                                ? "the service permission cleared"
+                                : "requireServicePermission was disarmed")
+                        + " — replaying the stored handshake");
                 try {
                     ServerReceiverGlue.handleHandshake(
                             new dev.vox.lss.networking.payloads.HandshakeC2SPayload(

@@ -67,11 +67,14 @@ public final class ServiceGateState {
     }
 
     /** A successful registration by ANY path: the episode is over — memo entry gone
-     *  (nothing to re-offer), log latch re-armed, streak reset. */
+     *  (nothing to re-offer), log latch re-armed. The revocation streak deliberately
+     *  SURVIVES (implementation review, 2026-08-27): registerPlayer is also the
+     *  dimension-change reuse path, and a streak reset there would let a
+     *  frequently-portalling player outrun the two-sweep hysteresis forever; a
+     *  genuinely passing player's streak dies at its next passing sweep anyway. */
     public void onRegistered(UUID uuid) {
         this.deniedHandshakes.remove(uuid);
         this.denialLogged.remove(uuid);
-        this.revocationStreaks.remove(uuid);
     }
 
     /** The connection died: session-scoped state goes with it (the rejoin handshake
@@ -145,6 +148,13 @@ public final class ServiceGateState {
     /** A passing sweep: the streak dies (hysteresis is CONSECUTIVE failures). */
     public void resetRevocationStreak(UUID uuid) {
         this.revocationStreaks.remove(uuid);
+    }
+
+    /** The gate was DISARMED: every streak dies — otherwise a disarm/re-arm cycle
+     *  carries a stale streak=1 and revokes on the first failing sweep instead of the
+     *  pinned two (implementation review, 2026-08-27). */
+    public void clearRevocationStreaks() {
+        this.revocationStreaks.clear();
     }
 
 }

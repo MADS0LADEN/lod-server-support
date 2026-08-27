@@ -232,7 +232,8 @@ def check_paper_jar(jar, problems):
         # and a flipped default is the same non-op black-out the moment an operator
         # arms requireServicePermission.
         for node in ("lss.use", "vss.use"):
-            m = re.search(r"^  " + re.escape(node) + r":\s*\n(?:^    .*\n)*?^    default:\s*(\S+)\s*$",
+            m = re.search(r"^  " + re.escape(node)
+                          + r":\s*\n(?:^    .*\n)*?^    default:\s*['\"]?(\w+)['\"]?\s*(?:#.*)?$",
                           ymltext, re.MULTILINE)
             if m is None:
                 problems.append(f"{base}: plugin.yml is missing the service-gate node "

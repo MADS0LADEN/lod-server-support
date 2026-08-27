@@ -38,7 +38,7 @@ class ServiceGateStateTest {
     }
 
     @Test
-    void registrationEndsTheEpisodeMemoLatchAndStreak() {
+    void registrationEndsTheEpisodeMemoAndLatchButNotTheStreak() {
         state.rememberDenied(uuid, "Steve", 20, 5);
         assertTrue(state.claimDenialLog(uuid));
         assertFalse(state.claimDenialLog(uuid), "one line per episode");
@@ -49,9 +49,24 @@ class ServiceGateStateTest {
         assertFalse(state.isDenied(uuid), "a successful registration by ANY path removes the entry");
         assertTrue(state.claimDenialLog(uuid),
                 "the latch re-arms: a revoke->grant->revoke session logs each episode once (§8 O1-m6)");
+        assertTrue(state.bumpRevocationStreak(uuid),
+                "the streak SURVIVES registration (implementation review 2026-08-27): "
+                        + "registerPlayer is also the dimension-change reuse path, and a reset "
+                        + "there would let a frequently-portalling player outrun the hysteresis "
+                        + "forever — a passing sweep is what clears it");
+    }
+
+    @Test
+    void disarmingClearsEveryStreak() {
+        var other = UUID.randomUUID();
+        state.bumpRevocationStreak(uuid);
+        state.bumpRevocationStreak(other);
+
+        state.clearRevocationStreaks();
+
         assertFalse(state.bumpRevocationStreak(uuid),
-                "the streak reset: one pre-registration failing sweep must not count toward "
-                        + "a post-registration revocation");
+                "a disarm/re-arm cycle must restart the two-sweep hysteresis");
+        assertFalse(state.bumpRevocationStreak(other));
     }
 
     @Test

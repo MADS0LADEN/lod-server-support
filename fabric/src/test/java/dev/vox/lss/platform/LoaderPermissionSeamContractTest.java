@@ -128,6 +128,57 @@ class LoaderPermissionSeamContractTest {
         }
     }
 
+    @Test
+    void theSharedServiceTickCadenceAndNoProviderWarnArePinned() throws IOException {
+        // Implementation review 2026-08-27 (the O1-M3 class): the tick cadence is the
+        // ONLY production caller of the sweeps on Fabric/NeoForge — without these pins
+        // the whole live-recheck half is deletable on two loaders with a green suite.
+        String svc = source("xplat/src/main/java/dev/vox/lss/networking/server/RequestProcessingService.java");
+        assertTrue(svc.contains("static final int PERMISSION_RECHECK_TICKS = 200;"),
+                "the recheck cadence constant (plan §2.3: 200 ticks)");
+        assertTrue(svc.contains("if (++this.permissionRecheckCounter >= PERMISSION_RECHECK_TICKS)")
+                        && svc.contains("runServiceGateSweeps(config);"),
+                "tick() must run the sweeps on the cadence");
+        assertTrue(svc.contains("\"none\".equals(")
+                        && svc.contains("no permission provider "),
+                "the armed-gate-without-provider once-warn (plan §2.1/§8 N-2) lives in "
+                        + "the sweep, keyed on the LoaderServices provider token");
+    }
+
+    @Test
+    void thePaperReplayWiringAndQuitSweepArePinned() throws IOException {
+        String svc = source("paper/src/main/java/dev/vox/lss/paper/PaperRequestProcessingService.java");
+        assertTrue(svc.contains("this.handshakeReplayer = lss::replayServiceGateHandshake;"),
+                "the production constructor must wire the grant sweep's replay to the "
+                        + "plugin's receiver body — without it a re-grant strands every "
+                        + "denied Paper player until rejoin (implementation review MAJOR)");
+        assertTrue(svc.contains("if (++this.permissionRecheckCounter >= PERMISSION_RECHECK_TICKS)"),
+                "Paper's tick cadence (its behavioral twin lives in PaperServiceGateSweepTest)");
+        String plugin = source("paper/src/main/java/dev/vox/lss/paper/LSSPaperPlugin.java");
+        assertTrue(plugin.contains(".getServiceGateState().onDisconnect(event.getPlayer().getUniqueId());"),
+                "Paper's quit hook must sweep the gate state — the census's third loader "
+                        + "(§8 F2-M2: without it every denied joiner leaks for the server's life)");
+        assertTrue(svc.contains("this.serviceGateState.onDisconnect(uuid);"),
+                "…and the departed-player sweep (the quit event never fired for those) too");
+    }
+
+    @Test
+    void noOtherXplatFileTouchesTheOpenGate() throws IOException {
+        // Widened census (implementation review NIT): the OPEN landmine count inside
+        // the glue is pinned above; this guards the rest of the shared source set.
+        java.nio.file.Path root = SourcePaths.repoFile("xplat/src/main/java");
+        try (var walk = Files.walk(root)) {
+            for (var f : walk.filter(x -> x.toString().endsWith(".java")).toList()) {
+                if (f.getFileName().toString().equals("ServerReceiverGlue.java")) continue;
+                if (f.getFileName().toString().equals("PlayerServiceGate.java")) continue;
+                String text = Files.readString(f);
+                assertFalse(text.contains("PlayerServiceGate.OPEN"),
+                        f + " references the open gate — production call sites must build "
+                                + "a real gate");
+            }
+        }
+    }
+
     private static int occurrences(String text, String needle) {
         int count = 0, idx = 0;
         while ((idx = text.indexOf(needle, idx)) >= 0) {

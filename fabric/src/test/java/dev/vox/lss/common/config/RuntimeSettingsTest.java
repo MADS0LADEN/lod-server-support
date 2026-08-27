@@ -188,7 +188,10 @@ class RuntimeSettingsTest {
                 "generationConcurrencyLimitPerPlayer", "mbPerSecondLimitPerPlayer",
                 "mbPerSecondLimitGlobal", "dirtyBroadcastIntervalSeconds",
                 "maxConcurrentDiskReads", "farPlayers", "farPlayersMaxDistanceBlocks",
-                "enablePingBackstop", "enableSendPacing")));
+                "enablePingBackstop", "enableSendPacing", "requireServicePermission")));
+        assertEquals(12, names.size(),
+                "row #12 (requireServicePermission) — a drifted count means a row was "
+                        + "added or dropped without updating this census");
         var c = new TestServerConfig();
         assertEquals(names.size(), RuntimeSettings.listLines(c).size());
     }

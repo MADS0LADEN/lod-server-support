@@ -292,15 +292,19 @@ class PaperServiceGateSweepTest {
 
         var registered = UUID.randomUUID();
         registerCurrent(registered, 1);
-        // Simulate a stale entry surviving a registration race:
+        // A denied re-handshake racing its own queued unregister composite (Folia):
+        // the memo deposit landed while the player is still registered.
         service.getServiceGateState().rememberDenied(registered, "back", 20, 1);
 
         service.runServiceGateSweeps();
         assertEquals(List.of(), replays, "neither an offline nor a registered uuid replays");
         assertFalse(service.getServiceGateState().isDenied(offline),
                 "the offline entry drops — the memo is session-scoped");
-        assertFalse(service.getServiceGateState().isDenied(registered),
-                "the registered entry is cleaned (belt: registration already owns it)");
+        assertTrue(service.getServiceGateState().isDenied(registered),
+                "a registered uuid's entry is SKIPPED, never cleared (implementation "
+                        + "review 2026-08-27): on Folia the deposit can precede the queued "
+                        + "unregister composite, and clearing here would strand the player "
+                        + "past its own revocation");
         assertNotNull(players.get(registered), "…and the registration is untouched");
     }
 
@@ -331,6 +335,64 @@ class PaperServiceGateSweepTest {
         assertEquals(List.of(), sentConfigs);
         assertEquals(List.of(), replays);
         assertNotNull(players.get(uuid));
+    }
+
+    @Test
+    void aNullReplayerRetainsTheMemoInsteadOfDrainingIt() {
+        // Implementation review MAJOR: takeDenied ran BEFORE the null-replayer check,
+        // so a broken replay wiring silently drained the memo — a re-granted player
+        // would be stranded with nothing left to re-offer.
+        config.requireServicePermission = false;
+        service.setHandshakeReplayer(null);
+        var uuid = UUID.randomUUID();
+        service.getServiceGateState().rememberDenied(uuid, "steve", 20, 5);
+        var online = playerIn(uuid);
+        when(playerList.getPlayer(uuid)).thenReturn(online);
+
+        service.runServiceGateSweeps();
+
+        assertTrue(service.getServiceGateState().isDenied(uuid),
+                "no replayer: the entry must be RETAINED, never drained");
+    }
+
+    @Test
+    void aDimensionChangeDoesNotResetTheRevocationStreak() {
+        // Implementation review: registerPlayer is also the dimension-change reuse
+        // path — a streak reset there would let a frequently-portalling player outrun
+        // the two-sweep hysteresis forever.
+        config.requireServicePermission = true;
+        var uuid = UUID.randomUUID();
+        var p = registerCurrent(uuid, 1);
+        when(playerList.getPlayer(uuid)).thenReturn(p);
+        denied.add(uuid);
+
+        service.runServiceGateSweeps();          // streak = 1
+        service.removePlayer(uuid);              // the dimension-change cycle…
+        service.registerPlayer(p, 1);            // …re-registers the same player
+        service.runServiceGateSweeps();          // second consecutive failing sweep
+
+        assertNull(players.get(uuid),
+                "the hysteresis counts CONSECUTIVE failing sweeps across dimension "
+                        + "changes — portal-hopping must not dodge revocation");
+    }
+
+    @Test
+    void disarmingClearsStreaksSoReArmRestartsTheHysteresis() {
+        config.requireServicePermission = true;
+        var uuid = UUID.randomUUID();
+        var p = registerCurrent(uuid, 1);
+        when(playerList.getPlayer(uuid)).thenReturn(p);
+        denied.add(uuid);
+
+        service.runServiceGateSweeps();          // streak = 1
+        config.requireServicePermission = false;
+        service.runServiceGateSweeps();          // disarmed sweep clears streaks
+        config.requireServicePermission = true;
+        service.runServiceGateSweeps();          // re-armed: this is failure ONE again
+
+        assertNotNull(players.get(uuid),
+                "a disarm/re-arm cycle restarts the two-sweep hysteresis — a stale "
+                        + "streak must not turn the first post-re-arm sweep into a revocation");
     }
 
     // ---- cadence + ordering ----

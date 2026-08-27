@@ -183,8 +183,9 @@ public final class RuntimeSettings {
                         c.requireServicePermission = parseBoolean(raw);
                         return null;
                     },
-                    "existing sessions are re-checked within ~20 s; denied players are"
-                            + " re-offered when granted or when the gate is disarmed"));
+                    "current-protocol sessions are re-checked within ~20 s (legacy"
+                            + " clients heal at rejoin); denied players are re-offered when"
+                            + " granted or when the gate is disarmed"));
 
     private static String parseFarPlayersMode(String raw) {
         String v = raw.trim().toLowerCase(java.util.Locale.ROOT);

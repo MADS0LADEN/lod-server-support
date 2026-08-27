@@ -369,3 +369,48 @@ pin, the write-predicate scoping, and the governor/sub-key carry. Verified
 sound and not re-litigated: the seam install points, the glue transplant
 target, the Folia pump-thread permission-read precedent, the §2.4 premise,
 row #12, xplat purity, R-2 conformance.
+
+## 9. Implementation-review fold (2 Fable + 4 Opus, 2026-08-27) — as-built corrections
+
+All verified findings folded; the deltas vs the plan text above, normative:
+
+- **The §2.1/§8 N-2 no-provider warn lives in the recheck sweep**, not at
+  boot/set-arm sites: one site (keyed on the LoaderServices provider token
+  answering "none") fires within one recheck interval (~10 s) of EITHER arm
+  path. All three doc surfaces say "within one recheck interval of arming".
+- **Far-player target prefs are RETAINED across viewer sheds**
+  (`FarPlayerBroadcastService.retainedPrefs`): the revocation composite's
+  `removeViewer` no longer destroys an online player's shareSelf opt-out (the
+  E2 prefs-carrier rule — the review's privacy MAJOR), `subscribeViewer`
+  seeds a re-subscription from the retained prefs so the grant re-offer
+  resumes far-player serving without a client re-handshake, `onPrefs` retains
+  receipts from unsubscribed (gate-denied) senders, and the new
+  `onDisconnect(uuid)` — wired at every true connection end on all three
+  loaders — is the only sweep.
+- **The grant sweep SKIPS registered UUIDs** (never `onRegistered`-clears
+  them): the Folia deposit-vs-queued-composite race would otherwise wipe a
+  just-deposited memo and strand the player past its own revocation.
+- **The offline grant-sweep branch sweeps the whole session state**
+  (`onDisconnect`, not `takeDenied`) — the log latch and streak are
+  session-scoped too. Paper's departed-player sweep and quit-race mailbox
+  Remove sweep the gate state as well.
+- **`onRegistered` no longer resets the revocation streak** (registerPlayer
+  is the dimension-change reuse path; a reset there let a portal-hopping
+  player outrun the hysteresis forever); a DISARMED sweep clears all streaks
+  so a re-arm restarts the two-sweep hysteresis.
+- **Paper's null-replayer guard precedes `takeDenied`** (a missing replay
+  wiring retains the memo instead of draining it), the replay frame is built
+  by `PaperPayloadHandler.encodeHandshakeFrame` (round-trip-pinned), and the
+  production `handshakeReplayer` wiring + both tick cadences are
+  source-pinned in `LoaderPermissionSeamContractTest`.
+- The revocation INFO names both node spellings; the re-offer INFO
+  distinguishes grant from disarm; `ClientSessionGate.onDisconnect` clears
+  the park; the Paper permissible-throw warn latch is CAS; the bridge test
+  stub carries the CommandSource-shaped decoy (the by-shape discriminator is
+  no longer a vacuous pin); release_check's node regex tolerates trailing
+  comments/quotes; README + the set apply-note carry the legacy-dialect
+  carve-out. Accepted-open (recorded, not fixed): the Folia
+  two-opposite-handshakes drain-window inversion (self-heals via the 60 s
+  re-attach prompt — documented at `enqueueServiceGateUnregister`), the
+  once-per-JVM (not per-session) throw warns, and the grant-probe-vs-replay
+  double-count corner.

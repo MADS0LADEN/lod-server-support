@@ -206,9 +206,10 @@ public class LSSServerNetworking {
                 // membership — dim changes reuse that path and must keep both).
                 service.getV16CompatManager().onDisconnect(handler.getPlayer().getUUID());
                 service.getDialectTracker().onDisconnect(handler.getPlayer().getUUID());
-                // Far players: the subscription dies with the CONNECTION, never with the
-                // dimension-change remove+register cycle (the v18-rung checklist).
-                service.getFarPlayerService().removeViewer(handler.getPlayer().getUUID());
+                // Far players: the subscription AND the retained target prefs die with
+                // the CONNECTION, never with the dimension-change remove+register cycle
+                // (the v18-rung checklist).
+                service.getFarPlayerService().onDisconnect(handler.getPlayer().getUUID());
                 // Region summaries: same connection-scoped cleanup (pending request,
                 // queued job, and the re-sweep cooldown mark die here).
                 service.getRegionSummaries().removePlayer(handler.getPlayer().getUUID());

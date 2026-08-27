@@ -112,7 +112,7 @@ class ClientSessionGateTest {
     }
 
     /** Records the teardown-relevant manager calls; overrides keep the tests off disk. */
-    private static final class RecordingManager extends LodRequestManager {
+    private static class RecordingManager extends LodRequestManager {
         private final List<String> events;
 
         RecordingManager(List<String> events) {
@@ -972,6 +972,32 @@ class ClientSessionGateTest {
                 "the re-enabled manager's governor must stay engaged");
         assertEquals(desired, second.governor.getDesiredBytesPerSec(),
                 "the governed rate survives the revoke->grant cycle via the park");
+    }
+
+    @Test
+    void theParkCarriesTheWorldSubKeyThroughARevokeGrantCycle() {
+        // The #243 world-axis half of the park (implementation review: the governor
+        // half alone was pinned): the disable teardown must snapshot the sub-key and
+        // the re-enable must hand it to the rebuilt manager — otherwise an unreadable
+        // re-read drops the client into the BARE cache bucket.
+        var subKeyed = new java.util.concurrent.atomic.AtomicReference<java.util.Optional<String>>();
+        var g = new ClientSessionGate(processor, v -> { }, cfg -> new RecordingManager(events) {
+            @Override
+            java.util.Optional<String> worldSubKeySnapshot() {
+                return java.util.Optional.of("world-abc");
+            }
+
+            @Override
+            void adoptCarriedSubKey(java.util.Optional<String> previousSubKey) {
+                subKeyed.set(previousSubKey);
+            }
+        });
+        g.onSessionConfig(config(V, true), true, true);
+        g.onSessionConfig(config(V, false), true, true); // revoke: park
+        g.onSessionConfig(config(V, true), true, true);  // regrant: adopt
+
+        assertEquals(java.util.Optional.of("world-abc"), subKeyed.get(),
+                "the parked world sub-key must reach the rebuilt manager's adopt hook");
     }
 
     @Test

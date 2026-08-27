@@ -30,4 +30,14 @@ public interface Permissions {
     static boolean check(Entity entity, String permission) {
         throw new AssertionError("the bridge must not bind the 2-arg overload");
     }
+
+    /** The CommandSource-flavored decoy (the real API's other 3-arg boolean overload):
+     *  static, named check, arity 3, (non-Entity, String, boolean) -> boolean — it
+     *  differs from the target ONLY in the first parameter type, so it exercises the
+     *  {@code p[0].isAssignableFrom(ServerPlayer.class)} discriminator, the one clause
+     *  the other decoys never reach (implementation review, 2026-08-27: without this
+     *  the clause was a vacuous pin — deletable with a green suite). */
+    static boolean check(String commandSourceStandIn, String permission, boolean defaultValue) {
+        throw new AssertionError("the bridge must not bind the CommandSource-shaped overload");
+    }
 }

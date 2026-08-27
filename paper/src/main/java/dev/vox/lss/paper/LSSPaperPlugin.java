@@ -87,8 +87,7 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                 try {
                     return bukkitPlayer.hasPermission(node);
                 } catch (Exception e) {
-                    if (!permissibleThrowWarned) {
-                        permissibleThrowWarned = true;
+                    if (PERMISSIBLE_THROW_WARNED.compareAndSet(false, true)) {
                         LSSLogger.warn("Bukkit permission read threw for " + playerName
                                 + " on " + node + " — serving (fail-open; the gate is not"
                                 + " a security boundary): " + e);
@@ -111,12 +110,14 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
         };
     }
 
-    /** Once-per-JVM warn latch for a throwing Bukkit permissible (test seam resets). */
-    private static volatile boolean permissibleThrowWarned;
+    /** Once-per-JVM warn latch for a throwing Bukkit permissible (CAS — on Folia the
+     *  handshake read and the pump sweep can race; test seam resets). */
+    private static final java.util.concurrent.atomic.AtomicBoolean PERMISSIBLE_THROW_WARNED =
+            new java.util.concurrent.atomic.AtomicBoolean();
 
     /** Test seam. */
     static void resetPermissibleThrowWarnedForTest() {
-        permissibleThrowWarned = false;
+        PERMISSIBLE_THROW_WARNED.set(false);
     }
 
     /** Whether the player clears the service gate — BOTH brand spellings, AND not OR
@@ -687,18 +688,9 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
      */
     void replayServiceGateHandshake(ServerPlayer nmsPlayer,
                                     ServiceGateState.DeniedHandshake remembered) {
-        var buf = new net.minecraft.network.FriendlyByteBuf(
-                io.netty.buffer.Unpooled.buffer());
-        byte[] data;
-        try {
-            buf.writeVarInt(remembered.protocolVersion());
-            buf.writeVarInt(remembered.capabilities());
-            data = new byte[buf.readableBytes()];
-            buf.readBytes(data);
-        } finally {
-            buf.release();
-        }
-        handleHandshake(nmsPlayer.getBukkitEntity(), nmsPlayer, data);
+        handleHandshake(nmsPlayer.getBukkitEntity(), nmsPlayer,
+                PaperPayloadHandler.encodeHandshakeFrame(
+                        remembered.protocolVersion(), remembered.capabilities()));
     }
 
     private void handleBatchChunkRequest(ServerPlayer nmsPlayer, byte[] data) {

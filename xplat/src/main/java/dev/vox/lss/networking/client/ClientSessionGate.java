@@ -514,6 +514,10 @@ final class ClientSessionGate {
 
     /** DISCONNECT: tear down the live manager, then zero all session state and counters. */
     void onDisconnect() {
+        // The service-gate park is same-connection state (the disconnect routine's
+        // zero-everything contract): onJoin clears it too, this keeps the claim true.
+        this.parkedGovernor = null;
+        this.parkedSubKey = java.util.Optional.empty();
         var manager = this.requestManager;
         if (manager != null) {
             // (A column the drain thread polled concurrently still dispatches; if its

@@ -24,8 +24,10 @@ import java.lang.reflect.Modifier;
  * answers {@code defaultValue} (the gate passes {@code true}: fail-open, serve), with
  * a once-warned drift message for the present-but-unresolvable and throwing shapes.
  * The bridge CANNOT detect a present-API-dead-provider backend (an unset node and a
- * dead provider both answer the check-site default) — the plan's honesty scope; the
- * once-warn fires only for the class-absent shape, via {@link #present()}'s callers.
+ * dead provider both answer the check-site default) — the plan's honesty scope. The
+ * class-absent shape stays quiet HERE; the armed-gate once-warn lives in the recheck
+ * sweep ({@code RequestProcessingService.runServiceGateSweeps}), keyed on
+ * {@link #providerToken()} answering "none".
  */
 public final class FabricPermissionsBridge {
 
@@ -115,7 +117,7 @@ public final class FabricPermissionsBridge {
                 checkHandle = MethodHandles.lookup().unreflect(match);
                 state = 1;
             } catch (ClassNotFoundException absent) {
-                state = -1; // the ordinary no-provider install — quiet; the ARMED gate warns
+                state = -1; // the ordinary no-provider install — quiet; the ARMED sweep warns
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError vme) throw vme;
                 state = -1;
