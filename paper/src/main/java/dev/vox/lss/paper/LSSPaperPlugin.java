@@ -5,6 +5,8 @@ import dev.vox.lss.common.HandshakeGate;
 import dev.vox.lss.common.LSSConstants;
 import dev.vox.lss.common.LSSLogger;
 import dev.vox.lss.common.LogThrottle;
+import dev.vox.lss.common.PlayerServiceGate;
+import dev.vox.lss.common.ServiceGateState;
 import net.minecraft.server.level.ServerPlayer;
 import org.bukkit.craftbukkit.CraftServer;
 import org.bukkit.craftbukkit.entity.CraftPlayer;
@@ -58,97 +60,71 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
     /** The VSS spelling of {@link #PERMISSION_SERVICE_LSS} — see there. */
     static final String PERMISSION_SERVICE_VSS = dev.vox.lss.common.LSSPermissions.SERVICE_VSS;
 
-    /**
-     * Once-per-player-per-session latch for the service-denial log line. A client may
-     * re-handshake at packet rate, so the line is claimed once per connection and stays
-     * silent afterwards. Keyed by UUID and swept on the CLIENT_DATA_VERSIONS lifecycle
-     * (onPlayerQuit removes, onDisable clears) — the leak shape review C1-9 caught there
-     * applies verbatim here: without the sweep, every denied joiner leaks an entry for the
-     * life of the server, and a rejoining player would never get a second line.
-     */
-    static final java.util.Set<java.util.UUID> SERVICE_DENIAL_LOGGED =
-            java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-    /**
-     * Test seam: the per-player half of the service gate. Function-injected so the static
-     * handshake core stays free of Bukkit (and of static mutable state) — the production
-     * implementation is {@link #serviceGateFor}, which reads the real Bukkit permissible and
-     * claims the real latch.
+    /** The pre-gate overloads' gate (see {@link PlayerServiceGate#OPEN} — the seam
+     *  interface and the open-gate landmine doc live in common now, shared with the
+     *  Fabric/NeoForge glue). */
+    static final PlayerServiceGate SERVICE_GATE_OPEN = PlayerServiceGate.OPEN;
+
+    /** The production {@link PlayerServiceGate}: a real Bukkit permission read (CONTAINED
+     *  — a throwing permissible answers TRUE with a once-warn: fail-open, serve; a throw
+     *  must never escape into handshake silence), the log latch + denied-handshake memo on
+     *  the service's {@link ServiceGateState}, and the denial hook marshaling the
+     *  unregistration composite onto the pump. Extracted static so both halves are
+     *  pinnable against a mock Player — a hard-coded {@code true} here would make the
+     *  whole feature inert on a live server while every core test stayed green.
      *
-     * <p>Folia: both methods are consulted INLINE on the thread already handling the
-     * handshake message (the player's region thread there, the main thread on Paper) — no
-     * scheduling is added, and a permission read for an online player is region-safe, the
-     * same call shape PaperFarPlayerSnapshots already makes from the pump.
-     */
-    interface PlayerServiceGate {
-        /** Whether the handshaking player holds {@code node}. */
-        boolean hasPermission(String node);
-
-        /**
-         * Claims the once-per-session denial log. Side-effecting: the FIRST call in a session
-         * returns true, every later one false — so the core must call it only when it is
-         * actually about to deny, never speculatively.
-         */
-        boolean claimDenialLog();
-    }
-
-    /**
-     * The gate the pre-gate {@code handleHandshake} overloads ride: permits everything and
-     * never logs, i.e. exactly the behavior of every build before the gate existed.
-     *
-     * <p><b>Test/legacy-overload only.</b> The production path always builds a real gate via
-     * {@link #serviceGateFor}; a production call site left on a shorter overload would open
-     * the gate for everyone with {@code requireServicePermission=true} still in the file. Same
-     * landmine shape as the {@code ViaProbe.NO_SIGNAL} overload below, and mitigated the same
-     * way — one production call site, documented here.
-     */
-    static final PlayerServiceGate SERVICE_GATE_OPEN = new PlayerServiceGate() {
-        @Override
-        public boolean hasPermission(String node) {
-            return true;
-        }
-
-        @Override
-        public boolean claimDenialLog() {
-            return false;
-        }
-    };
-
-    /** The production {@link PlayerServiceGate}: a real Bukkit permission read plus the
-     *  UUID-keyed denial latch. Extracted static so both halves are pinnable against a mock
-     *  Player — a hard-coded {@code true} here would make the whole feature inert on a live
-     *  server while every core test stayed green. */
-    static PlayerServiceGate serviceGateFor(Player bukkitPlayer, java.util.UUID uuid) {
+     *  @param state                 the owning service's gate state, or null when no
+     *                               service exists (the conjunction then never deposits)
+     *  @param deniedWhileRegistered the pump-marshaled unregistration composite
+     *                               (enqueueServiceGateUnregister), or null */
+    static PlayerServiceGate serviceGateFor(Player bukkitPlayer, java.util.UUID uuid,
+                                            String playerName, ServiceGateState state,
+                                            Runnable deniedWhileRegistered) {
         return new PlayerServiceGate() {
             @Override
             public boolean hasPermission(String node) {
-                return bukkitPlayer.hasPermission(node);
+                try {
+                    return bukkitPlayer.hasPermission(node);
+                } catch (Exception e) {
+                    if (!permissibleThrowWarned) {
+                        permissibleThrowWarned = true;
+                        LSSLogger.warn("Bukkit permission read threw for " + playerName
+                                + " on " + node + " — serving (fail-open; the gate is not"
+                                + " a security boundary): " + e);
+                    }
+                    return true;
+                }
             }
 
             @Override
             public boolean claimDenialLog() {
-                return SERVICE_DENIAL_LOGGED.add(uuid);
+                return state != null && state.claimDenialLog(uuid);
+            }
+
+            @Override
+            public void onServiceDenied(int protocolVersion, int capabilities) {
+                if (state == null) return; // unreachable: the conjunction requires servicePresent
+                state.rememberDenied(uuid, playerName, protocolVersion, capabilities);
+                if (deniedWhileRegistered != null) deniedWhileRegistered.run();
             }
         };
     }
 
-    /**
-     * Whether the player clears the service gate: BOTH brand spellings must be held, so a
-     * negative grant on EITHER one denies. Only called while the gate is armed.
-     *
-     * <p><b>AND, not OR — the De Morgan mirror of the far-player privacy nodes.</b> Those are
-     * a GRANT model ({@code default: false}, holding EITHER spelling takes effect); this is a
-     * DENY model ({@code default: true}, revoking EITHER spelling takes effect). The dual
-     * declaration means the OTHER spelling always resolves to its declared {@code true}, so an
-     * OR here would let it out-vote the admin's single negative grant and the gate could never
-     * deny anyone (user, 2026-08-25). With AND, one negative grant is enough on either jar,
-     * and an LSS&lt;-&gt;VSS swap keeps honoring it.
-     *
-     * <p>Short-circuits: a player already missing the first spelling is denied without a
-     * second lookup.
-     */
+    /** Once-per-JVM warn latch for a throwing Bukkit permissible (test seam resets). */
+    private static volatile boolean permissibleThrowWarned;
+
+    /** Test seam. */
+    static void resetPermissibleThrowWarnedForTest() {
+        permissibleThrowWarned = false;
+    }
+
+    /** Whether the player clears the service gate — BOTH brand spellings, AND not OR
+     *  (the De Morgan mirror of the far-player privacy nodes' grant-model OR; the full
+     *  rationale lives on {@link PlayerServiceGate#holdsService}, shared with the
+     *  Fabric/NeoForge glue). */
     static boolean holdsServicePermission(PlayerServiceGate gate) {
-        return gate.hasPermission(PERMISSION_SERVICE_LSS) && gate.hasPermission(PERMISSION_SERVICE_VSS);
+        return PlayerServiceGate.holdsService(gate);
     }
 
     /**
@@ -314,7 +290,6 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
         // Static sidecar facts must not survive /reload or a plugin-manager disable —
         // players who quit while disabled would leak entries forever (review C1-9).
         CLIENT_DATA_VERSIONS.clear();
-        SERVICE_DENIAL_LOGGED.clear();
         // Unregister the channels BEFORE shutdown (2026-08-05 review H5): a frame already
         // dispatched into onPluginMessageReceived proceeds with its captured service
         // reference (nothing can stop it; everything it touches is individually
@@ -451,7 +426,11 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
                 // Ticket #6: the per-player service gate. Read inline on this thread (region
                 // thread on Folia) — no scheduling, and an online player's permissible is
                 // safe to read there, the same shape PaperFarPlayerSnapshots already uses.
-                serviceGateFor(bukkitPlayer, nmsPlayer.getUUID()),
+                serviceGateFor(bukkitPlayer, nmsPlayer.getUUID(),
+                        nmsPlayer.getName().getString(),
+                        service == null ? null : service.getServiceGateState(),
+                        service == null ? null
+                                : () -> service.enqueueServiceGateUnregister(nmsPlayer.getUUID())),
                 (dialect, enabled, lodDistanceChunks, syncCap, genCap, generationEnabled) -> {
                     // A cross-dialect re-handshake sheds the stale compat identities it is
                     // NOT — otherwise columns keep shipping the old dialect's shape and
@@ -687,6 +666,14 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
         } else {
             // Reply-without-register (e.g. DISABLED advertisement): nothing to race.
             reply.run();
+            if (deniedByServiceGate) {
+                // AFTER the reply: the enabled=false config is the client's disarm; the
+                // hook deposits the denied-handshake memo (re-offerable on a later
+                // grant) and pump-marshals the unregistration composite for a live
+                // session re-handshaking after a revocation (an ADMIN fact, unlike the
+                // protocol facts an existing registration deliberately survives).
+                serviceGate.onServiceDenied(handshake.protocolVersion(), handshake.capabilities());
+            }
         }
     }
 
@@ -717,9 +704,12 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
         // Service-independent: the sidecar fact is recorded at the network level
         // (possibly before any service exists) and must die with the connection.
         CLIENT_DATA_VERSIONS.remove(event.getPlayer().getUniqueId());
-        // Same lifecycle for the service-denial latch: without this it leaks one entry per
-        // denied joiner for the life of the server, and a rejoin would never re-log.
-        SERVICE_DENIAL_LOGGED.remove(event.getPlayer().getUniqueId());
+        // Service gate: the denied-handshake memo, the denial-log latch, and any
+        // revocation streak are session-scoped — swept beside the client-info fact
+        // (the state lives on the service, so a serviceless quit has nothing to sweep).
+        if (service != null) {
+            service.getServiceGateState().onDisconnect(event.getPlayer().getUniqueId());
+        }
     }
 
     public PaperRequestProcessingService getRequestService() {

@@ -43,6 +43,11 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  */
 public class PaperRequestProcessingService {
     private final Map<UUID, PaperPlayerRequestState> players;
+    // Service gate (service-permission-gate-plan.md §2.3): the denied-handshake memo,
+    // the once-per-episode denial-log latch, and the revocation streaks — dying with
+    // this service (onDisable's shutdown() is the C1-9 clear).
+    private final dev.vox.lss.common.ServiceGateState serviceGateState =
+            new dev.vox.lss.common.ServiceGateState();
     private final MinecraftServer server;
     private final PaperChunkDiskReader diskReader;
     private final PaperChunkGenerationService generationService;
@@ -898,6 +903,9 @@ public class PaperRequestProcessingService {
                 && !this.dialects.isV16(player.getUUID())
                 && !this.dialects.isV18(player.getUUID()));
         state.markHandshakeComplete();
+        // Service gate: a successful registration by ANY path ends the denied episode
+        // (memo entry gone, log latch re-armed, streak reset).
+        this.serviceGateState.onRegistered(player.getUUID());
         return state;
     }
 
@@ -929,6 +937,35 @@ public class PaperRequestProcessingService {
         this.diskReader.removePlayerResults(uuid);
         if (this.generationService != null)
             this.generationService.removePlayer(uuid);
+    }
+
+    /**
+     * The service-gate unregistration composite (service-permission-gate-plan.md
+     * §2.3): {@code removePlayer} + the far-player viewer shed + the region-summary
+     * cleanup — the departed-player sweep's trio, NEVER a modified removePlayer
+     * (that is the dimension-change reuse path on Folia; teaching it to shed viewers
+     * would break every dimension change). The dialect mark and v16 identity are
+     * deliberately KEPT — connection-lifecycle facts, and the mark is what any
+     * per-player disable push read. No-op for an unregistered uuid. Pump thread only.
+     */
+    void unregisterForServiceGate(UUID uuid) {
+        if (!this.players.containsKey(uuid)) return;
+        removePlayer(uuid);
+        this.farPlayerService.removeViewer(uuid);
+        if (this.regionSummaries != null) this.regionSummaries.removePlayer(uuid);
+    }
+
+    /** Any thread (the handshake's denial hook runs on a region thread on Folia):
+     *  marshals the composite onto the pump, where the registered-check happens at
+     *  drain time — after the lifecycle mailbox, so a registration racing the denial
+     *  is visible before the composite decides it has work. */
+    public void enqueueServiceGateUnregister(UUID uuid) {
+        enqueueRuntimeTask(() -> unregisterForServiceGate(uuid));
+    }
+
+    /** The service-gate bookkeeping — see {@link dev.vox.lss.common.ServiceGateState}. */
+    public dev.vox.lss.common.ServiceGateState getServiceGateState() {
+        return this.serviceGateState;
     }
 
     /** Minimum interval between re-attach prompts per player — also the post-removal grace
@@ -1771,6 +1808,7 @@ public class PaperRequestProcessingService {
         // region thread — this flag shrinks the tick-vs-shutdown overlap to at most the one
         // in-flight tick (runtime disables are documented best-effort on Folia).
         this.shuttingDown = true;
+        this.serviceGateState.clear();
         try {
             // Own containment, FIRST (P2 review I-m2): no ordering dependency on the
             // dirty drain, and a throw there must not leak the sweeper daemon across

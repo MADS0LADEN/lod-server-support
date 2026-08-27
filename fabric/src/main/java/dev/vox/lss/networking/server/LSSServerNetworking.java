@@ -212,6 +212,9 @@ public class LSSServerNetworking {
                 // Region summaries: same connection-scoped cleanup (pending request,
                 // queued job, and the re-sweep cooldown mark die here).
                 service.getRegionSummaries().removePlayer(handler.getPlayer().getUUID());
+                // Service gate: the denied-handshake memo, the denial-log latch, and any
+                // revocation streak are session-scoped — swept beside the client-info fact.
+                service.getServiceGateState().onDisconnect(handler.getPlayer().getUUID());
             }
             // Service-independent: the sidecar fact is recorded at the network level
             // (possibly before any service exists) and must die with the connection.

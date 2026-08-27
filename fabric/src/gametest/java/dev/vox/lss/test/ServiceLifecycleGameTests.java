@@ -1535,4 +1535,158 @@ public class ServiceLifecycleGameTests {
             server.getPlayerList().remove(mock);
         });
     }
+
+    /**
+     * The service gate's crafted-frame table on the SHARED glue
+     * (service-permission-gate-plan.md §4.2 — the Paper core's twin pins live in
+     * LSSPaperPluginGlueTest; this drives the xplat core with a REAL service and the
+     * REAL {@code ServiceGateState}): a denied handshake takes the DISABLED rung in the
+     * client's OWN dialect (enabled=false reply, no registration, never silence), the
+     * denial deposits the re-offer memo exactly once, a HOLDING player under the armed
+     * gate is served verbatim (arming alone denies nobody), and — the plan's §8 O2-M3 —
+     * a denied re-handshake of a LIVE session runs the unregistration composite (a
+     * permission denial is an ADMIN fact, unlike the protocol facts an existing
+     * registration deliberately survives).
+     */
+    @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 400)
+    public void serviceGateDeniesInDialectAndUnregistersALiveSession(GameTestHelper helper) {
+        ServerLevel level = helper.getLevel();
+        var server = level.getServer();
+        var mock = placeMockServerPlayer(helper);
+        var uuid = mock.getUUID();
+        var service = new RequestProcessingService(server);
+        var replies = new ArrayList<SessionConfigS2CPayload>();
+        LSSServerNetworking.SessionConfigResponder recorder = replies::add;
+        var config = LSSServerConfig.CONFIG;
+        boolean savedArm = config.requireServicePermission;
+        config.requireServicePermission = true;
+        try {
+            var gateState = service.getServiceGateState();
+            // The production gate shape with the permission read forced FALSE (no live
+            // permission backend exists in a gametest JVM — LoaderServices would answer
+            // the default TRUE): latch, memo, and composite are the REAL service's.
+            var deny = new dev.vox.lss.common.PlayerServiceGate() {
+                @Override
+                public boolean hasPermission(String node) {
+                    return false;
+                }
+
+                @Override
+                public boolean claimDenialLog() {
+                    return gateState.claimDenialLog(uuid);
+                }
+
+                @Override
+                public void onServiceDenied(int protocolVersion, int capabilities) {
+                    gateState.rememberDenied(uuid, "mock", protocolVersion, capabilities);
+                    service.unregisterForServiceGate(uuid);
+                }
+            };
+            int nativeProto = net.minecraft.SharedConstants.getProtocolVersion();
+
+            // 1. Denied CURRENT handshake: enabled=false in the CURRENT shape, no state.
+            dev.vox.lss.networking.server.ServerReceiverGlue.handleHandshake(
+                    new HandshakeC2SPayload(LSSConstants.PROTOCOL_VERSION,
+                            LSSConstants.CAPABILITY_VOXEL_COLUMNS),
+                    mock, service, recorder,
+                    dev.vox.lss.common.compat.ViaProbe.NO_SIGNAL, nativeProto, deny);
+            helper.assertTrue(replies.size() == 1 && !replies.get(0).enabled()
+                            && replies.get(0).protocolVersion() == LSSConstants.PROTOCOL_VERSION
+                            && !replies.get(0).v16Wire(),
+                    "a denied CURRENT handshake must reply enabled=false in the CURRENT "
+                            + "shape, got " + replies);
+            helper.assertTrue(service.getPlayers().get(uuid) == null,
+                    "a denied player must never be registered");
+            helper.assertTrue(gateState.isDenied(uuid) && gateState.permissionDeniedTotal() == 1,
+                    "the denial must deposit the re-offer memo and count ONE transition");
+
+            // 2. Denied v16 handshake (same session re-asking in an older dialect): the
+            //    reply is the 6-field v16 shape, still enabled=false, still no state —
+            //    and STILL one counted transition (re-handshakes while denied never
+            //    re-count).
+            dev.vox.lss.networking.server.ServerReceiverGlue.handleHandshake(
+                    new HandshakeC2SPayload(LSSConstants.V16_COMPAT_PROTOCOL_VERSION,
+                            LSSConstants.CAPABILITY_VOXEL_COLUMNS),
+                    mock, service, recorder,
+                    dev.vox.lss.common.compat.ViaProbe.NO_SIGNAL, nativeProto, deny);
+            helper.assertTrue(replies.size() == 2 && !replies.get(1).enabled()
+                            && replies.get(1).v16Wire(),
+                    "a denied v16 handshake must be denied in its OWN dialect (the 6-field "
+                            + "enabled=false shape), got " + replies);
+            helper.assertTrue(service.getPlayers().get(uuid) == null
+                            && gateState.permissionDeniedTotal() == 1,
+                    "still unregistered, still one transition");
+
+            // 3. The gate disarmed mid-session: the same player registers through the
+            //    same entry (the OPEN overload path is production for gate-off in the
+            //    sense that serviceDenied short-circuits false before any probe).
+            config.requireServicePermission = false;
+            dev.vox.lss.networking.server.ServerReceiverGlue.handleHandshake(
+                    new HandshakeC2SPayload(LSSConstants.PROTOCOL_VERSION,
+                            LSSConstants.CAPABILITY_VOXEL_COLUMNS
+                                    | LSSConstants.CAPABILITY_FAR_PLAYERS),
+                    mock, service, recorder,
+                    dev.vox.lss.common.compat.ViaProbe.NO_SIGNAL, nativeProto, deny);
+            helper.assertTrue(replies.size() == 3 && replies.get(2).enabled()
+                            && service.getPlayers().get(uuid) != null,
+                    "with the gate off the SAME denying backend is never consulted and the "
+                            + "player registers");
+            helper.assertTrue(!gateState.isDenied(uuid),
+                    "a successful registration by any path removes the memo entry");
+            helper.assertTrue(service.getFarPlayerService().subscriberCount() == 1,
+                    "premise: the live session is a far-player viewer");
+
+            // 4. Re-armed + denied re-handshake of the LIVE session: the composite runs —
+            //    state gone, viewer shed — and the reply advertises disabled.
+            config.requireServicePermission = true;
+            dev.vox.lss.networking.server.ServerReceiverGlue.handleHandshake(
+                    new HandshakeC2SPayload(LSSConstants.PROTOCOL_VERSION,
+                            LSSConstants.CAPABILITY_VOXEL_COLUMNS
+                                    | LSSConstants.CAPABILITY_FAR_PLAYERS),
+                    mock, service, recorder,
+                    dev.vox.lss.common.compat.ViaProbe.NO_SIGNAL, nativeProto, deny);
+            helper.assertTrue(replies.size() == 4 && !replies.get(3).enabled(),
+                    "the revoked re-handshake replies enabled=false (the client disarm)");
+            helper.assertTrue(service.getPlayers().get(uuid) == null,
+                    "a permission denial is an ADMIN fact: the live registration must NOT "
+                            + "survive it (§8 O2-M3)");
+            helper.assertTrue(service.getFarPlayerService().subscriberCount() == 0,
+                    "the composite sheds the far-player viewer too — a revoked player must "
+                            + "not keep receiving proxy frames");
+            helper.assertTrue(gateState.isDenied(uuid) && gateState.permissionDeniedTotal() == 2,
+                    "the revocation re-deposits the memo (revoke->regrant must heal) and "
+                            + "counts a SECOND transition");
+
+            // 5. Armed + HOLDING backend: arming alone denies nobody.
+            var hold = new dev.vox.lss.common.PlayerServiceGate() {
+                @Override
+                public boolean hasPermission(String node) {
+                    return true;
+                }
+
+                @Override
+                public boolean claimDenialLog() {
+                    return gateState.claimDenialLog(uuid);
+                }
+
+                @Override
+                public void onServiceDenied(int protocolVersion, int capabilities) {
+                    helper.fail("the denial hook must never fire for a holding player");
+                }
+            };
+            dev.vox.lss.networking.server.ServerReceiverGlue.handleHandshake(
+                    new HandshakeC2SPayload(LSSConstants.PROTOCOL_VERSION,
+                            LSSConstants.CAPABILITY_VOXEL_COLUMNS),
+                    mock, service, recorder,
+                    dev.vox.lss.common.compat.ViaProbe.NO_SIGNAL, nativeProto, hold);
+            helper.assertTrue(replies.size() == 5 && replies.get(4).enabled()
+                            && service.getPlayers().get(uuid) != null,
+                    "an armed gate over a holding player serves verbatim");
+        } finally {
+            config.requireServicePermission = savedArm;
+            service.shutdown();
+            server.getPlayerList().remove(mock);
+        }
+        helper.succeed();
+    }
 }

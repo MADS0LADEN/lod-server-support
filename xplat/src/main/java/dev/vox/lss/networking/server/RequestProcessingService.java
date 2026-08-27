@@ -44,6 +44,11 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class RequestProcessingService {
     private final Map<UUID, PlayerRequestState> players = new ConcurrentHashMap<>();
+    // Service gate (service-permission-gate-plan.md §2.3): the denied-handshake memo,
+    // the once-per-episode denial-log latch, and the revocation streaks — dying with
+    // this service (the server-stop clear is shutdown()'s).
+    private final dev.vox.lss.common.ServiceGateState serviceGateState =
+            new dev.vox.lss.common.ServiceGateState();
     private final MinecraftServer server;
     private final ChunkDiskReader diskReader;
     private final ChunkGenerationService generationService;
@@ -443,6 +448,9 @@ public class RequestProcessingService {
                 && !this.dialects.isV16(player.getUUID())
                 && !this.dialects.isV18(player.getUUID()));
         state.markHandshakeComplete();
+        // Service gate: a successful registration by ANY path ends the denied episode
+        // (memo entry gone, log latch re-armed, streak reset).
+        this.serviceGateState.onRegistered(player.getUUID());
         return state;
     }
 
@@ -454,6 +462,28 @@ public class RequestProcessingService {
         // by the network DISCONNECT hook), mirroring how capabilities ride the dim-change
         // remove+register cycle. No-op for v18 players.
         this.v16Compat.onServiceRemove(uuid);
+    }
+
+    /**
+     * The service-gate unregistration composite (service-permission-gate-plan.md
+     * §2.3): {@code removePlayer} + the far-player viewer shed + the region-summary
+     * cleanup — the departed-player sweep's trio, NEVER a modified removePlayer
+     * (that is the dimension-change reuse path; teaching it to shed viewers would
+     * break every dimension change). The dialect mark and v16 identity are
+     * deliberately KEPT — connection-lifecycle facts, and the mark is what any
+     * per-player disable push read. No-op for an unregistered uuid. Server thread.
+     */
+    public void unregisterForServiceGate(UUID uuid) {
+        if (!this.players.containsKey(uuid)) return;
+        removePlayer(uuid);
+        this.farPlayerService.removeViewer(uuid);
+        var summaries = getRegionSummaries();
+        if (summaries != null) summaries.removePlayer(uuid);
+    }
+
+    /** The service-gate bookkeeping — see {@link dev.vox.lss.common.ServiceGateState}. */
+    public dev.vox.lss.common.ServiceGateState getServiceGateState() {
+        return this.serviceGateState;
     }
 
     private void cleanupPlayerServices(UUID uuid) {
@@ -1468,6 +1498,7 @@ public class RequestProcessingService {
     }
 
     public void shutdown() {
+        this.serviceGateState.clear();
         try {
             // Own containment, FIRST (P2 review I-m2): no ordering dependency on the
             // dirty drain, and a throw there must not leak the sweeper daemon (which

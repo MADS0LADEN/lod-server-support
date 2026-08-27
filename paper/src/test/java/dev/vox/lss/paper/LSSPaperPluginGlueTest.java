@@ -25,6 +25,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -79,9 +80,6 @@ class LSSPaperPluginGlueTest {
         // The containment pins each assert exactly one ERROR row; the production throttle
         // (60 s window, JVM-wide) would suppress whichever containment test runs second.
         LSSPaperPlugin.hostileFrameLog = new dev.vox.lss.common.LogThrottle(60_000);
-        // Same reason for the service-gate denial latch: it is JVM-wide and keyed by UUID,
-        // so a leftover entry would silence the once-per-session pin below.
-        LSSPaperPlugin.SERVICE_DENIAL_LOGGED.clear();
     }
 
     // ---- frame + recorder plumbing ----
@@ -146,9 +144,10 @@ class LSSPaperPluginGlueTest {
 
     /** Service-gate recorder: which nodes the core asked about, and how many times it tried
      *  to claim the once-per-session denial log (the latch itself releases exactly once). */
-    private static final class RecordingGate implements LSSPaperPlugin.PlayerServiceGate {
+    private static final class RecordingGate implements dev.vox.lss.common.PlayerServiceGate {
         final Set<String> held;
         final List<String> checked = new ArrayList<>();
+        final List<int[]> denials = new ArrayList<>(); // {protocolVersion, capabilities}
         int denialClaims;
         private boolean latched;
 
@@ -168,6 +167,11 @@ class LSSPaperPluginGlueTest {
             if (latched) return false;
             latched = true;
             return true;
+        }
+
+        @Override
+        public void onServiceDenied(int protocolVersion, int capabilities) {
+            denials.add(new int[]{protocolVersion, capabilities});
         }
     }
 
@@ -509,6 +513,10 @@ class LSSPaperPluginGlueTest {
             assertEquals(List.of(), registrar.caps, "a denied player must never be registered");
             assertEquals(List.of(LSSPaperPlugin.PERMISSION_SERVICE_LSS), gate.checked,
                     "the check is AND and short-circuits: the first missing spelling already denies");
+            assertEquals(1, gate.denials.size(),
+                    "the denial hook fires exactly once, under the deniedByServiceGate conjunction");
+            assertArrayEquals(new int[]{V, VOXEL_CAPS}, gate.denials.get(0),
+                    "the memo carries the denied handshake verbatim — the grant sweep replays it");
 
             var rows = denialRows(capture);
             assertEquals(1, rows.size(), "a denial must be visible to admins, not silent: " + capture.rows());
@@ -639,9 +647,17 @@ class LSSPaperPluginGlueTest {
                     dev.vox.lss.common.compat.ViaProbe.NO_SIGNAL, 0, gate, sender, registrar);
 
             assertEquals(1, sender.replies.size(), "NO_CONSUMER still replies");
+            assertFalse(sender.replies.get(0).enabled(),
+                    "§8 n17, direction one: the gate rides the same evaluate input as the kill "
+                            + "switch, so a DENIED consumer-less client's NO_CONSUMER reply "
+                            + "advertises enabled=false — were it true, a consumer registered "
+                            + "later this session would believe the server serves it");
             assertEquals(List.of(), registrar.caps);
             assertEquals(List.of(), denialRows(capture), "a consumer-less client is not a permission denial");
             assertEquals(0, gate.denialClaims, "the once-per-session release must NOT be burned here");
+            assertEquals(0, gate.denials.size(),
+                    "the memo deposit is under EXACTLY the deniedByServiceGate conjunction — "
+                            + "never NO_CONSUMER (§8 O2-m3)");
             assertEquals(1, capture.rows().stream().filter(r -> r.message().contains("no LOD consumer")).count(),
                     "the NO_CONSUMER line is the only denial line: " + capture.rows());
 
@@ -653,6 +669,24 @@ class LSSPaperPluginGlueTest {
             assertFalse(sender.replies.get(1).enabled());
             assertEquals(List.of(), registrar.caps, "still denied, still unregistered");
         }
+    }
+
+    @Test
+    void aConsumerlessHoldingClientStillSeesEnabledTrue() {
+        // §8 n17, direction two: with the gate armed but the player HOLDING both nodes, the
+        // caps=0 NO_CONSUMER reply keeps advertising enabled=true — the gate must be
+        // invisible to players it does not deny, in every outcome.
+        var sender = new RecordingSender();
+        var gate = new RecordingGate(LSSPaperPlugin.PERMISSION_SERVICE_LSS,
+                LSSPaperPlugin.PERMISSION_SERVICE_VSS);
+
+        LSSPaperPlugin.handleHandshake(frame(b -> b.writeVarInt(V)), "Steve", gatedConfig(), true,
+                dev.vox.lss.common.compat.ViaProbe.NO_SIGNAL, 0, gate, sender, new RecordingRegistrar());
+
+        assertEquals(1, sender.replies.size());
+        assertTrue(sender.replies.get(0).enabled(),
+                "a holding player's NO_CONSUMER reply is byte-identical to the ungated one");
+        assertEquals(0, gate.denials.size());
     }
 
     @Test
@@ -683,22 +717,55 @@ class LSSPaperPluginGlueTest {
     void productionGateReadsBothNodesOffTheBukkitPlayerAndLatchesPerSession() {
         // The production seam: the injected gate must be a REAL hasPermission read (a
         // hard-coded true would make the whole feature inert on a live server) and the
-        // latch must be keyed by UUID so quit/disable can sweep it.
+        // latch must be keyed by UUID on the service's gate state so quit/stop can sweep.
         var uuid = UUID.randomUUID();
         var bukkit = mock(org.bukkit.entity.Player.class);
         when(bukkit.hasPermission(LSSPaperPlugin.PERMISSION_SERVICE_VSS)).thenReturn(true);
-        var gate = LSSPaperPlugin.serviceGateFor(bukkit, uuid);
+        var state = new dev.vox.lss.common.ServiceGateState();
+        var compositeRuns = new java.util.concurrent.atomic.AtomicInteger();
+        var gate = LSSPaperPlugin.serviceGateFor(bukkit, uuid, "Steve", state,
+                compositeRuns::incrementAndGet);
 
         assertFalse(gate.hasPermission(LSSPaperPlugin.PERMISSION_SERVICE_LSS));
         assertTrue(gate.hasPermission(LSSPaperPlugin.PERMISSION_SERVICE_VSS));
 
         assertTrue(gate.claimDenialLog(), "the first denial releases");
         assertFalse(gate.claimDenialLog(), "later denials in the same session stay silent");
-        assertTrue(LSSPaperPlugin.SERVICE_DENIAL_LOGGED.contains(uuid),
-                "the latch must be keyed by UUID (onPlayerQuit removes, onDisable clears)");
 
-        LSSPaperPlugin.SERVICE_DENIAL_LOGGED.remove(uuid);
+        gate.onServiceDenied(20, 1);
+        assertTrue(state.isDenied(uuid), "the denial hook deposits the re-offer memo");
+        assertEquals(1, state.permissionDeniedTotal(), "absent->present is the counted transition");
+        gate.onServiceDenied(20, 1);
+        assertEquals(1, state.permissionDeniedTotal(), "re-handshakes while denied are not re-counted");
+        assertEquals(2, compositeRuns.get(),
+                "every denial marshals the composite (it no-ops on the pump for unregistered uuids)");
+
+        state.onDisconnect(uuid);
+        assertFalse(state.isDenied(uuid), "quit sweeps the memo");
         assertTrue(gate.claimDenialLog(), "a rejoin gets its line again — 'per session', not 'per server run'");
+    }
+
+    @Test
+    void aThrowingBukkitPermissibleIsContainedAndServes() {
+        // Fail-open doctrine (plan §3): a throwing permission backend answers TRUE with a
+        // once-warn — a throw must never escape into handshake silence or a denial.
+        LSSPaperPlugin.resetPermissibleThrowWarnedForTest();
+        var bukkit = mock(org.bukkit.entity.Player.class);
+        when(bukkit.hasPermission(org.mockito.ArgumentMatchers.anyString()))
+                .thenThrow(new IllegalStateException("backend exploded"));
+        var gate = LSSPaperPlugin.serviceGateFor(bukkit, UUID.randomUUID(), "Steve",
+                new dev.vox.lss.common.ServiceGateState(), null);
+
+        try (var capture = new LssLogCapture()) {
+            assertTrue(gate.hasPermission(LSSPaperPlugin.PERMISSION_SERVICE_LSS),
+                    "a throwing permissible must serve, not deny");
+            assertTrue(gate.hasPermission(LSSPaperPlugin.PERMISSION_SERVICE_VSS));
+            assertTrue(LSSPaperPlugin.holdsServicePermission(gate),
+                    "the armed gate composed over the throw still clears — fail-open");
+            assertEquals(1, capture.rows().stream()
+                            .filter(r -> r.message().contains("permission read threw")).count(),
+                    "one warn, once per JVM: " + capture.rows());
+        }
     }
 
     // ---- plugin-message dispatch containment ----
