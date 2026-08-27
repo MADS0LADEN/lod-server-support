@@ -108,6 +108,11 @@ class ExporterContractTest {
         @Override public dev.vox.lss.common.region.RegionSummaryDiagnostics summaryDiagnostics() {
             return new dev.vox.lss.common.region.RegionSummaryDiagnostics();
         }
+        final dev.vox.lss.common.ServiceGateState gateState =
+                new dev.vox.lss.common.ServiceGateState();
+        @Override public dev.vox.lss.common.ServiceGateState serviceGateState() {
+            return this.gateState;
+        }
         @Override public SharedBandwidthLimiter bandwidthLimiter() { return this.bandwidthLimiter; }
         @Override public Collection<? extends AbstractPlayerRequestState<?>> players() {
             return this.players.values();
