@@ -1738,7 +1738,17 @@ public class PaperRequestProcessingService {
         long[] positions = snapshotProbePositions(state, fresh, skipPositions);
         if (positions.length == 0) return;
         UUID uuid = player.getUUID();
-        this.regionTaskScheduler.schedule(player, () -> runRegionProbe(uuid, level, positions));
+        try {
+            this.regionTaskScheduler.schedule(player,
+                    () -> runRegionProbe(uuid, level, positions));
+        } catch (Exception e) {
+            // A plugin-manager disable from a region thread can land between tick()'s
+            // shuttingDown check and this schedule: the EntityScheduler then throws
+            // IllegalPluginAccessException (Folia review R5 — the identical containment
+            // PaperChunkGenerationService's MainThreadScheduler documents). The probe is
+            // simply lost — the held batch still releases next tick (or dies with the
+            // service), and probe misses are the designed degrade.
+        }
     }
 
     private static final long[] NO_POSITIONS = new long[0];
@@ -1835,11 +1845,16 @@ public class PaperRequestProcessingService {
             String dimension = this.dimensionStringCache.computeIfAbsent(level.dimension(),
                     k -> k.identifier().toString());
             // Ticket queued before a dimension change targets the old dimension's coordinates.
-            // Dropping it leaks nothing: the admitting state was discarded by
-            // removePlayer+registerPlayer (its slot dies with it), AND that same removePlayer
+            // Dropping it leaks nothing: in the common shape the admitting state was discarded
+            // by removePlayer+registerPlayer (its slot dies with it), AND that same removePlayer
             // enqueues the removal event that sweeps the processing thread's UUID-keyed
             // generation in-flight tracking (removeGenerationTracking) — without that sweep the
             // dropped ticket's tracking would leak (do not add a drop path that skips it).
+            // Folia timing corner (review 2026-08-27 R17): a region-thread dimension flip
+            // landing BETWEEN this tick's lifecycle pass and this drain reaches the mismatch
+            // with the OLD state still admitting — its pending GENERATION entry then gets no
+            // outcome this tick and the slot is held until the NEXT tick's dimension-change
+            // cycle sweeps the whole state. Bounded to one tick, no leak.
             if (!dimension.equals(req.dimension())) continue;
             boolean accepted = !player.isRemoved() && this.generationService.submitGeneration(
                     req.playerUuid(), level, req.cx(), req.cz(),
