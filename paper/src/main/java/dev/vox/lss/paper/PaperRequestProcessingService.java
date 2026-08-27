@@ -48,6 +48,32 @@ public class PaperRequestProcessingService {
     // this service (onDisable's shutdown() is the C1-9 clear).
     private final dev.vox.lss.common.ServiceGateState serviceGateState =
             new dev.vox.lss.common.ServiceGateState();
+    /** The recheck cadence (plan §2.3): both sweeps run every 200 ticks (~10 s). */
+    static final int PERMISSION_RECHECK_TICKS = 200;
+    private int permissionRecheckCounter;
+    /** The sweep's permission read — pump-thread Bukkit permissible reads (the
+     *  PaperFarPlayerSnapshots Folia precedent); seam-injected for tests. A throwing
+     *  probe is contained at the sweep site (counts as HOLDING — fail-open). */
+    private java.util.function.BiPredicate<ServerPlayer, String> permissionProbe =
+            (p, node) -> p.getBukkitEntity().hasPermission(node);
+    /** The grant sweep's replay hook — wired to the plugin's production handshake body
+     *  by the production constructor (the full ladder re-runs; the reply lands via the
+     *  registrar's DEFERRED path, so the Folia pre-registration gap stays closed);
+     *  null in bare test wirings until injected. */
+    private java.util.function.BiConsumer<ServerPlayer,
+            dev.vox.lss.common.ServiceGateState.DeniedHandshake> handshakeReplayer;
+
+    /** Test seam. */
+    public void setPermissionProbeForTest(
+            java.util.function.BiPredicate<ServerPlayer, String> probe) {
+        this.permissionProbe = probe;
+    }
+
+    /** Test seam (production wiring: the constructor). */
+    public void setHandshakeReplayer(java.util.function.BiConsumer<ServerPlayer,
+            dev.vox.lss.common.ServiceGateState.DeniedHandshake> replayer) {
+        this.handshakeReplayer = replayer;
+    }
     private final MinecraftServer server;
     private final PaperChunkDiskReader diskReader;
     private final PaperChunkGenerationService generationService;
@@ -361,6 +387,11 @@ public class PaperRequestProcessingService {
     public PaperRequestProcessingService(MinecraftServer server, Plugin plugin, PaperConfig config) {
         this(server, config, productionWiring(server, plugin, config));
         this.plugin = plugin;
+        if (plugin instanceof LSSPaperPlugin lss) {
+            // The grant sweep's re-offer: the stored handshake replays through the
+            // plugin's PRODUCTION receiver body — full ladder, real gate, deferred reply.
+            this.handshakeReplayer = lss::replayServiceGateHandshake;
+        }
     }
 
     /** Test seam: same field wiring as production, collaborators injected. */
@@ -779,12 +810,15 @@ public class PaperRequestProcessingService {
      *  plugin-message send (the broadcaster's setDirtySender pattern). */
     @FunctionalInterface
     interface SessionConfigSender {
-        void send(ServerPlayer player, PaperConfig config) throws Exception;
+        /** {@code enabled} is passed explicitly (not read off the config): the service
+         *  gate's revocation push advertises {@code false} at a player on a server whose
+         *  config says {@code true}. */
+        void send(ServerPlayer player, PaperConfig config, boolean enabled) throws Exception;
     }
 
-    private SessionConfigSender sessionConfigSender = (player, cfg) ->
+    private SessionConfigSender sessionConfigSender = (player, cfg, enabled) ->
             PaperPayloadHandler.sendSessionConfig(player.getBukkitEntity(),
-                    LSSConstants.PROTOCOL_VERSION, cfg.enabled,
+                    LSSConstants.PROTOCOL_VERSION, enabled,
                     cfg.lodDistanceChunks, cfg.enableChunkGeneration);
 
     void setSessionConfigSender(SessionConfigSender sender) {
@@ -801,7 +835,7 @@ public class PaperRequestProcessingService {
                 continue;
             }
             try {
-                this.sessionConfigSender.send(state.getPlayer(), this.config);
+                this.sessionConfigSender.send(state.getPlayer(), this.config, this.config.enabled);
                 pushed++;
             } catch (Exception e) {
                 LSSLogger.error("Session-config re-push failed for "
@@ -809,6 +843,98 @@ public class PaperRequestProcessingService {
             }
         }
         return new int[]{pushed, legacy};
+    }
+
+    /**
+     * The two service-gate sweeps (service-permission-gate-plan.md §2.3) — the textual
+     * twin of {@code RequestProcessingService.runServiceGateSweeps}, with the Paper
+     * differences: Bukkit permissible reads on the pump, the widened
+     * {@link SessionConfigSender} for the enabled=false push, and the replay through
+     * the plugin's production receiver via {@link #setHandshakeReplayer} (deferred
+     * reply — the Folia pre-registration gap stays closed). Public so tests drive one
+     * sweep directly; the one production caller is the tick cadence. Pump thread only.
+     */
+    public void runServiceGateSweeps() {
+        var gateState = this.serviceGateState;
+        var config = this.config;
+        if (config.requireServicePermission) {
+            for (var state : this.players.values()) {
+                UUID uuid = state.getPlayerUUID();
+                if (this.dialects.dialectOf(uuid)
+                        != dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT) {
+                    continue; // legacy sessions heal at rejoin — recorded accepted-open
+                }
+                var player = state.getPlayer();
+                boolean holds;
+                try {
+                    holds = this.permissionProbe.test(player,
+                                    dev.vox.lss.common.LSSPermissions.SERVICE_LSS)
+                            && this.permissionProbe.test(player,
+                                    dev.vox.lss.common.LSSPermissions.SERVICE_VSS);
+                } catch (Exception e) {
+                    holds = true; // contained: a throwing backend counts as HOLDING
+                }
+                if (holds) {
+                    gateState.resetRevocationStreak(uuid);
+                    continue;
+                }
+                if (!gateState.bumpRevocationStreak(uuid)) continue;
+                try {
+                    this.sessionConfigSender.send(player, config, false);
+                } catch (Exception e) {
+                    LSSLogger.error("Service-gate disable push failed for "
+                            + player.getName().getString(), e);
+                }
+                gateState.rememberDenied(uuid, player.getName().getString(),
+                        LSSConstants.PROTOCOL_VERSION, state.getCapabilities());
+                unregisterForServiceGate(uuid);
+                LSSLogger.info("LOD service revoked for " + player.getName().getString()
+                        + ": requireServicePermission is on and a permission recheck found "
+                        + "a negative grant (either spelling denies) — the session was told "
+                        + dev.vox.lss.common.Brand.shortName() + " is disabled; it is re-offered automatically "
+                        + "if the grant returns");
+            }
+        }
+        if (gateState.hasDenied()) {
+            for (UUID uuid : gateState.deniedSnapshot()) {
+                if (this.players.containsKey(uuid)) {
+                    gateState.onRegistered(uuid); // belt: registration already removed it
+                    continue;
+                }
+                var player = this.server.getPlayerList().getPlayer(uuid);
+                if (player == null) {
+                    gateState.takeDenied(uuid); // offline: the memo is session-scoped
+                    continue;
+                }
+                boolean cleared;
+                if (!config.requireServicePermission) {
+                    cleared = true; // a disarmed gate trivially clears everyone
+                } else {
+                    try {
+                        cleared = this.permissionProbe.test(player,
+                                        dev.vox.lss.common.LSSPermissions.SERVICE_LSS)
+                                && this.permissionProbe.test(player,
+                                        dev.vox.lss.common.LSSPermissions.SERVICE_VSS);
+                    } catch (Exception e) {
+                        cleared = true; // fail-open, the doctrine
+                    }
+                }
+                if (!cleared) continue;
+                var remembered = gateState.takeDenied(uuid);
+                if (remembered == null || this.handshakeReplayer == null) continue;
+                LSSLogger.info("Re-offering " + dev.vox.lss.common.Brand.shortName() + " to "
+                        + remembered.playerName() + " (re-offer): the service permission "
+                        + "cleared, replaying the stored handshake");
+                try {
+                    this.handshakeReplayer.accept(player, remembered);
+                } catch (Exception e) {
+                    // Contained — twin of the Fabric sweep: a throwing replay must not
+                    // abort the remaining re-offers; the entry stays dropped (rejoin heals).
+                    LSSLogger.error("Service-gate re-offer failed for "
+                            + remembered.playerName(), e);
+                }
+            }
+        }
     }
 
     private void drainLifecycleMailbox() {
@@ -1135,6 +1261,14 @@ public class PaperRequestProcessingService {
         this.diag.reset(this.offThreadProcessor.getDiagnostics());
 
         applyRuntimeConfig();
+        // Service gate (plan §2.3): tick-cadenced permission rechecks, ordered AFTER
+        // drainLifecycleMailbox above — a registered-but-flip-pending player must have
+        // its dialect applied before the CURRENT-only revocation enumerates (the same
+        // ordering MAJOR the set re-push closed).
+        if (++this.permissionRecheckCounter >= PERMISSION_RECHECK_TICKS) {
+            this.permissionRecheckCounter = 0;
+            runServiceGateSweeps();
+        }
         var generationReady = tickGenerationService();
         // v16 declares BEFORE the lifecycle pass: the sync probe reads the mailbox during
         // processPlayerLifecycle, and on Folia holdAndScheduleRegionProbe reads ONLY the

@@ -677,6 +677,30 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
         }
     }
 
+    /**
+     * The grant sweep's re-offer entry (service-permission-gate-plan.md §2.3): rebuilds
+     * the remembered handshake frame and drives it through the PRODUCTION receiver body
+     * — the full ladder re-runs (version, Via, consumer, enabled, gate), the reply
+     * lands in the client's own dialect, and a REGISTER outcome takes the registrar's
+     * DEFERRED reply (the Folia pre-registration gap stays closed). Called on the pump;
+     * the player reference was freshly resolved by the sweep this tick.
+     */
+    void replayServiceGateHandshake(ServerPlayer nmsPlayer,
+                                    ServiceGateState.DeniedHandshake remembered) {
+        var buf = new net.minecraft.network.FriendlyByteBuf(
+                io.netty.buffer.Unpooled.buffer());
+        byte[] data;
+        try {
+            buf.writeVarInt(remembered.protocolVersion());
+            buf.writeVarInt(remembered.capabilities());
+            data = new byte[buf.readableBytes()];
+            buf.readBytes(data);
+        } finally {
+            buf.release();
+        }
+        handleHandshake(nmsPlayer.getBukkitEntity(), nmsPlayer, data);
+    }
+
     private void handleBatchChunkRequest(ServerPlayer nmsPlayer, byte[] data) {
         var decoded = PaperPayloadHandler.decodeBatchChunkRequest(data);
         if (decoded == null) return;

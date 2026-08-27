@@ -1689,4 +1689,79 @@ public class ServiceLifecycleGameTests {
         }
         helper.succeed();
     }
+
+    /**
+     * The service-gate recheck sweeps end to end on the SHARED service
+     * (service-permission-gate-plan.md §2.3 — the seam-level differentials live in
+     * PaperServiceGateSweepTest; this drives the xplat twin with a REAL service, real
+     * registration, and the REAL replay through the production glue): a registered
+     * CURRENT session failing the injected permission probe on two consecutive sweeps
+     * is revoked (unregistered, far viewer shed, memo deposited with the LIVE
+     * capabilities), and the grant sweep then REPLAYS the remembered handshake through
+     * the full production ladder — the player re-registers without any client action.
+     */
+    @GameTest(structure = "fabric-gametest-api-v1:empty", maxTicks = 400)
+    public void serviceGateSweepsRevokeAndReofferALiveSession(GameTestHelper helper) {
+        ServerLevel level = helper.getLevel();
+        var server = level.getServer();
+        var mock = placeMockServerPlayer(helper);
+        var uuid = mock.getUUID();
+        var service = new RequestProcessingService(server);
+        var replies = new ArrayList<SessionConfigS2CPayload>();
+        LSSServerNetworking.SessionConfigResponder recorder = replies::add;
+        var config = LSSServerConfig.CONFIG;
+        boolean savedArm = config.requireServicePermission;
+        var denying = new java.util.concurrent.atomic.AtomicBoolean(false);
+        try {
+            // Register through the production entry (no permission backend in a gametest
+            // JVM: the LoaderServices default serves).
+            LSSServerNetworking.handleHandshake(
+                    new HandshakeC2SPayload(LSSConstants.PROTOCOL_VERSION,
+                            LSSConstants.CAPABILITY_VOXEL_COLUMNS
+                                    | LSSConstants.CAPABILITY_FAR_PLAYERS),
+                    mock, service, recorder);
+            helper.assertTrue(service.getPlayers().get(uuid) != null && replies.size() == 1,
+                    "premise: registered");
+            helper.assertTrue(service.getFarPlayerService().subscriberCount() == 1,
+                    "premise: far-player viewer");
+
+            config.requireServicePermission = true;
+            service.setPermissionProbeForTest((p, node) -> !denying.get());
+            denying.set(true);
+
+            service.runServiceGateSweeps(config);
+            helper.assertTrue(service.getPlayers().get(uuid) != null,
+                    "one failing sweep never revokes (flap hysteresis)");
+
+            service.runServiceGateSweeps(config);
+            helper.assertTrue(service.getPlayers().get(uuid) == null,
+                    "the second consecutive failing sweep revokes the live session");
+            helper.assertTrue(service.getFarPlayerService().subscriberCount() == 0,
+                    "the composite sheds the far-player viewer");
+            var remembered = service.getServiceGateState().peekDenied(uuid);
+            helper.assertTrue(remembered != null
+                            && remembered.capabilities() == (LSSConstants.CAPABILITY_VOXEL_COLUMNS
+                                    | LSSConstants.CAPABILITY_FAR_PLAYERS)
+                            && remembered.protocolVersion() == LSSConstants.PROTOCOL_VERSION,
+                    "the memo carries the LIVE session's version+capabilities");
+            helper.assertTrue(service.getServiceGateState().permissionDeniedTotal() == 1,
+                    "one revocation = one counted transition");
+
+            // The grant: the next sweep replays the stored handshake through the FULL
+            // production ladder and the player re-registers, far viewer included.
+            denying.set(false);
+            service.runServiceGateSweeps(config);
+            helper.assertTrue(service.getPlayers().get(uuid) != null,
+                    "the re-offer replays the production ladder and re-registers");
+            helper.assertTrue(service.getFarPlayerService().subscriberCount() == 1,
+                    "the replayed capabilities restore the far-player subscription");
+            helper.assertTrue(!service.getServiceGateState().isDenied(uuid),
+                    "the successful registration removed the memo entry");
+        } finally {
+            config.requireServicePermission = savedArm;
+            service.shutdown();
+            server.getPlayerList().remove(mock);
+        }
+        helper.succeed();
+    }
 }

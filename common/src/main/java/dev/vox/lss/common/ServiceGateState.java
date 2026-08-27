@@ -94,6 +94,11 @@ public final class ServiceGateState {
         return this.deniedHandshakes.containsKey(uuid);
     }
 
+    /** Read-only look at {@code uuid}'s memo entry (tests/diagnostics), or null. */
+    public DeniedHandshake peekDenied(UUID uuid) {
+        return this.deniedHandshakes.get(uuid);
+    }
+
     /** Removes and returns {@code uuid}'s memo entry (the grant sweep's take), or
      *  null. The caller replays it through the production handshake ladder; a replay
      *  that lands anywhere but REGISTER must NOT redeposit here (the ladder's own
