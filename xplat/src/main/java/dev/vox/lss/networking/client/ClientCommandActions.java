@@ -6,7 +6,12 @@ import dev.vox.lss.config.LSSClientConfig;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.Component;
 
+import com.mojang.brigadier.Command;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.mojang.brigadier.context.CommandContext;
+
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * The /lss client-command BODIES (N-3, neoforge-support-plan.md §1.1 item 5 —
@@ -15,6 +20,13 @@ import java.util.function.Consumer;
  * feedback sink. Each loader keeps only its thin brigadier tree against its
  * own source type (Fabric's {@code FabricClientCommandSource.sendFeedback},
  * NeoForge's client command source).
+ *
+ * <p>ONE subtree is shared rather than mirrored: {@link #resetSubtree} (issue #4). Once
+ * {@code reset} grew a second confirm-gated form it became four nodes whose
+ * (confirmed, force) pairs must agree across loaders, and a hand-copied tree on each
+ * side is a drift waiting to happen — the same reason the gametest entrypoint and
+ * plugin.yml carry contract tests. Sharing the builder makes the drift unrepresentable
+ * instead of merely detectable.
  */
 public final class ClientCommandActions {
 
@@ -41,8 +53,12 @@ public final class ClientCommandActions {
      * binds the live collaborators. Main client thread (client commands dispatch there —
      * the same thread Voxy's own command and login/disconnect mixins run on, so no
      * concurrent-lifecycle race).
+     *
+     * @param forceVoxyWipe issue #4's {@code voxy-force} form. It is two-stage like
+     *                      {@code confirm}: unconfirmed it only shows the storage roots.
      */
-    public static void runReset(Consumer<Component> feedback, boolean confirmed) {
+    public static void runReset(Consumer<Component> feedback, boolean confirmed,
+                                boolean forceVoxyWipe) {
         var manager = ClientNetGlue.getRequestManager();
         ResetCoordinator.run(new ResetCoordinator.Deps(
                 manager != null,
@@ -60,13 +76,71 @@ public final class ClientCommandActions {
                     }
                 },
                 dev.vox.lss.compat.ModCompat::resetVoxyLods,
+                dev.vox.lss.compat.ModCompat::probeVoxyStorage,
                 () -> {
                     if (manager != null) manager.flushCache();
                 },
                 ColumnCacheStore::clearAll,
                 FarPlayerClientSupport::resetAndResubscribe,
-                line -> feedback.accept(Component.literal(line).withStyle(ChatFormatting.GOLD))),
-                confirmed);
+                line -> feedback.accept(Component.literal(line).withStyle(ChatFormatting.GOLD)),
+                // The force grant's connection identity: the live ClientPacketListener
+                // (null = the no-session sentinel — a no-session grant matches only a
+                // still-no-session confirm).
+                () -> (Object) net.minecraft.client.Minecraft.getInstance().getConnection(),
+                System::nanoTime),
+                confirmed, forceVoxyWipe);
+    }
+
+    /**
+     * The whole {@code reset} subtree, built once for every loader:
+     *
+     * <pre>
+     *   reset                        -> plain reset
+     *   reset confirm                -> the destructive no-session form
+     *   reset voxy-force             -> issue #4 stage 1: show the storage roots only
+     *   reset voxy-force confirm     -> issue #4 stage 2: wipe the live root
+     * </pre>
+     *
+     * <p>Generic over the loader's command-source type; the caller supplies its own
+     * literal factory (Fabric's {@code ClientCommands::literal}, NeoForge's
+     * {@code Commands::literal}) and its own source-to-feedback adapter, and gets back a
+     * builder to hang on its own root node.
+     */
+    public static <S> LiteralArgumentBuilder<S> resetSubtree(
+            Function<String, LiteralArgumentBuilder<S>> literal,
+            Function<S, Consumer<Component>> feedback) {
+        return resetSubtree(literal, feedback, ClientCommandActions::runReset);
+    }
+
+    /** The node→(confirmed, force) mapping — a dispatch seam so the contract test can
+     *  EXECUTE all four forms against a recorder (executing the production sink would
+     *  run a real reset). */
+    @FunctionalInterface
+    interface ResetDispatch {
+        void reset(Consumer<Component> feedback, boolean confirmed, boolean forceVoxyWipe);
+    }
+
+    static <S> LiteralArgumentBuilder<S> resetSubtree(
+            Function<String, LiteralArgumentBuilder<S>> literal,
+            Function<S, Consumer<Component>> feedback,
+            ResetDispatch dispatch) {
+        return literal.apply("reset")
+                .executes(context -> dispatchReset(context, feedback, dispatch, false, false))
+                .then(literal.apply("confirm")
+                        .executes(context -> dispatchReset(context, feedback, dispatch, true, false)))
+                .then(literal.apply("voxy-force")
+                        .executes(context -> dispatchReset(context, feedback, dispatch, false, true))
+                        .then(literal.apply("confirm")
+                                .executes(context ->
+                                        dispatchReset(context, feedback, dispatch, true, true))));
+    }
+
+    private static <S> int dispatchReset(CommandContext<S> context,
+                                         Function<S, Consumer<Component>> feedback,
+                                         ResetDispatch dispatch,
+                                         boolean confirmed, boolean forceVoxyWipe) {
+        dispatch.reset(feedback.apply(context.getSource()), confirmed, forceVoxyWipe);
+        return Command.SINGLE_SUCCESS;
     }
 
     /** /lss trace. */
@@ -149,15 +223,23 @@ public final class ClientCommandActions {
         int confirmedRing = manager.getConfirmedRing();
         int scanRing = manager.getScanRing();
         int maxRing = manager.getEffectiveLodDistanceChunks();
-        // ring_skips: rings the section-store fast path confirmed leaf-wise (0 with
-        // enableQuadtreeScan=false); valve: reopened-ring valve overflows this session
-        // (the quadtree plan's phase-0 B1 field measurement — nonzero on a busy server
-        // means dirty broadcasts genuinely disperse past 64 rings).
+        // ring_skips: rings the leaf fast path confirmed without a per-position walk
+        // (the legacy arm's quadtree path, gated by enableQuadtreeScan — AND the
+        // hybrid walk's phase-1 skips, which are gate-independent and make this
+        // unconditionally large on the hybrid arm: NOT a dirty-dispersion signal
+        // there, §7). valve: reopened-ring valve overflows this session (the
+        // quadtree plan's phase-0 B1 field measurement — on the LEGACY arm nonzero
+        // on a busy server means dirty broadcasts genuinely disperse past 64 rings).
+        // near_rings: hybrid phase-1 rings that emitted/observed needy work last
+        // walk — the §7/§9 in-band instrument: active during near fill, ~0 at
+        // convergence (always 0 on the legacy arm).
         feedback.accept(Component.literal(String.format(
-                "Scan: confirmed=%d, reopened=%d, scanning=%d/%d, missing_vanilla=%d, fast=%d, ring_skips=%d, valve=%d",
+                "Scan: confirmed=%d, reopened=%d, scanning=%d/%d, missing_vanilla=%d, fast=%d, ring_skips=%d, valve=%d, region_span=%d, region_skips=%d, audit_heals=%d, near_rings=%d",
                 confirmedRing, manager.getReopenedRingCount(), scanRing, maxRing,
                 manager.getMissingVanillaChunks(), manager.getFastScans(),
-                manager.getQuadRingSkips(), manager.getValveTrips()
+                manager.getQuadRingSkips(), manager.getValveTrips(),
+                manager.getRegionSpan(), manager.getRegionSkips(), manager.getAuditHeals(),
+                manager.getNearRings()
         )).withStyle(ChatFormatting.GRAY));
 
         // Region summaries (§6 attributability): rendered once any summary applied —
@@ -199,6 +281,13 @@ public final class ClientCommandActions {
                 manager.getGovernedRateLabel(), manager.getRateGated()
         )).withStyle(ChatFormatting.GRAY));
 
+        // The two-axis cache key (cache-alias-keying-and-reset-override-plan.md §2.1):
+        // both axes and the reason branch.
+        var cacheLine = manager.describeCacheKey();
+        if (cacheLine != null) {
+            feedback.accept(Component.literal("Cache: " + cacheLine)
+                    .withStyle(ChatFormatting.GRAY));
+        }
         // Xaero map bridge (issue #223, conditional slot — present only when Xaero's
         // World Map was detected at init; the Summary-line precedent).
         var xaeroLine = dev.vox.lss.compat.ModCompat.xaeroDiagLine();

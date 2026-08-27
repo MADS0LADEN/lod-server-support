@@ -14,7 +14,49 @@ public class LSSClientConfig extends JsonConfig {
     public static LSSClientConfig CONFIG =
             load(LSSClientConfig.class, CANDIDATES, dev.vox.lss.platform.LoaderServices.get().configDir());
 
+    // Region-major want-set scanning (docs/planning/region-scan-plan.md): the scanner
+    // walks 32x32-chunk REGIONS in a spiral, completing each region before advancing, so
+    // every downstream consumer (Xaero map regions, server region files, the timestamp
+    // cache's tiles, region-summary tiles) sees one or two active regions instead of ~95
+    // at far radius — the structural fix for far-distance Xaero map tile drops. False =
+    // the legacy chunk-ring scanner, verbatim (the field A/B lever and instant rollback).
+    // Applied at manager construction: a flip takes effect at the next join/SessionConfig.
+    public boolean enableRegionScan = true;
+
     public boolean receiveServerLods = true;
+    // The two-axis cache key's WORLD AXIS (docs/planning/cache-alias-keying-and-
+    // reset-override-plan.md §2.3): a remote session's column-stamp cache bucket gains
+    // a ".world-<16 lowercase hex>" suffix derived from vanilla's obfuscated seed (the
+    // sha256-derived value every vanilla login already carries — never the raw seed),
+    // so ONE ADDRESS whose world changes — a pre-generated map reset, a multi-world
+    // rotation, a proxy backend switch — stops smearing every world's stamps into one
+    // bucket (a pre-generated reset otherwise leaves stale "up to date" terrain that
+    // never self-heals by wall clock). Default TRUE: (address, seed) can only be FINER
+    // than any consumer partition derivable from the address — stock Voxy's own
+    // partition is exactly this pair — so the safe direction holds without opt-in.
+    // The sub-key derives fresh at every session build and dimension entry; seedless
+    // sessions (waiting rooms sending seed 0, single-player, Realms, an unreadable
+    // accessor) keep the bare address bucket. The first seeded session per address
+    // adopts an existing bare bucket once (warm upgrade); false = bare legacy naming
+    // for NEW state, but NOT a rollback lever after adoption — the adopted bucket
+    // stays under its world name and a switched-off session starts cold.
+    public boolean useWorldSubBuckets = true;
+    // The two-axis cache key's ALIAS AXIS (plan §2.2): groups of addresses that name
+    // ONE server (proxy networks reachable at several hostnames), e.g.
+    //   "cacheAddressAliases": [["play.example.com", "alt.example.com", "eu.example.com"]]
+    // The FIRST entry of a group is canonical: every member connection shares the
+    // canonical entry's cache bucket, so the world cold-fills once instead of once per
+    // entry address. Matching is trim+lowercase only — no default-port strip (SRV
+    // resolution can make a.com and a.com:25565 different servers) — and the canonical
+    // must be port-free (voxy-extra substitutes it verbatim into a directory name).
+    // GUARDED per connection: with the Voxy ingest bridge active the group applies only
+    // when Voxy's own storage root corroborates it (voxy-extra's LoD Mirror configured
+    // with the same group, first entries identical) — an alias applied to LSS's stamps
+    // alone would leave them COARSER than Voxy's per-address store, a permanent hole.
+    // While the Xaero map bridge is armed the group never applies (Xaero has no alias
+    // support). Fallback is always the typed address: finer, never wrong. Malformed
+    // groups drop whole with one warning at load.
+    public java.util.List<java.util.List<String>> cacheAddressAliases = new java.util.ArrayList<>();
     public int lodDistanceChunks = 0;
     // The §3 unknown-identity fallback ladder's TERMINAL default (protocol 20,
     // cross-version-identity-encoding-plan.md): a v20 identity this client's registries
@@ -94,12 +136,14 @@ public class LSSClientConfig extends JsonConfig {
     // Default OFF for v0.12.0 (user decision 2026-08-23): opt-in while the feature is new —
     // map writes are persistent saved data, so the surprise default is the cautious one.
     public boolean enableXaeroMapBridge = false;
-    // The bridge's dropped-tile heal (xaero-map-bridge-plan.md §18): tiles the bridge had
-    // to drop under far-radius region-load saturation (queue overflow / deferral expiry)
-    // are re-requested — bounded, at most 3 attempts per position — once their Xaero map
-    // region can actually accept them, instead of staying permanent map holes. Consulted
-    // only while the bridge itself is enabled; inert without the mod.
-    public boolean enableXaeroMapBridgeHeal = true;
+    // §12 Xaero ingest backpressure (hybrid-scan-plan.md §12): the bridge reports its
+    // queue occupancy through the issue-#71 consumer machinery, so the want-set tapers
+    // and LOD arrival self-paces to what the map writer can commit — the map completes
+    // on the first pass instead of shedding overflow drops (~10-15% slower fill while
+    // the map is catching up). false = ungoverned (pre-§12 behavior: the bridge queue
+    // sheds at its cap). Composes under enableIngestBackpressure; consulted only while
+    // the bridge itself is enabled; inert without the mod.
+    public boolean enableXaeroMapBackpressure = true;
     // Ingest-pressure request pacing (issue #71, docs/planning/ingest-backpressure-design.md):
     // scale the want-set budget down — and halt declarations entirely at a threshold — when a
     // registered LOD consumer reports a pending ingest backlog (Voxy's ingest queue depth via
@@ -221,5 +265,17 @@ public class LSSClientConfig extends JsonConfig {
         } else {
             lodColumnsPerSecondLimit = Math.clamp(lodColumnsPerSecondLimit, 10, 100_000);
         }
+        // Alias-axis validation (cache-alias-keying-and-reset-override-plan.md §2.2):
+        // a malformed group drops WHOLE with one warning per load (the
+        // crossVersionBlockFallbacks fail-open convention). The FIELD is deliberately
+        // NOT rewritten to the survivors (panel fix): the config re-saves on load, so
+        // a rewrite would permanently ERASE the user's dropped groups from their file
+        // with one scrolled warning as the only trace — session code re-validates the
+        // raw field silently instead (validated() is deterministic and cheap).
+        if (cacheAddressAliases == null) {
+            cacheAddressAliases = new java.util.ArrayList<>();
+        }
+        dev.vox.lss.networking.client.CacheKeyAliases.validated(
+                cacheAddressAliases, dev.vox.lss.common.LSSLogger::warn);
     }
 }
