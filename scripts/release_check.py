@@ -225,6 +225,24 @@ def check_paper_jar(jar, problems):
                             "(derived from line.env LINE_PAPER_LOADERS) — the wrong "
                             "polarity either refuses Folia or auto-loads onto a "
                             "platform this line does not publish for")
+        # Service-gate nodes (plan §2.6 / §8 O1-m13): UNCONDITIONAL — the dual-jar pair
+        # check below only runs when a VSS jar exists, and it pins token PRESENCE, not
+        # the declared default. Both spellings must be declared AND both must carry the
+        # `default: true` VALUE: an undeclared node falls back to Bukkit's op default,
+        # and a flipped default is the same non-op black-out the moment an operator
+        # arms requireServicePermission.
+        for node in ("lss.use", "vss.use"):
+            m = re.search(r"^  " + re.escape(node) + r":\s*\n(?:^    .*\n)*?^    default:\s*(\S+)\s*$",
+                          ymltext, re.MULTILINE)
+            if m is None:
+                problems.append(f"{base}: plugin.yml is missing the service-gate node "
+                                f"{node!r} with an explicit default (both brand "
+                                "spellings must be declared — Bukkit resolves an "
+                                "undeclared node to the op default)")
+            elif m.group(1) != "true":
+                problems.append(f"{base}: plugin.yml service-gate node {node!r} declares "
+                                f"default: {m.group(1)} — must be true (arming "
+                                "requireServicePermission alone must deny NOBODY)")
     if not any(n.startswith("dev/vox/lss/common/") and n.endswith(".class") for n in names):
         problems.append(f"{base}: shaded jar missing the shared common/ classes")
     if "paperweight-mappings-namespace: mojang" not in _manifest(jar):
@@ -1366,15 +1384,46 @@ def _selftest():
         check(any("common/soak" in m and "META-INF/jars" in m for m in p),
               f"dev code inside a nested jar not caught: {p}")
 
+        GATE_NODES_YML = ("permissions:\n"
+                          "  lss.use:\n    description: receive LOD data\n    default: true\n"
+                          "  vss.use:\n    description: receive LOD data\n    default: true\n")
         good_pap = os.path.join(td, "lod-server-support-paper.jar")
         _make_jar(good_pap, {
-            "plugin.yml": "name: LodServerSupport\nversion: 0.4.0\nfolia-supported: true\n",
+            "plugin.yml": "name: LodServerSupport\nversion: 0.4.0\nfolia-supported: true\n"
+                          + GATE_NODES_YML,
             "dev/vox/lss/paper/LSSPaperPlugin.class": "x",
             "dev/vox/lss/common/PositionUtil.class": "x",
         }, manifest="Manifest-Version: 1.0\npaperweight-mappings-namespace: mojang\n")
         p = []
         check_paper_jar(good_pap, p)
         check(p == [], f"clean paper jar flagged: {p}")
+
+        # Service-gate node checks are UNCONDITIONAL (plan §2.6): a jar missing a node,
+        # and a jar whose declared default flipped, must both be caught here — the pair
+        # check only runs when a VSS jar exists.
+        nodeless_pap = os.path.join(td, "lod-server-support-paper-nodeless.jar")
+        _make_jar(nodeless_pap, {
+            "plugin.yml": "name: LodServerSupport\nversion: 0.4.0\nfolia-supported: true\n"
+                          "permissions:\n  lss.use:\n    default: true\n",
+            "dev/vox/lss/paper/LSSPaperPlugin.class": "x",
+            "dev/vox/lss/common/PositionUtil.class": "x",
+        }, manifest="Manifest-Version: 1.0\npaperweight-mappings-namespace: mojang\n")
+        p = []
+        check_paper_jar(nodeless_pap, p)
+        check(any("missing the service-gate node 'vss.use'" in m for m in p),
+              f"missing vss.use node not caught: {p}")
+        flipped_pap = os.path.join(td, "lod-server-support-paper-flipped.jar")
+        _make_jar(flipped_pap, {
+            "plugin.yml": "name: LodServerSupport\nversion: 0.4.0\nfolia-supported: true\n"
+                          + GATE_NODES_YML.replace("  vss.use:\n    description: receive LOD data\n    default: true\n",
+                                                   "  vss.use:\n    description: receive LOD data\n    default: op\n"),
+            "dev/vox/lss/paper/LSSPaperPlugin.class": "x",
+            "dev/vox/lss/common/PositionUtil.class": "x",
+        }, manifest="Manifest-Version: 1.0\npaperweight-mappings-namespace: mojang\n")
+        p = []
+        check_paper_jar(flipped_pap, p)
+        check(any("declares default: op" in m and "vss.use" in m for m in p),
+              f"flipped default not caught: {p}")
 
         # a paper jar LOSING folia-supported must be caught: Folia ships a 26.2 build since
         # 2026-07-28, so a jar without the flag silently stops loading on Folia servers
@@ -1530,7 +1579,8 @@ def _selftest():
         _make_jar(good_vpap, {
             "plugin.yml": ("name: VoxyServerSide\nversion: 0.7.0\n"
                            "folia-supported: true\n"
-                           "description: Render distant Voxy LODs on servers\n"),
+                           "description: Render distant Voxy LODs on servers\n"
+                           + GATE_NODES_YML),
             "dev/vox/lss/paper/LSSPaperPlugin.class": "x",
             "dev/vox/lss/common/PositionUtil.class": "x",
         }, manifest="Manifest-Version: 1.0\npaperweight-mappings-namespace: mojang\n")
