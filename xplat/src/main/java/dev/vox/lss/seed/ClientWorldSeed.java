@@ -37,11 +37,15 @@ public final class ClientWorldSeed {
     public static WorldSubKey.Context context(boolean subBucketsEnabled) {
         var mc = Minecraft.getInstance();
         var serverData = mc.getCurrentServer();
-        // Mirrors ClientNetGlue's own remote test verbatim (serverData != null && ip !=
-        // null) so the two halves can never disagree about which branch a session is on.
-        boolean remote = serverData != null && serverData.ip != null;
-        boolean realm = serverData != null && serverData.isRealm();
         boolean singleplayer = mc.getSingleplayerServer() != null;
+        // The world axis's remote-eligibility: ClientNetGlue's own remote test
+        // (serverData != null && ip != null) PLUS the no-server-data "unknown" shape —
+        // plan §2.3: the `unknown` bucket gets the sub-key too, because stock Voxy
+        // splits its UNKNOWN twin by world id and LSS must not go coarser there. The
+        // eligibility is what keeps single-player worlds (which have seeds) out.
+        boolean remote = (serverData != null && serverData.ip != null)
+                || (serverData == null && !singleplayer);
+        boolean realm = serverData != null && serverData.isRealm();
         OptionalLong seed = readBiomeZoomSeed(mc, subBucketsEnabled);
         return new WorldSubKey.Context(subBucketsEnabled, remote, realm, singleplayer,
                 seed.isPresent(), seed.orElse(0L));
