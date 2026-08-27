@@ -548,6 +548,10 @@ FABRIC_ONLY_CLASS_PREFIXES = (
     "dev/vox/lss/trace/MoveTraceBootstrap",
     "dev/vox/lss/platform/FabricLoaderServices",
     "dev/vox/lss/platform/FabricClientLoaderServices",
+    # The service gate's Fabric permission rung (service-permission-gate-plan.md §2.1):
+    # the reflective fabric-permissions-api bridge is fabric-only BY DESIGN — NeoForge
+    # enforces through its native PermissionNode registration (LSSNeoPermissions).
+    "dev/vox/lss/compat/FabricPermissionsBridge",
     # Same-FQN TWIN classes: each loader implements its own body behind the shared
     # outer name xplat compiles against, so their NESTED members legitimately differ
     # (the fabric renderer's Proxy/MountInstance vs the neoforge cut; the fabric
