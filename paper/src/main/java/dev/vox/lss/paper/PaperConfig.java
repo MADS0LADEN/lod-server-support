@@ -30,37 +30,6 @@ public class PaperConfig extends ServerConfigBase {
         // the case that actually deserves an operator's attention.
     }
 
-    /**
-     * Per-player service gate: when true, a handshaking player who holds neither
-     * {@code lss.use} nor {@code vss.use} (both declared {@code default: true} in plugin.yml)
-     * is told LOD is unavailable — the reply carries {@code enabled=false} and no session is
-     * registered — instead of being served. BOTH spellings are required, so a negative grant
-     * on EITHER one denies.
-     *
-     * <p><b>The nodes default to TRUE</b> (user decision, 2026-08-25), so turning this key on
-     * denies NOBODY by itself — that is the original behavior, preserved. Denial is always an
-     * explicit negative grant in the permission plugin (LuckPerms:
-     * {@code group default permission set lss.use false}), which is what makes this a deny
-     * lever rather than an allowlist that has to be populated before it is safe to arm. One
-     * negative grant on EITHER spelling is enough: the enforcement requires both, the De
-     * Morgan mirror of the far-player privacy nodes' grant model (an OR here would let the
-     * untouched spelling's {@code default: true} out-vote the admin and the gate could never
-     * deny anyone).
-     *
-     * <p><b>Default false, and that default is load-bearing:</b> off, the handshake path is
-     * byte-for-byte what it was before the gate existed (the permission backend is not even
-     * consulted), so an upgrading server keeps serving every player with nothing to grant
-     * first. On, the operator revokes the node from whoever should not be served — the
-     * permission system IS the list, which is why no UUID/name allowlist key exists beside
-     * it.
-     *
-     * <p>Paper-only by construction (this is what {@link ServerConfigBase} reserves the
-     * platform subclasses for): permissions are a Bukkit concept, and Fabric's server has no
-     * equivalent node system to honor, so a shared key would be a dead option in every
-     * Fabric config file.
-     */
-    public boolean requireServicePermission = false;
-
     // Bukkit events that mark a chunk dirty for LOD re-send. Broadened to better match the
     // Fabric chunk-save hook's coverage (decay, growth, ice/snow, fire, falling blocks).
     // High-frequency fluid flow (BlockFromToEvent) is intentionally NOT a default — admins who

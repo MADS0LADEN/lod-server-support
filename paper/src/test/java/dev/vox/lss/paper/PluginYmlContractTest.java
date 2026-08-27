@@ -128,6 +128,11 @@ class PluginYmlContractTest {
                 "the declared node and the enforced constant must be the same string");
         assertEquals(LSSPaperPlugin.PERMISSION_SERVICE_VSS, "vss.use",
                 "the declared node and the enforced constant must be the same string");
+        // The constants' HOME moved to common (service-permission-gate-plan.md §2.1):
+        // xplat's gate and NeoForge's node registration enforce the same strings, and
+        // this is the one pin tying all three modules' spellings together.
+        assertEquals("lss.use", dev.vox.lss.common.LSSPermissions.SERVICE_LSS);
+        assertEquals("vss.use", dev.vox.lss.common.LSSPermissions.SERVICE_VSS);
     }
 
     @Test

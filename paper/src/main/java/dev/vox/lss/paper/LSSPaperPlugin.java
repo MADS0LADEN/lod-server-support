@@ -54,9 +54,9 @@ public class LSSPaperPlugin extends JavaPlugin implements PluginMessageListener,
      * the gate alone therefore changes nothing for anyone, and a denial is always an explicit
      * negative grant an admin made in their permission plugin.
      */
-    static final String PERMISSION_SERVICE_LSS = "lss.use";
+    static final String PERMISSION_SERVICE_LSS = dev.vox.lss.common.LSSPermissions.SERVICE_LSS;
     /** The VSS spelling of {@link #PERMISSION_SERVICE_LSS} — see there. */
-    static final String PERMISSION_SERVICE_VSS = "vss.use";
+    static final String PERMISSION_SERVICE_VSS = dev.vox.lss.common.LSSPermissions.SERVICE_VSS;
 
     /**
      * Once-per-player-per-session latch for the service-denial log line. A client may
