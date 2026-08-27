@@ -1,5 +1,8 @@
 package dev.vox.lss.common;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Locale;
 
 /**
@@ -86,5 +89,47 @@ public final class XrayMaskPolicy {
             if (d.contains("end")) return END;
             return OVERWORLD;
         }
+    }
+
+    /**
+     * Permutation-stable fingerprint of the mask SEMANTICS (v0.13.1 —
+     * store-registry-permutation-plan.md §3.5), shared by both platforms' MaskSet
+     * twins as the LOD store's per-dimension staleness key: FNV-1a over the SORTED,
+     * DEDUPED hidden-state identity strings, then the cutoff height. The old hash
+     * walked the boolean-per-global-state-id array, so a registry-order permutation
+     * (VisualWorkbench-class per-boot dynamic registration) flipped every masked
+     * dimension's fingerprint each boot and the freshness sweep dropped its rows —
+     * defeating the meta-level permutation tolerance. Identity strings (BlockState
+     * toString — the registry fingerprint's own convention) survive a permutation;
+     * any REAL semantic change (states added/removed/renamed, cutoff moved) still
+     * flips the value. NOTE the value differs from the old array hash for every
+     * non-empty mask: masked servers pay a one-time per-dimension re-warm at the
+     * first boot on this version.
+     */
+    public static long maskContentFingerprint(Collection<String> hiddenStateIdentities,
+                                              int maxBlockHeight) {
+        // Null elements are skipped rather than thrown on (fix-review fold): MaskSet
+        // construction happens lazily inside serve choke points where throw-freedom
+        // is load-bearing, and this is a public common API.
+        var sorted = new ArrayList<String>(hiddenStateIdentities.size());
+        for (String s : hiddenStateIdentities) {
+            if (s != null) sorted.add(s);
+        }
+        Collections.sort(sorted);
+        long hash = 0xcbf29ce484222325L;
+        String prev = null;
+        for (String s : sorted) {
+            if (s.equals(prev)) continue; // dedupe: a doubled config entry is the same mask
+            prev = s;
+            for (int i = 0; i < s.length(); i++) {
+                hash ^= s.charAt(i);
+                hash *= 0x100000001b3L;
+            }
+            hash ^= ':';
+            hash *= 0x100000001b3L;
+        }
+        hash ^= maxBlockHeight;
+        hash *= 0x100000001b3L;
+        return hash;
     }
 }
