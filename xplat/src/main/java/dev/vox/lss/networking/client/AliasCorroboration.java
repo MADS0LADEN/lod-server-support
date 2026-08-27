@@ -90,9 +90,10 @@ public final class AliasCorroboration {
         }
         if (observedDirName == null) {
             return Result.fallBack("voxy-unprobeable",
-                    "cacheAddressAliases: Voxy is present but its storage root could not be "
-                            + "observed — not applying the alias group (fail-safe; the cache "
-                            + "stays keyed by the typed address)");
+                    "cacheAddressAliases: Voxy is installed but its storage root could not be "
+                            + "observed (Voxy may not be running for this session, or its "
+                            + "internals drifted) — not applying the alias group (fail-safe; "
+                            + "the cache stays keyed by the typed address)");
         }
         if (observedDirName.equals(canonicalRaw)
                 || observedDirName.equals(voxyMunge(canonicalRaw))) {

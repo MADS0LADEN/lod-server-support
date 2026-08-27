@@ -105,6 +105,7 @@ class AliasCorroborationTest {
     private static void assertFallsBack(AliasCorroboration.Result r, String token, String why) {
         assertEquals(AliasCorroboration.Outcome.FALL_BACK, r.outcome(), why);
         assertEquals(token, r.token(), why);
+        assertNotNull(r.warn(), "every fallback names its reason to the user (" + why + ")");
     }
 
     // ---- the munge itself ----

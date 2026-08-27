@@ -108,6 +108,11 @@ public final class ModCompat {
      *                     UNAVAILABLE)
      * @param liveRoot     the root the running Voxy instance reported, or null
      * @param expectedRoot the root LSS derived for this connection, or null
+     * @param liveRootContained whether {@code liveRoot} sits inside the containment
+     *                     fence — the declined-wipe report offers {@code voxy-force}
+     *                     only when stage 1 could actually arm it (panel fix: the
+     *                     chat/log report must not send the user down the dead end
+     *                     the force prompt itself refuses)
      * @param wipeDeclined true when the ladder reached the cross-check and REFUSED the
      *                     disk wipe. This is deliberately not derivable from
      *                     {@code outcome}: a wipe declined by the cross-check can still
@@ -121,11 +126,12 @@ public final class ModCompat {
                                   VoxyStorageOverride.Verdict verdict,
                                   java.nio.file.Path liveRoot,
                                   java.nio.file.Path expectedRoot,
+                                  boolean liveRootContained,
                                   boolean wipeDeclined) {
         /** An outcome reached before (or without) reading either root. */
         public static VoxyResetReport of(VoxyResetOutcome outcome) {
             return new VoxyResetReport(outcome, VoxyStorageOverride.Verdict.UNAVAILABLE,
-                    null, null, false);
+                    null, null, false, false);
         }
     }
 
@@ -156,19 +162,31 @@ public final class ModCompat {
      * the down-window). Main client thread only. Every failure shape is contained to a
      * feedback-driving outcome — it must never cost the ingest bridge.
      *
-     * @param forceWipe the user-confirmed {@code voxy-force} override: waives the
-     *                  derived-root cross-check ONLY. Containment still applies, and
-     *                  the default ({@code false}) path is unchanged.
+     * @param forceWipe        the user-confirmed {@code voxy-force} override: waives the
+     *                         derived-root cross-check ONLY. Containment still applies,
+     *                         and the default ({@code false}) path is unchanged.
+     * @param grantedLiveRoot  the exact root the consumed ForceGrant was armed for
+     *                         (null on every unforced path): the forced wipe applies
+     *                         ONLY to a live root {@code samePath}-equal to it — the
+     *                         shown==wiped invariant enforced at the wipe itself, not
+     *                         merely at the coordinator's re-probe (panel fix)
      */
-    public static VoxyResetReport resetVoxyLods(boolean forceWipe) {
-        if (!voxyLoaded) return VoxyResetReport.of(VoxyResetOutcome.NOT_PRESENT);
-        return VoxyCompat.resetVoxyProduction(forceWipe);
+    public static VoxyResetReport resetVoxyLods(boolean forceWipe,
+                                                java.nio.file.Path grantedLiveRoot) {
+        if (!dev.vox.lss.platform.LoaderServices.get().isModLoaded("voxy")) {
+            return VoxyResetReport.of(VoxyResetOutcome.NOT_PRESENT);
+        }
+        return VoxyCompat.resetVoxyProduction(forceWipe, grantedLiveRoot);
     }
 
     /** Reads the storage roots without touching Voxy's lifecycle or the disk — what
      *  {@code /lss reset voxy-force} shows before asking for confirmation. */
     public static VoxyStorageProbe probeVoxyStorage() {
-        if (!voxyLoaded) {
+        // Presence means the MOD is installed, not that the ingest bridge resolved
+        // (panel fix): a Voxy that renamed the ingest surface but kept the reset/probe
+        // domain must not be reported "not installed" while its store sits on disk —
+        // the domains resolve independently.
+        if (!dev.vox.lss.platform.LoaderServices.get().isModLoaded("voxy")) {
             return new VoxyStorageProbe(false, VoxyStorageOverride.Verdict.UNAVAILABLE,
                     null, null, false);
         }

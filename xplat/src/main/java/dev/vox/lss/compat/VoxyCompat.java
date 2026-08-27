@@ -350,7 +350,8 @@ class VoxyCompat {
                       ThrowingRunnable createInstance,
                       java.util.function.Consumer<java.nio.file.Path> wipe,
                       Runnable gc,
-                      Runnable allChanged) {
+                      Runnable allChanged,
+                      java.util.function.Predicate<java.nio.file.Path> wipeContained) {
 }
 
     /**
@@ -387,7 +388,8 @@ class VoxyCompat {
      *                  the containment fence inside {@link #wipeVoxyStore} stands, and
      *                  {@code false} reproduces the pre-#4 behaviour exactly.
      */
-    static ModCompat.VoxyResetReport resetVoxy(ResetHooks h, boolean forceWipe) {
+    static ModCompat.VoxyResetReport resetVoxy(ResetHooks h, boolean forceWipe,
+                                               java.nio.file.Path grantedLiveRoot) {
         Object instance;
         try {
             instance = h.instance().get();
@@ -399,12 +401,24 @@ class VoxyCompat {
         }
         if (instance == null) {
             java.nio.file.Path derived = h.fallbackPath().get();
+            if (forceWipe) {
+                // The grant was armed for a LIVE root that no longer exists — under
+                // force this branch wipes NOTHING (panel fix: the no-instance fallback
+                // wipe targets the DERIVED root, which on the OVERRIDDEN shape is a
+                // different directory than the one the user was shown; shown==wiped
+                // must hold at the wipe itself).
+                LSSLogger.warn("Voxy reset (forced): the live instance vanished before "
+                        + "the wipe — nothing was deleted");
+                return new ModCompat.VoxyResetReport(
+                        ModCompat.VoxyResetOutcome.UNAVAILABLE,
+                        VoxyStorageOverride.Verdict.NO_INSTANCE, null, derived, false, true);
+            }
             if (derived != null) h.wipe().accept(derived);
             // No cross-check happens on this branch and the log says nothing about one,
             // so the feedback must not either — the flag mirrors the log exactly.
             return new ModCompat.VoxyResetReport(
                     ModCompat.VoxyResetOutcome.WIPED_NO_INSTANCE,
-                    VoxyStorageOverride.Verdict.NO_INSTANCE, null, derived, false);
+                    VoxyStorageOverride.Verdict.NO_INSTANCE, null, derived, false, false);
         }
         java.nio.file.Path liveRoot;
         try {
@@ -421,18 +435,24 @@ class VoxyCompat {
         // never be the thing that breaks the reset.
         java.nio.file.Path expected =
                 liveRoot != null ? h.fallbackPath().get() : fallbackPathForReport(h);
+        // Force applies ONLY to the exact root the consumed grant was armed for — a
+        // live root that moved since the stage-2 probe falls back to the ordinary
+        // comparison (declined, nothing wiped) rather than deleting an unshown path.
+        boolean forceApplies = forceWipe && grantedLiveRoot != null
+                && VoxyStorageOverride.samePath(liveRoot, grantedLiveRoot);
         java.nio.file.Path root =
-                VoxyStorageOverride.shouldWipeLiveRoot(liveRoot, expected, forceWipe)
+                VoxyStorageOverride.shouldWipeLiveRoot(liveRoot, expected, forceApplies)
                         ? liveRoot : null;
         var verdict = VoxyStorageOverride.verdict(true, true, liveRoot, expected);
+        boolean liveContained = liveRootContained(h, liveRoot);
         boolean wipeDeclined = root == null;
         if (wipeDeclined) {
             // Step 1 above declined the wipe. The report is the user-facing half of #4:
             // both roots, the likely cause, and (unless they already forced) the override.
             LSSLogger.warn(String.join(System.lineSeparator(),
                     VoxyStorageOverride.wipeSkippedLines(verdict, liveRoot, expected,
-                            !forceWipe)));
-        } else if (forceWipe && verdict != VoxyStorageOverride.Verdict.MATCHES) {
+                            !forceWipe && liveContained)));
+        } else if (forceApplies && verdict != VoxyStorageOverride.Verdict.MATCHES) {
             LSSLogger.warn("Voxy reset: FORCED wipe of " + liveRoot + " — it does NOT match this "
                     + "connection's derived root " + VoxyStorageOverride.render(expected)
                     + "; the storage-override cross-check was waived on explicit user "
@@ -442,7 +462,7 @@ class VoxyCompat {
         if (rendererShutdown == null) {
             return new ModCompat.VoxyResetReport(
                     ModCompat.VoxyResetOutcome.UNAVAILABLE, verdict, liveRoot, expected,
-                    wipeDeclined);
+                    liveContained, wipeDeclined);
         }
         try {
             rendererShutdown.run();
@@ -453,7 +473,7 @@ class VoxyCompat {
             LSSLogger.warn("Voxy reset: renderer shutdown failed — aborting the Voxy half", t);
             return new ModCompat.VoxyResetReport(
                     ModCompat.VoxyResetOutcome.UNAVAILABLE, verdict, liveRoot, expected,
-                    wipeDeclined);
+                    liveContained, wipeDeclined);
         }
         try {
             h.shutdownInstance().run();
@@ -469,16 +489,16 @@ class VoxyCompat {
                 LSSLogger.error("Voxy reset: createInstance failed after a failed shutdown", t2);
                 return new ModCompat.VoxyResetReport(
                         ModCompat.VoxyResetOutcome.RESTART_FAILED, verdict, liveRoot, expected,
-                        wipeDeclined);
+                        liveContained, wipeDeclined);
             }
             if (!runAllChangedContained(h)) {
                 return new ModCompat.VoxyResetReport(
                         ModCompat.VoxyResetOutcome.RESTART_FAILED, verdict, liveRoot, expected,
-                        wipeDeclined);
+                        liveContained, wipeDeclined);
             }
             return new ModCompat.VoxyResetReport(
                     ModCompat.VoxyResetOutcome.SHUTDOWN_FAILED, verdict, liveRoot, expected,
-                    wipeDeclined);
+                    liveContained, wipeDeclined);
         }
         if (root != null) h.wipe().accept(root);
         h.gc().run();
@@ -491,17 +511,30 @@ class VoxyCompat {
             LSSLogger.error("Voxy reset: createInstance failed — Voxy is down until rejoin", t);
             return new ModCompat.VoxyResetReport(
                     ModCompat.VoxyResetOutcome.RESTART_FAILED, verdict, liveRoot, expected,
-                    wipeDeclined);
+                    liveContained, wipeDeclined);
         }
         if (!runAllChangedContained(h)) {
             return new ModCompat.VoxyResetReport(
                     ModCompat.VoxyResetOutcome.RESTART_FAILED, verdict, liveRoot, expected,
-                    wipeDeclined);
+                    liveContained, wipeDeclined);
         }
         return new ModCompat.VoxyResetReport(
                 wipeDeclined ? ModCompat.VoxyResetOutcome.RESET_WIPE_SKIPPED
                         : ModCompat.VoxyResetOutcome.RESET,
-                verdict, liveRoot, expected, wipeDeclined);
+                verdict, liveRoot, expected, liveContained, wipeDeclined);
+    }
+
+    /** Containment of the live root for REPORTING (the wipe itself re-checks inside
+     *  {@link #wipeVoxyStore}). Throw-contained; doubt reads as not-contained, which
+     *  only suppresses the voxy-force offer — the safe direction. */
+    private static boolean liveRootContained(ResetHooks h, java.nio.file.Path liveRoot) {
+        if (liveRoot == null) return false;
+        try {
+            return h.wipeContained().test(liveRoot);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError vme) throw vme;
+            return false;
+        }
     }
 
     /** The derived root read purely to enrich a message (issue #4 follow-up). Contained:
@@ -722,9 +755,10 @@ class VoxyCompat {
         }
     }
 
-    /** Production entry for {@link ModCompat#resetVoxyLods(boolean, boolean)}: resolve the domain,
+    /** Production entry for {@link ModCompat#resetVoxyLods}: resolve the domain,
      *  build the production hooks, run the ladder. Main client thread only. */
-    static ModCompat.VoxyResetReport resetVoxyProduction(boolean forceWipe) {
+    static ModCompat.VoxyResetReport resetVoxyProduction(boolean forceWipe,
+                                                        java.nio.file.Path grantedLiveRoot) {
         if (!initResetDomain()) {
             return ModCompat.VoxyResetReport.of(ModCompat.VoxyResetOutcome.UNAVAILABLE);
         }
@@ -739,10 +773,10 @@ class VoxyCompat {
                     // Voxy's renderer rebuild against the new instance.
                     var extractor = net.minecraft.client.Minecraft.getInstance().levelExtractor;
                     if (extractor != null) extractor.allChanged();
-                }), forceWipe);
+                }), forceWipe, grantedLiveRoot);
     }
 
-    /** Production entry for {@link ModCompat#probeVoxyStorage(boolean)} — the same resolved
+    /** Production entry for {@link ModCompat#probeVoxyStorage()} — the same resolved
      *  handles the ladder uses, so the prompt cannot show a path the wipe would not
      *  target. The renderer/allChanged hooks are inert here: {@link #probeStorage}
      *  never calls them. */
@@ -789,7 +823,8 @@ class VoxyCompat {
                 () -> { resetCreateInstance.invokeExact(); },
                 target -> wipeVoxyStore(target, gameDir),
                 System::gc,
-                allChanged);
+                allChanged,
+                target -> isWipeContained(target, gameDir));
     }
 
     /** The instance probe THROWS on a failed handle invoke (never null — "can't tell"

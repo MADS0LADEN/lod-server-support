@@ -38,13 +38,14 @@ public final class ClientWorldSeed {
         var mc = Minecraft.getInstance();
         var serverData = mc.getCurrentServer();
         boolean singleplayer = mc.getSingleplayerServer() != null;
-        // The world axis's remote-eligibility: ClientNetGlue's own remote test
-        // (serverData != null && ip != null) PLUS the no-server-data "unknown" shape —
-        // plan §2.3: the `unknown` bucket gets the sub-key too, because stock Voxy
-        // splits its UNKNOWN twin by world id and LSS must not go coarser there. The
-        // eligibility is what keeps single-player worlds (which have seeds) out.
-        boolean remote = (serverData != null && serverData.ip != null)
-                || (serverData == null && !singleplayer);
+        // The world axis's remote-eligibility: every shape that is NOT a single-player
+        // world qualifies — the direct remote test (serverData with an ip), and BOTH
+        // "unknown" flavors (no serverData at all, and serverData with a null ip; the
+        // glue buckets both as `unknown`, and stock Voxy splits its UNKNOWN twin by
+        // world id, so LSS must not go coarser there — plan §2.3). Single-player worlds
+        // (which have seeds) are excluded here AND by the predicate's own term; a stale
+        // currentServer surviving into single-player is likewise killed by that term.
+        boolean remote = (serverData != null && serverData.ip != null) || !singleplayer;
         boolean realm = serverData != null && serverData.isRealm();
         OptionalLong seed = readBiomeZoomSeed(mc, subBucketsEnabled);
         return new WorldSubKey.Context(subBucketsEnabled, remote, realm, singleplayer,

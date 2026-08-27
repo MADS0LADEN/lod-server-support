@@ -45,10 +45,12 @@ import java.util.function.Supplier;
  */
 final class ResetCoordinator {
 
-    /** The Voxy half, parameterised by the force flag. */
+    /** The Voxy half: the force flag plus the exact root the consumed grant was armed
+     *  for (null on every unforced path) — the ladder wipes under force ONLY a live
+     *  root samePath-equal to it, so shown==wiped is enforced at the wipe itself. */
     @FunctionalInterface
     interface VoxyReset {
-        ModCompat.VoxyResetReport reset(boolean forceWipe);
+        ModCompat.VoxyResetReport reset(boolean forceWipe, java.nio.file.Path grantedLiveRoot);
     }
 
     /** The armed stage-1 evidence: the exact root the user was shown, when, and for
@@ -90,6 +92,7 @@ final class ResetCoordinator {
     /** Runs the sequence; returns true when anything was actually reset (false = an
      *  unconfirmed destructive branch replied with its prompt only). */
     static boolean run(Deps deps, boolean confirmed, boolean forceVoxyWipe) {
+        java.nio.file.Path grantedRoot = null;
         if (forceVoxyWipe && !confirmed) {
             return forceStage1(deps);
         }
@@ -109,10 +112,12 @@ final class ResetCoordinator {
                         ? "No armed voxy-force confirmation — showing stage 1 instead "
                                 + "(nothing was deleted):"
                         : "The voxy-force confirmation is no longer valid (expired, a "
-                                + "different connection, or the storage root changed) — "
-                                + "showing stage 1 again (nothing was deleted):");
+                                + "different connection, or the storage root changed or "
+                                + "could not be re-read) — showing stage 1 again (nothing "
+                                + "was deleted):");
                 return forceStage1(deps);
             }
+            grantedRoot = grant.normalizedLiveRoot();
         }
         if (!deps.managerActive()) {
             if (!confirmed) {
@@ -124,7 +129,7 @@ final class ResetCoordinator {
             }
             deps.drainAndAwaitDecode().run(); // a reset racing a just-died session's final
                                               // dispatch must still close the wipe window
-            var report = voxyResetContained(deps, forceVoxyWipe);
+            var report = voxyResetContained(deps, forceVoxyWipe, grantedRoot);
             deps.clearAllCaches().run();
             deps.feedback().accept(voxyLine(report) + Brand.shortName() + " caches cleared for "
                     + "ALL servers. No " + Brand.shortName() + " server on this connection — "
@@ -134,7 +139,7 @@ final class ResetCoordinator {
         }
 
         deps.drainAndAwaitDecode().run();
-        var report = voxyResetContained(deps, forceVoxyWipe);
+        var report = voxyResetContained(deps, forceVoxyWipe, grantedRoot);
         deps.lssFlush().run();
         // R-3 (filled at E1): clear the far-player tracker + seen-epoch state and
         // re-send prefs AFTER the flush — the server answers ANY prefs receipt with a
@@ -175,9 +180,10 @@ final class ResetCoordinator {
     /** The last containment belt (stage-D review m2): a throw escaping the Voxy half
      *  must never skip the LSS flush — a wiped Voxy plus surviving LSS stamps is the
      *  persisted-false-stamps hole the feedback branches exist to prevent. */
-    private static ModCompat.VoxyResetReport voxyResetContained(Deps deps, boolean forceVoxyWipe) {
+    private static ModCompat.VoxyResetReport voxyResetContained(Deps deps, boolean forceVoxyWipe,
+                                                                java.nio.file.Path grantedRoot) {
         try {
-            return deps.voxyReset().reset(forceVoxyWipe);
+            return deps.voxyReset().reset(forceVoxyWipe, grantedRoot);
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError vme) throw vme;
             dev.vox.lss.common.LSSLogger.error("Voxy reset threw — treating as restart failure "
@@ -199,8 +205,11 @@ final class ResetCoordinator {
     private static void emitStorageDetail(Deps deps, ModCompat.VoxyResetReport report,
                                           boolean forceVoxyWipe) {
         if (!report.wipeDeclined()) return;
+        // Offer voxy-force only where stage 1 could actually arm it — an outside-fence
+        // live root gets the report without the dead-end instruction (panel fix).
         VoxyStorageOverride.wipeSkippedLines(report.verdict(), report.liveRoot(),
-                report.expectedRoot(), !forceVoxyWipe).forEach(deps.feedback());
+                report.expectedRoot(), !forceVoxyWipe && report.liveRootContained())
+                .forEach(deps.feedback());
     }
 
     /** The per-outcome Voxy prefix of the feedback line. The UNAVAILABLE and

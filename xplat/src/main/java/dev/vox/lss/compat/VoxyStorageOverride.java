@@ -195,11 +195,17 @@ public final class VoxyStorageOverride {
         Verdict verdict = probe.verdict();
         if (verdict == Verdict.NO_INSTANCE) {
             // The ONE verdict carrying the plain-reset hint (plan §3.1): with no live
-            // instance the ordinary reset already wipes the derived root directly.
-            return List.of("Voxy is not running for this session — there is no live root to "
-                    + "force-wipe. Run '/" + Brand.clientCommand() + " reset' instead; it "
-                    + "clears the root " + Brand.shortName() + " derives for this connection ("
-                    + render(probe.expectedRoot()) + ").");
+            // instance the ordinary reset already wipes the derived root directly —
+            // promised only when that root actually derived (panel fix).
+            return List.of(probe.expectedRoot() != null
+                    ? "Voxy is not running for this session — there is no live root to "
+                            + "force-wipe. Run '/" + Brand.clientCommand() + " reset' instead; it "
+                            + "clears the root " + Brand.shortName() + " derives for this "
+                            + "connection (" + probe.expectedRoot() + ")."
+                    : "Voxy is not running for this session — there is no live root to "
+                            + "force-wipe, and no derived root could be resolved; run '/"
+                            + Brand.clientCommand() + " reset' for the "
+                            + Brand.shortName() + " half.");
         }
         if (verdict == Verdict.UNAVAILABLE || probe.liveRoot() == null) {
             return List.of("Voxy's live storage root could not be read — there is nothing to "
@@ -207,11 +213,14 @@ public final class VoxyStorageOverride {
         }
         var out = new ArrayList<String>();
         if (!armed) {
-            // The fence pre-check refused this root read-only, BEFORE anything armed
-            // (plan §3.2): say so terminally rather than offering a dead confirm.
-            out.add("Voxy's live storage root is OUTSIDE Voxy's own storage locations, so it "
-                    + "cannot be wiped even with force (the containment fail-safe is not "
-                    + "waivable):");
+            // The coordinator armed nothing. Say WHY structurally (panel fix: the text
+            // must key on the probe's own containment fact, not on an inference from
+            // the arming decision — a future arming term must not turn this into a lie).
+            out.add(probe.containedForWipe()
+                    ? "The voxy-force confirmation was not armed for this root:"
+                    : "Voxy's live storage root is OUTSIDE Voxy's own storage locations, so it "
+                            + "cannot be wiped even with force (the containment fail-safe is not "
+                            + "waivable):");
             out.addAll(rootLines(probe.liveRoot(), probe.expectedRoot()));
             out.add(causeLine(verdict));
             out.add("Nothing has been deleted, and nothing was armed.");

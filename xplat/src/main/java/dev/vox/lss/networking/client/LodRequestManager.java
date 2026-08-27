@@ -282,6 +282,8 @@ public class LodRequestManager {
         this.worldSubKey = java.util.Optional.empty();
         this.worldAxisReason = "off";
         this.preparedWorldBuckets.clear();
+        this.dimensionBuckets.clear();
+        this.sessionUsedBareBucket = false;
         // Safe default until the factory wires the Tier B decision for this session (a v18
         // session never re-enables it).
         this.v16GenerationDrive = false;
@@ -1051,9 +1053,14 @@ public class LodRequestManager {
             // A report for another dimension (a consumer rejected asynchronously after the
             // player changed dimension): its in-memory state map is gone, but the false stamp is
             // already saved in that dimension's cache. Remove it there directly so the next visit
-            // re-resolves honestly instead of getting a false up_to_date (#36).
-            if (this.serverAddress != null && dimension != null) {
-                ColumnCacheStore.removeAsync(this.serverAddress, dimension, packed);
+            // re-resolves honestly instead of getting a false up_to_date (#36). The target is
+            // the bucket THAT dimension loaded/saved under — after a dimension change re-keys
+            // the world axis, serverAddress is the NEW world's bucket and a removal aimed there
+            // would silently no-op (panel MAJOR).
+            String departedBucket = dimension != null
+                    ? this.dimensionBuckets.getOrDefault(dimension, this.serverAddress) : null;
+            if (departedBucket != null) {
+                ColumnCacheStore.removeAsync(departedBucket, dimension, packed);
             }
             return;
         }
@@ -1177,6 +1184,9 @@ public class LodRequestManager {
     private void startAsyncCacheLoad(ResourceKey<Level> dimension) {
         this.failuresDuringCacheLoad.clear(); // per-dimension buffer; a new load starts clean
         this.dirtyDuringCacheLoad.clear();     // same scope — old-dimension notices are stale
+        // The bucket this dimension loads under IS the bucket it saves under (save
+        // precedes the next rederive) — remember it for late cross-dimension unstamps.
+        this.dimensionBuckets.put(dimension, this.serverAddress);
         this.pendingCacheLoad = ColumnCacheStore.loadStateAsync(this.serverAddress, dimension);
     }
 
@@ -1239,6 +1249,17 @@ public class LodRequestManager {
     /** Seeded buckets already queued for preparation this session (adoption + the
      *  sibling cap run once per bucket, on the cache IO thread, ahead of any load). */
     private final java.util.Set<String> preparedWorldBuckets = new java.util.HashSet<>();
+    /** The composed bucket each dimension was LOADED under this session — the target
+     *  for late cross-dimension unstamps (panel MAJOR: after a dimension change
+     *  re-keys the bucket, {@code serverAddress} is no longer the bucket the departed
+     *  dimension saved under; a removal aimed there would no-op and leave the false
+     *  stamp — re-opening the #36 hole on per-world-seed servers). */
+    private final java.util.Map<ResourceKey<Level>, String> dimensionBuckets =
+            new java.util.HashMap<>();
+    /** True once any derive point this session composed the BARE bucket — the
+     *  same-session residue guard (panel fix): a seedless lobby leg's bucket must not
+     *  become the adoption source for the game world that follows it. */
+    private boolean sessionUsedBareBucket;
 
     /**
      * Production wiring for the two-axis key (the session factory calls this right
@@ -1275,10 +1296,37 @@ public class LodRequestManager {
         }
         this.serverAddress = dev.vox.lss.seed.WorldSubKey.composeBucket(
                 this.cacheAddressComponent, this.worldSubKey);
-        if (this.worldSubKey.isPresent() && this.preparedWorldBuckets.add(this.serverAddress)) {
-            ColumnCacheStore.prepareWorldBucketAsync(
-                    this.cacheAddressComponent, this.worldSubKey.get());
+        if (this.worldSubKey.isEmpty()) {
+            this.sessionUsedBareBucket = true;
+        } else if (this.preparedWorldBuckets.add(this.serverAddress)) {
+            ColumnCacheStore.prepareWorldBucketAsync(this.cacheAddressComponent,
+                    this.worldSubKey.get(), !this.sessionUsedBareBucket);
         }
+    }
+
+    /**
+     * Rebuild carry (panel fix, the governor's {@code adoptFrom} shape): a re-sent
+     * session config rebuilds the manager, and the fresh derive's ONLY carry source
+     * died with the old manager — so an unreadable read at rebuild time would silently
+     * drop to the bare bucket, the exact drop {@link dev.vox.lss.seed.WorldSubKey#carryForward}
+     * forbids mid-session. The gate hands the old manager's sub-key here right after
+     * the factory; applied ONLY when this manager's own fresh read was unreadable.
+     */
+    void adoptCarriedSubKey(java.util.Optional<String> previousSubKey) {
+        if (!"unreadable".equals(this.worldAxisReason) || previousSubKey.isEmpty()) return;
+        this.worldSubKey = previousSubKey;
+        this.worldAxisReason = "carried";
+        this.serverAddress = dev.vox.lss.seed.WorldSubKey.composeBucket(
+                this.cacheAddressComponent, this.worldSubKey);
+        if (this.preparedWorldBuckets.add(this.serverAddress)) {
+            ColumnCacheStore.prepareWorldBucketAsync(this.cacheAddressComponent,
+                    this.worldSubKey.get(), !this.sessionUsedBareBucket);
+        }
+    }
+
+    /** The current world sub-key, for the gate's rebuild carry. */
+    java.util.Optional<String> worldSubKeySnapshot() {
+        return this.worldSubKey;
     }
 
     /** Why there is no world sub-key, for diag/log — from the context's first failing term. */

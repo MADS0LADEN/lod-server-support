@@ -266,18 +266,16 @@ public class LSSClientConfig extends JsonConfig {
             lodColumnsPerSecondLimit = Math.clamp(lodColumnsPerSecondLimit, 10, 100_000);
         }
         // Alias-axis validation (cache-alias-keying-and-reset-override-plan.md §2.2):
-        // a malformed group drops WHOLE with one warning (the crossVersionBlockFallbacks
-        // fail-open convention) and the field is rewritten to the survivors, so session
-        // code re-reading it gets an already-clean shape (its re-validation is silent).
+        // a malformed group drops WHOLE with one warning per load (the
+        // crossVersionBlockFallbacks fail-open convention). The FIELD is deliberately
+        // NOT rewritten to the survivors (panel fix): the config re-saves on load, so
+        // a rewrite would permanently ERASE the user's dropped groups from their file
+        // with one scrolled warning as the only trace — session code re-validates the
+        // raw field silently instead (validated() is deterministic and cheap).
         if (cacheAddressAliases == null) {
             cacheAddressAliases = new java.util.ArrayList<>();
         }
-        var survivingGroups = dev.vox.lss.networking.client.CacheKeyAliases.validated(
+        dev.vox.lss.networking.client.CacheKeyAliases.validated(
                 cacheAddressAliases, dev.vox.lss.common.LSSLogger::warn);
-        var cleaned = new java.util.ArrayList<java.util.List<String>>();
-        for (var group : survivingGroups) {
-            cleaned.add(new java.util.ArrayList<>(group.membersRaw()));
-        }
-        cacheAddressAliases = cleaned;
     }
 }

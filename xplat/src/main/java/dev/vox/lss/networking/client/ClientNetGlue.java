@@ -244,10 +244,14 @@ public final class ClientNetGlue {
         if (group == null) {
             return unaliasedDecision(connectAddr, "no-group");
         }
+        // The Xaero gate is evaluated first inside the ladder, so the Voxy probe (a
+        // reflective read with its own log line) is skipped when its answer would be
+        // discarded anyway.
+        boolean xaeroArmed = dev.vox.lss.compat.ModCompat.isXaeroBridgeArmed();
         var result = AliasCorroboration.evaluate(
                 dev.vox.lss.compat.ModCompat.isVoxyBridgeActive(),
-                dev.vox.lss.compat.ModCompat.isXaeroBridgeArmed(),
-                dev.vox.lss.compat.ModCompat.observeVoxyStorageDirName(),
+                xaeroArmed,
+                xaeroArmed ? null : dev.vox.lss.compat.ModCompat.observeVoxyStorageDirName(),
                 connectAddr, group.canonicalRaw());
         if (result.warn() != null) {
             LSSLogger.warn(result.warn());

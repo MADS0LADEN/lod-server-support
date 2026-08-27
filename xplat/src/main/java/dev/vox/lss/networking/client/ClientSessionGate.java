@@ -177,6 +177,11 @@ final class ClientSessionGate {
         // play→config reconfiguration fires neither loader's disconnect, and JOIN is
         // the one event that reliably brackets a play session (plan §2.1, §9 M-B2).
         AliasLatch.resetForJoin();
+        // The force grant gets the same JOIN bracket (panel fix): a reconfiguration
+        // fires no disconnect, and a grant armed with a live manager must not survive
+        // into a rejoined session where the no-session branch would do MORE than the
+        // armed prompt disclosed.
+        ResetCoordinator.clearForceGrant();
 
         if (!receiveServerLods) return;
         if (localIntegratedServer) return;
@@ -412,15 +417,21 @@ final class ClientSessionGate {
             // self-healing, engaged-sessions-only, needs an admin re-push to coincide
             // with a dimension trip inside one tick.
             TransferRateGovernor carried = null;
+            java.util.Optional<String> carriedSubKey = java.util.Optional.empty();
             if (previous != null) {
                 carried = new TransferRateGovernor();
                 carried.adoptFrom(previous.governor);
+                carriedSubKey = previous.worldSubKeySnapshot();
                 teardownManager(previous);
             }
             this.connectionStartMs = System.currentTimeMillis();
             this.requestManager = this.managerFactory.create(config);
             if (carried != null) {
                 this.requestManager.governor.adoptFrom(carried);
+                // The world axis's carry-forward must survive the rebuild too (panel
+                // fix): applied only when the NEW manager's own fresh read was
+                // unreadable — a readable answer always wins.
+                this.requestManager.adoptCarriedSubKey(carriedSubKey);
             }
         }
     }

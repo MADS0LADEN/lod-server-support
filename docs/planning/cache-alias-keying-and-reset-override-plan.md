@@ -460,3 +460,50 @@ real and visible rather than re-attributed:
 6. Fallback (only if the fork push is refused despite the flag): the same
    branch as an in-repo PR crediting them in title/body/trailers, closing
    #243 with a link — recorded here so the preference order is explicit.
+
+## 11. Implementation fold (1 Fable + 4 Opus panel, 2026-08-27) — as-built corrections
+
+All five reviewers: SHIP-WITH-FIXES; every §2/§3 obligation and both §9 fold
+MAJORs verified delivered. Folded (all fixed in the implementation):
+
+- **Cross-dimension unstamp bucket (session MAJOR)**: `onIngestFailure`'s
+  cross-dimension `removeAsync` assumed a session-constant bucket — the manager
+  now records each dimension's load-time bucket (`dimensionBuckets`) and routes
+  late unstamps there, closing the reopened #36 hole on per-world-seed servers.
+- **Non-following deletes (FS MAJOR)**: `deleteBucketDir` gained the
+  `NOFOLLOW_LINKS` guard (a symlinked bucket is deleted as a LINK) and is now
+  the one body behind `clearForServer`/`clearForServers`/`clearAll`.
+- **Wiring source-pin (tests MAJOR)**: `TwoAxisWiringContractTest` pins the
+  factory's latch/keying/live-context wiring and the gate's two session
+  brackets — the §4.4 deliverable that had been skipped.
+- **ForceGrant hardening**: the grant's root now travels INTO the ladder
+  (`resetVoxy(hooks, force, grantedLiveRoot)`) — force applies only to a live
+  root samePath-equal to the granted one, and the no-instance fallback wipe is
+  refused under force; the gate clears the grant at JOIN as well as disconnect
+  (the reconfiguration gap); the declined-wipe report carries
+  `liveRootContained` and offers voxy-force only where stage 1 could arm it;
+  `voxyPresent` now means the MOD is installed, not that the ingest bridge
+  resolved.
+- **Adoption residue guard**: a session that used the bare bucket (a seedless
+  lobby leg) never adopts it into a later world's bucket (`allowAdoption`);
+  sibling matching (cap + adoption blocker) is case-insensitive like the sweep.
+- **Alias validation**: dropped groups claim nothing (no cascade), intra-group
+  case variants dedupe instead of dropping the group, and `validate()` no
+  longer rewrites the user's field (the load-time re-save would have erased
+  dropped groups from the file).
+- **Eligibility**: both "unknown" flavors (no ServerData, and ServerData with a
+  null ip) are world-axis-eligible via one predicate.
+- Naming correction: §3's "ResetStorageReport" shipped as the
+  `VoxyStorageOverride` assembler + the `VoxyResetReport`/`VoxyStorageProbe`
+  carriers.
+
+Accepted-open, recorded per the panel: a NEW `ClientLevel` with a different
+seed under the SAME dimension key (an in-place world regeneration, no respawn
+into another key) does not re-derive mid-dimension — Voxy re-partitions there
+and LSS heals only at the next dimension change/rejoin (the pre-plan behavior;
+closing it needs a per-tick level-identity watch). A cross-session lobby-first
+join can still adopt pre-upgrade lobby residue (bounded by once-ever). The
+reserved-tail escape applies switch-independently (sweep safety outranks
+byte-identity for that pathological spelling). The alias latch samples
+corroboration once per session at first build — a Voxy instance that appears
+later corroborates only from the next session.

@@ -365,12 +365,8 @@ public class ColumnCacheStore {
         runIoAndWait(() -> {
             var dir = getServerDir(serverAddress);
             if (!Files.exists(dir)) return;
-
-            try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir)) {
-                for (Path file : stream) {
-                    Files.deleteIfExists(file);
-                }
-                Files.deleteIfExists(dir);
+            try {
+                deleteBucketDir(dir);
                 LSSLogger.info("Cleared column cache for server " + serverAddress);
             } catch (IOException e) {
                 LSSLogger.warn("Failed to clear column cache for " + serverAddress, e);
@@ -389,9 +385,10 @@ public class ColumnCacheStore {
      * buckets are swept too. ONE IO task, one bounded wait — not N 30 s waits — with a
      * per-entry try/catch so one undeletable bucket cannot strand the rest. The store
      * learns the suffix CONVENTION here, never alias semantics: which components to
-     * sweep is entirely the caller's decision. Entry deletion inherits
-     * {@link #clearForServer}'s non-following shape (files then dir, no recursion —
-     * a symlinked foreign tree is deleted as a link).
+     * sweep is entirely the caller's decision. Entry deletion is
+     * NON-FOLLOWING (files then dir, no recursion — a symlinked entry is deleted as a
+     * link, its foreign target tree untouched; {@link #deleteBucketDir}, shared with
+     * {@link #clearForServer} and {@link #clearAll}).
      */
     public static void clearForServers(java.util.Collection<String> addressComponents) {
         if (addressComponents.isEmpty()) return;
@@ -429,9 +426,14 @@ public class ColumnCacheStore {
 
     /** Delete one bucket directory: files, then the dir. Non-recursive on purpose —
      *  buckets hold flat per-dimension files, and a planted subdirectory (which this
-     *  store never creates) fails the final delete instead of being walked. */
+     *  store never creates) fails the final delete instead of being walked. NON-FOLLOWING
+     *  (panel fix): a symlink planted in the cache root is deleted as a LINK — its
+     *  foreign target tree survives untouched (the {@code wipeVoxyStore} discipline;
+     *  {@code Files.isDirectory} follows links by default, which would have emptied the
+     *  target's top level before unlinking). */
     private static void deleteBucketDir(Path dir) throws IOException {
-        if (!Files.isDirectory(dir)) {
+        if (Files.isSymbolicLink(dir)
+                || !Files.isDirectory(dir, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
             Files.deleteIfExists(dir);
             return;
         }
@@ -463,21 +465,37 @@ public class ColumnCacheStore {
      *       would otherwise mint one bucket per join, unbounded (§9 fold).</li>
      * </ul>
      */
-    public static void prepareWorldBucketAsync(String addressComponent, String subKey) {
-        IO_EXECUTOR.execute(() -> prepareWorldBucket(addressComponent, subKey));
+    public static void prepareWorldBucketAsync(String addressComponent, String subKey,
+                                               boolean allowAdoption) {
+        IO_EXECUTOR.execute(() -> {
+            try {
+                prepareWorldBucket(addressComponent, subKey, allowAdoption);
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError vme) throw vme;
+                LSSLogger.warn("World-bucket preparation failed for " + addressComponent, t);
+            }
+        });
     }
 
     /** Cap on {@code .world-*} sibling buckets per address component (plan §2.3). */
     static final int MAX_WORLD_SIBLINGS = 8;
 
-    /** IO-thread body of {@link #prepareWorldBucketAsync}; package-visible for inline tests. */
-    static void prepareWorldBucket(String addressComponent, String subKey) {
+    /** Test observability: the last seed-unstable cap WARN (null = none since reset). */
+    static volatile String lastCapWarnForTest;
+
+    /** IO-thread body of {@link #prepareWorldBucketAsync}; package-visible for inline
+     *  tests. {@code allowAdoption} is the SAME-SESSION residue guard (panel fix): a
+     *  session that already used the bare bucket (a seedless lobby leg before this
+     *  world) must not adopt its own residue into the new world's bucket — that would
+     *  re-open exactly the stale-stamps hole the world axis closes. */
+    static void prepareWorldBucket(String addressComponent, String subKey,
+                                   boolean allowAdoption) {
         String bareName = sanitizeForFilePath(addressComponent);
         Path seeded = cacheDir().resolve(bareName + "." + sanitizeForFilePath(subKey));
         if (Files.isDirectory(seeded)) return;
         Path bare = cacheDir().resolve(bareName);
         var siblings = worldSiblingsOf(bareName);
-        if (siblings.isEmpty() && Files.isDirectory(bare)) {
+        if (allowAdoption && siblings.isEmpty() && Files.isDirectory(bare)) {
             try {
                 Files.move(bare, seeded);
                 LSSLogger.info("Adopted the existing column cache for " + addressComponent
@@ -508,24 +526,32 @@ public class ColumnCacheStore {
                             + siblings.get(i).getFileName(), e);
                 }
             }
-            LSSLogger.warn("Server " + addressComponent + " has minted more than "
+            String warn = "Server " + addressComponent + " has minted more than "
                     + MAX_WORLD_SIBLINGS + " world cache buckets — its seed looks UNSTABLE "
                     + "(per-login seed randomization?); oldest bucket(s) evicted. The warm "
                     + "cache cannot work against a rotating seed; consider "
-                    + "useWorldSubBuckets=false for this install");
+                    + "useWorldSubBuckets=false for this install";
+            lastCapWarnForTest = warn;
+            LSSLogger.warn(warn);
         }
     }
 
-    /** The {@code <component>.world-<hex>} siblings currently on disk (exact-case
-     *  component match — the names this store mints). */
+    /** The {@code <component>.world-<hex>} siblings currently on disk. CASE-INSENSITIVE
+     *  on the component (panel fix, aligned with the sweep's member matching): bucket
+     *  names preserve the raw address's case, and on the case-insensitive filesystems
+     *  most clients run (Windows, default macOS) two case spellings share one
+     *  namespace — a case-split sibling count would let the cap grow unbounded and the
+     *  once-ever adoption re-fire. */
     private static java.util.List<Path> worldSiblingsOf(String bareName) {
         var out = new java.util.ArrayList<Path>();
         if (!Files.isDirectory(cacheDir())) return out;
+        String prefix = bareName.toLowerCase(java.util.Locale.ROOT) + ".";
         try (DirectoryStream<Path> entries = Files.newDirectoryStream(cacheDir())) {
             for (Path entry : entries) {
-                String name = entry.getFileName().toString();
-                if (!name.startsWith(bareName + ".")) continue;
-                String rest = name.substring(bareName.length());
+                String lower = entry.getFileName().toString()
+                        .toLowerCase(java.util.Locale.ROOT);
+                if (!lower.startsWith(prefix)) continue;
+                String rest = lower.substring(prefix.length() - 1);
                 if (dev.vox.lss.seed.WorldSubKey.SIBLING_SUFFIX.matcher(rest).matches()) {
                     out.add(entry);
                 }
@@ -544,13 +570,9 @@ public class ColumnCacheStore {
 
             try (DirectoryStream<Path> servers = Files.newDirectoryStream(cacheDir())) {
                 for (Path serverDir : servers) {
-                    if (!Files.isDirectory(serverDir)) continue;
-                    try (DirectoryStream<Path> files = Files.newDirectoryStream(serverDir)) {
-                        for (Path file : files) {
-                            Files.deleteIfExists(file);
-                        }
-                    }
-                    Files.deleteIfExists(serverDir);
+                    if (!Files.isDirectory(serverDir, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                            && !Files.isSymbolicLink(serverDir)) continue;
+                    deleteBucketDir(serverDir);
                 }
                 LSSLogger.info("Cleared all column caches");
             } catch (IOException e) {

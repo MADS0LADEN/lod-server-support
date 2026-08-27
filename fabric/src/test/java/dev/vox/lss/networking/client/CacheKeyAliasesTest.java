@@ -137,6 +137,37 @@ class CacheKeyAliasesTest {
     }
 
     @Test
+    void aDroppedGroupClaimsNothingSoLaterGroupsSurvive() {
+        // Panel fix: the old eager claim cascaded — a group dropped for one duplicate
+        // poisoned its OTHER members against innocent later groups, with a message
+        // naming a group that does not exist.
+        var warns = new ArrayList<String>();
+        var groups = validated(List.of(
+                List.of("a.com", "shared.com"),
+                List.of("b.com", "shared.com", "c.com"),
+                List.of("d.com", "c.com")), warns);
+        assertEquals(2, groups.size(),
+                "group 2 drops for 'shared.com'; group 3 keeps 'c.com' — a dropped "
+                        + "group must not have claimed it");
+        assertEquals("d.com", groups.get(1).canonicalRaw());
+        assertEquals(1, warns.size(), warns.toString());
+    }
+
+    @Test
+    void intraGroupCaseVariantsDedupeInsteadOfDroppingTheGroup() {
+        // Panel fix: listing case variants of one hostname is exactly what an alias
+        // list invites — redundant under normalized matching, never group-fatal.
+        var warns = new ArrayList<String>();
+        var groups = validated(List.of(List.of("a.com", "A.COM", "alt.a.com")), warns);
+        assertEquals(1, groups.size());
+        assertTrue(warns.isEmpty());
+        assertEquals(List.of("a.com", "alt.a.com"), groups.get(0).membersRaw(),
+                "the first spelling survives, the case variant folds into it");
+        assertNotNull(CacheKeyAliases.match(groups, "a.COM"),
+                "the deduped spelling still matches (normalized membership)");
+    }
+
+    @Test
     void aRejectedGroupDoesNotTakeItsNeighboursDown() {
         var warns = new ArrayList<String>();
         var groups = validated(List.of(

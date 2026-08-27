@@ -93,11 +93,26 @@ public final class CacheKeyAliases {
                 warn.accept(label + " dropped: " + reason);
                 continue;
             }
-            var members = List.copyOf(entries);
+            // Intra-group normalized duplicates (case/whitespace variants of one
+            // spelling) are REDUNDANT under normalized matching, not errors — dedupe
+            // keeping the first spelling (panel fix: dropping the whole group punished
+            // exactly the case-variant listing an alias list invites).
+            var members = new ArrayList<String>();
+            var groupNormalized = new HashSet<String>();
+            for (String entry : entries) {
+                if (groupNormalized.add(normalize(entry))) {
+                    members.add(entry);
+                }
+            }
+            // Cross-group duplicates are checked against SURVIVING groups only, and a
+            // dropped group claims nothing (panel fix: the old eager claim let one
+            // dropped group cascade spurious drops onto innocent later groups, with a
+            // message naming a group that does not exist).
             String duplicate = null;
-            for (String member : members) {
-                if (!claimedMembers.add(normalize(member))) {
-                    duplicate = member;
+            for (String normalized : groupNormalized) {
+                if (claimedMembers.contains(normalized)) {
+                    duplicate = normalized;
+                    break;
                 }
             }
             if (duplicate != null) {
@@ -111,7 +126,8 @@ public final class CacheKeyAliases {
                         + "' collides with an earlier group's");
                 continue;
             }
-            out.add(new Group(members.get(0), members));
+            claimedMembers.addAll(groupNormalized);
+            out.add(new Group(members.get(0), List.copyOf(members)));
         }
         return List.copyOf(out);
     }

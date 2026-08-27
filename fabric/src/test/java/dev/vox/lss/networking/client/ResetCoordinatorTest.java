@@ -45,7 +45,7 @@ class ResetCoordinatorTest {
                                                     boolean wipeDeclined) {
         return new ModCompat.VoxyResetReport(outcome,
                 VoxyStorageOverride.verdict(true, true, live, derived),
-                live, derived, wipeDeclined);
+                live, derived, live != null, wipeDeclined);
     }
 
     private static ModCompat.VoxyStorageProbe probe(Path live, Path derived, boolean contained) {
@@ -67,7 +67,10 @@ class ResetCoordinatorTest {
         return new ResetCoordinator.Deps(
                 managerActive,
                 () -> log.add("drain"),
-                force -> { log.add("voxy(force=" + force + ")"); return report; },
+                (force, granted) -> {
+                    log.add("voxy(force=" + force + (granted != null ? ",granted" : "") + ")");
+                    return report;
+                },
                 () -> { log.add("probe"); return probe; },
                 () -> log.add("flush"),
                 () -> log.add("clearAll"),
@@ -161,7 +164,7 @@ class ResetCoordinatorTest {
         var deps = new ResetCoordinator.Deps(
                 true,
                 () -> log.add("drain"),
-                force -> { throw new IllegalStateException("mixin drift"); },
+                (force, granted) -> { throw new IllegalStateException("mixin drift"); },
                 () -> probe(LIVE, DERIVED, true),
                 () -> log.add("flush"),
                 () -> log.add("clearAll"),
@@ -244,7 +247,7 @@ class ResetCoordinatorTest {
         var deps = deps(true, ModCompat.VoxyResetOutcome.RESET);
         armGrant(deps);
         assertTrue(ResetCoordinator.run(deps, true, true));
-        assertEquals(List.of("probe", "drain", "voxy(force=true)", "flush", "farp"), log,
+        assertEquals(List.of("probe", "drain", "voxy(force=true,granted)", "flush", "farp"), log,
                 "stage 2 re-probes (the shown==wiped invariant), then force changes the "
                         + "wipe criterion, never the ordering: " + log);
         assertNull(ResetCoordinator.peekForceGrantForTest(), "the grant is consumed");
@@ -318,6 +321,37 @@ class ResetCoordinatorTest {
         assertTrue(allFeedback().contains("No armed voxy-force confirmation"), allFeedback());
     }
 
+    /** Vanished instance between the stages (plan §4.6): a stage-2 probe with no
+     *  readable live root refuses and deletes nothing. */
+    @Test
+    void aVanishedLiveRootAtStage2Refuses() {
+        armGrant(deps(true, ModCompat.VoxyResetOutcome.RESET));
+        assertFalse(ResetCoordinator.run(deps(true,
+                report(ModCompat.VoxyResetOutcome.RESET, null, DERIVED, false),
+                new ModCompat.VoxyStorageProbe(true,
+                        VoxyStorageOverride.Verdict.NO_INSTANCE, null, DERIVED, false)),
+                true, true));
+        assertFalse(log.contains("drain"), "nothing destructive ran: " + log);
+        assertTrue(allFeedback().contains("no longer valid"), allFeedback());
+    }
+
+    /** force × SHUTDOWN_FAILED (plan §4.6): a forced run whose ladder fails a later
+     *  rung still reports honestly and never re-offers the force it just ran. */
+    @Test
+    void aForcedRunEndingShutdownFailedReportsHonestly() {
+        var deps = deps(true,
+                report(ModCompat.VoxyResetOutcome.SHUTDOWN_FAILED, LIVE, DERIVED, true),
+                probe(LIVE, DERIVED, true));
+        armGrant(deps);
+        assertTrue(ResetCoordinator.run(deps, true, true));
+        String text = allFeedback();
+        assertTrue(text.contains("rejoin to fully clear"), text);
+        assertTrue(text.contains(LIVE.toString()),
+                "the declined-wipe detail still names the roots: " + text);
+        assertFalse(text.contains("voxy-force"), "already forced — no re-offer: " + text);
+        assertTrue(log.contains("flush"), "the LSS half still runs");
+    }
+
     /** The disconnect belt: the gate clears the grant with the session. */
     @Test
     void aClearedGrantRefuses() {
@@ -367,7 +401,7 @@ class ResetCoordinatorTest {
         var deps = deps(false, ModCompat.VoxyResetOutcome.WIPED_NO_INSTANCE);
         armGrant(deps);
         assertTrue(ResetCoordinator.run(deps, true, true));
-        assertEquals(List.of("probe", "drain", "voxy(force=true)", "clearAll"), log,
+        assertEquals(List.of("probe", "drain", "voxy(force=true,granted)", "clearAll"), log,
                 log.toString());
     }
 

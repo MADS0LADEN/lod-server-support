@@ -67,7 +67,10 @@ class TwoAxisManagerKeyTest {
     }
 
     @Test
-    void theKillSwitchOffIsByteIdenticalForEverySessionShape() {
+    void theKillSwitchOffKeepsTheBareLegacyBucket() {
+        // Byte-identical for every ORDINARY shape; the one documented exception is a
+        // raw address ending in the reserved .world-<16hex> tail, whose escape applies
+        // switch-independently (the sweep-safety invariant outranks byte-identity).
         var m = manager("play.example.com");
         m.configureCacheKeying("play.example.com", List.of("play.example.com"), "address",
                 () -> new WorldSubKey.Context(false, true, false, false, true, 42L));
@@ -146,6 +149,110 @@ class TwoAxisManagerKeyTest {
         } catch (java.nio.file.NoSuchFileException benign) {
             // no cache root at all — equally proves nothing was prepared
         }
+    }
+
+    @Test
+    void aLateCrossDimensionUnstampTargetsTheDepartedDimensionsOwnBucket() throws Exception {
+        // Panel MAJOR: after a dimension change re-keys the world axis, a late consumer
+        // rejection for the OLD dimension must unstamp in the bucket that dimension
+        // saved under — aiming at the current bucket would no-op and leave the false
+        // ts>0 stamp forever (the #36 hole, reopened on per-world-seed servers).
+        String comp = "xdim-" + System.nanoTime() + ".example.com";
+        var ctx = new AtomicReference<>(liveSeed(0xAL));
+        var m = manager(comp);
+        m.configureCacheKeying(comp, List.of(comp), "address", ctx::get);
+        var arena = dim("arena");
+        m.tickDimensionAndCachePhase(arena, 0, 0);
+        String arenaBucket = m.cacheBucketForTest();
+
+        // Plant the false stamp exactly where that dimension's cache lives.
+        var stamps = new it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap();
+        stamps.defaultReturnValue(-1L);
+        long packed = dev.vox.lss.common.PositionUtil.packPosition(3, 4);
+        stamps.put(packed, 9999L);
+        ColumnCacheStore.save(arenaBucket, arena, stamps);
+
+        // The world rotates: the next dimension re-keys the bucket.
+        ctx.set(liveSeed(0xBL));
+        m.tickDimensionAndCachePhase(dim("hub"), 0, 0);
+        org.junit.jupiter.api.Assertions.assertNotEquals(arenaBucket, m.cacheBucketForTest());
+
+        // The late rejection for the departed dimension.
+        m.onIngestFailure(arena, packed);
+        ColumnCacheStore.flushPendingIo();
+
+        assertEquals(-1L, ColumnCacheStore.load(arenaBucket, arena).get(packed),
+                "the unstamp landed in the DEPARTED dimension's bucket");
+        m.flushCache();
+    }
+
+    @Test
+    void aSeedlessLegBlocksAdoptionForTheRestOfTheSession() throws Exception {
+        // Panel fix: the lobby's own residue must not become the game world's stamps.
+        String comp = "lobbyfirst-" + System.nanoTime() + ".example.com";
+        var bare = ColumnCacheStore.cacheRoot().resolve(comp);
+        Files.createDirectories(bare);
+        Files.writeString(bare.resolve("minecraft_overworld.bin"), "lobby residue");
+
+        var ctx = new AtomicReference<>(liveSeed(0L)); // the lobby: seed 0
+        var m = manager(comp);
+        m.configureCacheKeying(comp, List.of(comp), "address", ctx::get);
+        m.tickDimensionAndCachePhase(dim("lobby"), 0, 0);
+        assertEquals(comp, m.cacheBucketForTest());
+
+        ctx.set(liveSeed(0x77L)); // transferred into the game world
+        m.tickDimensionAndCachePhase(dim("game"), 0, 0);
+        ColumnCacheStore.flushPendingIo();
+
+        assertTrue(Files.exists(bare), "the bare residue stays where it is");
+        assertTrue(!Files.exists(ColumnCacheStore.cacheRoot()
+                        .resolve(comp + "." + WorldSubKey.format(0x77L))),
+                "the game world's bucket starts empty — never seeded from lobby residue");
+        m.flushCache();
+    }
+
+    @Test
+    void aRebuildCarriesTheSubKeyOnlyAcrossAnUnreadableRead() {
+        var m = manager("rebuild.example.com");
+        m.configureCacheKeying("rebuild.example.com", List.of("rebuild.example.com"),
+                "address", TwoAxisManagerKeyTest::unreadable);
+        assertEquals("rebuild.example.com", m.cacheBucketForTest(),
+                "an unreadable FIRST read has nothing to carry — bare");
+        m.adoptCarriedSubKey(java.util.Optional.of(WorldSubKey.format(5L)));
+        assertEquals("rebuild.example.com." + WorldSubKey.format(5L), m.cacheBucketForTest(),
+                "the previous manager's sub-key survives the rebuild across an "
+                        + "unreadable read (the governor's adoptFrom shape)");
+        assertTrue(m.describeCacheKey().contains("— carried"), m.describeCacheKey());
+
+        var readable = manager("rebuild2.example.com");
+        readable.configureCacheKeying("rebuild2.example.com",
+                List.of("rebuild2.example.com"), "address", () -> liveSeed(9L));
+        readable.adoptCarriedSubKey(java.util.Optional.of(WorldSubKey.format(5L)));
+        assertEquals("rebuild2.example.com." + WorldSubKey.format(9L),
+                readable.cacheBucketForTest(), "a READABLE fresh answer always wins");
+    }
+
+    @Test
+    void postAdoptionSwitchOffReadsAnEmptyBareBucket() throws Exception {
+        // The documented non-rollback semantics (plan §2.3): after adoption the bare
+        // bucket is GONE — a switched-off session starts cold rather than resurrecting
+        // pre-adoption stamps.
+        String comp = "postadopt-" + System.nanoTime() + ".example.com";
+        var bare = ColumnCacheStore.cacheRoot().resolve(comp);
+        Files.createDirectories(bare);
+        Files.writeString(bare.resolve("minecraft_overworld.bin"), "warm stamps");
+
+        var m = manager(comp);
+        m.configureCacheKeying(comp, List.of(comp), "address", () -> liveSeed(0x33L));
+        ColumnCacheStore.flushPendingIo(); // the adoption move runs
+
+        var off = manager(comp);
+        off.configureCacheKeying(comp, List.of(comp), "address",
+                () -> new WorldSubKey.Context(false, true, false, false, true, 0x33L));
+        assertEquals(comp, off.cacheBucketForTest(), "switch off = the bare name");
+        assertTrue(!Files.exists(bare),
+                "…which is now EMPTY: the switch is not a rollback lever after adoption");
+        m.flushCache();
     }
 
     // ---- the reset sweep wiring ----

@@ -3,7 +3,6 @@ package dev.vox.lss.config;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -26,17 +25,20 @@ class ClientAliasConfigValidationTest {
     }
 
     @Test
-    void malformedGroupsDropWholeAndTheSurvivorsAreRewrittenInPlace() {
+    void malformedGroupsWarnButTheUsersFieldIsNeverRewritten() {
+        // Panel fix: the config re-saves on load, so rewriting the field to the
+        // survivors would permanently ERASE the user's dropped groups from their file
+        // with one scrolled warning as the only trace. The field stays verbatim;
+        // session code re-validates it silently.
         var c = new LSSClientConfig();
-        c.cacheAddressAliases = new ArrayList<>(List.of(
-                new ArrayList<>(List.of("good.example.com", "alt.good.example.com")),
-                new ArrayList<>(List.of("bad.example.com:25565", "alt.bad.example.com")),
-                new ArrayList<>(Arrays.asList("half.example.com", (String) null))));
+        var original = List.of(
+                List.of("good.example.com", "alt.good.example.com"),
+                List.of("bad.example.com:25565", "alt.bad.example.com"));
+        c.cacheAddressAliases = new ArrayList<>();
+        for (var g : original) c.cacheAddressAliases.add(new ArrayList<>(g));
         c.validate();
-        assertEquals(List.of(List.of("good.example.com", "alt.good.example.com")),
-                c.cacheAddressAliases,
-                "the port-bearing-canonical and null-entry groups drop whole; the good "
-                        + "group survives untouched");
+        assertEquals(original, c.cacheAddressAliases,
+                "the user's groups — including the rejected one — stay in their file");
     }
 
     @Test
@@ -60,4 +62,5 @@ class ClientAliasConfigValidationTest {
         assertEquals(afterFirst, c.cacheAddressAliases,
                 "validate() re-runs on every load — a clean field must pass unchanged");
     }
+
 }
