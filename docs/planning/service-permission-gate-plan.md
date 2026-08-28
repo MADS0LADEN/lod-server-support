@@ -414,3 +414,30 @@ All verified findings folded; the deltas vs the plan text above, normative:
   re-attach prompt — documented at `enqueueServiceGateUnregister`), the
   once-per-JVM (not per-session) throw warns, and the grant-probe-vs-replay
   double-count corner.
+
+## §10 v0.14.0 release-panel addenda (2026-08-28 — recorded residuals, no code change this cut)
+
+- **Region-summary ingress is not gate-checked** (O2-M1): a denied client that
+  ignores its enabled=false config can still pull region freshness stamps —
+  inside the "not a security boundary" scope but not previously listed as a
+  residual. Candidate one-liner for the next open cut: an `isDenied` early
+  return at both summary ingress sites.
+- **The xplat handshake's `checkPermission` is uncontained** (O2-M2 — only
+  reachable with no LoaderServices impl at all); the sweeps' permission-throw
+  containment is silent (O2-M3 — `holds = true` with no warn on the pump
+  path). Both queued for the next open cut.
+- **Coverage debts** (O2-W1..W3): the enabled=false revocation push is
+  behaviorally unpinned on Fabric/NeoForge; the two ~90-line sweep bodies
+  have no twin-parity test; Paper's grant-replay deferred-reply leg runs only
+  under a seam mock.
+- **Alias corroboration rung 2 fails open when Voxy is installed but its
+  ingest domain failed to bind** (O1-M1 from the same panel — gate the
+  corroboration input on `isModLoaded("voxy")` instead of
+  `isVoxyBridgeActive()`); with O1's sweep-composition and
+  `ClientWorldSeed.context()` coverage gaps, queued for the next open cut.
+- **R1 follow-ups (same panel)**: `sessionUsedBareBucket` does not survive
+  manager rebuilds (the §9 M-A2 lobby-residue guard weakens across a config
+  re-push or revoke/re-grant — carry the boolean beside the parked sub-key);
+  the grant replay's `markConnection` bumps the connection epoch with no new
+  connection (a replay racing a concurrent quit can leak an epoch entry).
+  Both narrow; queued for the next open cut.

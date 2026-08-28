@@ -282,3 +282,18 @@ concrete falsifiable definition of "multi-region".
 4. **R10-R12** (one PR): the coverage program.
 5. **C-program** as its own arc (instrument → harness → scenario → label
    decision), R6 measured inside it, R16 decided by its store leg.
+
+## Addendum — v0.14.0 release-panel residuals (2026-08-28, O3 lens; queued, no code change this cut)
+
+- R5's scheduler containment is SILENT (bare catch, no once-latched warn — the
+  farPlayerSnapshotWarned convention is the fix shape) and untested on either arm.
+- The R1 arm is un-budgeted globally (pre-existing: the regionized branch never
+  charges globalProbeBudget) — the accepted-risk comment now records the widened
+  duty cycle; the probe counters are the measuring instrument.
+- Fail-hidden privacy has no counter: a vanish plugin whose metadata read throws
+  hides every player behind one once-per-JVM warn — add a
+  far_players.privacy_read_errors gauge next open cut.
+- R4's summary belt (regionSummaries.removePlayer under the epoch guard) and the
+  missing-epoch safe-direction claim are unpinned by tests; the R9(a) race test
+  asserts nothing beyond no-throw; the R11 census allowlists LSSPaperPlugin (a
+  new @EventHandler on the plugin class evades it).
