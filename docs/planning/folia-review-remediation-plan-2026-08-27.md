@@ -6,7 +6,18 @@ cross-thread memory safety, Folia API conformance, feature-completeness matrix,
 test coverage + the experimental exit criterion. All findings below were verified
 in code by their reporting agent; the four highest-impact single-witness claims
 (R1, R3, R4, and the probe-arm gap) were independently re-verified at the exact
-lines during compilation. STATUS: PLAN ONLY — nothing implemented.
+lines during compilation. STATUS (2026-08-27, feat/folia-hardening): sections A, B, and D are
+IMPLEMENTED as recommended — R1 (the published-want-set probe arm), R2/R7
+(per-player containment, fail-HIDDEN direction chosen for both the permission
+and vanish reads — R18's counter therefore skipped), R3 (onRegistered moved to
+the handshake register paths), R4 (connection-epoch-guarded Remove belts), R5,
+R8 (retract-guard seam + deterministic differential, mutation-verified, + the
+3-thread stress), R9-R13 (the batteries + the generalized pump-only census +
+the reflective-scheduler scan), R14, R15, R17. Deferred with rationale: R6
+(measure-first — the gauge belongs to the C-program's instrumented soak), R16
+(a user decision the plan poses), and the whole C-program (its own arc: the
+multi-region harness, scenario-set expansion, CI-lane decision).
+store-second-join VALIDATED on Folia (first ever run: PASS 0/0, 2026-08-28) and on Paper (PASS 0/0), and joined BOTH Bukkit `all` lists — the store SERVE path is now soak-covered on Folia (single-player; the multi-region caveat and the R16 fresh-install question remain with the C-program). Live validation at landing: Folia fresh-backfill + warm-rejoin + store-second-join and Paper store-second-join, all 0 violations 0 warnings, with the R1 arm live.
 
 ## Verdict
 
