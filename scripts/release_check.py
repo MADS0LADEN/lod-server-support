@@ -55,12 +55,11 @@ COMMON_FORBIDDEN = ("dev/vox/lss/common/soak/", "dev/vox/lss/common/benchmark/")
 # (Modrinth voxy-server-side). The VSS jars are branded byte-copies of the LSS jars — same
 # classes, mod id `lss` / plugin name LodServerSupport, so they get the IDENTICAL safety
 # gate plus an identity guardrail (check_vss_*_identity). See docs/planning/ci-dual-publish.md.
-# v0.11.0 release scope (user decision 2026-08-15): NeoForge SHIPS only on the
-# 1.21.1 line. On this line the neoforge families are NOT release artifacts — the
-# module still builds/tests in CI, and any neoforge jar FOUND in build/libs still
-# gets the full jar checks below; only the SHIPPING requirements (family presence,
-# version pin, release globs) are gated. Mirrors .github/line.env
-# LINE_SHIP_NEOFORGE; flip BOTH together.
+# Ship scope (user decision 2026-08-27, since v0.13.1): NeoForge SHIPS on the
+# 26.x lines too (the VoX/Foxy fork client pairing) — on THIS 26.2 line the
+# neoforge families ARE required release artifacts. The gate derives from
+# .github/line.env LINE_SHIP_NEOFORGE (R2-5); any neoforge jar FOUND in
+# build/libs gets the full jar checks either way.
 def _line_env():
     """Parse .github/line.env (the single per-line data source, R2-5) — release_check
     stops carrying hand-mirrored copies of line data; the contract tests pin the
