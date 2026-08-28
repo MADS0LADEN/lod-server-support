@@ -22,6 +22,12 @@ import static org.mockito.Mockito.when;
  */
 class PaperFarPlayerSnapshotsTest {
 
+    @org.junit.jupiter.api.BeforeAll
+    static void setup() {
+        net.minecraft.SharedConstants.tryDetectVersion();
+        net.minecraft.server.Bootstrap.bootStrap();
+    }
+
     @BeforeEach
     void resetLatch() {
         PaperFarPlayerSnapshots.resetHiddenReadWarnedForTest();
@@ -91,5 +97,73 @@ class PaperFarPlayerSnapshotsTest {
         assertTrue(PaperFarPlayerSnapshots.hiddenFor(broken));
         assertFalse(PaperFarPlayerSnapshots.hiddenFor(bukkit()),
                 "the next player's read must be unaffected by the previous throw");
+    }
+
+    // ---- R10: the pass-level containment + the snapshot builder (rig-level) ----
+
+    private static net.minecraft.server.level.ServerPlayer healthyNms(java.util.UUID uuid,
+                                                                      String name) {
+        var level = mock(net.minecraft.server.level.ServerLevel.class);
+        when(level.dimension()).thenReturn(net.minecraft.world.level.Level.OVERWORLD);
+        var p = mock(net.minecraft.server.level.ServerPlayer.class);
+        when(p.getUUID()).thenReturn(uuid);
+        when(p.getName()).thenReturn(net.minecraft.network.chat.Component.literal(name));
+        when(p.level()).thenReturn(level);
+        when(p.getItemBySlot(org.mockito.ArgumentMatchers.any()))
+                .thenReturn(net.minecraft.world.item.ItemStack.EMPTY);
+        when(p.getKnownMovement()).thenReturn(net.minecraft.world.phys.Vec3.ZERO);
+        when(p.isAlive()).thenReturn(true);
+        var bukkit = mock(org.bukkit.craftbukkit.entity.CraftPlayer.class);
+        when(bukkit.getMetadata(anyString())).thenReturn(List.of());
+        when(p.getBukkitEntity()).thenReturn(bukkit);
+        return p;
+    }
+
+    @Test
+    void oneBrokenPlayerSkipsOnlyItselfNeverThePass() {
+        // The pre-fix shape: one raced cross-region read aborted the snapshot loop for
+        // ALL players (far players dark for the interval). buildFarPlayerSnapshots
+        // contains per player.
+        var config = new PaperConfig();
+        config.validate();
+        var server = mock(net.minecraft.server.MinecraftServer.class);
+        var players = new java.util.concurrent.ConcurrentHashMap<java.util.UUID,
+                PaperPlayerRequestState>();
+        var diskReader = new PaperChunkDiskReader(1, false);
+        var processor = new PaperRequestProcessingServiceTest.RecordingProcessor(players, diskReader);
+        var tracker = new dev.vox.lss.common.tracking.DirtyColumnTracker();
+        var broadcaster = new PaperRequestProcessingServiceTest.RecordingBroadcaster(
+                server, players, tracker, processor);
+        var service = new PaperRequestProcessingService(server, config,
+                new PaperRequestProcessingService.Wiring(
+                        players, diskReader, null, processor, tracker, broadcaster));
+
+        var healthy = healthyNms(java.util.UUID.randomUUID(), "healthy");
+        var broken = healthyNms(java.util.UUID.randomUUID(), "broken");
+        when(broken.getItemBySlot(org.mockito.ArgumentMatchers.any()))
+                .thenThrow(new IllegalStateException("cross-region equipment read raced"));
+
+        var snapshots = service.buildFarPlayerSnapshots(List.of(broken, healthy));
+
+        org.junit.jupiter.api.Assertions.assertEquals(1, snapshots.size(),
+                "the broken player is skipped; the pass survives");
+        org.junit.jupiter.api.Assertions.assertEquals("healthy", snapshots.get(0).name(),
+                "the healthy player's snapshot is intact");
+    }
+
+    @Test
+    void theSnapshotCarriesTheLadderAndIdentityFields() {
+        var uuid = java.util.UUID.randomUUID();
+        var p = healthyNms(uuid, "steve");
+        var bukkit = (org.bukkit.entity.Player) p.getBukkitEntity();
+        when(bukkit.hasPermission("lss.farplayers.hidden")).thenReturn(true);
+
+        var snap = PaperFarPlayerSnapshots.snapshot(p);
+
+        org.junit.jupiter.api.Assertions.assertEquals(uuid, snap.uuid());
+        org.junit.jupiter.api.Assertions.assertEquals("steve", snap.name());
+        org.junit.jupiter.api.Assertions.assertEquals("minecraft:overworld", snap.dimension());
+        assertTrue(snap.hidden(), "the privacy ladder's verdict rides the snapshot");
+        assertTrue(snap.alive());
     }
 }

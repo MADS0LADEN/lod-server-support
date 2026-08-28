@@ -1659,8 +1659,10 @@ public class PaperRequestProcessingService {
      * declared position is never probed on its first routing cycle, and a want-set that fits
      * under the per-player slot cap — the converged steady state, and every single-position
      * dirty-broadcast re-request — has no second cycle, so it disk-reads. Folia's one-tick
-     * hold-release makes the same alignment deterministic; this is the sync path's
-     * equivalent. The PUBLISHED want-set then covers the other ~19 ticks of each second
+     * hold-release makes the same alignment deterministic for the ARRIVAL-tick arm, and
+     * since the 2026-08-27 review (R1) the regionized path carries the published-want-set
+     * arm too — before that it probed only on arrival ticks, collapsing coverage to the
+     * client's declaration cadence. The PUBLISHED want-set covers the other ~19 ticks of each second
      * ({@code takeIncomingBatch()} nulls the mailbox within ~50 ms of arrival while batches
      * arrive at only 1-4 Hz — the client's adaptive cadence) and carries a want-set too large for the slot cap across the
      * cycles that work it off (published exactly while the backlog is non-empty).
@@ -1777,7 +1779,33 @@ public class PaperRequestProcessingService {
         // stale batch resurrect.
         long heldAtGeneration = state.offerGeneration();
         var fresh = state.takeIncomingBatch();
-        if (fresh == null) return;
+        if (fresh == null) {
+            // The published-want-set arm (Folia review 2026-08-27 R1): before this arm
+            // existed, Folia probed ONLY on a declaration's arrival tick — the probe
+            // window advanced at the client's 1-4 Hz cadence instead of every tick, so
+            // any want-set larger than the 512-position window (or the sync slot cap)
+            // routed its later cycles with ZERO probe coverage: loaded chunks took
+            // disk reads, and on gen-disabled servers the loaded-but-never-saved
+            // NOT_GENERATED park became the steady state. This is the sync path's
+            // peekWantSet arm, regionized: same per-player cap, same served-head/
+            // suppress filters (probes are position-keyed, so results merge into the
+            // same consume path regardless of which arm scheduled them). Runs only on
+            // no-fresh-batch ticks, so the one-region-task-per-player-per-tick shape
+            // holds; a release-success tick returns above and the arm picks up next
+            // tick.
+            var published = state.peekWantSet();
+            if (published == null) return; // converged player, no probe cost
+            long[] positions = snapshotProbePositions(state, published, skipPositions);
+            if (positions.length == 0) return;
+            UUID uuid = player.getUUID();
+            try {
+                this.regionTaskScheduler.schedule(player,
+                        () -> runRegionProbe(uuid, level, positions));
+            } catch (Exception e) {
+                // R5 containment — see the sibling below.
+            }
+            return;
+        }
         this.heldForProbe.put(player.getUUID(), new HeldBatch(fresh, heldAtGeneration));
 
         long[] positions = snapshotProbePositions(state, fresh, skipPositions);
@@ -1937,26 +1965,7 @@ public class PaperRequestProcessingService {
         if (++this.farPlayerTickCounter < this.config.farPlayersUpdateIntervalTicks) return;
         this.farPlayerTickCounter = 0;
         try {
-            var online = new java.util.ArrayList<dev.vox.lss.common.farplayers
-                    .FarPlayerBroadcastService.PlayerSnapshot>();
-            for (var p : this.server.getPlayerList().getPlayers()) {
-                try {
-                    online.add(PaperFarPlayerSnapshots.snapshot(p));
-                } catch (Exception e) {
-                    // Folia review 2026-08-27 R2: one player's raced cross-region read
-                    // (equipment, vehicle, a throwing permissible the hiddenFor belt
-                    // did not cover) must not abort the pass for every other player.
-                    // The skipped player reads as absent this interval — the roster
-                    // reconciles next tick; stale-tolerant by the same doctrine as the
-                    // reads themselves. The pass-level catch below stays as the belt.
-                    if (!this.farPlayerSnapshotWarned) {
-                        this.farPlayerSnapshotWarned = true;
-                        LSSLogger.warn("Far-player snapshot failed for "
-                                + p.getName().getString()
-                                + " — skipped this interval (once per session): " + e);
-                    }
-                }
-            }
+            var online = buildFarPlayerSnapshots(this.server.getPlayerList().getPlayers());
             this.farPlayerService.tick(System.currentTimeMillis(), online,
                     new dev.vox.lss.common.farplayers.FarPlayerBroadcastService.Settings(
                             this.config.farPlayers, this.config.farPlayersMaxDistanceBlocks,
@@ -1976,6 +1985,33 @@ public class PaperRequestProcessingService {
     }
 
     private boolean farPlayerTickErrorWarned;
+
+    /** One snapshot per online player, CONTAINED per player (Folia review 2026-08-27
+     *  R2): one raced cross-region read (equipment, vehicle, a throwing permissible
+     *  the hiddenFor belt did not cover) must not abort the pass for every other
+     *  player — the pre-fix shape, where the only catch was around the whole pass.
+     *  The skipped player reads as absent this interval; the roster reconciles next
+     *  tick (stale-tolerant by the same doctrine as the reads themselves). The
+     *  pass-level catch in tickFarPlayers stays as the final belt. Package-private
+     *  for the R10 battery. */
+    java.util.List<dev.vox.lss.common.farplayers.FarPlayerBroadcastService.PlayerSnapshot>
+            buildFarPlayerSnapshots(java.util.List<ServerPlayer> players) {
+        var online = new java.util.ArrayList<dev.vox.lss.common.farplayers
+                .FarPlayerBroadcastService.PlayerSnapshot>(players.size());
+        for (var p : players) {
+            try {
+                online.add(PaperFarPlayerSnapshots.snapshot(p));
+            } catch (Exception e) {
+                if (!this.farPlayerSnapshotWarned) {
+                    this.farPlayerSnapshotWarned = true;
+                    LSSLogger.warn("Far-player snapshot failed for "
+                            + p.getName().getString()
+                            + " — skipped this interval (once per session): " + e);
+                }
+            }
+        }
+        return online;
+    }
 
     /** The dedicated far-player send lane — twin of the Fabric sender: writability
      *  consult (NOT_WRITABLE withholds) + bandwidth governor charge; NMS DiscardedPayload
