@@ -8,7 +8,7 @@ https://github.com/user-attachments/assets/721fb344-890e-4e03-ab36-539444427f7b
 
 ## Compatibility
 
-Clients use the Fabric mod on every version; on 1.21.1 a NeoForge client works as well. Supported servers:
+Clients use the Fabric mod on every version; on 26.2, 26.1, and 1.21.1 a NeoForge client works as well. Supported servers:
 
 | Minecraft | Fabric | Paper / Purpur | Folia | NeoForge |
 |---|---|---|---|---|
@@ -30,6 +30,8 @@ Compatible with [AntiXray](https://modrinth.com/mod/anti-xray), [Moonrise](https
 With [Xaero's World Map](https://modrinth.com/mod/xaeros-world-map) 1.42.0 or newer installed on the client, downloaded LOD terrain is also written into the world map, so the map fills in far beyond vanilla render distance (multiplayer only — for single-player worldgen use [Xaero WorldGen](https://modrinth.com/mod/voxyworldgenxaero-bridge) instead). This works even without Voxy: Xaero's Map plus this mod alone will download and map the server's terrain. The bridge is OFF by default (map writes are saved map data — chunks near you stay Xaero's own and Xaero redraws its tiles whenever you revisit an area, but distant LOD-drawn tiles, slightly simplified and matching any anti-x-ray masking the server applies, persist until you do): turn it on with the "Write LODs to Xaero's Map" toggle on the LSS Sodium options page, or `enableXaeroMapBridge` in `lss-client-config.json`. Tiles go to the map's surface layer; while the map is showing a cave layer (underground with auto cave mode, and the Nether by default) terrain that arrives is not written to the map and is not retried — revisiting the area (or `/lss clearcache`) backfills it — and the bridge follows Xaero's own "Load New Chunks" / "Update Chunks" switches. While the map is catching up on a big download, LOD delivery is paced to what the map can draw (`enableXaeroMapBackpressure`, default on), so the map fills in completely as it goes at a slightly slower rate — including brief full pauses of the LOD download (a few seconds) while the map itself is busy writing the terrain around you. On a server you had already explored before installing, run `/lss clearcache` once while connected to re-stream the terrain and backfill the map (a full re-download).
 
 LOD Server Support is backwards and forwards compatible from v0.4.0 through the current version. Server operators can freely update to take advantage of improvements without breaking clients on older versions, and clients can update without breaking compatibility with older servers.
+
+Since v0.14.0 the client keys its LOD cache by world identity as well as server address, so proxy networks that move you between worlds behind one address no longer mix caches. On a lobby-first proxy (where you connect through a hub world before a game world) each game world may re-serve its LODs once on the first v0.14 visit; it warms fully after that. Set `useWorldSubBuckets` to `false` in the client config to keep the pre-v0.14 address-only cache (note: once a world sub-bucket has been adopted, turning it back off does not restore the old bucket).
 
 [Voxy Server Side](https://modrinth.com/plugin/voxy-server-side) is the same mod. Voxy Server Side clients are compatible with LOD Server Support servers and vice versa.
 

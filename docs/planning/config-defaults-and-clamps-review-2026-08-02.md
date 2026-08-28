@@ -599,3 +599,21 @@ that run.
   observation window instead. Soaks/gametests provably unaffected (loopback channels
   never report unwritable — the CI-inertness pin in TransportYieldFlushTest); both
   config-suite default pins flipped with the change.
+
+## v0.14.0 additions (2026-08-28)
+
+Three keys added since the 2026-08-02 audit; recorded here so this stays the full
+default/clamp reference:
+
+- **`requireServicePermission`** (server) — default `false`, boolean, no clamp (R-2
+  boolean convention: the `/lsslod set` row and boot validate() agree trivially). Not
+  `@HiddenFromFile`. Arming denies nobody by itself (both `lss.use`/`vss.use` nodes
+  default true through every resolver); the handshake short-circuits the permission
+  read at the shipped default, so an in-place upgrade is byte-identical.
+- **`useWorldSubBuckets`** (client) — default `true`, boolean, no clamp, no options-page
+  row (the `enableRegionScan` precedent). Changes cache KEYING in place: a direct server
+  adopts the existing bare bucket warmly (one directory move); a lobby-first proxy may
+  re-serve a world once on first visit (accepted §9 M-A2 tradeoff). Not a rollback lever
+  after adoption.
+- **`cacheAddressAliases`** (client) — default empty list; `validate()` warns on a
+  malformed group (via `CacheKeyAliases.validated`) and never rewrites the field.

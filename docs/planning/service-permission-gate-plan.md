@@ -417,11 +417,23 @@ All verified findings folded; the deltas vs the plan text above, normative:
 
 ## §10 v0.14.0 release-panel addenda (2026-08-28 — recorded residuals, no code change this cut)
 
-- **Region-summary ingress is not gate-checked** (O2-M1): a denied client that
-  ignores its enabled=false config can still pull region freshness stamps —
-  inside the "not a security boundary" scope but not previously listed as a
-  residual. Candidate one-liner for the next open cut: an `isDenied` early
-  return at both summary ingress sites.
+- **Region-summary ingress is not gate-checked** (O2-M1) — CORRECTED 2026-08-28
+  by three independent v0.14 reviewers (O1 security / O2 gate / FA hostile-input):
+  the exposure is NOT reachable. A denied handshake never registers, and the
+  summary pump's anchor supplier is registration-gated (`players.get(uuid)` +
+  `hasCompletedHandshake`) on both platforms, so a denied/unregistered client
+  gets ZERO frames and ZERO stamps — only a ~30-byte TTL'd pending entry the
+  pump's own anchor-less sweep strips same-tick. The candidate `isDenied`
+  early-return is hygiene (defense-in-depth against a future change that anchors
+  summaries off the live player list instead of registered state), not a leak
+  fix. Re-prioritized as low-value hygiene.
+- **FIXED this cut (v0.14 review fold, 2026-08-28)**: O2-M1 gate quit-hook belt
+  bypass (`LSSPaperPlugin.onPlayerQuit` no longer sweeps the gate memo directly
+  — the epoch-guarded mailbox drain is the sole path, so a Folia fast-rejoin
+  can't wipe a successor's fresh denial memo); O2-m3 the three Paper
+  permission-read catches widened to `Throwable` minus `VirtualMachineError`
+  (an Error from a reloaded permission plugin no longer escapes the handshake /
+  aborts the sweep) — matching the Fabric/NeoForge rungs.
 - **The xplat handshake's `checkPermission` is uncontained** (O2-M2 — only
   reachable with no LoaderServices impl at all); the sweeps' permission-throw
   containment is silent (O2-M3 — `holds = true` with no warn on the pump
@@ -441,3 +453,24 @@ All verified findings folded; the deltas vs the plan text above, normative:
   the grant replay's `markConnection` bumps the connection epoch with no new
   connection (a replay racing a concurrent quit can leak an epoch entry).
   Both narrow; queued for the next open cut.
+- **Fabric departed-player sweep lacks the gate/identity cleanup its Paper twin
+  has** (O2-m2): benign today (Fabric's DISCONNECT event is main-thread and
+  guaranteed, so `toRemove` only fires behind it), a twin-parity gap. Next open
+  cut.
+- **`fallbackVoxyBasePath` builds a wipe target from the raw server address
+  without `sanitizeForFilePath`** (O1 LOW): a `../`-bearing address would pass
+  the wipe fence, but such an address can't complete a connection and
+  `getCurrentServer()` needs a live one — not reachable. One-liner (sanitize the
+  segment) for the next open cut; diverges from the mirrored Voxy source
+  deliberately.
+- **Hostile-server per-session cache multiplier** (O1 LOW): a server rotating the
+  obfuscated seed mints up to `MAX_WORLD_SIBLINGS` (8) buckets before eviction —
+  amplification-bounded, confined to that server's own address bucket. The cap +
+  eviction + seed-unstable WARN are the controls; recorded, no action.
+- **Test-adequacy gaps** (O3, all "well-tested-half beside untested-direction",
+  no broken code): the `hiddenFor` `asBoolean` guard, both once-per-session warn
+  latches, the dimension-change save ordering (source-text-order only), and
+  `VoxyStorageOverride.forcePromptLines`'s NO_INSTANCE-null and not-armed branches
+  are unpinned; `VoxyStorageProbe` has no stub-vs-real contract check. F16
+  (far-player hidden false-direction) and F17 (alias validation drops+warns) were
+  FIXED this cut. Remainder queued.
