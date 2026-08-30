@@ -9,8 +9,67 @@ on:
     paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.gitignore']
 
 jobs:
+  # Listed first and independent of Fabric/NeoForge so the Paper jars land in
+  # Artifacts as soon as this job greens — typically minutes before the Fabric
+  # gametests finish.
+  paper:
+    name: Paper
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+
+      # Line identity comes from .github/line.env (R2-2 — build.yml used to hardcode
+      # the Java version and went red-by-construction on the Java-21 line).
+      - name: Source line env
+        run: grep -vE '^\s*(#|$)' .github/line.env >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.LINE_JAVA_VERSION }}
+
+      - uses: gradle/actions/setup-gradle@v5
+
+      - name: Build Paper plugin
+        run: ./gradlew :paper:shadowJar
+
+      - name: Paper Tier 1 tests
+        run: ./gradlew :paper:test
+
+      - name: Release-jar safety gate (Paper)
+        run: python3 scripts/release_check.py --families paper
+
+      - name: Upload failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gametest-failure-evidence-paper
+          path: |
+            paper/build/reports/
+            paper/build/test-results/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Stage Paper jars
+        run: |
+          bash scripts/ci_stage_jars.sh lod-server-support-paper paper/build/libs lod-server-support-paper.jar
+          bash scripts/ci_stage_jars.sh voxy-server-side-paper paper/build/libs voxy-server-side-paper.jar
+
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ci-jars/lod-server-support-paper.jar
+          archive: false
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ci-jars/voxy-server-side-paper.jar
+          archive: false
+          if-no-files-found: error
+
   build:
-    name: Build + Unit Tests + Server GameTests
+    name: Fabric + NeoForge
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -46,12 +105,6 @@ jobs:
             ./gradlew :fabric:runGameTest
           }
 
-      - name: Build Paper plugin
-        run: ./gradlew :paper:shadowJar
-
-      - name: Paper Tier 1 tests
-        run: ./gradlew :paper:test
-
       # Stage N: the NeoForge module (best-effort tier — CLAUDE.md "Support tiers").
       # build = compile (xplat under MDG — the twin-contract enforcement) + the contract
       # suite + shadowJar + the VSS repackage; the gametest smoke runs the 8-test subset
@@ -78,7 +131,7 @@ jobs:
           python3 scripts/compare_profile.py --selftest
 
       - name: Release-jar safety gate
-        run: python3 scripts/release_check.py
+        run: python3 scripts/release_check.py --families fabric,neoforge
 
       - name: Upload flake evidence (first attempt of a retried gametest)
         if: always()
@@ -99,8 +152,6 @@ jobs:
             fabric/build/run/*/crash-reports/
             fabric/build/reports/
             fabric/build/test-results/
-            paper/build/reports/
-            paper/build/test-results/
             neoforge/build/reports/
             neoforge/build/test-results/
             neoforge/run/logs/
@@ -113,34 +164,12 @@ jobs:
       # wrapper. archive: false accepts exactly one file and names the artifact after
       # that file (`name:` is ignored). Stage to stable filenames so a sources/dev
       # sibling in build/libs cannot make the glob resolve to two files.
-      - name: Stage downloadable jars
+      - name: Stage Fabric and NeoForge jars
         run: |
-          set -euo pipefail
-          mkdir -p ci-jars
-          stage() {
-            local prefix="$1" dir="$2" dest="$3"
-            local matches=() f base
-            for f in "$dir"/"$prefix"*.jar; do
-              [ -e "$f" ] || continue
-              base=$(basename "$f")
-              case "$base" in
-                *-sources.jar|*-javadoc.jar|*-dev.jar|*-slim.jar) continue ;;
-              esac
-              matches+=("$f")
-            done
-            if [ "${#matches[@]}" -ne 1 ]; then
-              echo "::error::expected exactly one ${prefix} jar in ${dir}, got ${#matches[@]}: ${matches[*]}"
-              ls -la "$dir" || true
-              exit 1
-            fi
-            cp "${matches[0]}" "ci-jars/${dest}"
-          }
-          stage lod-server-support-fabric fabric/build/libs lod-server-support-fabric.jar
-          stage lod-server-support-paper paper/build/libs lod-server-support-paper.jar
-          stage lod-server-support-neoforge neoforge/build/libs lod-server-support-neoforge.jar
-          stage voxy-server-side-fabric fabric/build/libs voxy-server-side-fabric.jar
-          stage voxy-server-side-paper paper/build/libs voxy-server-side-paper.jar
-          stage voxy-server-side-neoforge neoforge/build/libs voxy-server-side-neoforge.jar
+          bash scripts/ci_stage_jars.sh lod-server-support-fabric fabric/build/libs lod-server-support-fabric.jar
+          bash scripts/ci_stage_jars.sh voxy-server-side-fabric fabric/build/libs voxy-server-side-fabric.jar
+          bash scripts/ci_stage_jars.sh lod-server-support-neoforge neoforge/build/libs lod-server-support-neoforge.jar
+          bash scripts/ci_stage_jars.sh voxy-server-side-neoforge neoforge/build/libs voxy-server-side-neoforge.jar
 
       - uses: actions/upload-artifact@v7
         with:
@@ -150,19 +179,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          path: ci-jars/lod-server-support-paper.jar
-          archive: false
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@v7
-        with:
           path: ci-jars/voxy-server-side-fabric.jar
-          archive: false
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@v7
-        with:
-          path: ci-jars/voxy-server-side-paper.jar
           archive: false
           if-no-files-found: error
 

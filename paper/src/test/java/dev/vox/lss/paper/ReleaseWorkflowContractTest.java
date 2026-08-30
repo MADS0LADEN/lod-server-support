@@ -79,15 +79,15 @@ class ReleaseWorkflowContractTest {
     @org.junit.jupiter.api.Test
     void buildYmlDerivesJavaVersionFromLineEnv() throws java.io.IOException {
         // R2-2 (port-isolation round 2): build.yml hardcoded java-version went red by
-        // construction on the Java-21 line, twice. Both jobs must source line.env and
+        // construction on the Java-21 line, twice. Every job must source line.env and
         // derive; a literal value is the regression.
         String buildYml = Files.readString(locate(".github/workflows/build.yml"));
         assertFalse(buildYml.matches("(?s).*java-version:\\s*\\d.*"),
                 "build.yml must not hardcode java-version — derive from LINE_JAVA_VERSION");
-        assertEquals(2, count(buildYml, "java-version: ${{ env.LINE_JAVA_VERSION }}"),
-                "both build.yml jobs must derive java-version from line.env");
-        assertEquals(2, count(buildYml, "grep -vE '^\\s*(#|$)' .github/line.env >> \"$GITHUB_ENV\""),
-                "both build.yml jobs must source line.env before setup-java");
+        assertEquals(3, count(buildYml, "java-version: ${{ env.LINE_JAVA_VERSION }}"),
+                "every build.yml job must derive java-version from line.env");
+        assertEquals(3, count(buildYml, "grep -vE '^\\s*(#|$)' .github/line.env >> \"$GITHUB_ENV\""),
+                "every build.yml job must source line.env before setup-java");
     }
 
     @org.junit.jupiter.api.Test
@@ -426,10 +426,44 @@ class ReleaseWorkflowContractTest {
                 "do not upload the fabric glob directly — it would zip (or fail archive:false on siblings)");
         assertFalse(buildYml.contains("path: paper/build/libs/lod-server-support-paper*.jar"),
                 "do not upload the paper glob directly");
-        assertTrue(buildYml.contains("- name: Stage downloadable jars"),
-                "the stage step must exist so archive: false sees exactly one file per family");
+        assertTrue(buildYml.contains("scripts/ci_stage_jars.sh"),
+                "staging must go through scripts/ci_stage_jars.sh so classifier siblings cannot make archive:false fail");
+        assertTrue(buildYml.contains("Stage Paper jars"),
+                "the Paper job stages its own jars so they upload when that job greens");
+        assertTrue(buildYml.contains("Stage Fabric and NeoForge jars"),
+                "the Fabric job stages the remaining jars independently");
         assertEquals(6, count(buildYml, "if-no-files-found: error"),
                 "a missing staged jar must fail the upload, not warn-and-green");
+    }
+
+    @Test
+    void paperJobUploadsIndependentlyOfFabric() {
+        // Artifacts appear when a *job* finishes. Putting Paper first inside the Fabric
+        // job would still wait on gametests. A sibling job with no needs: is what makes
+        // the Paper jars downloadable first.
+        int paperJob = buildYml.indexOf("\n  paper:\n");
+        int fabricJob = buildYml.indexOf("\n  build:\n");
+        int clientJob = buildYml.indexOf("\n  client-gametest:\n");
+        assertTrue(paperJob >= 0 && paperJob < fabricJob && fabricJob < clientJob,
+                "jobs must be listed paper, then Fabric+NeoForge, then client-gametest");
+        String paperBlock = buildYml.substring(paperJob, fabricJob);
+        String fabricBlock = buildYml.substring(fabricJob, clientJob);
+        assertFalse(paperBlock.contains("needs:"),
+                "the Paper job must not wait on Fabric");
+        assertFalse(fabricBlock.contains("needs: paper"),
+                "Fabric must not wait on Paper — that would serialize CI");
+        assertTrue(paperBlock.contains(":paper:shadowJar"),
+                "the Paper job must build the plugin jar");
+        assertTrue(paperBlock.contains(":paper:test"),
+                "the Paper job must run Tier 1 before uploading");
+        assertTrue(paperBlock.contains("release_check.py --families paper"),
+                "the Paper job's release_check must not demand Fabric/NeoForge jars");
+        assertTrue(fabricBlock.contains("release_check.py --families fabric,neoforge"),
+                "the Fabric job's release_check must not demand Paper jars");
+        assertFalse(fabricBlock.contains(":paper:shadowJar"),
+                "the Fabric job must not rebuild Paper");
+        assertTrue(Files.isExecutable(locate("scripts/ci_stage_jars.sh")),
+                "ci_stage_jars.sh must be executable so the workflow can invoke it");
     }
 
     @Test
