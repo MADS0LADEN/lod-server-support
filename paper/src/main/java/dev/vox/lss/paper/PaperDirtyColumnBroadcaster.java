@@ -91,7 +91,7 @@ class PaperDirtyColumnBroadcaster {
                 if (player.isRemoved()) continue;
                 int playerCx = player.getBlockX() >> 4;
                 int playerCz = player.getBlockZ() >> 4;
-                int lodDist = config.lodDistanceChunks;
+                int lodDist = PaperWorldLod.distance(config, player);
 
                 // Paginate (twin of the Fabric broadcaster): a single dirty-columns frame caps
                 // at MAX_POSITIONS, so when a player has more in-range dirty positions than the
