@@ -5,6 +5,7 @@ import net.minecraft.server.level.ServerPlayer;
 /** Per-world LOD distance resolution for Paper (Bukkit world name, then dimension id). */
 final class PaperWorldLod {
     static int distance(PaperConfig config, ServerPlayer player) {
+        if (player == null) return config.lodDistanceChunks;
         return config.lodDistanceForWorld(worldName(player), dimensionId(player));
     }
 

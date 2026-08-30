@@ -337,8 +337,6 @@ class PaperRequestProcessingServiceTest {
         assertEquals(2, state.drainPendingRangeFiltered());
     }
 
-    // ---- PP-001b: empty override map keeps the default gate ----
-
     @Test
     void unregisteredBatchSendsRateLimitedReattachPromptMidHandshakeDoesNot() {
         // R2-3: after a plugin /reload the fresh service has an empty player map while
