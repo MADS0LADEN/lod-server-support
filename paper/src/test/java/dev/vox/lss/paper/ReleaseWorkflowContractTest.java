@@ -402,6 +402,37 @@ class ReleaseWorkflowContractTest {
     // ---- build.yml ----
 
     @Test
+    void buildWorkflowUploadsJarsUnzipped() {
+        // GitHub changelog 2026-02-26: upload-artifact v7 + archive: false uploads a
+        // single file as-is, so the Actions UI download is the .jar, not a zip wrapper.
+        // archive: false names the artifact after the file (`name:` is ignored) and
+        // FAILS if the path glob resolves to more than one file — hence the ci-jars/
+        // staging copy to a stable single filename per family.
+        assertEquals(0, count(buildYml, "actions/upload-artifact@v5"),
+                "build.yml must not keep the v5 zip-wrapping uploader");
+        assertEquals(6, count(buildYml, "archive: false"),
+                "exactly the six shipped jars upload unzipped");
+        for (String jar : new String[]{
+                "lod-server-support-fabric.jar",
+                "lod-server-support-paper.jar",
+                "lod-server-support-neoforge.jar",
+                "voxy-server-side-fabric.jar",
+                "voxy-server-side-paper.jar",
+                "voxy-server-side-neoforge.jar"}) {
+            assertEquals(1, count(buildYml, "path: ci-jars/" + jar),
+                    "each shipped jar must upload from the staged single file: " + jar);
+        }
+        assertFalse(buildYml.contains("path: fabric/build/libs/lod-server-support-fabric*.jar"),
+                "do not upload the fabric glob directly — it would zip (or fail archive:false on siblings)");
+        assertFalse(buildYml.contains("path: paper/build/libs/lod-server-support-paper*.jar"),
+                "do not upload the paper glob directly");
+        assertTrue(buildYml.contains("- name: Stage downloadable jars"),
+                "the stage step must exist so archive: false sees exactly one file per family");
+        assertEquals(6, count(buildYml, "if-no-files-found: error"),
+                "a missing staged jar must fail the upload, not warn-and-green");
+    }
+
+    @Test
     void buildWorkflowRunsOnSupportBranches() {
         // build.yml is shared in spirit across lines; keeping the branches filter identical
         // on main makes the recurring main→support merges conflict-free and ensures a
