@@ -59,6 +59,18 @@ public final class WireDialectTracker {
         return this.sessions.get(uuid) == WireDialect.V16;
     }
 
+    /**
+     * True only when this UUID was marked {@link WireDialect#CURRENT} at handshake.
+     * Distinct from {@link #dialectOf}, which answers CURRENT for untracked ids
+     * (egress must never strip an unknown session). Mid-session SessionConfig
+     * pushes — dimension-change distance re-push — must not fire on that default,
+     * or unit-test rigs that {@code registerPlayer} without a handshake would
+     * send at a mock with no client.
+     */
+    public boolean isCurrent(UUID uuid) {
+        return this.sessions.get(uuid) == WireDialect.CURRENT;
+    }
+
     public boolean isV18(UUID uuid) {
         return this.sessions.get(uuid) == WireDialect.V18;
     }
