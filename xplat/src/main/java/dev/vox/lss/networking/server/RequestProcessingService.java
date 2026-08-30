@@ -1045,8 +1045,7 @@ public class RequestProcessingService {
                 // Far players: identity SURVIVES the remove+register cycle (the v18-rung
                 // checklist); the roster does not — a bumped-epoch full roster follows.
                 this.farPlayerService.onViewerDimensionChange(player.getUUID());
-                if (this.dialects.dialectOf(player.getUUID())
-                        == dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT) {
+                if (this.dialects.isCurrent(player.getUUID())) {
                     try {
                         dev.vox.lss.platform.LoaderServices.get().sendToPlayer(player,
                                 new SessionConfigS2CPayload(
