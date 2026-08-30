@@ -114,6 +114,69 @@ class ConfigValidationTest {
         assertEquals(2048, c.lodDistanceChunks);
     }
 
+    @Test
+    void lodDistanceForWorldPrefersTheFirstMatchingOverrideThenTheDefault() {
+        var c = serverConfig();
+        c.lodDistanceChunks = 512;
+        c.lodDistanceChunksByWorld = new java.util.LinkedHashMap<>();
+        c.lodDistanceChunksByWorld.put("creative", 128);
+        c.lodDistanceChunksByWorld.put("minecraft:the_nether", 64);
+        c.validate();
+
+        assertEquals(128, c.lodDistanceForWorld("creative", "minecraft:overworld"),
+                "Paper world name wins over the dimension fallback");
+        assertEquals(64, c.lodDistanceForWorld("world_nether", "minecraft:the_nether"),
+                "dimension id is the fallback when the Bukkit name is not keyed");
+        assertEquals(512, c.lodDistanceForWorld("world", "minecraft:overworld"),
+                "an unlisted world keeps the default");
+        assertEquals(512, c.lodDistanceForWorld((String) null, "", "nope"),
+                "null/blank/unknown keys skip through to the default");
+        assertEquals(512, c.lodDistanceForWorld(),
+                "no keys at all is the default");
+    }
+
+    @Test
+    void lodDistanceChunksByWorldClampsDropsBlankKeysAndSurvivesNull() {
+        var c = serverConfig();
+        c.lodDistanceChunksByWorld = new java.util.LinkedHashMap<>();
+        c.lodDistanceChunksByWorld.put("minecraft:the_end", 99999);
+        c.lodDistanceChunksByWorld.put("  ", 32);
+        c.lodDistanceChunksByWorld.put("", 16);
+        c.lodDistanceChunksByWorld.put("creative", 0);
+        c.validate();
+        assertEquals(2048, c.lodDistanceChunksByWorld.get("minecraft:the_end"));
+        assertEquals(1, c.lodDistanceChunksByWorld.get("creative"),
+                "0 clamps to MIN_LOD_DISTANCE through the same helper as the default");
+        assertFalse(c.lodDistanceChunksByWorld.containsKey(""));
+        assertFalse(c.lodDistanceChunksByWorld.containsKey("  "));
+
+        c.lodDistanceChunksByWorld = null;
+        c.validate();
+        assertNotNull(c.lodDistanceChunksByWorld);
+        assertTrue(c.lodDistanceChunksByWorld.isEmpty());
+    }
+
+    @Test
+    void maxConfiguredLodDistanceChunksIsTheDefaultPlusOverrideCeiling() {
+        var c = serverConfig();
+        c.lodDistanceChunks = 64;
+        c.validate();
+        assertEquals(64, c.maxConfiguredLodDistanceChunks());
+
+        c.lodDistanceChunksByWorld.put("minecraft:the_nether", 32);
+        c.lodDistanceChunksByWorld.put("creative", 256);
+        c.validate();
+        assertEquals(256, c.maxConfiguredLodDistanceChunks(),
+                "a high override must size the AUTO cache / sweep, not the default");
+
+        c.lodDistanceChunks = 512;
+        c.lodDistanceChunksByWorld.clear();
+        c.lodDistanceChunksByWorld.put("minecraft:the_end", 8);
+        c.validate();
+        assertEquals(512, c.maxConfiguredLodDistanceChunks(),
+                "overrides below the default must not shrink the global bound");
+    }
+
     private static final double MB = 1024.0 * 1024.0;
 
     @Test
@@ -349,6 +412,17 @@ class ConfigValidationTest {
         assertTrue(at512 > at256 * 2,
                 "4x the disc area must buy materially more cache: " + at256 + " -> " + at512);
         assertTrue(at512 <= LSSConstants.MAX_TIMESTAMP_CACHE_SIZE_MB, "AUTO must respect the ceiling");
+
+        c.lodDistanceChunks = 64;
+        c.lodDistanceChunksByWorld.clear();
+        c.validate();
+        int at64 = c.effectiveTimestampCacheMB();
+        c.lodDistanceChunksByWorld.put("creative", 256);
+        c.validate();
+        int withOverride = c.effectiveTimestampCacheMB();
+        assertTrue(withOverride > at64 * 2,
+                "AUTO must size against the HIGHEST override, not the default 64: "
+                        + at64 + " -> " + withOverride);
 
         c.perDimensionTimestampCacheSizeMB = 77;
         assertEquals(77, c.effectiveTimestampCacheMB(), "an explicit value always wins");
