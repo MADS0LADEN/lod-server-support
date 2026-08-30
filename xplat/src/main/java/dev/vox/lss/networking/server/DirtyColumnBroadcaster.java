@@ -123,7 +123,12 @@ class DirtyColumnBroadcaster {
                 int playerCz = this.playerView.chunkZ(state);
                 // Raw lodDistanceChunks, no LOD_DISTANCE_BUFFER: columns held via the request
                 // gate's +32 buffer never receive dirty pushes.
-                int lodDist = config.lodDistanceChunks;
+                String dimKey = null;
+                try {
+                    var lastDim = state.getLastDimension();
+                    if (lastDim != null) dimKey = lastDim.identifier().toString();
+                } catch (Throwable ignored) {}
+                int lodDist = config.lodDistanceForWorld(dimKey);
 
                 // Paginate: a single DirtyColumns payload caps at MAX_POSITIONS, so when a player
                 // has more in-range dirty positions than the cap, send multiple payloads rather

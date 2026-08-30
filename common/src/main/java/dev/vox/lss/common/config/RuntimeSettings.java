@@ -1,7 +1,12 @@
 package dev.vox.lss.common.config;
 
+import dev.vox.lss.common.LSSConstants;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 
@@ -67,13 +72,16 @@ public final class RuntimeSettings {
             new SettingKey("lodDistanceChunks",
                     c -> String.valueOf(c.lodDistanceChunks),
                     (c, raw) -> {
-                        c.lodDistanceChunks = ServerConfigBase.clampLodDistance(parseInt(raw));
+                        applyLodDistance(c, raw);
                         return null;
                     },
                     "applies now server-side; current-protocol clients get a config re-push"
                             + " (legacy clients update on rejoin — a SHRINK leaves them"
                             + " re-asking beyond the new distance until rejoin); the AUTO"
-                            + " timestamp cache stays at boot sizing until restart"),
+                            + " timestamp cache stays at boot sizing until restart; "
+                            + "`<world> <n>` sets a per-world override (Paper: Bukkit "
+                            + "world name, Fabric/NeoForge: dimension id) and "
+                            + "`<world> default` clears it"),
             new SettingKey("generationConcurrencyLimitGlobal",
                     c -> String.valueOf(c.generationConcurrencyLimitGlobal),
                     (c, raw) -> {
@@ -223,15 +231,33 @@ public final class RuntimeSettings {
         key.apply().apply(config, rawValue);
         config.validate();
         config.save();
+        if (key.name().equals("lodDistanceChunks")) {
+            return lodDistanceReport(config, rawValue);
+        }
         return key.current().apply(config);
     }
 
     /** The reply's "(clamped from 'raw')" suffix, or "" when the value was accepted
      *  as given. Numeric-aware (review F3): "25" rendering back as "25.0" is a formatting
-     *  difference, not a clamp — compare parsed values when both sides parse. */
+     *  difference, not a clamp — compare parsed values when both sides parse. The
+     *  per-world {@code <world> <n>} form reports as {@code world=n}, so the suffix
+     *  compares the distance token only. */
     public static String clampedSuffix(String effective, String rawValue) {
         String raw = rawValue.trim();
         if (effective.equals(raw)) return "";
+        int rawSplit = lastWhitespace(raw);
+        int eq = effective.lastIndexOf('=');
+        if (rawSplit >= 0 && eq >= 0) {
+            String rawVal = raw.substring(rawSplit + 1).trim();
+            String effVal = effective.substring(eq + 1);
+            if (isLodDistanceClearToken(rawVal) && "default".equals(effVal)) return "";
+            try {
+                if (Double.parseDouble(effVal) == Double.parseDouble(rawVal)) return "";
+            } catch (NumberFormatException ignored) {
+                return " (clamped from '" + rawVal + "')";
+            }
+            return " (clamped from '" + rawVal + "')";
+        }
         try {
             if (Double.parseDouble(effective) == Double.parseDouble(raw)) return "";
         } catch (NumberFormatException ignored) {
@@ -240,11 +266,78 @@ public final class RuntimeSettings {
         return " (clamped from '" + raw + "')";
     }
 
-    /** The no-args `set` listing: one "key = value" line per registry row. */
+    /** The no-args {@code set} listing: one "key = value" line per registry row,
+     *  plus one {@code lodDistanceChunks[world] = n} line per per-world override. */
     public static List<String> listLines(ServerConfigBase config) {
-        return KEYS.stream()
-                .map(k -> k.name() + " = " + k.current().apply(config))
-                .toList();
+        List<String> lines = new ArrayList<>();
+        for (var k : KEYS) {
+            lines.add(k.name() + " = " + k.current().apply(config));
+            if (k.name().equals("lodDistanceChunks") && config.lodDistanceChunksByWorld != null) {
+                for (var e : config.lodDistanceChunksByWorld.entrySet()) {
+                    lines.add("lodDistanceChunks[" + e.getKey() + "] = " + e.getValue());
+                }
+            }
+        }
+        return lines;
+    }
+
+    /**
+     * {@code <n>} sets the default; {@code <world> <n>} sets a per-world override;
+     * {@code <world> default} (also {@code clear}/{@code -}) removes it. Parse
+     * happens BEFORE any assign so a malformed value leaves the config untouched
+     * (the existing command-surface pin).
+     */
+    static void applyLodDistance(ServerConfigBase c, String raw) {
+        String s = raw.trim();
+        int split = lastWhitespace(s);
+        if (split < 0) {
+            c.lodDistanceChunks = ServerConfigBase.clampLodDistance(parseInt(s));
+            return;
+        }
+        String world = s.substring(0, split).trim();
+        String val = s.substring(split + 1).trim();
+        if (world.isEmpty() || val.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "expected <distance> or <world> <distance>");
+        }
+        if (world.length() > LSSConstants.MAX_DIMENSION_STRING_LENGTH) {
+            throw new IllegalArgumentException("world key too long (max "
+                    + LSSConstants.MAX_DIMENSION_STRING_LENGTH + " chars)");
+        }
+        Map<String, Integer> map = new LinkedHashMap<>(
+                c.lodDistanceChunksByWorld == null ? Map.of() : c.lodDistanceChunksByWorld);
+        if (isLodDistanceClearToken(val)) {
+            map.remove(world);
+        } else {
+            map.put(world, ServerConfigBase.clampLodDistance(parseInt(val)));
+        }
+        c.lodDistanceChunksByWorld = map;
+    }
+
+    static String lodDistanceReport(ServerConfigBase config, String rawValue) {
+        String raw = rawValue.trim();
+        int split = lastWhitespace(raw);
+        if (split < 0) return String.valueOf(config.lodDistanceChunks);
+        String world = raw.substring(0, split).trim();
+        String val = raw.substring(split + 1).trim();
+        if (isLodDistanceClearToken(val)
+                || config.lodDistanceChunksByWorld == null
+                || !config.lodDistanceChunksByWorld.containsKey(world)) {
+            return world + "=default";
+        }
+        return world + "=" + config.lodDistanceChunksByWorld.get(world);
+    }
+
+    private static boolean isLodDistanceClearToken(String val) {
+        return val.equals("-") || val.equalsIgnoreCase("default")
+                || val.equalsIgnoreCase("clear");
+    }
+
+    private static int lastWhitespace(String s) {
+        for (int i = s.length() - 1; i >= 0; i--) {
+            if (Character.isWhitespace(s.charAt(i))) return i;
+        }
+        return -1;
     }
 
     private RuntimeSettings() {}

@@ -314,7 +314,28 @@ class PaperRequestProcessingServiceTest {
         assertEquals(0, state.drainPendingRangeFiltered(), "the drain is destructive");
     }
 
-    // ---- PP-002: unregistered / pre-handshake batch requests are silent no-ops ----
+    @Test
+    void batchRequestGateUsesPerWorldLodOverrideByDimensionId() {
+        config.lodDistanceChunks = 16;
+        config.lodDistanceChunksByWorld.put("minecraft:the_nether", 8); // gate at 8 + 32 = 40
+        var player = playerIn(UUID.randomUUID(), level(Level.NETHER));
+        var state = service.registerPlayer(player, 1);
+
+        service.handleBatchRequest(player, batchOf(
+                new long[]{
+                        PositionUtil.packPosition(40, -40),  // exactly at the override gate: accepted
+                        PositionUtil.packPosition(41, 0),    // one past: dropped
+                        PositionUtil.packPosition(0, -41)}, // negative side: dropped
+                new long[]{77L, 1L, 2L}));
+
+        assertEquals(1, state.getTotalRequestsReceived(),
+                "the nether override shrinks the gate to 40, not the default 48");
+        var accepted = pendingBatch(state);
+        assertEquals(1, accepted.size());
+        assertEquals(40, accepted.get(0).cx());
+        assertEquals(-40, accepted.get(0).cz());
+        assertEquals(2, state.drainPendingRangeFiltered());
+    }
 
     @Test
     void unregisteredBatchSendsRateLimitedReattachPromptMidHandshakeDoesNot() {
@@ -456,6 +477,28 @@ class PaperRequestProcessingServiceTest {
         service.tick();
         assertSame(fresh, service.getPlayers().get(uuid));
         assertEquals(1, processor.removals.size());
+    }
+
+    @Test
+    void dimensionChangeRePushesSessionConfigWithNewWorldDistance() {
+        config.lodDistanceChunks = 512;
+        config.lodDistanceChunksByWorld.put("minecraft:the_nether", 64);
+        var uuid = UUID.randomUUID();
+        var overworld = level(Level.OVERWORLD);
+        var player = playerIn(uuid, overworld);
+        service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT);
+        service.registerPlayer(player, 1);
+
+        var sent = new ArrayList<Integer>();
+        service.setSessionConfigSender((p, cfg, enabled) ->
+                sent.add(PaperWorldLod.distance(cfg, p)));
+
+        var nether = level(Level.NETHER);
+        when(player.level()).thenReturn(nether);
+        service.tick();
+
+        assertEquals(List.of(64), sent,
+                "a CURRENT-dialect dimension change must re-push SessionConfig with the new distance");
     }
 
     // ---- PP-005: removed-vs-respawn branches ----

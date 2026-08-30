@@ -226,4 +226,54 @@ class RuntimeSettingsTest {
         assertEquals(true, c.enableSendPacing, "true applies");
     }
 
+    @Test
+    void lodDistanceWorldOverrideRoundTripsAndClears(@TempDir Path dir) {
+        var c = loaded(dir);
+        assertEquals("minecraft:the_nether=64", apply(c, "lodDistanceChunks", "minecraft:the_nether 64"));
+        assertEquals(512, c.lodDistanceChunks, "the default is unchanged by a per-world set");
+        assertEquals(64, c.lodDistanceChunksByWorld.get("minecraft:the_nether"));
+        assertEquals(64, c.lodDistanceForWorld("minecraft:the_nether"));
+
+        assertEquals("minecraft:the_nether=64",
+                RuntimeSettings.lodDistanceReport(c, "minecraft:the_nether 64"));
+        assertEquals("", RuntimeSettings.clampedSuffix("minecraft:the_nether=64",
+                "minecraft:the_nether 64"),
+                "an in-band per-world set is not a clamp");
+        assertEquals(" (clamped from '99999')",
+                RuntimeSettings.clampedSuffix("minecraft:the_end=2048",
+                        "minecraft:the_end 99999"));
+
+        apply(c, "lodDistanceChunks", "creative 128");
+        var lines = RuntimeSettings.listLines(c);
+        assertTrue(lines.contains("lodDistanceChunks = 512"));
+        assertTrue(lines.contains("lodDistanceChunks[minecraft:the_nether] = 64"));
+        assertTrue(lines.contains("lodDistanceChunks[creative] = 128"));
+
+        assertEquals("minecraft:the_nether=default",
+                apply(c, "lodDistanceChunks", "minecraft:the_nether default"));
+        assertFalse(c.lodDistanceChunksByWorld.containsKey("minecraft:the_nether"));
+        assertEquals(128, c.lodDistanceChunksByWorld.get("creative"));
+
+        int before = c.lodDistanceChunks;
+        assertThrows(IllegalArgumentException.class,
+                () -> apply(c, "lodDistanceChunks", "minecraft:the_end many"));
+        assertEquals(before, c.lodDistanceChunks);
+        assertFalse(c.lodDistanceChunksByWorld.containsKey("minecraft:the_end"),
+                "a parse failure must assign no override");
+        assertEquals(128, c.lodDistanceChunksByWorld.get("creative"),
+                "a parse failure must leave existing overrides");
+    }
+
+    @Test
+    void lodDistanceWorldOverridePersistsAcrossSave(@TempDir Path dir) throws Exception {
+        var c = loaded(dir);
+        apply(c, "lodDistanceChunks", "world_nether 32");
+        var tree = JsonParser.parseString(Files.readString(
+                dir.resolve("lss-server-config.json"))).getAsJsonObject();
+        assertEquals(32, tree.getAsJsonObject("lodDistanceChunksByWorld")
+                .get("world_nether").getAsInt());
+        var reloaded = TestServerConfig.load(dir);
+        assertEquals(32, reloaded.lodDistanceForWorld("world_nether", "minecraft:the_nether"));
+    }
+
 }
