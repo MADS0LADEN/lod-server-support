@@ -82,7 +82,7 @@ jobs:
 
       - name: Upload flake evidence (first attempt of a retried gametest)
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: gametest-flake-evidence-server
           path: flake-evidence/
@@ -91,7 +91,7 @@ jobs:
 
       - name: Upload failure evidence
         if: failure()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: gametest-failure-evidence-server
           path: |
@@ -108,38 +108,75 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
-      # Four shipped jars: the LSS pair and the branded Voxy Server Side pair (produced by the
-      # vssJar repackage tasks — Fabric's runs as a `build` dependency, Paper's as a shadowJar
-      # finalizer). Explicit per-brand globs so each artifact holds only its own jar.
-      - uses: actions/upload-artifact@v5
-        with:
-          name: lod-server-support-fabric
-          path: fabric/build/libs/lod-server-support-fabric*.jar
+      # Direct (unzipped) jar downloads: upload-artifact v7 `archive: false` (GitHub
+      # changelog 2026-02-26) so the Actions UI hands back the .jar itself, not a zip
+      # wrapper. archive: false accepts exactly one file and names the artifact after
+      # that file (`name:` is ignored). Stage to stable filenames so a sources/dev
+      # sibling in build/libs cannot make the glob resolve to two files.
+      - name: Stage downloadable jars
+        run: |
+          set -euo pipefail
+          mkdir -p ci-jars
+          stage() {
+            local prefix="$1" dir="$2" dest="$3"
+            local matches=() f base
+            for f in "$dir"/"$prefix"*.jar; do
+              [ -e "$f" ] || continue
+              base=$(basename "$f")
+              case "$base" in
+                *-sources.jar|*-javadoc.jar|*-dev.jar|*-slim.jar) continue ;;
+              esac
+              matches+=("$f")
+            done
+            if [ "${#matches[@]}" -ne 1 ]; then
+              echo "::error::expected exactly one ${prefix} jar in ${dir}, got ${#matches[@]}: ${matches[*]}"
+              ls -la "$dir" || true
+              exit 1
+            fi
+            cp "${matches[0]}" "ci-jars/${dest}"
+          }
+          stage lod-server-support-fabric fabric/build/libs lod-server-support-fabric.jar
+          stage lod-server-support-paper paper/build/libs lod-server-support-paper.jar
+          stage lod-server-support-neoforge neoforge/build/libs lod-server-support-neoforge.jar
+          stage voxy-server-side-fabric fabric/build/libs voxy-server-side-fabric.jar
+          stage voxy-server-side-paper paper/build/libs voxy-server-side-paper.jar
+          stage voxy-server-side-neoforge neoforge/build/libs voxy-server-side-neoforge.jar
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
-          name: lod-server-support-paper
-          path: paper/build/libs/lod-server-support-paper*.jar
+          path: ci-jars/lod-server-support-fabric.jar
+          archive: false
+          if-no-files-found: error
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
-          name: voxy-server-side-fabric
-          path: fabric/build/libs/voxy-server-side-fabric*.jar
+          path: ci-jars/lod-server-support-paper.jar
+          archive: false
+          if-no-files-found: error
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
-          name: voxy-server-side-paper
-          path: paper/build/libs/voxy-server-side-paper*.jar
+          path: ci-jars/voxy-server-side-fabric.jar
+          archive: false
+          if-no-files-found: error
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
-          name: lod-server-support-neoforge
-          path: neoforge/build/libs/lod-server-support-neoforge*.jar
+          path: ci-jars/voxy-server-side-paper.jar
+          archive: false
+          if-no-files-found: error
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
-          name: voxy-server-side-neoforge
-          path: neoforge/build/libs/voxy-server-side-neoforge*.jar
+          path: ci-jars/lod-server-support-neoforge.jar
+          archive: false
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ci-jars/voxy-server-side-neoforge.jar
+          archive: false
+          if-no-files-found: error
 
   # Tier 3: the only end-to-end pins for the client-server flow, LSSApi consumer
   # dispatch, the ingest-failure recovery loop, and the IntegratedServerLanHook path.
@@ -180,7 +217,7 @@ jobs:
 
       - name: Upload flake evidence (first attempt of a retried gametest)
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: gametest-flake-evidence-client
           path: flake-evidence/
@@ -189,7 +226,7 @@ jobs:
 
       - name: Upload failure evidence
         if: failure()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: gametest-failure-evidence-client
           path: |
