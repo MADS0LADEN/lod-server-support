@@ -21,6 +21,7 @@ Run after a CI-style build:
   CI=true ./gradlew :fabric:build -x runClientGameTest :paper:shadowJar -Pmod_version=X.Y.Z
   python3 scripts/release_check.py --version X.Y.Z   # check exactly the release jars
   python3 scripts/release_check.py            # auto-discovers fabric/ + paper/ build/libs
+  python3 scripts/release_check.py --families paper  # Paper-only CI job; does not demand Fabric
   python3 scripts/release_check.py --selftest # synthetic-jar fixtures, no build needed
 
 Exit nonzero if any violation is found. Stdlib only.
@@ -92,6 +93,21 @@ CI_NAME_SUFFIX = "0.4.0+26.1.2.jar"  # a representative CI filename for glob rou
 # real server of this line — so the manifest attribute is pinned like Paper's namespace.
 FABRIC_MAPPING_NAMESPACE = _LINE_ENV.get("LINE_FABRIC_MAPPING_NAMESPACE", "official")
 SOAK_JAR_PREFIX = "lss-paper-soak"
+VALID_FAMILIES = ("fabric", "paper", "neoforge")
+
+
+def parse_families(raw):
+    """Parse --families. None/blank → all three loaders. Unknown names raise ValueError."""
+    if raw is None or not str(raw).strip():
+        return set(VALID_FAMILIES)
+    names = [p.strip().lower() for p in str(raw).split(",") if p.strip()]
+    if not names:
+        raise ValueError("--families: empty list; valid: " + ",".join(VALID_FAMILIES))
+    bad = [n for n in names if n not in VALID_FAMILIES]
+    if bad:
+        raise ValueError("--families: unknown " + ",".join(bad)
+                         + "; valid: " + ",".join(VALID_FAMILIES))
+    return set(names)
 
 
 def _names(jar):
@@ -1010,26 +1026,41 @@ def check_glob_hygiene(problems, soak_jars):
         problems.append("CI-named soak jar matches a release glob")
 
 
-def discover(problems, expected_version=None, root=ROOT):
+def discover(problems, expected_version=None, root=ROOT, families=None):
+    """Locate the selected release jars (default: all six, or four when
+    LINE_SHIP_NEOFORGE=false). `families` restricts the required set so a split
+    CI job can check only the loaders it built. Appends a problem and returns
+    empty lists when a required jar is missing, so the caller can still report
+    every other problem in the same run. `expected_version` (the tag that
+    triggered the release, via --version) is checked against every located jar's
+    filename so a leftover from a previous CI=true build cannot silently become
+    the uploaded asset."""
+    if families is None:
+        families = set(VALID_FAMILIES)
     fab_libs = os.path.join(root, "fabric", "build", "libs")
     pap_libs = os.path.join(root, "paper", "build", "libs")
     neo_libs = os.path.join(root, "neoforge", "build", "libs")
     # `voxy-server-side-*` and `lod-server-support-*` are disjoint prefixes, so neither
-    # discovery list contaminates the other.
-    fab = _jars_in(fab_libs, "lod-server-support-fabric")
-    pap = _jars_in(pap_libs, "lod-server-support-paper")
-    vfab = _jars_in(fab_libs, "voxy-server-side-fabric")
-    vpap = _jars_in(pap_libs, "voxy-server-side-paper")
-    neo = _jars_in(neo_libs, "lod-server-support-neoforge")
-    vneo = _jars_in(neo_libs, "voxy-server-side-neoforge")
+    # discovery list contaminates the other. Unselected families stay empty so a
+    # Paper-only job cannot fail on a leftover Fabric jar (or demand one).
+    fab = _jars_in(fab_libs, "lod-server-support-fabric") if "fabric" in families else []
+    pap = _jars_in(pap_libs, "lod-server-support-paper") if "paper" in families else []
+    vfab = _jars_in(fab_libs, "voxy-server-side-fabric") if "fabric" in families else []
+    vpap = _jars_in(pap_libs, "voxy-server-side-paper") if "paper" in families else []
+    neo = _jars_in(neo_libs, "lod-server-support-neoforge") if "neoforge" in families else []
+    vneo = _jars_in(neo_libs, "voxy-server-side-neoforge") if "neoforge" in families else []
     soak = _jars_in(pap_libs, SOAK_JAR_PREFIX)
-    # All six families must be present — a release ships all six, and a missing family
-    # (e.g. the vssJar finalizer silently unwired) must fail the gate, not shrink it.
-    required = [(fab, "lod-server-support-fabric", "run :fabric:build"),
-                (pap, "lod-server-support-paper", "run :paper:shadowJar"),
-                (vfab, "voxy-server-side-fabric", "the fabric vssJar task did not run"),
-                (vpap, "voxy-server-side-paper", "the paper vssJar finalizer did not run")]
-    if SHIP_NEOFORGE:
+    # Selected families must be present — a release ships all six, and a missing
+    # family (e.g. the vssJar finalizer silently unwired) must fail the gate, not
+    # shrink it. --families lets a split CI job require only what it built.
+    required = []
+    if "fabric" in families:
+        required += [(fab, "lod-server-support-fabric", "run :fabric:build"),
+                     (vfab, "voxy-server-side-fabric", "the fabric vssJar task did not run")]
+    if "paper" in families:
+        required += [(pap, "lod-server-support-paper", "run :paper:shadowJar"),
+                     (vpap, "voxy-server-side-paper", "the paper vssJar finalizer did not run")]
+    if "neoforge" in families and SHIP_NEOFORGE:
         required += [(neo, "lod-server-support-neoforge", "run :neoforge:build"),
                      (vneo, "voxy-server-side-neoforge", "the neoforge vssJar task did not run")]
     for jars, what, hint in required:
@@ -1046,21 +1077,26 @@ def discover(problems, expected_version=None, root=ROOT):
             # to any-suffix matching — the exact multi-line stale-jar hole it exists to close.
             problems.append("cannot read minecraft_version from gradle.properties — refusing "
                             "to version-match release jars without the line pin")
-        fab = _require_version(fab, "lod-server-support-fabric", expected_version, problems, mc=mc)
-        pap = _require_version(pap, "lod-server-support-paper", expected_version, problems, mc=mc)
-        vfab = _require_version(vfab, "voxy-server-side-fabric", expected_version, problems, mc=mc)
-        vpap = _require_version(vpap, "voxy-server-side-paper", expected_version, problems, mc=mc)
-        if SHIP_NEOFORGE:
+        if "fabric" in families:
+            fab = _require_version(fab, "lod-server-support-fabric", expected_version, problems, mc=mc)
+            vfab = _require_version(vfab, "voxy-server-side-fabric", expected_version, problems, mc=mc)
+        if "paper" in families:
+            pap = _require_version(pap, "lod-server-support-paper", expected_version, problems, mc=mc)
+            vpap = _require_version(vpap, "voxy-server-side-paper", expected_version, problems, mc=mc)
+        if "neoforge" in families and SHIP_NEOFORGE:
             neo = _require_version(neo, "lod-server-support-neoforge", expected_version, problems, mc=mc)
             vneo = _require_version(vneo, "voxy-server-side-neoforge", expected_version, problems, mc=mc)
         # With --version the ambiguity guard is off, but release.yml's upload globs are
         # greedy: any OTHER versioned jar sitting beside the selected one would be attached
         # to the release too. Flag them (the suffixless local dev names stay tolerated).
-        greedy = [(fab, _jars_in(fab_libs, "lod-server-support-fabric"), "lod-server-support-fabric"),
-                  (pap, _jars_in(pap_libs, "lod-server-support-paper"), "lod-server-support-paper"),
-                  (vfab, _jars_in(fab_libs, "voxy-server-side-fabric"), "voxy-server-side-fabric"),
-                  (vpap, _jars_in(pap_libs, "voxy-server-side-paper"), "voxy-server-side-paper")]
-        if SHIP_NEOFORGE:
+        greedy = []
+        if "fabric" in families:
+            greedy += [(fab, _jars_in(fab_libs, "lod-server-support-fabric"), "lod-server-support-fabric"),
+                       (vfab, _jars_in(fab_libs, "voxy-server-side-fabric"), "voxy-server-side-fabric")]
+        if "paper" in families:
+            greedy += [(pap, _jars_in(pap_libs, "lod-server-support-paper"), "lod-server-support-paper"),
+                       (vpap, _jars_in(pap_libs, "voxy-server-side-paper"), "voxy-server-side-paper")]
+        if "neoforge" in families and SHIP_NEOFORGE:
             greedy += [(neo, _jars_in(neo_libs, "lod-server-support-neoforge"), "lod-server-support-neoforge"),
                        (vneo, _jars_in(neo_libs, "voxy-server-side-neoforge"), "voxy-server-side-neoforge")]
         for sel, allj, prefix in greedy:
@@ -1070,11 +1106,13 @@ def discover(problems, expected_version=None, root=ROOT):
                 problems.append(f"{prefix}: stale versioned jar(s) beside the release build: "
                                 f"{stale} — delete them (release.yml globs would attach them)")
     else:
-        _flag_ambiguous(fab, "lod-server-support-fabric", problems)
-        _flag_ambiguous(pap, "lod-server-support-paper", problems)
-        _flag_ambiguous(vfab, "voxy-server-side-fabric", problems)
-        _flag_ambiguous(vpap, "voxy-server-side-paper", problems)
-        if SHIP_NEOFORGE:
+        if "fabric" in families:
+            _flag_ambiguous(fab, "lod-server-support-fabric", problems)
+            _flag_ambiguous(vfab, "voxy-server-side-fabric", problems)
+        if "paper" in families:
+            _flag_ambiguous(pap, "lod-server-support-paper", problems)
+            _flag_ambiguous(vpap, "voxy-server-side-paper", problems)
+        if "neoforge" in families and SHIP_NEOFORGE:
             _flag_ambiguous(neo, "lod-server-support-neoforge", problems)
             _flag_ambiguous(vneo, "voxy-server-side-neoforge", problems)
     for jar in fab:
@@ -2129,6 +2167,55 @@ def _selftest():
               == len(neo_d) == len(vneo_d) == 1,
               f"clean synthetic tree flagged by discover: {p}")
 
+        # --families restricts the required set so a Paper-only CI job does not
+        # demand Fabric/NeoForge jars (and vice versa). Unknown names abort.
+        check(parse_families(None) == set(VALID_FAMILIES),
+              f"default families: {parse_families(None)}")
+        check(parse_families("paper") == {"paper"},
+              f"paper-only parse: {parse_families('paper')}")
+        check(parse_families("fabric,neoforge") == {"fabric", "neoforge"},
+              f"split parse: {parse_families('fabric,neoforge')}")
+        try:
+            parse_families("foo")
+            check(False, "unknown family must raise")
+        except ValueError as e:
+            check("unknown" in str(e), f"unknown-family error: {e}")
+        p = []
+        _, pap_only, _, vpap_only, neo_only, _, _ = discover(
+            p, root=droot, families={"paper"})
+        check(p == [] and len(pap_only) == len(vpap_only) == 1 and not neo_only,
+              f"--families paper on a full tree failed: {p}")
+        for gone in (os.path.join(dfab, "lod-server-support-fabric.jar"),
+                     os.path.join(dfab, "voxy-server-side-fabric.jar"),
+                     os.path.join(dneo, "lod-server-support-neoforge.jar"),
+                     os.path.join(dneo, "voxy-server-side-neoforge.jar")):
+            os.remove(gone)
+        p = []
+        discover(p, root=droot, families={"paper"})
+        joined = "\n".join(p)
+        check(p == [] and "fabric" not in joined and "neoforge" not in joined,
+              f"--families paper demanded other loaders: {p}")
+        # restore the other families before the rest of the discover pins
+        _write_tree_fabric("lod-server-support-fabric.jar",
+                           {"id": "lss", "name": "LOD Server Support", "version": "0.7.0"},
+                           BRAND_LSS)
+        _write_tree_fabric("voxy-server-side-fabric.jar",
+                           {"id": "lss", "name": "Voxy Server Side", "version": "0.7.0",
+                            "icon": "assets/lss/icon-vss.png"},
+                           BRAND_VSS,
+                           extra={"assets/lss/icon-vss.png": "PNG"})
+        _write_tree_neoforge("lod-server-support-neoforge.jar", TOML_LSS, BRAND_LSS)
+        _write_tree_neoforge("voxy-server-side-neoforge.jar", TOML_VSS, BRAND_VSS)
+        os.remove(os.path.join(dpap, "lod-server-support-paper.jar"))
+        os.remove(os.path.join(dpap, "voxy-server-side-paper.jar"))
+        p = []
+        discover(p, root=droot, families={"fabric", "neoforge"})
+        joined = "\n".join(p)
+        check("paper" not in joined,
+              f"--families fabric,neoforge demanded paper: {p}")
+        _write_tree_paper("lod-server-support-paper.jar", PY_LSS, BRAND_LSS)
+        _write_tree_paper("voxy-server-side-paper.jar", PY_VSS, BRAND_VSS)
+
         # a neoforge jar whose entrypoint/seam classes were shaded OUT must fail
         # (round-3 review NIT-3: the gametest smoke runs off classes dirs, never the
         # jar, so a careless shadowJar exclude shipped an entrypoint-less jar green)
@@ -2410,12 +2497,24 @@ def main(argv):
     ap.add_argument("--version", metavar="X.Y.Z",
                     help="require and check exactly the release jars for this mod_version "
                          "(ignores stale artifacts from earlier builds)")
+    ap.add_argument("--families", metavar="LIST",
+                    help="comma-separated loader families to require "
+                         "(fabric,paper,neoforge). Default: all. Split CI jobs "
+                         "pass the families they actually built so a Paper-only "
+                         "job does not demand Fabric/NeoForge jars.")
     args = ap.parse_args(argv)
     if args.selftest:
         return _selftest()
 
+    try:
+        families = parse_families(args.families)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 2
+
     problems = []
-    fab, pap, vfab, vpap, neo, vneo, soak = discover(problems, expected_version=args.version)
+    fab, pap, vfab, vpap, neo, vneo, soak = discover(
+        problems, expected_version=args.version, families=families)
     print(f"release_check: lss(fabric={len(fab)} paper={len(pap)} neoforge={len(neo)}) "
           f"vss(fabric={len(vfab)} paper={len(vpap)} neoforge={len(vneo)}) soak={len(soak)}")
     if problems:
