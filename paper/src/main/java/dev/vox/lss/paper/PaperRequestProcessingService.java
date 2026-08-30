@@ -1556,8 +1556,7 @@ public class PaperRequestProcessingService {
                 // Far players: identity SURVIVES the cycle (v18-rung checklist); the
                 // roster does not — a bumped-epoch full roster follows.
                 this.farPlayerService.onViewerDimensionChange(changed.getUUID());
-                if (this.dialects.dialectOf(changed.getUUID())
-                        == dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT) {
+                if (this.dialects.isCurrent(changed.getUUID())) {
                     try {
                         this.sessionConfigSender.send(changed, this.config, this.config.enabled);
                     } catch (Exception e) {
