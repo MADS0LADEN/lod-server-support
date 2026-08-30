@@ -114,6 +114,9 @@ class TwoAxisCacheKeyStoreTest {
         // Cleanup.
         Files.deleteIfExists(stubborn.resolve("planted").resolve("foreign.txt"));
         Files.deleteIfExists(stubborn.resolve("planted"));
+        // The flat per-file delete aborts the bucket when it hits planted/, so the
+        // stamp file may still be here depending on DirectoryStream order.
+        Files.deleteIfExists(stubborn.resolve("minecraft_overworld.bin"));
         Files.deleteIfExists(stubborn);
     }
 
