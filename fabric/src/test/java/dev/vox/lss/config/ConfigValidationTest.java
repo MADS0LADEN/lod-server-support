@@ -157,6 +157,22 @@ class ConfigValidationTest {
     }
 
     @Test
+    void clampLodDistanceByWorldCoercesNumbersDropsNonNumericAndOverLongKeys() {
+        // A hand-edited file / schema drift can present a Double or a non-numeric value;
+        // the Number coercion and the value-type/over-long-key drops must all hold.
+        var raw = new java.util.LinkedHashMap<Object, Object>();
+        raw.put("creative", 64.0);                 // Gson Double coercion → 64
+        raw.put("resource", "not-a-number");       // non-Number value → dropped
+        raw.put("x".repeat(300), 96);              // over-long key → dropped (mirrors the set-path reject)
+        raw.put("world", 99999);                   // clamps to MAX
+        var cleaned = dev.vox.lss.common.config.ServerConfigBase.clampLodDistanceByWorld(raw);
+        assertEquals(64, cleaned.get("creative"));
+        assertFalse(cleaned.containsKey("resource"), "a non-numeric value is dropped");
+        assertFalse(cleaned.containsKey("x".repeat(300)), "an over-long key is dropped");
+        assertEquals(2048, cleaned.get("world"));
+    }
+
+    @Test
     void maxConfiguredLodDistanceChunksIsTheDefaultPlusOverrideCeiling() {
         var c = serverConfig();
         c.lodDistanceChunks = 64;

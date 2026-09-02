@@ -79,8 +79,17 @@ public abstract class ServerConfigBase extends JsonConfig {
      * <p>This is a LOCAL config surface, not a wire change: SessionConfig still
      * carries one distance, resolved for the player's current world at handshake
      * and re-pushed on dimension change.
+     *
+     * <p><b>{@code volatile} + replace-never-mutate:</b> this is read on the handshake
+     * thread (a region thread on Folia), the processing thread, and the broadcaster
+     * thread, but reassigned by {@code /lsslod set}. Every writer builds a fresh
+     * {@link LinkedHashMap} and assigns it whole (never mutates the live map), so the
+     * volatile reference safely publishes a fully-built map with no torn reads — the
+     * same discipline as the volatile {@code genSlotCap} the processing thread reads
+     * cross-thread. (Scalar config fields need no volatile: an {@code int} write can't
+     * tear, and the tick-poll consumers re-read them live.)
      */
-    public Map<String, Integer> lodDistanceChunksByWorld = new LinkedHashMap<>();
+    public volatile Map<String, Integer> lodDistanceChunksByWorld = new LinkedHashMap<>();
     /**
      * Per-player bandwidth cap. Went 20 -> 50 -> 25 MiB on 2026-08-02, 25 -> 15 MiB on
      * 2026-08-05 (v0.9.1), then 15 -> 25 MiB on 2026-08-08 (all user decisions; the
@@ -772,10 +781,14 @@ public abstract class ServerConfigBase extends JsonConfig {
     }
 
     /**
-     * Rebuilds the per-world override map: drops blank/null keys, coerces Gson
-     * Doubles (type-erasure on {@code Map} fields), clamps each value through
-     * {@link #clampLodDistance}, restores an empty map from null. Insertion order
-     * is kept so a re-save does not reshuffle an admin's file.
+     * Rebuilds the per-world override map: drops blank/null and over-long keys, coerces
+     * any {@link Number} value (a defensive {@code intValue()} — Gson honors the field's
+     * {@code Map<String,Integer>} generic type and yields Integers, but a hand-edited file
+     * or a schema drift could present a Double), clamps each value through
+     * {@link #clampLodDistance}, restores an empty map from null. Insertion order is kept
+     * so a re-save does not reshuffle an admin's file. The over-long key drop mirrors the
+     * {@code /lsslod set} path's rejection (which throws) — a file just drops, never fails
+     * the whole load.
      */
     public static Map<String, Integer> clampLodDistanceByWorld(Map<?, ?> raw) {
         if (raw == null || raw.isEmpty()) return new LinkedHashMap<>();
@@ -784,7 +797,7 @@ public abstract class ServerConfigBase extends JsonConfig {
             Object keyObj = entry.getKey();
             if (!(keyObj instanceof String key)) continue;
             key = key.trim();
-            if (key.isEmpty()) continue;
+            if (key.isEmpty() || key.length() > LSSConstants.MAX_DIMENSION_STRING_LENGTH) continue;
             Object value = entry.getValue();
             if (!(value instanceof Number n)) continue;
             cleaned.put(key, clampLodDistance(n.intValue()));
@@ -800,10 +813,13 @@ public abstract class ServerConfigBase extends JsonConfig {
      * id alone; see the field javadoc for the key convention.
      */
     public int lodDistanceForWorld(String... worldKeys) {
-        if (lodDistanceChunksByWorld != null) {
+        // Snapshot the volatile once: it is only ever REPLACED whole (never mutated), so
+        // one read gives a stable, fully-built map for the whole lookup.
+        Map<String, Integer> byWorld = this.lodDistanceChunksByWorld;
+        if (byWorld != null) {
             for (String key : worldKeys) {
                 if (key == null || key.isEmpty()) continue;
-                Integer override = lodDistanceChunksByWorld.get(key);
+                Integer override = byWorld.get(key);
                 if (override != null) return override;
             }
         }
@@ -820,8 +836,9 @@ public abstract class ServerConfigBase extends JsonConfig {
      */
     public int maxConfiguredLodDistanceChunks() {
         int max = lodDistanceChunks;
-        if (lodDistanceChunksByWorld != null) {
-            for (Integer v : lodDistanceChunksByWorld.values()) {
+        Map<String, Integer> byWorld = this.lodDistanceChunksByWorld; // snapshot the volatile once
+        if (byWorld != null) {
+            for (Integer v : byWorld.values()) {
                 if (v != null) max = Math.max(max, v);
             }
         }

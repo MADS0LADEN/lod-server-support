@@ -1195,7 +1195,7 @@ public class PaperRequestProcessingService {
         // one prompt per REATTACH_PROMPT_INTERVAL, which the guard's INFO line makes
         // visible; a rejoin heals it.
         PaperPayloadHandler.sendSessionConfigV16(player.getBukkitEntity(),
-                this.config.enabled, this.config.lodDistanceChunks,
+                this.config.enabled, PaperWorldLod.distance(this.config, player),
                 LSSConstants.SYNC_ON_LOAD_SLOT_CAP,
                 this.config.generationConcurrencyLimitPerPlayer,
                 this.config.enableChunkGeneration);
@@ -1544,6 +1544,8 @@ public class PaperRequestProcessingService {
             // Counted AFTER the removal check (R2-11) — see the Fabric twin.
             activeCount++;
 
+            // Captured BEFORE checkDimensionChange() mutates the stored dimension.
+            var prevDim = state.getLastDimension();
             if (state.checkDimensionChange()) {
                 // A dimension change abandons all in-flight work. Reuse the (well-tested)
                 // disconnect teardown + a fresh registration instead of a second, hand-rolled
@@ -1556,7 +1558,14 @@ public class PaperRequestProcessingService {
                 // Far players: identity SURVIVES the cycle (v18-rung checklist); the
                 // roster does not — a bumped-epoch full roster follows.
                 this.farPlayerService.onViewerDimensionChange(changed.getUUID());
-                if (this.dialects.isCurrent(changed.getUUID())) {
+                // Re-push ONLY when the new world's distance differs — the client rebuilds
+                // its whole request manager on any SessionConfig, so an unconditional push
+                // would tax every portal even with no overrides (see the Fabric twin). The
+                // previous world's distance resolves from its ResourceKey via the loaded
+                // level so a Bukkit-name-keyed override still matches.
+                int newDist = PaperWorldLod.distance(this.config, changed);
+                int prevDist = PaperWorldLod.distanceForDimKey(this.config, this.server, prevDim);
+                if (newDist != prevDist && this.dialects.isCurrent(changed.getUUID())) {
                     try {
                         this.sessionConfigSender.send(changed, this.config, this.config.enabled);
                     } catch (Exception e) {

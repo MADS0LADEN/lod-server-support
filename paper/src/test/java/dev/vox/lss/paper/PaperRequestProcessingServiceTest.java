@@ -501,6 +501,75 @@ class PaperRequestProcessingServiceTest {
                 "a CURRENT-dialect dimension change must re-push SessionConfig with the new distance");
     }
 
+    @Test
+    void dimensionChangeDoesNotRePushWhenTheDistanceIsUnchanged() {
+        // No overrides: both worlds resolve to the default, so the re-push must be
+        // SKIPPED — the client rebuilds its manager on any SessionConfig, so an
+        // unconditional push would tax every portal even with the feature off (the client
+        // rebuilds its whole request manager on any SessionConfig).
+        config.lodDistanceChunks = 512;
+        var uuid = UUID.randomUUID();
+        var overworld = level(Level.OVERWORLD);
+        var player = playerIn(uuid, overworld);
+        service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT);
+        service.registerPlayer(player, 1);
+
+        var sent = new ArrayList<Integer>();
+        service.setSessionConfigSender((p, cfg, enabled) ->
+                sent.add(PaperWorldLod.distance(cfg, p)));
+
+        var end = level(Level.END);
+        when(player.level()).thenReturn(end);
+        service.tick();
+
+        assertTrue(sent.isEmpty(),
+                "an equal-distance dimension change must NOT re-push SessionConfig");
+        assertNotNull(service.getPlayers().get(uuid),
+                "the dimension change is still processed (re-registration) — only the push is gated");
+    }
+
+    @Test
+    void dimensionChangeDoesNotRePushWhenBothWorldsAreOverriddenToTheSameDistance() {
+        // Configured-but-equal (not just empty map): two worlds explicitly overridden to
+        // the same value must still skip the push — a "push whenever overrides exist" bug
+        // would fail here.
+        config.lodDistanceChunks = 512;
+        config.lodDistanceChunksByWorld.put("minecraft:the_nether", 96);
+        config.lodDistanceChunksByWorld.put("minecraft:the_end", 96);
+        var uuid = UUID.randomUUID();
+        var player = playerIn(uuid, level(Level.NETHER));
+        service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.CURRENT);
+        service.registerPlayer(player, 1);
+        var sent = new ArrayList<Integer>();
+        service.setSessionConfigSender((p, cfg, enabled) -> sent.add(PaperWorldLod.distance(cfg, p)));
+
+        var end = level(Level.END);  // build the mock BEFORE the when() stub (no nested stubbing)
+        when(player.level()).thenReturn(end);
+        service.tick();
+
+        assertTrue(sent.isEmpty(), "nether(96) → end(96): equal distance, no re-push");
+    }
+
+    @Test
+    void dimensionChangeDoesNotRePushToALegacyDialectSession() {
+        // The push is v20-shaped; a legacy (v18) session must never receive it even when
+        // the distance genuinely differs — it picks the new world's distance up on rejoin.
+        config.lodDistanceChunks = 512;
+        config.lodDistanceChunksByWorld.put("minecraft:the_nether", 64);
+        var uuid = UUID.randomUUID();
+        var player = playerIn(uuid, level(Level.OVERWORLD));
+        service.getDialectTracker().onHandshake(uuid, dev.vox.lss.common.HandshakeGate.WireDialect.V18);
+        service.registerPlayer(player, 1);
+        var sent = new ArrayList<Integer>();
+        service.setSessionConfigSender((p, cfg, enabled) -> sent.add(PaperWorldLod.distance(cfg, p)));
+
+        var nether = level(Level.NETHER);  // build the mock BEFORE the when() stub (no nested stubbing)
+        when(player.level()).thenReturn(nether);
+        service.tick();
+
+        assertTrue(sent.isEmpty(), "a legacy-dialect session gets no mid-session v20 push");
+    }
+
     // ---- PP-005: removed-vs-respawn branches ----
 
     @Test

@@ -33,6 +33,10 @@ class RuntimeSettingsTest {
     }
 
     private static String apply(ServerConfigBase c, String key, String value) {
+        return applyResult(c, key, value).display();
+    }
+
+    private static RuntimeSettings.ApplyResult applyResult(ServerConfigBase c, String key, String value) {
         var k = RuntimeSettings.byName(key);
         assertNotNull(k, "registry must carry " + key);
         return RuntimeSettings.applyAndPersist(c, k, value);
@@ -146,9 +150,9 @@ class RuntimeSettingsTest {
     @Test
     void clampedValuesReportTheEffectiveValueNotTheRequest(@TempDir Path dir) {
         var c = loaded(dir);
-        assertEquals(String.valueOf(dev.vox.lss.common.LSSConstants.MAX_LOD_DISTANCE),
+        assertEquals(dev.vox.lss.common.LSSConstants.MAX_LOD_DISTANCE + " (clamped from '999999')",
                 apply(c, "lodDistanceChunks", "999999"),
-                "the reply value is the post-clamp truth, never an echo of the request");
+                "the reply value is the post-clamp truth (with its clamp note), never an echo of the request");
     }
 
     @Test
@@ -229,19 +233,27 @@ class RuntimeSettingsTest {
     @Test
     void lodDistanceWorldOverrideRoundTripsAndClears(@TempDir Path dir) {
         var c = loaded(dir);
-        assertEquals("minecraft:the_nether=64", apply(c, "lodDistanceChunks", "minecraft:the_nether 64"));
+        // Per-world set: display "world=n", changed=true. The changed flag is what the
+        // command surface re-pushes on — a per-world set leaves the SCALAR unchanged, so
+        // a per-world set leaves the scalar
+        // unchanged, so a reply-string comparison would silently miss it and never re-push.
+        var r = applyResult(c, "lodDistanceChunks", "minecraft:the_nether 64");
+        assertEquals("minecraft:the_nether=64", r.display());
+        assertTrue(r.repush(), "a per-world set must signal a re-push");
         assertEquals(512, c.lodDistanceChunks, "the default is unchanged by a per-world set");
         assertEquals(64, c.lodDistanceChunksByWorld.get("minecraft:the_nether"));
         assertEquals(64, c.lodDistanceForWorld("minecraft:the_nether"));
 
-        assertEquals("minecraft:the_nether=64",
-                RuntimeSettings.lodDistanceReport(c, "minecraft:the_nether 64"));
-        assertEquals("", RuntimeSettings.clampedSuffix("minecraft:the_nether=64",
-                "minecraft:the_nether 64"),
-                "an in-band per-world set is not a clamp");
-        assertEquals(" (clamped from '99999')",
-                RuntimeSettings.clampedSuffix("minecraft:the_end=2048",
-                        "minecraft:the_end 99999"));
+        // Re-applying the same value changes nothing → no re-push.
+        assertFalse(applyResult(c, "lodDistanceChunks", "minecraft:the_nether 64").repush(),
+                "an unchanged per-world set must NOT re-push");
+
+        // A per-world clamp is reported on the distance token only, inside the display —
+        // clampedSuffix itself stays PURELY numeric (no per-world branch).
+        assertEquals("resource=2048 (clamped from '99999')",
+                applyResult(c, "lodDistanceChunks", "resource 99999").display());
+        assertEquals("", RuntimeSettings.clampedSuffix("64", "64"));
+        assertEquals(" (clamped from '99999')", RuntimeSettings.clampedSuffix("2048", "99999"));
 
         apply(c, "lodDistanceChunks", "creative 128");
         var lines = RuntimeSettings.listLines(c);
@@ -249,10 +261,21 @@ class RuntimeSettingsTest {
         assertTrue(lines.contains("lodDistanceChunks[minecraft:the_nether] = 64"));
         assertTrue(lines.contains("lodDistanceChunks[creative] = 128"));
 
-        assertEquals("minecraft:the_nether=default",
-                apply(c, "lodDistanceChunks", "minecraft:the_nether default"));
+        // Clear an existing override → "world=default", changed=true.
+        var cleared = applyResult(c, "lodDistanceChunks", "minecraft:the_nether default");
+        assertEquals("minecraft:the_nether=default", cleared.display());
+        assertTrue(cleared.repush(), "clearing an existing override must re-push");
         assertFalse(c.lodDistanceChunksByWorld.containsKey("minecraft:the_nether"));
         assertEquals(128, c.lodDistanceChunksByWorld.get("creative"));
+
+        // Clearing an ABSENT override changes nothing → no re-push.
+        assertFalse(applyResult(c, "lodDistanceChunks", "minecraft:the_nether default").repush(),
+                "clearing an absent override must NOT re-push");
+
+        // A scalar change re-pushes; an unchanged scalar does not.
+        assertTrue(applyResult(c, "lodDistanceChunks", "256").repush());
+        assertFalse(applyResult(c, "lodDistanceChunks", "256").repush(),
+                "an unchanged scalar set must NOT re-push");
 
         int before = c.lodDistanceChunks;
         assertThrows(IllegalArgumentException.class,
@@ -262,6 +285,34 @@ class RuntimeSettingsTest {
                 "a parse failure must assign no override");
         assertEquals(128, c.lodDistanceChunksByWorld.get("creative"),
                 "a parse failure must leave existing overrides");
+    }
+
+    @Test
+    void lodDistanceGrammarCornersAndReplyRendering(@TempDir Path dir) {
+        var c = loaded(dir);
+        var lod = RuntimeSettings.byName("lodDistanceChunks");
+
+        // All three clear tokens remove an override.
+        apply(c, "lodDistanceChunks", "a 100");
+        apply(c, "lodDistanceChunks", "b 100");
+        apply(c, "lodDistanceChunks", "c 100");
+        apply(c, "lodDistanceChunks", "a -");
+        apply(c, "lodDistanceChunks", "b clear");
+        apply(c, "lodDistanceChunks", "c default");
+        assertTrue(c.lodDistanceChunksByWorld.isEmpty(), "-, clear, and default all remove");
+
+        // An over-long world key is rejected at the command surface (the file path drops).
+        String longKey = "x".repeat(dev.vox.lss.common.LSSConstants.MAX_DIMENSION_STRING_LENGTH + 1);
+        assertThrows(IllegalArgumentException.class,
+                () -> RuntimeSettings.applyAndPersist(c, lod, longKey + " 64"));
+
+        // renderReplyValue: lodDistanceChunks renders its own (baked) text verbatim, a
+        // non-lod key gets the pure-numeric clampedSuffix appended — the ONE split home.
+        var lodRes = applyResult(c, "lodDistanceChunks", "the_nether 96");
+        assertEquals("the_nether=96", RuntimeSettings.renderReplyValue(lod, lodRes, "the_nether 96"));
+        var mb = RuntimeSettings.byName("mbPerSecondLimitPerPlayer");
+        var mbRes = RuntimeSettings.applyAndPersist(c, mb, "-1"); // resets to default 25.0
+        assertEquals("25.0 (clamped from '-1')", RuntimeSettings.renderReplyValue(mb, mbRes, "-1"));
     }
 
     @Test

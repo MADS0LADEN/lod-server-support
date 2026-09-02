@@ -62,10 +62,11 @@ public final class WireDialectTracker {
     /**
      * True only when this UUID was marked {@link WireDialect#CURRENT} at handshake.
      * Distinct from {@link #dialectOf}, which answers CURRENT for untracked ids
-     * (egress must never strip an unknown session). Mid-session SessionConfig
-     * pushes — dimension-change distance re-push — must not fire on that default,
-     * or unit-test rigs that {@code registerPlayer} without a handshake would
-     * send at a mock with no client.
+     * (egress must never strip an unknown session). A mid-session SessionConfig push
+     * (the dimension-change distance re-push) must gate on THIS, not on that default:
+     * the payload is v20-shaped, so a legacy (v16/v18/v19) session must not receive it
+     * — a legacy client picks a world's distance up on rejoin instead. (It also keeps
+     * unit rigs that {@code registerPlayer} without a handshake from being sent at.)
      */
     public boolean isCurrent(UUID uuid) {
         return this.sessions.get(uuid) == WireDialect.CURRENT;

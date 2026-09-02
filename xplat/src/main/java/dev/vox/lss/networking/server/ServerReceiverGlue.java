@@ -323,12 +323,9 @@ public final class ServerReceiverGlue {
         boolean v16 = decision.dialect() == HandshakeGate.WireDialect.V16;
         boolean v18 = decision.dialect() == HandshakeGate.WireDialect.V18;
         boolean v19 = decision.dialect() == HandshakeGate.WireDialect.V19;
-        String dim = null;
-        try {
-            var level = player.level();
-            if (level != null) dim = level.dimension().identifier().toString();
-        } catch (Throwable ignored) {}
-        int lod = config.lodDistanceForWorld(dim);
+        // The player's current world decides the advertised distance (the ONE xplat
+        // extraction helper — static, so this works even when service == null below).
+        int lod = ServerWorldLod.distance(config, player);
         if (service != null) {
             if (!v16) {
                 // A cross-dialect re-handshake must shed the stale v16 ingress-shim

@@ -510,12 +510,7 @@ public class RequestProcessingService {
     }
 
     int lodDistanceFor(ServerPlayer player) {
-        String dim = null;
-        try {
-            var level = player.level();
-            if (level != null) dim = level.dimension().identifier().toString();
-        } catch (Throwable ignored) {}
-        return LSSServerConfig.CONFIG.lodDistanceForWorld(dim);
+        return ServerWorldLod.distance(LSSServerConfig.CONFIG, player);
     }
 
     public void handleBatchRequest(ServerPlayer player, BatchChunkRequestC2SPayload payload) {
@@ -878,7 +873,9 @@ public class RequestProcessingService {
                     dev.vox.lss.platform.LoaderServices.get().sendToPlayer(player,
                             new SessionConfigS2CPayload(
                                     LSSConstants.PROTOCOL_VERSION, false,
-                                    config.lodDistanceChunks, config.enableChunkGeneration,
+                                    // Inert under enabled=false, but resolved per-world for
+                                    // consistency (no raw per-player lodDistanceChunks reads left).
+                                    lodDistanceFor(player), config.enableChunkGeneration,
                                     net.minecraft.SharedConstants.getCurrentVersion()
                                             .dataVersion().version()));
                 } catch (Exception e) {
@@ -1033,6 +1030,9 @@ public class RequestProcessingService {
             // players DO count — the pinned SP-062 dilution.
             activeCount++;
 
+            // Captured BEFORE checkDimensionChange() mutates the stored dimension, so
+            // the conditional re-push below can compare the OLD world's distance.
+            var prevDim = state.getLastDimension();
             if (state.checkDimensionChange()) {
                 // A dimension change abandons all in-flight work. Reuse the (well-tested)
                 // disconnect teardown + a fresh registration instead of a second, hand-rolled
@@ -1045,13 +1045,22 @@ public class RequestProcessingService {
                 // Far players: identity SURVIVES the remove+register cycle (the v18-rung
                 // checklist); the roster does not — a bumped-epoch full roster follows.
                 this.farPlayerService.onViewerDimensionChange(player.getUUID());
-                if (this.dialects.isCurrent(player.getUUID())) {
+                // Re-push ONLY when the new world's distance differs (load-bearing, not an
+                // optimization): the client rebuilds its whole request manager on ANY
+                // SessionConfig, so an unconditional push would tax every portal trip even
+                // with no overrides configured (empty map ⇒ both sides resolve the default
+                // ⇒ equal ⇒ no push ⇒ byte-identical to pre-feature behavior). Gated on
+                // CURRENT because dialectOf defaults untracked ids to CURRENT.
+                int newDist = lodDistanceFor(player);
+                int prevDist = LSSServerConfig.CONFIG.lodDistanceForWorld(
+                        prevDim == null ? null : prevDim.identifier().toString());
+                if (newDist != prevDist && this.dialects.isCurrent(player.getUUID())) {
                     try {
                         dev.vox.lss.platform.LoaderServices.get().sendToPlayer(player,
                                 new SessionConfigS2CPayload(
                                         LSSConstants.PROTOCOL_VERSION,
                                         config.enabled,
-                                        lodDistanceFor(player),
+                                        newDist,
                                         config.enableChunkGeneration,
                                         net.minecraft.SharedConstants.getCurrentVersion()
                                                 .dataVersion().version()));

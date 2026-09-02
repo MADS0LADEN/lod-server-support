@@ -221,43 +221,61 @@ public final class RuntimeSettings {
         return KEYS.stream().map(SettingKey::name).toList();
     }
 
+    /** Result of {@link #applyAndPersist}. {@code display} is the value text as the row
+     *  produces it: the BARE effective value for most keys, or the fully-rendered
+     *  per-world text (own clamp note baked) for lodDistanceChunks — use
+     *  {@link #renderReplyValue} to turn it into a reply, so the bare/baked split lives in
+     *  ONE place, not duplicated across the platform command surfaces. {@code repush} is
+     *  whether the apply owes a live SessionConfig re-push: only a real lodDistance
+     *  mutation (scalar OR a per-world put/remove) sets it, and the command surfaces
+     *  re-push on THIS, never on a reply-string comparison (which a per-world set, whose
+     *  scalar is unchanged, would silently fail). */
+    public record ApplyResult(String display, boolean repush) {}
+
     /**
      * The full apply sequence minus the platform-specific reply/re-push: parse+clamp+
      * assign-once via the row, then validate() (cross-field work) and save(). Returns
-     * the post-validate effective value. Throws IllegalArgumentException on a malformed
-     * value (nothing assigned).
+     * the reply's value text plus whether a re-push is owed. Throws
+     * IllegalArgumentException on a malformed value (nothing assigned).
      */
-    public static String applyAndPersist(ServerConfigBase config, SettingKey key, String rawValue) {
+    public static ApplyResult applyAndPersist(ServerConfigBase config, SettingKey key, String rawValue) {
+        boolean isLod = key.name().equals("lodDistanceChunks");
+        int beforeScalar = isLod ? config.lodDistanceChunks : 0;
+        Map<String, Integer> beforeMap = isLod ? snapshotByWorld(config) : null;
         key.apply().apply(config, rawValue);
         config.validate();
         config.save();
-        if (key.name().equals("lodDistanceChunks")) {
-            return lodDistanceReport(config, rawValue);
+        if (isLod) {
+            boolean repush = beforeScalar != config.lodDistanceChunks
+                    || !beforeMap.equals(snapshotByWorld(config));
+            return new ApplyResult(lodDistanceDisplay(config, rawValue), repush);
         }
-        return key.current().apply(config);
+        return new ApplyResult(key.current().apply(config), false);
+    }
+
+    /** The reply's value text: lodDistanceChunks bakes its own per-world-aware clamp note
+     *  into {@code display}, so it renders verbatim; every other key gets the pure-numeric
+     *  {@link #clampedSuffix} appended here. ONE home for the split — both command surfaces
+     *  call this, so they cannot drift. */
+    public static String renderReplyValue(SettingKey key, ApplyResult result, String rawValue) {
+        return key.name().equals("lodDistanceChunks")
+                ? result.display()
+                : result.display() + clampedSuffix(result.display(), rawValue);
+    }
+
+    private static Map<String, Integer> snapshotByWorld(ServerConfigBase config) {
+        return new LinkedHashMap<>(config.lodDistanceChunksByWorld == null
+                ? Map.of() : config.lodDistanceChunksByWorld);
     }
 
     /** The reply's "(clamped from 'raw')" suffix, or "" when the value was accepted
-     *  as given. Numeric-aware (review F3): "25" rendering back as "25.0" is a formatting
-     *  difference, not a clamp — compare parsed values when both sides parse. The
-     *  per-world {@code <world> <n>} form reports as {@code world=n}, so the suffix
-     *  compares the distance token only. */
+     *  as given. PURELY numeric (review F3): "25" rendering back as "25.0" is a
+     *  formatting difference, not a clamp — compare parsed values when both sides parse.
+     *  The per-world form does its own token-level clamp note in
+     *  {@link #lodDistanceDisplay}, so this method stays per-world-agnostic. */
     public static String clampedSuffix(String effective, String rawValue) {
         String raw = rawValue.trim();
         if (effective.equals(raw)) return "";
-        int rawSplit = lastWhitespace(raw);
-        int eq = effective.lastIndexOf('=');
-        if (rawSplit >= 0 && eq >= 0) {
-            String rawVal = raw.substring(rawSplit + 1).trim();
-            String effVal = effective.substring(eq + 1);
-            if (isLodDistanceClearToken(rawVal) && "default".equals(effVal)) return "";
-            try {
-                if (Double.parseDouble(effVal) == Double.parseDouble(rawVal)) return "";
-            } catch (NumberFormatException ignored) {
-                return " (clamped from '" + rawVal + "')";
-            }
-            return " (clamped from '" + rawVal + "')";
-        }
         try {
             if (Double.parseDouble(effective) == Double.parseDouble(raw)) return "";
         } catch (NumberFormatException ignored) {
@@ -289,6 +307,9 @@ public final class RuntimeSettings {
      */
     static void applyLodDistance(ServerConfigBase c, String raw) {
         String s = raw.trim();
+        // Split at the LAST whitespace so the value is always the final token and a world
+        // KEY may contain spaces (a Bukkit/Multiverse name like "my world" → key "my
+        // world", value the trailing token). A single token is the scalar-default form.
         int split = lastWhitespace(s);
         if (split < 0) {
             c.lodDistanceChunks = ServerConfigBase.clampLodDistance(parseInt(s));
@@ -314,10 +335,17 @@ public final class RuntimeSettings {
         c.lodDistanceChunksByWorld = map;
     }
 
-    static String lodDistanceReport(ServerConfigBase config, String rawValue) {
+    /** The reply's value text for a lodDistance apply: the scalar (with its numeric
+     *  clamp note) for {@code <n>}, or {@code world=n} / {@code world=default} for the
+     *  per-world forms, with a clamp note comparing the distance token only. All
+     *  per-world formatting lives HERE, keeping {@link #clampedSuffix} pure-numeric. */
+    static String lodDistanceDisplay(ServerConfigBase config, String rawValue) {
         String raw = rawValue.trim();
         int split = lastWhitespace(raw);
-        if (split < 0) return String.valueOf(config.lodDistanceChunks);
+        if (split < 0) {
+            String v = String.valueOf(config.lodDistanceChunks);
+            return v + clampedSuffix(v, raw);
+        }
         String world = raw.substring(0, split).trim();
         String val = raw.substring(split + 1).trim();
         if (isLodDistanceClearToken(val)
@@ -325,7 +353,8 @@ public final class RuntimeSettings {
                 || !config.lodDistanceChunksByWorld.containsKey(world)) {
             return world + "=default";
         }
-        return world + "=" + config.lodDistanceChunksByWorld.get(world);
+        String eff = String.valueOf(config.lodDistanceChunksByWorld.get(world));
+        return world + "=" + eff + clampedSuffix(eff, val);
     }
 
     private static boolean isLodDistanceClearToken(String val) {
